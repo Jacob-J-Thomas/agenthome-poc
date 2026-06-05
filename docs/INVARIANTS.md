@@ -40,6 +40,12 @@ Direct Anthropic is not a founding pillar.
 
 CLI, TUI, web, IDE, and desktop interfaces should all be clients of the runtime, not owners of the architecture.
 
-## 9. The first audience is engineers
+## 9. Code review belongs in diff tools
+
+Chat and TUI surfaces are not the right place to review code changes.
+
+Agent-authored code should be inspected through source-control diffs in an external IDE, GitHub, or another dedicated diff surface. Runtime clients may summarize changes and link to diffs, but they should not become the code review authority.
+
+## 10. The first audience is engineers
 
 The project assumes technical users who value control, auditability, portability, and explicit configuration.

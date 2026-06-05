@@ -45,3 +45,5 @@
 - IDE adapter.
 
 Do not begin Phase 5 until the runtime is useful from CLI alone.
+
+Optional chat or TUI surfaces should remain runtime clients for commands, summaries, and links. They should not become primary code-review surfaces; source-control diffs in an IDE, GitHub, or another dedicated diff viewer are the review path for agent-authored code.

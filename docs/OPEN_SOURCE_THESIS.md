@@ -30,3 +30,5 @@ Useful contribution surfaces:
 - docs and examples
 
 The project should avoid requiring contributors to understand a bespoke assistant personality or opaque workflow.
+
+Contributors should be able to review agent-authored code the same way they review human-authored code: through source-control diffs in an IDE, GitHub, or another dedicated diff viewer. Chat transcripts and TUI output are useful coordination surfaces, not review authorities.
