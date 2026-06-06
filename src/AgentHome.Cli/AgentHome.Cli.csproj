@@ -3,7 +3,4 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
   </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="../AgentHome.Core/AgentHome.Core.csproj" />
-  </ItemGroup>
 </Project>

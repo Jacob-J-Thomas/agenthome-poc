@@ -1,35 +1,20 @@
 # Agent instructions for this repository
 
-You are working on AgentHome, an engineer-first local agent workspace/runtime.
+You are working on AgentHome, currently reduced to a minimal C# CLI shell.
 
-Do not turn this into a general coding agent. The product is the portable environment and runtime, not the model UI.
+## Current direction
 
-## Non-negotiable principles
+- Keep the implementation small and direct.
+- Use C# and the existing single-project CLI structure.
+- Avoid dependencies unless they buy something concrete.
 
-- Keep the core boring before it is powerful.
-- Prefer plain files and explicit config over opaque state.
-- Missing or ambiguous policy defaults to human approval.
-- Conversations are ephemeral; tasks and audit events are durable.
-- Secrets are brokered capabilities, not model-readable context.
-- Surfaces are replaceable clients of the runtime.
-- Provider support should be conservative and enterprise-aware.
+## Project axioms
 
-## Implementation rules
-
-- Use C# and the existing project structure unless explicitly asked otherwise.
-- Avoid dependencies in the core unless they buy something concrete.
-- Do not add a TUI, web app, MCP server, model provider, or database in the POC unless explicitly instructed.
-- Keep config files human-readable.
-- Preserve backwards compatibility with existing workspace files where practical.
-- Add tests when changing policy matching, task storage, or audit logging.
+- Treat `docs/OPINIONATED_PROJECT_AXIOMS.md` as the durable product-direction reference for AgentHome's long-term harness philosophy.
+- Read the axiom file before making design, scope, architecture, or roadmap decisions for this application.
+- The axioms are directional context, not authorization to expand the current POC scope on their own.
+- If an axiom points toward broader behavior than the current minimal CLI scope allows, keep the implementation minimal and call out the tension to the user.
 
 ## Current POC scope
 
-The CLI should support:
-
-- `init`
-- `status`
-- `task start`
-- `policy check`
-- `audit`
-- `context export codex`
+The CLI currently has no real behavior beyond proving the reduced solution builds.
