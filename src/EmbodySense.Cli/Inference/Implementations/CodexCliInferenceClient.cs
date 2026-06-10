@@ -74,11 +74,11 @@ internal sealed class CodexCliInferenceClient : ILlmInferenceClient
             startInfo.WorkingDirectory = _options.WorkingDirectory;
         }
 
+        startInfo.ArgumentList.Add("--ask-for-approval");
+        startInfo.ArgumentList.Add(_options.CodexApprovalPolicy);
         startInfo.ArgumentList.Add("exec");
         startInfo.ArgumentList.Add("--sandbox");
         startInfo.ArgumentList.Add(_options.CodexSandbox);
-        startInfo.ArgumentList.Add("--ask-for-approval");
-        startInfo.ArgumentList.Add(_options.CodexApprovalPolicy);
 
         if (_options.UseEphemeralCodexSession)
         {
