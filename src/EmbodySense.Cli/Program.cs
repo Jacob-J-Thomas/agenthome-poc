@@ -67,7 +67,7 @@ internal static class Program
         var root = args.Length >= 2 ? args[1] : Directory.GetCurrentDirectory();
         var initializer = new WorkspaceInitializer();
         await initializer.InitializeAsync(root);
-        Console.WriteLine($"Initialized AgentHome workspace at {Path.GetFullPath(root)}");
+        Console.WriteLine($"Initialized EmbodySense workspace at {Path.GetFullPath(root)}");
         return 0;
     }
 

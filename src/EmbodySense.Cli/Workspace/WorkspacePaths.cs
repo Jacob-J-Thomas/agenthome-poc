@@ -19,7 +19,11 @@ namespace EmbodySense.Cli.Workspace
 
         public string LogsPath => Path.Combine(AgentPath, "logs");
 
-        public string EventsLogPath => Path.Combine(LogsPath, "events.ndjson");
+        public string AuditPath => Path.Combine(AgentPath, "audit");
+
+        public string AuditReadmePath => Path.Combine(AuditPath, "README.md");
+
+        public string EventsLogPath => Path.Combine(AuditPath, "events.ndjson");
 
         public string TasksPath => Path.Combine(AgentPath, "tasks");
 

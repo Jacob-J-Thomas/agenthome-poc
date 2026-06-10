@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using EmbodySense.Cli.Audit;
 
 namespace EmbodySense.Cli.Workspace
 {
@@ -19,6 +20,7 @@ namespace EmbodySense.Cli.Workspace
             Directory.CreateDirectory(paths.AgentPath);
             Directory.CreateDirectory(paths.TasksPath);
             Directory.CreateDirectory(paths.LogsPath);
+            Directory.CreateDirectory(paths.AuditPath);
             Directory.CreateDirectory(paths.ExportsPath);
             Directory.CreateDirectory(Path.Combine(paths.AgentPath, "skills"));
             Directory.CreateDirectory(Path.Combine(paths.AgentPath, "hooks"));
@@ -34,6 +36,7 @@ namespace EmbodySense.Cli.Workspace
             await WriteIfMissingAsync(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), cancellationToken);
             await WriteIfMissingAsync(paths.AgentFile("MEMORY.md"), DefaultMemoryMd(), cancellationToken);
             await WriteIfMissingAsync(paths.AgentFile("models.json"), DefaultModelsJson(), cancellationToken);
+            await WriteRequiredAsync(paths.AuditReadmePath, DefaultAuditReadme(), cancellationToken);
             //await WriteIfMissingAsync(paths.AgentFile("tools.json"), DefaultToolsJson(), cancellationToken);
 
             //var permissions = PermissionsDocument.CreateDefault();
@@ -45,14 +48,19 @@ namespace EmbodySense.Cli.Workspace
                 await File.WriteAllTextAsync(paths.EventsLogPath, string.Empty, cancellationToken);
             }
 
-            //var audit = new AuditLog(paths);
-            //await audit.AppendAsync(new AuditEvent(
-            //    Actor: "agenthome.cli",
-            //    Action: "workspace.init",
-            //    Target: paths.RootPath,
-            //    Decision: "Allow",
-            //    TaskId: null,
-            //    Detail: "Initialized AgentHome workspace."), cancellationToken);
+            var audit = new AuditLog(paths);
+            await audit.AppendAsync(AuditEvent.Create(
+                actor: "embodysense.cli",
+                action: "workspace.init",
+                target: paths.RootPath,
+                outcome: "succeeded",
+                detail: "Initialized or refreshed EmbodySense workspace scaffolding.",
+                metadata: new Dictionary<string, object?>
+                {
+                    ["agent_path"] = paths.AgentPath,
+                    ["audit_path"] = paths.AuditPath,
+                    ["workspace_path"] = paths.WorkspacePath
+                }), cancellationToken);
         }
 
         private static async Task WriteIfMissingAsync(string path, string content, CancellationToken cancellationToken)
@@ -62,6 +70,17 @@ namespace EmbodySense.Cli.Workspace
                 return;
             }
 
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            await File.WriteAllTextAsync(path, content, cancellationToken);
+        }
+
+        private static async Task WriteRequiredAsync(string path, string content, CancellationToken cancellationToken)
+        {
             var directory = Path.GetDirectoryName(path);
             if (!string.IsNullOrWhiteSpace(directory))
             {
@@ -108,6 +127,21 @@ namespace EmbodySense.Cli.Workspace
 
         // TODO: Add additional agentic files in here for SOUL, USER, PROJECT, PERMISSIONS, ROLE, etc.
 
+        private static string DefaultAuditReadme() => """
+            # Audit Registry
+
+            This folder is the EmbodySense audit registry for this initialized workspace.
+
+            `events.ndjson` is an append-only JSON-lines event stream. Each line records one high-level harness action with timestamp, actor, action, target, outcome, detail, and structured metadata.
+
+            The audit registry is intended to explain what the harness did without becoming a raw transcript, secret store, or prompt dump. LLM inference events should record provider, model, message counts, character counts, duration, and outcome, but should not store raw prompts or model responses by default.
+
+            The harness may write this folder. Humans and trusted harness commands may inspect it. Agent context should not include raw audit events unless a human or policy explicitly requests that context.
+
+            This README is generated from hard-coded EmbodySense CLI text every time `init` runs so the audit policy explanation stays consistent across workspaces.
+
+            """;
+
         private static string DefaultModelsJson() => """
         {
           "version": 1,
@@ -133,4 +167,3 @@ namespace EmbodySense.Cli.Workspace
     }
 
 }
-
