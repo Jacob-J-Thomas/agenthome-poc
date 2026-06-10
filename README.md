@@ -1,8 +1,8 @@
-# AgentHome POC
+# EmbodySense POC
 
 
 ## Run
 
 ```powershell
-dotnet run --project src/AgentHome.Cli
+dotnet run --no-build --project src\EmbodySense.Cli -- run
 ```
