@@ -9,7 +9,8 @@ internal sealed class AuditLog
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
     };
 
     private readonly WorkspacePaths _paths;
@@ -44,5 +45,33 @@ internal sealed class AuditLog
             _paths.EventsLogPath,
             line + Environment.NewLine,
             cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)
+    {
+        if (limit <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "Limit must be greater than zero.");
+        }
+
+        if (!File.Exists(_paths.EventsLogPath))
+        {
+            return [];
+        }
+
+        var lines = await File.ReadAllLinesAsync(_paths.EventsLogPath, cancellationToken);
+        var events = new List<AuditEvent>();
+
+        foreach (var line in lines.Where(line => !string.IsNullOrWhiteSpace(line)).TakeLast(limit))
+        {
+            var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, JsonOptions);
+
+            if (auditEvent is not null)
+            {
+                events.Add(auditEvent);
+            }
+        }
+
+        return events;
     }
 }
