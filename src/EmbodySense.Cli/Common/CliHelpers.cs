@@ -1,3 +1,4 @@
+using EmbodySense.Cli.Permissions;
 using EmbodySense.Cli.Workspace;
 
 namespace EmbodySense.Cli.Common;
@@ -27,7 +28,9 @@ internal static class CliHelpers
         var root = args.Length >= 2 ? args[1] : Directory.GetCurrentDirectory();
         var initializer = new WorkspaceInitializer();
         await initializer.InitializeAsync(root);
+        var paths = new WorkspacePaths(root);
         Console.WriteLine($"Initialized EmbodySense workspace at {Path.GetFullPath(root)}");
+        Console.WriteLine($"Permissions: {paths.PermissionsPath}");
         return 0;
     }
 
@@ -41,8 +44,39 @@ internal static class CliHelpers
         Console.WriteLine($"Workspace:     {paths.WorkspacePath}");
         Console.WriteLine($"Initialized:   {paths.IsInitialized}");
         Console.WriteLine($"Audit log:     {paths.EventsLogPath}");
+        Console.WriteLine($"Permissions:   {paths.PermissionsPath}");
         Console.WriteLine($"Tasks path:    {paths.TasksPath}");
 
+        var permissions = DirectoryPermissionPolicy.Load(paths);
+        Console.WriteLine($"Default access: {FormatDefaultAccess(permissions)}");
+        Console.WriteLine($"Approved:       {FormatApprovedEntries(permissions.Approved)}");
+        Console.WriteLine($"Denied:         {FormatDeniedEntries(permissions.Denied)}");
+
         return paths.IsInitialized ? 0 : 2;
+    }
+
+    private static string FormatDefaultAccess(DirectoryPermissionPolicy permissions)
+    {
+        return permissions.HasDocument ? "requires approval for missing or unmatched directory rules" : "requires approval because permissions.json is missing, invalid, or unsupported";
+    }
+
+    private static string FormatApprovedEntries(IReadOnlyList<ApprovedFileSystemPermission> entries)
+    {
+        return entries.Count == 0 ? "(none)" : string.Join(", ", entries.Select(entry => $"{entry.Path} [{FormatOperations(entry.Operations)}]{FormatApproval(entry)}"));
+    }
+
+    private static string FormatDeniedEntries(IReadOnlyList<DeniedFileSystemPermission> entries)
+    {
+        return entries.Count == 0 ? "(none)" : string.Join(", ", entries.Select(entry => $"{entry.Path} [{FormatOperations(entry.Operations)}]"));
+    }
+
+    private static string FormatOperations(IReadOnlyList<FileSystemOperation> operations)
+    {
+        return string.Join("/", operations.Select(operation => operation.ToString().ToLowerInvariant()));
+    }
+
+    private static string FormatApproval(ApprovedFileSystemPermission entry)
+    {
+        return entry.RequiresApproval ? " (approval required)" : "";
     }
 }

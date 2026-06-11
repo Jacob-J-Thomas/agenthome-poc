@@ -1,17 +1,10 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using EmbodySense.Cli.Audit;
+using EmbodySense.Cli.Permissions;
 
 namespace EmbodySense.Cli.Workspace
 {
     public sealed class WorkspaceInitializer
     {
-        private static readonly JsonSerializerOptions JsonOptions = new()
-        {
-            WriteIndented = true,
-            Converters = { new JsonStringEnumConverter() }
-        };
-
         public async Task InitializeAsync(string rootPath, CancellationToken cancellationToken = default)
         {
             var paths = new WorkspacePaths(rootPath);
@@ -22,26 +15,26 @@ namespace EmbodySense.Cli.Workspace
             Directory.CreateDirectory(paths.LogsPath);
             Directory.CreateDirectory(paths.AuditPath);
             Directory.CreateDirectory(paths.ExportsPath);
-            Directory.CreateDirectory(Path.Combine(paths.AgentPath, "skills"));
-            Directory.CreateDirectory(Path.Combine(paths.AgentPath, "hooks"));
-            Directory.CreateDirectory(Path.Combine(paths.AgentPath, "recipes"));
+            Directory.CreateDirectory(paths.SkillsPath);
+            Directory.CreateDirectory(paths.HooksPath);
+            Directory.CreateDirectory(paths.RecipesPath);
 
             Directory.CreateDirectory(paths.WorkspacePath);
-            Directory.CreateDirectory(Path.Combine(paths.WorkspacePath, "private"));
-            Directory.CreateDirectory(Path.Combine(paths.WorkspacePath, "shared"));
-            Directory.CreateDirectory(Path.Combine(paths.WorkspacePath, "generated"));
-            Directory.CreateDirectory(Path.Combine(paths.WorkspacePath, "system"));
+            Directory.CreateDirectory(paths.WorkspacePrivatePath);
+            Directory.CreateDirectory(paths.WorkspaceSharedPath);
+            Directory.CreateDirectory(paths.WorkspaceGeneratedPath);
+            Directory.CreateDirectory(paths.WorkspaceSystemPath);
 
             await WriteIfMissingAsync(paths.AgentFile("AGENT.md"), DefaultAgentMd(), cancellationToken);
             await WriteIfMissingAsync(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), cancellationToken);
             await WriteIfMissingAsync(paths.AgentFile("MEMORY.md"), DefaultMemoryMd(), cancellationToken);
             await WriteIfMissingAsync(paths.AgentFile("models.json"), DefaultModelsJson(), cancellationToken);
             await WriteRequiredAsync(paths.AuditReadmePath, DefaultAuditReadme(), cancellationToken);
+            await WriteRequiredAsync(paths.PermissionsReadmePath, DefaultPermissionsReadme(), cancellationToken);
             //await WriteIfMissingAsync(paths.AgentFile("tools.json"), DefaultToolsJson(), cancellationToken);
 
-            //var permissions = PermissionsDocument.CreateDefault();
-            //var permissionsJson = JsonSerializer.Serialize(permissions, JsonOptions);
-            //await WriteIfMissingAsync(paths.AgentFile("permissions.json"), permissionsJson + Environment.NewLine, cancellationToken);
+            var permissions = PermissionsDocument.CreateDefault(paths);
+            await WriteIfMissingAsync(paths.PermissionsPath, permissions.ToJson() + Environment.NewLine, cancellationToken);
 
             if (!File.Exists(paths.EventsLogPath))
             {
@@ -59,6 +52,7 @@ namespace EmbodySense.Cli.Workspace
                 {
                     ["agent_path"] = paths.AgentPath,
                     ["audit_path"] = paths.AuditPath,
+                    ["permissions_path"] = paths.PermissionsPath,
                     ["workspace_path"] = paths.WorkspacePath
                 }), cancellationToken);
         }
@@ -99,7 +93,8 @@ namespace EmbodySense.Cli.Workspace
 
             Core principles:
 
-            - Missing policy means ask for human approval.
+            - Missing policy or missing directory permission means request human approval before proceeding.
+            - Explicit denied directory permissions mean do not repeatedly request the same inappropriate access.
             - Write durable task state before substantial work.
             - Append meaningful actions to the audit log.
             - Do not treat chat history as the system of record.
@@ -127,6 +122,35 @@ namespace EmbodySense.Cli.Workspace
 
         // TODO: Add additional agentic files in here for SOUL, USER, PROJECT, PERMISSIONS, ROLE, etc.
 
+        private static string DefaultPermissionsReadme() => """
+            # File-System Permissions
+
+            This file explains `.agent/permissions.json`.
+
+            The active policy is directory-level only and applies to agent-mediated file-system access in this workspace. It does not grant blanket process access to the host machine.
+
+            Default behavior:
+
+            - Missing or unsupported permissions require human approval before proceeding.
+            - Unmatched directories require human approval before proceeding.
+            - Explicit denied entries stop the agent from repeatedly requesting inappropriate access.
+            - Directory entries include subdirectories by system design.
+            - More specific directory entries override broader directory entries.
+
+            Configuration shape:
+
+            - `approved`: directories the agent may use. Approved entries can set `requiresApproval` to require human approval before use.
+            - `denied`: directories the agent should not request again unless the human changes the policy.
+            - `operations`: `list`, `read`, `create`, `append`, `modify`, and `delete`.
+
+            Default approved directories include `workspace/shared`, `workspace/generated`, `workspace/system`, `.agent/tasks`, `.agent/exports`, `.agent/skills`, and `.agent/recipes`. Mutable skill and recipe operations require approval by default.
+
+            Default denied directories include `workspace/private`, `.agent/audit`, `.agent/logs`, and `.agent/hooks`. Use `embodysense audit` to inspect audit events instead of reading raw audit files.
+
+            This README is generated from hard-coded EmbodySense CLI text every time `init` runs so the permission explanation stays consistent across workspaces.
+
+            """;
+
         private static string DefaultAuditReadme() => """
             # Audit Registry
 
@@ -142,6 +166,7 @@ namespace EmbodySense.Cli.Workspace
 
             """;
 
+        // TODO: Reevaluate below structure (the role should only be concerned with model choice, not hosting service)... we should concern ourselves about support for various models later
         private static string DefaultModelsJson() => """
         {
           "version": 1,

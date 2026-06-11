@@ -29,6 +29,25 @@ namespace EmbodySense.Cli.Workspace
 
         public string ExportsPath => Path.Combine(AgentPath, "exports");
 
-        public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(AgentFile("permissions.json"));
+        // TODO: Implement below instead of just initializing the locations and enforcing protections on them.
+        public string SkillsPath => Path.Combine(AgentPath, "skills");
+
+        public string HooksPath => Path.Combine(AgentPath, "hooks");
+
+        public string RecipesPath => Path.Combine(AgentPath, "recipes");
+
+        public string PermissionsPath => AgentFile("permissions.json");
+
+        public string PermissionsReadmePath => AgentFile("PERMISSIONS.md");
+
+        public string WorkspacePrivatePath => Path.Combine(WorkspacePath, "private");
+
+        public string WorkspaceSharedPath => Path.Combine(WorkspacePath, "shared");
+
+        public string WorkspaceGeneratedPath => Path.Combine(WorkspacePath, "generated");
+
+        public string WorkspaceSystemPath => Path.Combine(WorkspacePath, "system");
+
+        public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath);
     }
 }
