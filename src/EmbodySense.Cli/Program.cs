@@ -1,6 +1,4 @@
-using EmbodySense.Cli.Audit;
 using EmbodySense.Cli.Command;
-using EmbodySense.Cli.Harness;
 
 namespace EmbodySense.Cli;
 
@@ -17,7 +15,7 @@ internal static class Program
 
         if (arguments.Count == 0 || arguments.IsHelpAt(0))
         {
-            CliHelpers.PrintHelp();
+            HelpCommand.PrintRoot();
             return 0;
         }
 
@@ -27,9 +25,9 @@ internal static class Program
 
             return command switch
             {
-                "init" => await CliHelpers.InitAsync(arguments),
-                "status" => CliHelpers.Status(arguments),
-                "run" => await AgentHarnessLoop.RunHarnessLoopAsync(arguments),
+                "init" => await InitCommand.RunAsync(arguments),
+                "status" => StatusCommand.Run(arguments),
+                "run" => await RunCommand.RunAsync(arguments),
                 "audit" => await AuditCommand.RunAsync(arguments),
                 _ => UnknownCommand(command)
             };
@@ -44,7 +42,7 @@ internal static class Program
     private static int UnknownCommand(string command)
     {
         Console.Error.WriteLine($"unknown command: {command}");
-        CliHelpers.PrintHelp();
+        HelpCommand.PrintRoot();
         return 1;
     }
 }

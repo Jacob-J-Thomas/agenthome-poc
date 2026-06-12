@@ -1,8 +1,8 @@
 using System.Text.Json;
-using EmbodySense.Cli.Command;
+using EmbodySense.Cli.Audit;
 using EmbodySense.Cli.Workspace;
 
-namespace EmbodySense.Cli.Audit;
+namespace EmbodySense.Cli.Command;
 
 internal static class AuditCommand
 {
@@ -128,5 +128,4 @@ internal static class AuditCommand
     {
         return value.Equals("summary", StringComparison.OrdinalIgnoreCase) || value.Equals("show", StringComparison.OrdinalIgnoreCase);
     }
-
 }

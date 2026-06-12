@@ -3,38 +3,9 @@ using EmbodySense.Cli.Workspace;
 
 namespace EmbodySense.Cli.Command;
 
-internal static class CliHelpers
+internal static class StatusCommand
 {
-    public static void PrintHelp()
-    {
-        Console.WriteLine("""
-            EmbodySense POC CLI
-
-            usage:
-              embodysense init [root]
-              embodysense run [--model model] [--workdir path]
-              embodysense status [root]
-              embodysense audit [tail] [root] [--limit count]
-
-            example:
-              embodysense init ./scratch
-              embodysense run
-              embodysense audit tail ./scratch --limit 10
-            """);
-    }
-
-    public static async Task<int> InitAsync(CliArguments arguments)
-    {
-        var root = arguments.At(1) ?? Directory.GetCurrentDirectory();
-        var initializer = new WorkspaceInitializer();
-        await initializer.InitializeAsync(root);
-        var paths = new WorkspacePaths(root);
-        Console.WriteLine($"Initialized EmbodySense workspace at {Path.GetFullPath(root)}");
-        Console.WriteLine($"Permissions: {paths.PermissionsPath}");
-        return 0;
-    }
-
-    public static int Status(CliArguments arguments)
+    public static int Run(CliArguments arguments)
     {
         var root = arguments.At(1) ?? Directory.GetCurrentDirectory();
         var paths = new WorkspacePaths(root);
