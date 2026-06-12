@@ -1,3 +1,4 @@
+using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Common;
 using EmbodySense.Cli.Common.Enums;
 using EmbodySense.Cli.Inference.Implementations;
@@ -8,11 +9,11 @@ namespace EmbodySense.Cli.Harness;
 
 internal static class AgentHarnessLoop
 {
-    public static async Task<int> RunHarnessLoopAsync(string[] args)
+    public static async Task<int> RunHarnessLoopAsync(CliArguments arguments)
     {
         Console.WriteLine(Constants.HarnessBanner);
 
-        var inferenceClient = CreateDefaultInferenceClient(args);
+        var inferenceClient = CreateDefaultInferenceClient(arguments);
         var messages = new List<LlmMessage>();
         var exitRequested = false;
 
@@ -49,50 +50,25 @@ internal static class AgentHarnessLoop
         return 0;
     }
 
-    private static ILlmInferenceClient CreateDefaultInferenceClient(string[] args)
+    private static ILlmInferenceClient CreateDefaultInferenceClient(CliArguments arguments)
     {
         return new LlmInferenceClient(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
-            Model = GetModel(args),
-            WorkingDirectory = GetOptionValue(args, "--workdir") ?? GetOptionValue(args, "--working-directory") ?? Directory.GetCurrentDirectory(),
-            CodexExecutablePath = GetOptionValue(args, "--codex-path"),
-            CodexSandbox = GetOptionValue(args, "--sandbox") ?? "read-only",
-            CodexApprovalPolicy = GetOptionValue(args, "--approval") ?? "never",
-            UseEphemeralCodexSession = !HasFlag(args, "--persist-session"),
-            SkipCodexGitRepositoryCheck = HasFlag(args, "--skip-git-repo-check")
+            Model = arguments.OptionValueInTokenOrder("--model", "-m") ?? GetPositionalModel(arguments),
+            WorkingDirectory = arguments.OptionValue("--workdir") ?? arguments.OptionValue("--working-directory") ?? Directory.GetCurrentDirectory(),
+            CodexExecutablePath = arguments.OptionValue("--codex-path"),
+            CodexSandbox = arguments.OptionValue("--sandbox") ?? "read-only",
+            CodexApprovalPolicy = arguments.OptionValue("--approval") ?? "never",
+            UseEphemeralCodexSession = !arguments.HasFlag("--persist-session"),
+            SkipCodexGitRepositoryCheck = arguments.HasFlag("--skip-git-repo-check")
         });
     }
 
-    private static string? GetModel(string[] args)
+    private static string? GetPositionalModel(CliArguments arguments)
     {
-        for (var i = 1; i < args.Length; i++)
-        {
-            if ((args[i] is "--model" or "-m") && i + 1 < args.Length)
-            {
-                return args[i + 1];
-            }
-        }
-
-        return args.Length >= 2 && !args[1].StartsWith('-') ? args[1] : null;
-    }
-
-    private static string? GetOptionValue(string[] args, string optionName)
-    {
-        for (var i = 1; i < args.Length - 1; i++)
-        {
-            if (args[i].Equals(optionName, StringComparison.OrdinalIgnoreCase))
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
-    }
-
-    private static bool HasFlag(string[] args, string flagName)
-    {
-        return args.Skip(1).Any(arg => arg.Equals(flagName, StringComparison.OrdinalIgnoreCase));
+        var value = arguments.At(1);
+        return value is not null && !CliArguments.IsOption(value) ? value : null;
     }
 
     private static bool IsExitCommand(string input)

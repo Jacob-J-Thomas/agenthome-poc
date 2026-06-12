@@ -1,7 +1,7 @@
 using EmbodySense.Cli.Permissions;
 using EmbodySense.Cli.Workspace;
 
-namespace EmbodySense.Cli.Common;
+namespace EmbodySense.Cli.Command;
 
 internal static class CliHelpers
 {
@@ -23,9 +23,9 @@ internal static class CliHelpers
             """);
     }
 
-    public static async Task<int> InitAsync(string[] args)
+    public static async Task<int> InitAsync(CliArguments arguments)
     {
-        var root = args.Length >= 2 ? args[1] : Directory.GetCurrentDirectory();
+        var root = arguments.At(1) ?? Directory.GetCurrentDirectory();
         var initializer = new WorkspaceInitializer();
         await initializer.InitializeAsync(root);
         var paths = new WorkspacePaths(root);
@@ -34,9 +34,9 @@ internal static class CliHelpers
         return 0;
     }
 
-    public static int Status(string[] args)
+    public static int Status(CliArguments arguments)
     {
-        var root = args.Length >= 2 ? args[1] : Directory.GetCurrentDirectory();
+        var root = arguments.At(1) ?? Directory.GetCurrentDirectory();
         var paths = new WorkspacePaths(root);
 
         Console.WriteLine($"Root:          {paths.RootPath}");

@@ -1,5 +1,5 @@
 using EmbodySense.Cli.Audit;
-using EmbodySense.Cli.Common;
+using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Harness;
 
 namespace EmbodySense.Cli;
@@ -13,7 +13,9 @@ internal static class Program
 
     private static async Task<int> RunAsync(string[] args)
     {
-        if (args.Length == 0 || IsHelp(args[0]))
+        var arguments = new CliArguments(args);
+
+        if (arguments.Count == 0 || arguments.IsHelpAt(0))
         {
             CliHelpers.PrintHelp();
             return 0;
@@ -21,14 +23,14 @@ internal static class Program
 
         try
         {
-            var command = args[0].Trim().ToLowerInvariant();
+            var command = arguments.Command ?? "";
 
             return command switch
             {
-                "init" => await CliHelpers.InitAsync(args),
-                "status" => CliHelpers.Status(args),
-                "run" => await AgentHarnessLoop.RunHarnessLoopAsync(args),
-                "audit" => await AuditCommand.RunAsync(args),
+                "init" => await CliHelpers.InitAsync(arguments),
+                "status" => CliHelpers.Status(arguments),
+                "run" => await AgentHarnessLoop.RunHarnessLoopAsync(arguments),
+                "audit" => await AuditCommand.RunAsync(arguments),
                 _ => UnknownCommand(command)
             };
         }
@@ -37,11 +39,6 @@ internal static class Program
             Console.Error.WriteLine($"error: {exception.Message}");
             return 1;
         }
-    }
-
-    private static bool IsHelp(string value)
-    {
-        return value is "help" or "--help" or "-h";
     }
 
     private static int UnknownCommand(string command)

@@ -1,31 +1,37 @@
 using System.Text.Json;
+using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Workspace;
 
 namespace EmbodySense.Cli.Audit;
 
 internal static class AuditCommand
 {
-    public static async Task<int> RunAsync(string[] args)
+    private static readonly IReadOnlySet<string> IgnoredRootTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tail" };
+    private static readonly IReadOnlySet<string> OptionsWithValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--limit", "-n" };
+
+    public static async Task<int> RunAsync(CliArguments arguments)
     {
-        if (args.Length >= 2 && IsHelp(args[1]))
+        var subcommand = arguments.At(1);
+
+        if (arguments.Count >= 2 && arguments.IsHelpAt(1))
         {
             PrintHelp();
             return 0;
         }
 
-        if (args.Length >= 2 && !IsTail(args[1]) && args[1].StartsWith('-'))
+        if (subcommand is not null && !IsTail(subcommand) && CliArguments.IsOption(subcommand))
         {
-            return await PrintTailAsync(args);
+            return await PrintTailAsync(arguments);
         }
 
-        if (args.Length >= 2 && !IsTail(args[1]) && IsReservedSubcommand(args[1]))
+        if (subcommand is not null && !IsTail(subcommand) && IsReservedSubcommand(subcommand))
         {
-            Console.Error.WriteLine($"unknown audit command: {args[1]}");
+            Console.Error.WriteLine($"unknown audit command: {subcommand}");
             PrintHelp();
             return 1;
         }
 
-        return await PrintTailAsync(args);
+        return await PrintTailAsync(arguments);
     }
 
     private static void PrintHelp()
@@ -42,10 +48,10 @@ internal static class AuditCommand
             """);
     }
 
-    private static async Task<int> PrintTailAsync(string[] args)
+    private static async Task<int> PrintTailAsync(CliArguments arguments)
     {
-        var root = GetRoot(args);
-        var limit = GetLimit(args);
+        var root = GetRoot(arguments);
+        var limit = GetLimit(arguments);
         var paths = new WorkspacePaths(root);
         var auditLog = new AuditLog(paths);
         var events = await auditLog.ReadTailAsync(limit);
@@ -102,52 +108,15 @@ internal static class AuditCommand
         };
     }
 
-    private static string GetRoot(string[] args)
+    private static string GetRoot(CliArguments arguments)
     {
-        for (var i = 1; i < args.Length; i++)
-        {
-            if (IsTail(args[i]))
-            {
-                continue;
-            }
-
-            if (IsOptionWithValue(args[i]))
-            {
-                i++;
-                continue;
-            }
-
-            if (!args[i].StartsWith('-'))
-            {
-                return args[i];
-            }
-        }
-
-        return Directory.GetCurrentDirectory();
+        return arguments.FirstOperand(1, IgnoredRootTokens, OptionsWithValues) ?? Directory.GetCurrentDirectory();
     }
 
-    private static int GetLimit(string[] args)
+    private static int GetLimit(CliArguments arguments)
     {
-        var value = GetOptionValue(args, "--limit") ?? GetOptionValue(args, "-n");
+        var value = arguments.OptionValue("--limit") ?? arguments.OptionValue("-n");
         return int.TryParse(value, out var limit) && limit > 0 ? limit : 20;
-    }
-
-    private static string? GetOptionValue(string[] args, string optionName)
-    {
-        for (var i = 1; i < args.Length - 1; i++)
-        {
-            if (args[i].Equals(optionName, StringComparison.OrdinalIgnoreCase))
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
-    }
-
-    private static bool IsHelp(string value)
-    {
-        return value is "help" or "--help" or "-h";
     }
 
     private static bool IsTail(string value)
@@ -160,8 +129,4 @@ internal static class AuditCommand
         return value.Equals("summary", StringComparison.OrdinalIgnoreCase) || value.Equals("show", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool IsOptionWithValue(string value)
-    {
-        return value is "--limit" or "-n";
-    }
 }
