@@ -2,9 +2,7 @@ namespace EmbodySense.Cli.Inference.Models;
 
 internal sealed record LlmInferenceRequest
 {
-    public LlmInferenceRequest(
-        IReadOnlyList<LlmMessage> messages,
-        LlmInferenceOptions? options = null)
+    public LlmInferenceRequest(IReadOnlyList<LlmMessage> messages, LlmInferenceOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(messages);
 
@@ -23,9 +21,7 @@ internal sealed record LlmInferenceRequest
 
     public LlmInferenceOptions Options { get; }
 
-    public static LlmInferenceRequest FromUserText(
-        string text,
-        LlmInferenceOptions? options = null)
+    public static LlmInferenceRequest FromUserText(string text, LlmInferenceOptions? options = null)
     {
         return new LlmInferenceRequest([LlmMessage.User(text)], options);
     }

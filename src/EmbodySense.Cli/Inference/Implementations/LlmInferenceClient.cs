@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using EmbodySense.Cli.Audit;
-using EmbodySense.Cli.Common.Enums;
 using EmbodySense.Cli.Inference.Interfaces;
 using EmbodySense.Cli.Inference.Models;
 

@@ -1,6 +1,5 @@
 using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Common;
-using EmbodySense.Cli.Common.Enums;
 using EmbodySense.Cli.Inference.Implementations;
 using EmbodySense.Cli.Inference.Interfaces;
 using EmbodySense.Cli.Inference.Models;

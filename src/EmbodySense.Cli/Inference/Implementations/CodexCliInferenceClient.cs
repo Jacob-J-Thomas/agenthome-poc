@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
-using EmbodySense.Cli.Common.Enums;
 using EmbodySense.Cli.Inference.Interfaces;
 using EmbodySense.Cli.Inference.Models;
 

@@ -1,4 +1,4 @@
-namespace EmbodySense.Cli.Common.Enums;
+namespace EmbodySense.Cli.Inference.Models;
 
 internal enum LlmMessageRole
 {
