@@ -1,5 +1,6 @@
 using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Common;
+using EmbodySense.Core.Harness;
 using EmbodySense.Core.Inference.Implementations;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
@@ -13,7 +14,7 @@ internal static class AgentHarnessLoop
         Console.WriteLine(Constants.HarnessBanner);
 
         var inferenceClient = CreateDefaultInferenceClient(arguments);
-        var messages = new List<LlmMessage>();
+        var session = new AgentHarnessSession(inferenceClient);
         var exitRequested = false;
 
         while (!exitRequested)
@@ -35,12 +36,7 @@ internal static class AgentHarnessLoop
                     break;
 
                 default:
-                    messages.Add(LlmMessage.User(input));
-
-                    var response = await inferenceClient.GenerateAsync(new LlmInferenceRequest(messages));
-
-                    messages.Add(LlmMessage.Assistant(response.OutputText));
-
+                    var response = await session.SendUserMessageAsync(input);
                     Console.WriteLine(response.OutputText);
                     break;
             }
