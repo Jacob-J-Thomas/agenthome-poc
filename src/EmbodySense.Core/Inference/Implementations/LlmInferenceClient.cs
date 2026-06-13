@@ -14,17 +14,10 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
     public LlmInferenceClient(LlmInferenceClientOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        ValidateSurface(options.Surface);
 
         _options = options;
+        _innerClient = LlmInferenceClientFactory.CreateProvider(options);
         _auditLog = AuditLog.TryCreateForExistingWorkspace(options.WorkingDirectory);
-        _innerClient = options.Surface switch
-        {
-            LlmInferenceSurface.OpenAiCodex => new CodexCliInferenceClient(options),
-            LlmInferenceSurface.AzureAiFoundry => new NotSupportedInferenceClient(
-                "Azure AI Foundry inferencing is selected, but the Azure adapter has not been wired yet."),
-            _ => new NotSupportedInferenceClient("LLM inferencing is not wired for the selected surface.")
-        };
     }
 
     public async Task<LlmInferenceResponse> GenerateAsync(LlmInferenceRequest request, CancellationToken cancellationToken = default)
@@ -51,10 +44,7 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
         }
     }
 
-    private Task RecordInferenceStartedAsync(
-        string requestId,
-        LlmInferenceRequest request,
-        CancellationToken cancellationToken)
+    private Task RecordInferenceStartedAsync(string requestId, LlmInferenceRequest request, CancellationToken cancellationToken)
     {
         return AppendAuditAsync(AuditEvent.Create(
             actor: "embodysense.llm",
@@ -122,9 +112,7 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
         return metadata;
     }
 
-    private Dictionary<string, object?> CreateBaseMetadata(
-        string requestId,
-        LlmInferenceRequest request)
+    private Dictionary<string, object?> CreateBaseMetadata(string requestId, LlmInferenceRequest request)
     {
         return new Dictionary<string, object?>
         {
@@ -135,16 +123,5 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
             ["message_count"] = request.Messages.Count,
             ["input_character_count"] = request.Messages.Sum(message => message.Content.Length)
         };
-    }
-
-    private static void ValidateSurface(LlmInferenceSurface surface)
-    {
-        if (!Enum.IsDefined(surface) || surface == LlmInferenceSurface.Unknown)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(surface),
-                surface,
-                "Choose a concrete LLM inference surface.");
-        }
     }
 }
