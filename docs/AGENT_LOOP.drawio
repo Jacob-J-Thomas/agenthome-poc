@@ -22,16 +22,16 @@
         <mxCell id="init" value="init [root]&lt;br&gt;WorkspaceInitializer.InitializeAsync(root)&lt;br&gt;WorkspaceDefaults supplies dirs and seed files&lt;br&gt;Append workspace.init audit event" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="235" width="270" height="115" as="geometry" />
         </mxCell>
-        <mxCell id="status" value="status [root]&lt;br&gt;WorkspacePaths + DirectoryPermissionPolicy&lt;br&gt;Print initialized state, audit path,&lt;br&gt;permissions defaults, read/write dirs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
+        <mxCell id="status" value="status [root]&lt;br&gt;WorkspacePaths + ToolPermissionService&lt;br&gt;Print initialized state, audit path,&lt;br&gt;permissions defaults, read/write dirs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="385" width="270" height="105" as="geometry" />
         </mxCell>
         <mxCell id="audit" value="audit [tail] [root] [--limit count]&lt;br&gt;AuditCommand reads .agent/audit/events.ndjson&lt;br&gt;Prints recent event metadata" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="525" width="270" height="95" as="geometry" />
         </mxCell>
-        <mxCell id="run" value="run&lt;br&gt;RunCommand -&amp;gt; AgentHarnessLoop.RunHarnessLoopAsync(args)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E9D8FD;strokeColor=#6B46C1;fontSize=13;fontStyle=1" vertex="1" parent="1">
+        <mxCell id="run" value="run&lt;br&gt;RunCommand parses options&lt;br&gt;Creates LlmInferenceClient + AgentHarnessSession" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E9D8FD;strokeColor=#6B46C1;fontSize=13;fontStyle=1" vertex="1" parent="1">
           <mxGeometry x="350" y="670" width="270" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="banner" value="Print harness banner&lt;br&gt;Create default inference client&lt;br&gt;Create AgentHarnessSession" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
+        <mxCell id="banner" value="AgentHarnessLoop.RunHarnessLoopAsync(session)&lt;br&gt;Print harness banner&lt;br&gt;Own console input/output only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="700" y="645" width="230" height="75" as="geometry" />
         </mxCell>
         <mxCell id="options" value="LlmInferenceClientOptions&lt;br&gt;Surface = OpenAiCodex&lt;br&gt;model from --model / -m / positional&lt;br&gt;workdir from --workdir or current dir&lt;br&gt;codex path, sandbox, approval policy&lt;br&gt;ephemeral unless --persist-session" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
@@ -103,10 +103,10 @@
         <mxCell id="e6" value="run" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="1" source="command" target="run">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="1" source="run" target="banner">
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="1" source="run" target="options">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="1" source="banner" target="options">
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="1" source="options" target="banner">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="1" source="banner" target="prompt">
