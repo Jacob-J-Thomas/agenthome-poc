@@ -1,4 +1,6 @@
+using EmbodySense.Core.Permissions.Models;
 using EmbodySense.Core.Workspace;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Permissions;
 
@@ -29,7 +31,7 @@ public sealed class DirectoryPermissionPolicy
     {
         if (_document is null)
         {
-            return PermissionEvaluation.RequiresApproval("", "permissions.json is missing, invalid, or unsupported.");
+            return PermissionEvaluation.RequiresApproval("", PermissionEvaluationDetails.MissingOrUnsupportedDocument);
         }
 
         var candidatePath = Path.GetFullPath(directoryPath);
@@ -38,15 +40,15 @@ public sealed class DirectoryPermissionPolicy
 
         if (deniedMatch is not null && (approvedMatch is null || deniedMatch.Specificity >= approvedMatch.Specificity))
         {
-            return PermissionEvaluation.Denied(deniedMatch.Entry.Path);
+            return PermissionEvaluation.Denied(deniedMatch.Entry.Path, PermissionEvaluationDetails.ExplicitDirectoryDeny);
         }
 
         if (approvedMatch?.Entry is ApprovedFileSystemPermission approvedEntry)
         {
-            return approvedEntry.RequiresApproval ? PermissionEvaluation.RequiresApproval(approvedEntry.Path, "Approved directory rule requires human approval before use.") : PermissionEvaluation.Allowed(approvedEntry.Path);
+            return approvedEntry.RequiresApproval ? PermissionEvaluation.RequiresApproval(approvedEntry.Path, PermissionEvaluationDetails.ApprovedDirectoryRequiresHumanApproval) : PermissionEvaluation.Allowed(approvedEntry.Path);
         }
 
-        return PermissionEvaluation.RequiresApproval("", "No approved or denied directory rule matched.");
+        return PermissionEvaluation.RequiresApproval("", PermissionEvaluationDetails.NoMatchingDirectoryRule);
     }
 
     public bool CanReadDirectory(string directoryPath) => EvaluateDirectory(directoryPath, FileSystemOperation.Read).Decision == PermissionDecision.Allow;

@@ -29,6 +29,7 @@ internal static class CodexCliPromptFormatter
             LlmMessageRole.System => "System",
             LlmMessageRole.User => "User",
             LlmMessageRole.Assistant => "Assistant",
+            LlmMessageRole.Tool => "Tool",
             _ => "Message"
         };
     }

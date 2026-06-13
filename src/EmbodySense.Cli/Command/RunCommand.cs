@@ -1,6 +1,10 @@
 using EmbodySense.Cli.Harness;
+using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Harness;
 using EmbodySense.Core.Inference.Implementations;
+using EmbodySense.Core.Permissions;
+using EmbodySense.Core.Tools;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 
@@ -10,7 +14,11 @@ internal static class RunCommand
     {
         var options = RunOptions.FromArguments(arguments);
         var inferenceClient = new LlmInferenceClient(options.ToInferenceClientOptions());
-        var session = new AgentHarnessSession(inferenceClient);
+        var paths = new WorkspacePaths(options.WorkingDirectory);
+        var permissionPolicy = DirectoryPermissionPolicy.Load(paths);
+        var permissionService = new ToolPermissionService(paths, permissionPolicy);
+        var toolBroker = new ToolBroker(paths, permissionService, new ConsoleToolApprovalPrompt());
+        var session = new AgentHarnessSession(inferenceClient, toolBroker);
 
         return AgentHarnessLoop.RunHarnessLoopAsync(session);
     }

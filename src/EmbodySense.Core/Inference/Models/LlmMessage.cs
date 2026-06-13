@@ -36,4 +36,9 @@ public sealed record LlmMessage
     {
         return new LlmMessage(LlmMessageRole.Assistant, content);
     }
+
+    public static LlmMessage Tool(string content)
+    {
+        return new LlmMessage(LlmMessageRole.Tool, content);
+    }
 }

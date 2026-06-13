@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using EmbodySense.Core.Audit;
+using EmbodySense.Core.Audit.Models;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 
@@ -47,10 +48,10 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
     private Task RecordInferenceStartedAsync(string requestId, LlmInferenceRequest request, CancellationToken cancellationToken)
     {
         return AppendAuditAsync(AuditEvent.Create(
-            actor: "embodysense.llm",
-            action: "llm.inference.start",
+            actor: AuditSchema.Actors.Llm,
+            action: AuditSchema.Actions.LlmInferenceStart,
             target: _options.Surface.ToString(),
-            outcome: "started",
+            outcome: AuditSchema.Outcomes.Started,
             detail: "Started LLM inference request.",
             metadata: CreateBaseMetadata(requestId, request)), cancellationToken);
     }
@@ -67,10 +68,10 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
         metadata["provider_response_id"] = response.ProviderResponseId;
 
         return AppendAuditAsync(AuditEvent.Create(
-            actor: "embodysense.llm",
-            action: "llm.inference.complete",
+            actor: AuditSchema.Actors.Llm,
+            action: AuditSchema.Actions.LlmInferenceComplete,
             target: response.Surface.ToString(),
-            outcome: "succeeded",
+            outcome: AuditSchema.Outcomes.Succeeded,
             detail: "Completed LLM inference request.",
             metadata: metadata), cancellationToken);
     }
@@ -86,10 +87,10 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
         metadata["error_type"] = exception.GetType().Name;
 
         return AppendAuditAsync(AuditEvent.Create(
-            actor: "embodysense.llm",
-            action: "llm.inference.complete",
+            actor: AuditSchema.Actors.Llm,
+            action: AuditSchema.Actions.LlmInferenceComplete,
             target: _options.Surface.ToString(),
-            outcome: "failed",
+            outcome: AuditSchema.Outcomes.Failed,
             detail: "LLM inference request failed.",
             metadata: metadata), cancellationToken);
     }

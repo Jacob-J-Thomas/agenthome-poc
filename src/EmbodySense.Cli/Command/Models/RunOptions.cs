@@ -1,6 +1,6 @@
 using EmbodySense.Core.Inference.Models;
 
-namespace EmbodySense.Cli.Command;
+namespace EmbodySense.Cli.Command.Models;
 
 internal sealed record RunOptions(
     string? Model,

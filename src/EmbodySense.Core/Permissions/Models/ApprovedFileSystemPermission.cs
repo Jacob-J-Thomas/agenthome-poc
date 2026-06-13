@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace EmbodySense.Core.Permissions;
+namespace EmbodySense.Core.Permissions.Models;
 
 public sealed class ApprovedFileSystemPermission : FileSystemPermissionEntry
 {

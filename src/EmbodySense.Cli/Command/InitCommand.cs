@@ -1,4 +1,6 @@
+using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Workspace;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 

@@ -1,6 +1,8 @@
 using System.Text.Json;
 using EmbodySense.Core.Permissions;
+using EmbodySense.Core.Permissions.Models;
 using EmbodySense.Core.Workspace;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Tests;
 

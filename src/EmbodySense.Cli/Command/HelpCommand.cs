@@ -1,3 +1,5 @@
+using EmbodySense.Cli.Command.Models;
+
 namespace EmbodySense.Cli.Command;
 
 internal static class HelpCommand

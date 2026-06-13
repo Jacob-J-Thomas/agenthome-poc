@@ -1,4 +1,4 @@
-namespace EmbodySense.Cli.Command;
+namespace EmbodySense.Cli.Command.Models;
 
 internal sealed class CliArguments
 {

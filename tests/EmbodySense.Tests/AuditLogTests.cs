@@ -1,5 +1,6 @@
 using EmbodySense.Core.Audit;
-using EmbodySense.Core.Workspace;
+using EmbodySense.Core.Audit.Models;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Tests;
 

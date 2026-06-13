@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Workspace;
+namespace EmbodySense.Core.Workspace.Models;
 
 public sealed class WorkspacePaths
 {

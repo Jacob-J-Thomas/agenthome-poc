@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Audit;
+namespace EmbodySense.Core.Audit.Models;
 
 public sealed record AuditEvent(
     DateTimeOffset TimestampUtc,

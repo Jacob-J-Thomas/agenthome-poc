@@ -1,4 +1,5 @@
-using EmbodySense.Core.Permissions;
+using EmbodySense.Core.Permissions.Models;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Workspace;
 
@@ -57,6 +58,7 @@ internal static class WorkspaceDefaults
 
             - Missing policy or missing directory permission means request human approval before proceeding.
             - Explicit denied directory permissions mean do not repeatedly request the same inappropriate access.
+            - Governed tools are requested through the harness tool protocol and executed only through permission, approval, and audit checks.
             - Write durable task state before substantial work.
             - Append meaningful actions to the audit log.
             - Do not treat chat history as the system of record.

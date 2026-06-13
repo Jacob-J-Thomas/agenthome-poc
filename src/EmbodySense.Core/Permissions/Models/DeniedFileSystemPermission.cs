@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Permissions;
+namespace EmbodySense.Core.Permissions.Models;
 
 public sealed class DeniedFileSystemPermission : FileSystemPermissionEntry
 {

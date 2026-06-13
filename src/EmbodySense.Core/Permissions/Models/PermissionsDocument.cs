@@ -1,7 +1,8 @@
 using System.Text.Json;
-using EmbodySense.Core.Workspace;
+using EmbodySense.Core.Permissions;
+using EmbodySense.Core.Workspace.Models;
 
-namespace EmbodySense.Core.Permissions;
+namespace EmbodySense.Core.Permissions.Models;
 
 internal sealed class PermissionsDocument
 {

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using EmbodySense.Core.Workspace;
+using EmbodySense.Core.Audit.Models;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Audit;
 

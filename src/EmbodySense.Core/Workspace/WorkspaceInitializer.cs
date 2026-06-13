@@ -1,4 +1,6 @@
 using EmbodySense.Core.Audit;
+using EmbodySense.Core.Audit.Models;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Workspace;
 
@@ -20,10 +22,10 @@ public sealed class WorkspaceInitializer
 
         var audit = new AuditLog(paths);
         await audit.AppendAsync(AuditEvent.Create(
-            actor: "embodysense.cli",
-            action: "workspace.init",
+            actor: AuditSchema.Actors.Cli,
+            action: AuditSchema.Actions.WorkspaceInit,
             target: paths.RootPath,
-            outcome: "succeeded",
+            outcome: AuditSchema.Outcomes.Succeeded,
             detail: "Initialized or refreshed EmbodySense workspace scaffolding.",
             metadata: new Dictionary<string, object?>
             {
