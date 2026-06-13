@@ -19,7 +19,7 @@
         <mxCell id="help" value="help / no args&lt;br&gt;HelpCommand.PrintRoot()&lt;br&gt;return 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="130" width="210" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="init" value="init [root]&lt;br&gt;WorkspaceInitializer.InitializeAsync(root)&lt;br&gt;Create .agent/, workspace/, permissions.json&lt;br&gt;Append workspace.init audit event" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
+        <mxCell id="init" value="init [root]&lt;br&gt;WorkspaceInitializer.InitializeAsync(root)&lt;br&gt;WorkspaceDefaults supplies dirs and seed files&lt;br&gt;Append workspace.init audit event" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="235" width="270" height="115" as="geometry" />
         </mxCell>
         <mxCell id="status" value="status [root]&lt;br&gt;WorkspacePaths + DirectoryPermissionPolicy&lt;br&gt;Print initialized state, audit path,&lt;br&gt;permissions defaults, read/write dirs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
@@ -79,7 +79,7 @@
         <mxCell id="print" value="AgentHarnessSession stores assistant output&lt;br&gt;Console.WriteLine(output)&lt;br&gt;Prompt again" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="930" y="1630" width="240" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- No first-class action/tool execution broker in this harness loop.&lt;br&gt;- Directory permissions are scaffolded by init and displayed by status; run does not enforce them directly.&lt;br&gt;- Audit stores inference metadata and outcomes, not raw prompts or responses.&lt;br&gt;- Conversation history is process-memory only inside AgentHarnessSession for the current run." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
+        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- No first-class action/tool execution broker in this harness loop.&lt;br&gt;- Directory permissions are scaffolded by init, displayed by status, and exposed through ToolPermissionService; run does not enforce them directly.&lt;br&gt;- Audit stores inference metadata and outcomes, not raw prompts or responses.&lt;br&gt;- Conversation history is process-memory only inside AgentHarnessSession for the current run." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
           <mxGeometry x="70" y="870" width="520" height="130" as="geometry" />
         </mxCell>
         <mxCell id="maintenance" value="Documentation maintenance&lt;br&gt;Agents should update README.md and this draw.io source in the same change when real implementation behavior changes." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFAF0;strokeColor=#C05621;fontSize=12;dashed=1" vertex="1" parent="1">
