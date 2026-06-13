@@ -6,10 +6,6 @@ public sealed record LlmInferenceClientOptions
 
     public string? Model { get; init; }
 
-    public Uri? Endpoint { get; init; }
-
-    public string? CredentialEnvironmentVariable { get; init; }
-
     public string? WorkingDirectory { get; init; }
 
     public string? CodexExecutablePath { get; init; }
