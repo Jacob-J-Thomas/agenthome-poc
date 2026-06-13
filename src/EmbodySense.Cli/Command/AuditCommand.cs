@@ -1,6 +1,6 @@
 using System.Text.Json;
-using EmbodySense.Cli.Audit;
-using EmbodySense.Cli.Workspace;
+using EmbodySense.Core.Audit;
+using EmbodySense.Core.Workspace;
 
 namespace EmbodySense.Cli.Command;
 

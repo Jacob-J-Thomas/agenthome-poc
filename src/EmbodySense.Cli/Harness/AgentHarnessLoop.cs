@@ -1,8 +1,8 @@
 using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Common;
-using EmbodySense.Cli.Inference.Implementations;
-using EmbodySense.Cli.Inference.Interfaces;
-using EmbodySense.Cli.Inference.Models;
+using EmbodySense.Core.Inference.Implementations;
+using EmbodySense.Core.Inference.Interfaces;
+using EmbodySense.Core.Inference.Models;
 
 namespace EmbodySense.Cli.Harness;
 

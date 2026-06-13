@@ -1,5 +1,5 @@
-using EmbodySense.Cli.Permissions;
-using EmbodySense.Cli.Workspace;
+using EmbodySense.Core.Permissions;
+using EmbodySense.Core.Workspace;
 
 namespace EmbodySense.Cli.Command;
 

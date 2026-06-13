@@ -1,4 +1,4 @@
-using EmbodySense.Cli.Workspace;
+using EmbodySense.Core.Workspace;
 
 namespace EmbodySense.Cli.Command;
 
