@@ -19,6 +19,8 @@ public static class AuditSchema
 
         public const string LlmInferenceComplete = "llm.inference.complete";
 
+        public const string LlmAppServerRequest = "llm.appserver.request";
+
         public const string ToolPermissionEvaluate = "tool.permission.evaluate";
 
         public const string ToolApprovalRequest = "tool.approval.request";

@@ -6,10 +6,7 @@ internal sealed record RunOptions(
     string? Model,
     string WorkingDirectory,
     string? CodexExecutablePath,
-    string CodexSandbox,
-    string CodexApprovalPolicy,
-    bool UseEphemeralCodexSession,
-    bool SkipCodexGitRepositoryCheck)
+    string CodexSandbox)
 {
     public static RunOptions FromArguments(CliArguments arguments)
     {
@@ -19,10 +16,7 @@ internal sealed record RunOptions(
             Model: arguments.OptionValueInTokenOrder("--model", "-m") ?? GetPositionalModel(arguments),
             WorkingDirectory: arguments.OptionValue("--workdir") ?? arguments.OptionValue("--working-directory") ?? Directory.GetCurrentDirectory(),
             CodexExecutablePath: arguments.OptionValue("--codex-path"),
-            CodexSandbox: arguments.OptionValue("--sandbox") ?? "read-only",
-            CodexApprovalPolicy: arguments.OptionValue("--approval") ?? "never",
-            UseEphemeralCodexSession: !arguments.HasFlag("--persist-session"),
-            SkipCodexGitRepositoryCheck: arguments.HasFlag("--skip-git-repo-check"));
+            CodexSandbox: arguments.OptionValue("--sandbox") ?? "read-only");
     }
 
     public LlmInferenceClientOptions ToInferenceClientOptions()
@@ -33,10 +27,7 @@ internal sealed record RunOptions(
             Model = Model,
             WorkingDirectory = WorkingDirectory,
             CodexExecutablePath = CodexExecutablePath,
-            CodexSandbox = CodexSandbox,
-            CodexApprovalPolicy = CodexApprovalPolicy,
-            UseEphemeralCodexSession = UseEphemeralCodexSession,
-            SkipCodexGitRepositoryCheck = SkipCodexGitRepositoryCheck
+            CodexSandbox = CodexSandbox
         };
     }
 

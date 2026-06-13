@@ -58,7 +58,7 @@ internal static class WorkspaceDefaults
 
             - Missing policy or missing directory permission means request human approval before proceeding.
             - Explicit denied directory permissions mean do not repeatedly request the same inappropriate access.
-            - Governed tools are requested through the harness tool protocol and executed only through permission, approval, and audit checks.
+            - Governed workspace tools are requested through EmbodySense dynamic tools and executed only through permission, approval, and audit checks.
             - Write durable task state before substantial work.
             - Append meaningful actions to the audit log.
             - Do not treat chat history as the system of record.
@@ -120,7 +120,7 @@ internal static class WorkspaceDefaults
 
             `events.ndjson` is an append-only JSON-lines event stream. Each line records one high-level harness action with timestamp, actor, action, target, outcome, detail, and structured metadata.
 
-            The audit registry is intended to explain what the harness did without becoming a raw transcript, secret store, or prompt dump. LLM inference events should record provider, model, message counts, character counts, duration, and outcome, but should not store raw prompts or model responses by default.
+            The audit registry is intended to explain what the harness did without becoming a raw transcript, secret store, or prompt dump. LLM inference and app-server request handling events should record provider, model, message counts, character counts, request method, duration, and outcome where applicable, but should not store raw prompts or model responses by default.
 
             The harness may write this folder. Humans and trusted harness commands may inspect it. Agent context should not include raw audit events unless a human or policy explicitly requests that context.
 

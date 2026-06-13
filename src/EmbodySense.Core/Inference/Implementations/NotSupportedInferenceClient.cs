@@ -16,6 +16,7 @@ internal sealed class NotSupportedInferenceClient : ILlmInferenceClient
 
     public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);

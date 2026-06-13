@@ -31,8 +31,29 @@ internal static class AgentHarnessLoop
                     break;
 
                 default:
-                    var response = await session.SendUserMessageAsync(input);
-                    Console.WriteLine(response.OutputText);
+                    var wroteResponseChunk = false;
+                    var responseEndedWithNewLine = false;
+                    var response = await session.SendUserMessageAsync(input, (chunk, _) =>
+                    {
+                        if (!string.IsNullOrEmpty(chunk))
+                        {
+                            Console.Write(chunk);
+                            wroteResponseChunk = true;
+                            responseEndedWithNewLine = EndsWithNewLine(chunk);
+                        }
+
+                        return Task.CompletedTask;
+                    });
+
+                    if (!wroteResponseChunk)
+                    {
+                        Console.WriteLine(response.OutputText);
+                    }
+                    else if (!responseEndedWithNewLine)
+                    {
+                        Console.WriteLine();
+                    }
+
                     break;
             }
         }
@@ -43,5 +64,10 @@ internal static class AgentHarnessLoop
     private static bool IsExitCommand(string input)
     {
         return input.Trim().ToLowerInvariant() is "exit" or "quit" or "/exit" or "/quit";
+    }
+
+    private static bool EndsWithNewLine(string text)
+    {
+        return text.Length > 0 && text[^1] is '\n' or '\r';
     }
 }

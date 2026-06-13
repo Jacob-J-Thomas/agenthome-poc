@@ -6,5 +6,6 @@ public interface ILlmInferenceClient
 {
     Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default);
 }

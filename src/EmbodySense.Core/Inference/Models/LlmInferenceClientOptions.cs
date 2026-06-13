@@ -11,10 +11,4 @@ public sealed record LlmInferenceClientOptions
     public string? CodexExecutablePath { get; init; }
 
     public string CodexSandbox { get; init; } = "read-only";
-
-    public string CodexApprovalPolicy { get; init; } = "never";
-
-    public bool UseEphemeralCodexSession { get; init; } = true;
-
-    public bool SkipCodexGitRepositoryCheck { get; init; }
 }

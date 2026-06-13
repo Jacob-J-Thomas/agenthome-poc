@@ -48,11 +48,11 @@ public sealed class CliBehaviorTests
     }
 
     [Fact]
-    public async Task Run_command_accepts_options_and_exits_without_inference()
+    public async Task Run_command_accepts_app_server_options_and_exits_without_inference()
     {
         using var workspace = new TestWorkspace();
 
-        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", "unused", "--sandbox", "workspace-write", "--approval", "on-request", "--persist-session", "--skip-git-repo-check");
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", "unused", "--sandbox", "workspace-write");
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("EMBODYSENSE HARNESS", result.Output);

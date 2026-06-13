@@ -3,25 +3,29 @@ using EmbodySense.Core.Audit;
 using EmbodySense.Core.Audit.Models;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
+using EmbodySense.Core.Tools;
 
 namespace EmbodySense.Core.Inference.Implementations;
 
-public sealed class LlmInferenceClient : ILlmInferenceClient
+public sealed class LlmInferenceClient : ILlmInferenceClient, IAsyncDisposable
 {
     private readonly LlmInferenceClientOptions _options;
     private readonly ILlmInferenceClient _innerClient;
     private readonly AuditLog? _auditLog;
 
-    public LlmInferenceClient(LlmInferenceClientOptions options, ICodexCliProcessRunner? codexProcessRunner = null)
+    public LlmInferenceClient(LlmInferenceClientOptions options, IToolBroker? toolBroker = null, ICodexAppServerTransport? codexAppServerTransport = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         _options = options;
-        _innerClient = LlmInferenceClientFactory.CreateProvider(options, codexProcessRunner);
+        _innerClient = LlmInferenceClientFactory.CreateProvider(options, toolBroker, codexAppServerTransport);
         _auditLog = AuditLog.TryCreateForExistingWorkspace(options.WorkingDirectory);
     }
 
-    public async Task<LlmInferenceResponse> GenerateAsync(LlmInferenceRequest request, CancellationToken cancellationToken = default)
+    public async Task<LlmInferenceResponse> GenerateAsync(
+        LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -32,7 +36,7 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
 
         try
         {
-            var response = await _innerClient.GenerateAsync(request, cancellationToken);
+            var response = await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken);
             stopwatch.Stop();
             await RecordInferenceSucceededAsync(requestId, request, response, stopwatch.Elapsed, cancellationToken);
             return response;
@@ -42,6 +46,18 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
             stopwatch.Stop();
             await RecordInferenceFailedAsync(requestId, request, exception, stopwatch.Elapsed, cancellationToken);
             throw;
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_innerClient is IAsyncDisposable asyncDisposable)
+        {
+            await asyncDisposable.DisposeAsync();
+        }
+        else if (_innerClient is IDisposable disposable)
+        {
+            disposable.Dispose();
         }
     }
 

@@ -10,16 +10,16 @@ namespace EmbodySense.Cli.Command;
 
 internal static class RunCommand
 {
-    public static Task<int> RunAsync(CliArguments arguments)
+    public static async Task<int> RunAsync(CliArguments arguments)
     {
         var options = RunOptions.FromArguments(arguments);
-        var inferenceClient = new LlmInferenceClient(options.ToInferenceClientOptions());
         var paths = new WorkspacePaths(options.WorkingDirectory);
         var permissionPolicy = DirectoryPermissionPolicy.Load(paths);
         var permissionService = new ToolPermissionService(paths, permissionPolicy);
         var toolBroker = new ToolBroker(paths, permissionService, new ConsoleToolApprovalPrompt());
-        var session = new AgentHarnessSession(inferenceClient, toolBroker);
+        await using var inferenceClient = new LlmInferenceClient(options.ToInferenceClientOptions(), toolBroker);
+        var session = new AgentHarnessSession(inferenceClient);
 
-        return AgentHarnessLoop.RunHarnessLoopAsync(session);
+        return await AgentHarnessLoop.RunHarnessLoopAsync(session);
     }
 }
