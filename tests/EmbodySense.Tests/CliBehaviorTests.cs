@@ -45,6 +45,18 @@ public sealed class CliBehaviorTests
         Assert.DoesNotContain("first.extra", result.Output);
     }
 
+    [Fact]
+    public async Task Run_command_accepts_options_and_exits_without_inference()
+    {
+        using var workspace = new TestWorkspace();
+
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", "unused", "--sandbox", "workspace-write", "--approval", "on-request", "--persist-session", "--skip-git-repo-check");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("EMBODYSENSE HARNESS", result.Output);
+        Assert.Equal("", result.Error);
+    }
+
     private static async Task<CliResult> RunCliAsync(params string[] arguments)
     {
         var cliPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.Cli.dll");
@@ -68,6 +80,38 @@ public sealed class CliBehaviorTests
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("CLI process did not start.");
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        return new CliResult(process.ExitCode, await outputTask, await errorTask);
+    }
+
+    private static async Task<CliResult> RunCliWithInputAsync(string standardInput, params string[] arguments)
+    {
+        var cliPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.Cli.dll");
+        Assert.True(File.Exists(cliPath), $"Expected CLI assembly at {cliPath}.");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        startInfo.ArgumentList.Add(cliPath);
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("CLI process did not start.");
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        await process.StandardInput.WriteAsync(standardInput);
+        await process.StandardInput.FlushAsync();
+        process.StandardInput.Close();
         await process.WaitForExitAsync();
 
         return new CliResult(process.ExitCode, await outputTask, await errorTask);
