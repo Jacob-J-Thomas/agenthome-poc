@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Text;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 
@@ -23,8 +22,8 @@ internal sealed class CodexCliInferenceClient : ILlmInferenceClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var prompt = BuildPrompt(request);
-        var startInfo = CreateStartInfo();
+        var prompt = CodexCliPromptFormatter.Format(request);
+        var startInfo = CodexCliProcessStartInfoFactory.Create(_options);
 
         using var process = StartCodex(startInfo);
         using var cancellationRegistration = cancellationToken.Register(
@@ -54,52 +53,6 @@ internal sealed class CodexCliInferenceClient : ILlmInferenceClient
             _options.Model);
     }
 
-    private ProcessStartInfo CreateStartInfo()
-    {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = string.IsNullOrWhiteSpace(_options.CodexExecutablePath)
-                ? GetDefaultCodexExecutable()
-                : _options.CodexExecutablePath,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        if (!string.IsNullOrWhiteSpace(_options.WorkingDirectory))
-        {
-            startInfo.WorkingDirectory = _options.WorkingDirectory;
-        }
-
-        startInfo.ArgumentList.Add("--ask-for-approval");
-        startInfo.ArgumentList.Add(_options.CodexApprovalPolicy);
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add("--sandbox");
-        startInfo.ArgumentList.Add(_options.CodexSandbox);
-
-        if (_options.UseEphemeralCodexSession)
-        {
-            startInfo.ArgumentList.Add("--ephemeral");
-        }
-
-        if (_options.SkipCodexGitRepositoryCheck)
-        {
-            startInfo.ArgumentList.Add("--skip-git-repo-check");
-        }
-
-        if (!string.IsNullOrWhiteSpace(_options.Model))
-        {
-            startInfo.ArgumentList.Add("--model");
-            startInfo.ArgumentList.Add(_options.Model);
-        }
-
-        startInfo.ArgumentList.Add("-");
-
-        return startInfo;
-    }
-
     private static Process StartCodex(ProcessStartInfo startInfo)
     {
         try
@@ -113,37 +66,6 @@ internal sealed class CodexCliInferenceClient : ILlmInferenceClient
                 "Codex CLI was not found. Install Codex and run `codex login` with ChatGPT to use Codex subscription-backed inferencing.",
                 exception);
         }
-    }
-
-    private static string GetDefaultCodexExecutable()
-    {
-        return OperatingSystem.IsWindows() ? "codex.cmd" : "codex";
-    }
-
-    private static string BuildPrompt(LlmInferenceRequest request)
-    {
-        var builder = new StringBuilder();
-
-        foreach (var message in request.Messages)
-        {
-            builder.Append(GetRoleLabel(message.Role));
-            builder.AppendLine(":");
-            builder.AppendLine(message.Content);
-            builder.AppendLine();
-        }
-
-        return builder.ToString().TrimEnd();
-    }
-
-    private static string GetRoleLabel(LlmMessageRole role)
-    {
-        return role switch
-        {
-            LlmMessageRole.System => "System",
-            LlmMessageRole.User => "User",
-            LlmMessageRole.Assistant => "Assistant",
-            _ => "Message"
-        };
     }
 
     private static string CreateFailureMessage(int exitCode, string output, string error)
