@@ -1,52 +1,52 @@
 using EmbodySense.Core.Permissions;
 
-namespace EmbodySense.Core.Workspace
+namespace EmbodySense.Core.Workspace;
+
+internal static class WorkspaceDefaults
 {
-    internal static class WorkspaceDefaults
+    public static IReadOnlyList<string> GetDirectories(WorkspacePaths paths)
     {
-        public static IReadOnlyList<string> GetDirectories(WorkspacePaths paths)
-        {
-            ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(paths);
 
-            return
-            [
-                paths.RootPath,
-                paths.AgentPath,
-                paths.TasksPath,
-                paths.LogsPath,
-                paths.AuditPath,
-                paths.ExportsPath,
-                paths.SkillsPath,
-                paths.HooksPath,
-                paths.RecipesPath,
-                paths.WorkspacePath,
-                paths.WorkspacePrivatePath,
-                paths.WorkspaceSharedPath,
-                paths.WorkspaceGeneratedPath,
-                paths.WorkspaceSystemPath
-            ];
-        }
+        return
+        [
+            paths.RootPath,
+            paths.AgentPath,
+            paths.TasksPath,
+            paths.LogsPath,
+            paths.AuditPath,
+            paths.ExportsPath,
+            paths.SkillsPath,
+            paths.HooksPath,
+            paths.RecipesPath,
+            paths.WorkspacePath,
+            paths.WorkspacePrivatePath,
+            paths.WorkspaceSharedPath,
+            paths.WorkspaceGeneratedPath,
+            paths.WorkspaceSystemPath
+        ];
+    }
 
-        public static IReadOnlyList<WorkspaceSeedFile> GetSeedFiles(WorkspacePaths paths)
-        {
-            ArgumentNullException.ThrowIfNull(paths);
+    public static IReadOnlyList<WorkspaceSeedFile> GetSeedFiles(WorkspacePaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
 
-            var permissions = PermissionsDocument.CreateDefault(paths);
+        var permissions = PermissionsDocument.CreateDefault(paths);
 
-            return
-            [
-                new WorkspaceSeedFile(paths.AgentFile("AGENT.md"), DefaultAgentMd(), Overwrite: false),
-                new WorkspaceSeedFile(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), Overwrite: false),
-                new WorkspaceSeedFile(paths.AgentFile("MEMORY.md"), DefaultMemoryMd(), Overwrite: false),
-                new WorkspaceSeedFile(paths.AgentFile("models.json"), DefaultModelsJson(), Overwrite: false),
-                new WorkspaceSeedFile(paths.AuditReadmePath, DefaultAuditReadme(), Overwrite: true),
-                new WorkspaceSeedFile(paths.PermissionsReadmePath, DefaultPermissionsReadme(), Overwrite: true),
-                new WorkspaceSeedFile(paths.PermissionsPath, permissions.ToJson() + Environment.NewLine, Overwrite: false),
-                new WorkspaceSeedFile(paths.EventsLogPath, string.Empty, Overwrite: false)
-            ];
-        }
+        return
+        [
+            new WorkspaceSeedFile(paths.AgentFile("AGENT.md"), DefaultAgentMd(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AgentFile("MEMORY.md"), DefaultMemoryMd(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AgentFile("models.json"), DefaultModelsJson(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AuditReadmePath, DefaultAuditReadme(), Overwrite: true),
+            new WorkspaceSeedFile(paths.PermissionsReadmePath, DefaultPermissionsReadme(), Overwrite: true),
+            new WorkspaceSeedFile(paths.PermissionsPath, permissions.ToJson() + Environment.NewLine, Overwrite: false),
+            new WorkspaceSeedFile(paths.EventsLogPath, string.Empty, Overwrite: false)
+        ];
+    }
 
-        private static string DefaultAgentMd() => """
+    private static string DefaultAgentMd() => """
             # Agent operating guide
 
             This workspace is managed by EmbodySense Agent Harness.
@@ -64,7 +64,7 @@ namespace EmbodySense.Core.Workspace
 
             """;
 
-        private static string DefaultContextMd() => """
+    private static string DefaultContextMd() => """
             # Workspace context
 
             Describe the project, repository, human preferences, constraints, and important operating context here.
@@ -73,7 +73,7 @@ namespace EmbodySense.Core.Workspace
 
             """;
 
-        private static string DefaultMemoryMd() => """
+    private static string DefaultMemoryMd() => """
             # Memory
 
             Durable memory belongs here or in structured files under `.agent/memory/` once that directory is added.
@@ -82,7 +82,7 @@ namespace EmbodySense.Core.Workspace
 
             """;
 
-        private static string DefaultPermissionsReadme() => """
+    private static string DefaultPermissionsReadme() => """
             # File-System Permissions
 
             This file explains `.agent/permissions.json`.
@@ -111,7 +111,7 @@ namespace EmbodySense.Core.Workspace
 
             """;
 
-        private static string DefaultAuditReadme() => """
+    private static string DefaultAuditReadme() => """
             # Audit Registry
 
             This folder is the EmbodySense audit registry for this initialized workspace.
@@ -126,7 +126,7 @@ namespace EmbodySense.Core.Workspace
 
             """;
 
-        private static string DefaultModelsJson() => """
+    private static string DefaultModelsJson() => """
         {
           "version": 1,
           "roles": {
@@ -148,5 +148,4 @@ namespace EmbodySense.Core.Workspace
           }
         }
         """;
-    }
 }

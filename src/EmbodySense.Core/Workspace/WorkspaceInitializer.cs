@@ -1,53 +1,52 @@
 using EmbodySense.Core.Audit;
 
-namespace EmbodySense.Core.Workspace
+namespace EmbodySense.Core.Workspace;
+
+public sealed class WorkspaceInitializer
 {
-    public sealed class WorkspaceInitializer
+    public async Task InitializeAsync(string rootPath, CancellationToken cancellationToken = default)
     {
-        public async Task InitializeAsync(string rootPath, CancellationToken cancellationToken = default)
+        var paths = new WorkspacePaths(rootPath);
+
+        foreach (var directory in WorkspaceDefaults.GetDirectories(paths))
         {
-            var paths = new WorkspacePaths(rootPath);
-
-            foreach (var directory in WorkspaceDefaults.GetDirectories(paths))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            foreach (var file in WorkspaceDefaults.GetSeedFiles(paths))
-            {
-                await WriteSeedFileAsync(file, cancellationToken);
-            }
-
-            var audit = new AuditLog(paths);
-            await audit.AppendAsync(AuditEvent.Create(
-                actor: "embodysense.cli",
-                action: "workspace.init",
-                target: paths.RootPath,
-                outcome: "succeeded",
-                detail: "Initialized or refreshed EmbodySense workspace scaffolding.",
-                metadata: new Dictionary<string, object?>
-                {
-                    ["agent_path"] = paths.AgentPath,
-                    ["audit_path"] = paths.AuditPath,
-                    ["permissions_path"] = paths.PermissionsPath,
-                    ["workspace_path"] = paths.WorkspacePath
-                }), cancellationToken);
+            Directory.CreateDirectory(directory);
         }
 
-        private static async Task WriteSeedFileAsync(WorkspaceSeedFile file, CancellationToken cancellationToken)
+        foreach (var file in WorkspaceDefaults.GetSeedFiles(paths))
         {
-            if (!file.Overwrite && File.Exists(file.Path))
-            {
-                return;
-            }
-
-            var directory = Path.GetDirectoryName(file.Path);
-            if (!string.IsNullOrWhiteSpace(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            await File.WriteAllTextAsync(file.Path, file.Content, cancellationToken);
+            await WriteSeedFileAsync(file, cancellationToken);
         }
+
+        var audit = new AuditLog(paths);
+        await audit.AppendAsync(AuditEvent.Create(
+            actor: "embodysense.cli",
+            action: "workspace.init",
+            target: paths.RootPath,
+            outcome: "succeeded",
+            detail: "Initialized or refreshed EmbodySense workspace scaffolding.",
+            metadata: new Dictionary<string, object?>
+            {
+                ["agent_path"] = paths.AgentPath,
+                ["audit_path"] = paths.AuditPath,
+                ["permissions_path"] = paths.PermissionsPath,
+                ["workspace_path"] = paths.WorkspacePath
+            }), cancellationToken);
+    }
+
+    private static async Task WriteSeedFileAsync(WorkspaceSeedFile file, CancellationToken cancellationToken)
+    {
+        if (!file.Overwrite && File.Exists(file.Path))
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(file.Path);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        await File.WriteAllTextAsync(file.Path, file.Content, cancellationToken);
     }
 }
