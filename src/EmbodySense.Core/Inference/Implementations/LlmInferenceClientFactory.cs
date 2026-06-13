@@ -5,14 +5,14 @@ namespace EmbodySense.Core.Inference.Implementations;
 
 internal static class LlmInferenceClientFactory
 {
-    public static ILlmInferenceClient CreateProvider(LlmInferenceClientOptions options)
+    public static ILlmInferenceClient CreateProvider(LlmInferenceClientOptions options, ICodexCliProcessRunner? codexProcessRunner = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ValidateSurface(options.Surface);
 
         return options.Surface switch
         {
-            LlmInferenceSurface.OpenAiCodex => new CodexCliInferenceClient(options),
+            LlmInferenceSurface.OpenAiCodex => new CodexCliInferenceClient(options, codexProcessRunner),
             LlmInferenceSurface.AzureAiFoundry => new NotSupportedInferenceClient(
                 "Azure AI Foundry inferencing is selected, but the Azure adapter has not been wired yet."),
             _ => new NotSupportedInferenceClient("LLM inferencing is not wired for the selected surface.")

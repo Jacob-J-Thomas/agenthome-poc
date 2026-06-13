@@ -11,12 +11,12 @@ public sealed class LlmInferenceClient : ILlmInferenceClient
     private readonly ILlmInferenceClient _innerClient;
     private readonly AuditLog? _auditLog;
 
-    public LlmInferenceClient(LlmInferenceClientOptions options)
+    public LlmInferenceClient(LlmInferenceClientOptions options, ICodexCliProcessRunner? codexProcessRunner = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         _options = options;
-        _innerClient = LlmInferenceClientFactory.CreateProvider(options);
+        _innerClient = LlmInferenceClientFactory.CreateProvider(options, codexProcessRunner);
         _auditLog = AuditLog.TryCreateForExistingWorkspace(options.WorkingDirectory);
     }
 
