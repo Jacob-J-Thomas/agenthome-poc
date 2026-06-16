@@ -11,6 +11,7 @@ internal sealed record RunOptions(
     public static RunOptions FromArguments(CliArguments arguments)
     {
         ArgumentNullException.ThrowIfNull(arguments);
+        RejectUnsupportedFlags(arguments, "--persist-session", "--approval", "--skip-git-repo-check");
 
         return new RunOptions(
             Model: arguments.OptionValueInTokenOrder("--model", "-m") ?? GetPositionalModel(arguments),
@@ -35,5 +36,16 @@ internal sealed record RunOptions(
     {
         var value = arguments.At(1);
         return value is not null && !CliArguments.IsOption(value) ? value : null;
+    }
+
+    private static void RejectUnsupportedFlags(CliArguments arguments, params string[] unsupportedFlags)
+    {
+        foreach (var flag in unsupportedFlags)
+        {
+            if (arguments.HasFlag(flag))
+            {
+                throw new ArgumentException($"unsupported run option: {flag}");
+            }
+        }
     }
 }

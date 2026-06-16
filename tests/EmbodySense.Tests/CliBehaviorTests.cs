@@ -52,12 +52,58 @@ public sealed class CliBehaviorTests
     {
         using var workspace = new TestWorkspace();
 
-        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", "unused", "--sandbox", "workspace-write");
+        var result = await RunCliWithInputAsync("y" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", "unused", "--sandbox", "workspace-write");
 
         Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Initialize this workspace now?", result.Output);
         Assert.Contains("EMBODYSENSE HARNESS", result.Output);
         Assert.Equal("", result.Error);
         Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
+        Assert.Contains("workspace.init", await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson")));
+    }
+
+    [Fact]
+    public async Task Run_command_aborts_uninitialized_workspace_when_initialization_is_not_confirmed()
+    {
+        using var workspace = new TestWorkspace();
+
+        var result = await RunCliWithInputAsync("n" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Warning: this EmbodySense workspace is not initialized.", result.Output);
+        Assert.Contains("Workspace initialization cancelled.", result.Output);
+        Assert.DoesNotContain("EMBODYSENSE HARNESS", result.Output);
+        Assert.Equal("", result.Error);
+        Assert.False(Directory.Exists(workspace.File(".agent")));
+    }
+
+    [Fact]
+    public async Task Run_command_does_not_reinitialize_initialized_workspace()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var auditPath = workspace.File(".agent", "audit", "events.ndjson");
+        var beforeInitEventCount = CountOccurrences(await File.ReadAllTextAsync(auditPath), "workspace.init");
+
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.DoesNotContain("Initialize this workspace now?", result.Output);
+        Assert.Equal(beforeInitEventCount, CountOccurrences(await File.ReadAllTextAsync(auditPath), "workspace.init"));
+    }
+
+    [Theory]
+    [InlineData("--persist-session")]
+    [InlineData("--approval")]
+    [InlineData("--skip-git-repo-check")]
+    public async Task Run_command_rejects_removed_codex_exec_options(string removedOption)
+    {
+        using var workspace = new TestWorkspace();
+
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, removedOption);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains($"unsupported run option: {removedOption}", result.Error);
     }
 
     private static async Task<CliResult> RunCliAsync(params string[] arguments)
@@ -118,6 +164,11 @@ public sealed class CliBehaviorTests
         await process.WaitForExitAsync();
 
         return new CliResult(process.ExitCode, await outputTask, await errorTask);
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        return text.Split(value, StringSplitOptions.None).Length - 1;
     }
 
     private sealed record CliResult(int ExitCode, string Output, string Error);
