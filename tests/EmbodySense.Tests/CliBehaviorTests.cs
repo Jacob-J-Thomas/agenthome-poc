@@ -57,6 +57,7 @@ public sealed class CliBehaviorTests
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("EMBODYSENSE HARNESS", result.Output);
         Assert.Equal("", result.Error);
+        Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
     }
 
     private static async Task<CliResult> RunCliAsync(params string[] arguments)

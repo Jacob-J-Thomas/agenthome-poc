@@ -4,6 +4,7 @@ using EmbodySense.Core.Harness;
 using EmbodySense.Core.Inference.Implementations;
 using EmbodySense.Core.Permissions;
 using EmbodySense.Core.Tools;
+using EmbodySense.Core.Workspace;
 using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
@@ -14,6 +15,18 @@ internal static class RunCommand
     {
         var options = RunOptions.FromArguments(arguments);
         var paths = new WorkspacePaths(options.WorkingDirectory);
+
+        if (!paths.IsInitialized)
+        {
+            if (!ConfirmWorkspaceInitialization(paths))
+            {
+                Console.WriteLine("Workspace initialization cancelled. Run `embodysense init <root>` to initialize explicitly.");
+                return 1;
+            }
+
+            await new WorkspaceInitializer().InitializeAsync(options.WorkingDirectory);
+        }
+
         var permissionPolicy = DirectoryPermissionPolicy.Load(paths);
         var permissionService = new ToolPermissionService(paths, permissionPolicy);
         var toolBroker = new ToolBroker(paths, permissionService, new ConsoleToolApprovalPrompt());
@@ -21,5 +34,16 @@ internal static class RunCommand
         var session = new AgentHarnessSession(inferenceClient);
 
         return await AgentHarnessLoop.RunHarnessLoopAsync(session);
+    }
+
+    private static bool ConfirmWorkspaceInitialization(WorkspacePaths paths)
+    {
+        Console.WriteLine("Warning: this EmbodySense workspace is not initialized.");
+        Console.WriteLine($"Root: {paths.RootPath}");
+        Console.WriteLine("Initializing will create .agent/ and workspace/ scaffolding with a default permissions policy.");
+        Console.Write("Initialize this workspace now? [y/N] ");
+
+        var answer = Console.ReadLine()?.Trim();
+        return string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) || string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase);
     }
 }
