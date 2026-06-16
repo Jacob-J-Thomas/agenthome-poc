@@ -21,12 +21,7 @@ internal sealed class CodexAppServerToolBridge
     {
         return
         [
-            CreateSpec("list", "List a workspace directory through EmbodySense permission checks and audit logging.", "path"),
-            CreateSpec("read", "Read a workspace file through EmbodySense permission checks and audit logging.", "path"),
-            CreateSpec("search", "Search a workspace file or directory through EmbodySense permission checks and audit logging.", "path", "pattern"),
-            CreateSpec("write", "Create or replace a workspace file through EmbodySense permission checks, approval routing, and audit logging.", "path", "content"),
-            CreateSpec("append", "Append text to a workspace file through EmbodySense permission checks, approval routing, and audit logging.", "path", "content"),
-            CreateSpec("delete", "Delete a workspace file or directory through EmbodySense permission checks, approval routing, and audit logging.", "path")
+            CreateCommandSpec()
         ];
     }
 
@@ -55,14 +50,21 @@ internal sealed class CodexAppServerToolBridge
             throw new FormatException($"Unsupported tool namespace: {toolNamespace}");
         }
 
+        if (!string.Equals(toolName, "command", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new FormatException($"Unsupported EmbodySense dynamic tool: {toolName}");
+        }
+
         if (!parameters.TryGetProperty("arguments", out var arguments) || arguments.ValueKind != JsonValueKind.Object)
         {
             throw new FormatException("Dynamic tool call requires object arguments.");
         }
 
-        if (!Enum.TryParse<ToolCommand>(toolName, ignoreCase: true, out var command) || !Enum.IsDefined(command))
+        var commandText = GetRequiredString(arguments, "command", "tool", "operation");
+
+        if (!Enum.TryParse<ToolCommand>(commandText, ignoreCase: true, out var command) || !Enum.IsDefined(command))
         {
-            throw new FormatException($"Unsupported EmbodySense tool: {toolName}");
+            throw new FormatException($"Unsupported EmbodySense command: {commandText}");
         }
 
         return new ToolRequest(
@@ -72,10 +74,16 @@ internal sealed class CodexAppServerToolBridge
             GetOptionalString(arguments, "pattern", "query"));
     }
 
-    private static JsonObject CreateSpec(string name, string description, params string[] requiredFields)
+    private static JsonObject CreateCommandSpec()
     {
         var properties = new JsonObject
         {
+            ["command"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["enum"] = new JsonArray("list", "read", "search", "write", "append", "delete"),
+                ["description"] = "Governed EmbodySense workspace command."
+            },
             ["path"] = new JsonObject
             {
                 ["type"] = "string",
@@ -95,14 +103,14 @@ internal sealed class CodexAppServerToolBridge
 
         return new JsonObject
         {
-            ["name"] = name,
+            ["name"] = "command",
             ["namespace"] = Namespace,
-            ["description"] = description,
+            ["description"] = "Run a governed EmbodySense workspace command through permission checks, approval routing, and audit logging.",
             ["inputSchema"] = new JsonObject
             {
                 ["type"] = "object",
                 ["properties"] = properties,
-                ["required"] = new JsonArray(requiredFields.Select(field => JsonValue.Create(field)).ToArray<JsonNode?>()),
+                ["required"] = new JsonArray("command", "path"),
                 ["additionalProperties"] = false
             }
         };

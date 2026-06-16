@@ -58,7 +58,7 @@ internal static class WorkspaceDefaults
 
             - Missing policy or missing directory permission means request human approval before proceeding.
             - Explicit denied directory permissions mean do not repeatedly request the same inappropriate access.
-            - Governed workspace tools are requested through EmbodySense dynamic tools and executed only through permission, approval, and audit checks.
+            - Governed workspace commands are requested through the `embodysense.command` dynamic tool and executed only through permission, approval, and audit checks.
             - Write durable task state before substantial work.
             - Append meaningful actions to the audit log.
             - Do not treat chat history as the system of record.

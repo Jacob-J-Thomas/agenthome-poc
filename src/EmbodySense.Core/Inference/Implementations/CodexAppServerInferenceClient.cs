@@ -289,7 +289,7 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IAsyn
 
             EmbodySense governs the user workspace. Do not use Codex-native shell, filesystem, MCP, browser, web-search, subagent, or permission-escalation tools for workspace actions. The app-server working directory is an inert runtime directory, not the user workspace.
 
-            For any workspace action, use only the dynamic tools in the `embodysense` namespace. These tools enforce `.agent/permissions.json`, route approval when required, and write EmbodySense audit events. Do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.
+            For any workspace action, use only the `embodysense.command` dynamic tool. It enforces `.agent/permissions.json`, routes approval when required, and writes EmbodySense audit events. Do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.
             """;
     }
 
@@ -343,7 +343,8 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IAsyn
             return;
         }
 
-        await RecordAppServerRequestAsync(method, parameters, GetHandledRequestOutcome(method), GetHandledRequestDetail(method), cancellationToken);
+        var outcome = GetHandledRequestOutcome(method, result);
+        await RecordAppServerRequestAsync(method, parameters, outcome, GetHandledRequestDetail(method, outcome), cancellationToken);
         await SendAsync(new JsonObject
         {
             ["id"] = JsonNode.Parse(requestId.GetRawText()),
@@ -390,16 +391,31 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IAsyn
             .ToDictionary(item => item.Key, item => item.Value);
     }
 
-    private static string GetHandledRequestOutcome(string method)
+    private static string GetHandledRequestOutcome(string method, JsonObject result)
     {
-        return method == "item/tool/call" ? AuditSchema.Outcomes.Succeeded : AuditSchema.Outcomes.Denied;
+        if (method != "item/tool/call")
+        {
+            return AuditSchema.Outcomes.Denied;
+        }
+
+        return IsSuccessfulToolResult(result) ? AuditSchema.Outcomes.Succeeded : AuditSchema.Outcomes.Failed;
     }
 
-    private static string GetHandledRequestDetail(string method)
+    private static string GetHandledRequestDetail(string method, string outcome)
     {
-        return method == "item/tool/call"
+        if (method != "item/tool/call")
+        {
+            return "Declined native Codex app-server request.";
+        }
+
+        return outcome == AuditSchema.Outcomes.Succeeded
             ? "Handled Codex app-server dynamic tool request."
-            : "Declined native Codex app-server request.";
+            : "Rejected Codex app-server dynamic tool request.";
+    }
+
+    private static bool IsSuccessfulToolResult(JsonObject result)
+    {
+        return result.TryGetPropertyValue("success", out var success) && success is not null && success.GetValue<bool>();
     }
 
     private async Task SendRequestAsync(string method, int requestId, JsonObject parameters, CancellationToken cancellationToken)
