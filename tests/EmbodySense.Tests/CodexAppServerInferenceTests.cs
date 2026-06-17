@@ -125,6 +125,35 @@ public sealed class CodexAppServerInferenceTests
         Assert.Contains("\"outcome\":\"denied\"", auditText, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task GenerateAsync_includes_restored_context_in_thread_start_developer_instructions()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"new answer","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+        var request = new LlmInferenceRequest(
+        [
+            LlmMessage.System("startup context"),
+            LlmMessage.User("old question"),
+            LlmMessage.Assistant("old answer"),
+            LlmMessage.User("new question")
+        ]);
+
+        await client.GenerateAsync(request, (_, _) => Task.CompletedTask);
+
+        using var threadStartDocument = JsonDocument.Parse(transport.Writes.Single(IsThreadStart));
+        var developerInstructions = threadStartDocument.RootElement.GetProperty("params").GetProperty("developerInstructions").GetString();
+        Assert.Contains("startup context", developerInstructions);
+        Assert.Contains("old question", developerInstructions);
+        Assert.Contains("old answer", developerInstructions);
+        Assert.DoesNotContain("new question", developerInstructions);
+        using var turnStartDocument = JsonDocument.Parse(transport.Writes.Single(IsTurnStart));
+        Assert.Equal("new question", turnStartDocument.RootElement.GetProperty("params").GetProperty("input")[0].GetProperty("text").GetString());
+    }
+
     private static LlmInferenceClient CreateClient(
         ScriptedAppServerTransport transport,
         IToolBroker? broker = null,
@@ -165,6 +194,12 @@ public sealed class CodexAppServerInferenceTests
     {
         using var document = JsonDocument.Parse(line);
         return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "thread/start";
+    }
+
+    private static bool IsTurnStart(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "turn/start";
     }
 
     private sealed class ScriptedAppServerTransport(params string[] reads) : ICodexAppServerTransport

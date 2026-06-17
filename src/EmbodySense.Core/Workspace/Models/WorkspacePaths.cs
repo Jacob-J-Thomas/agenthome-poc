@@ -25,6 +25,14 @@ public sealed class WorkspacePaths
 
     public string EventsLogPath => Path.Combine(AuditPath, "events.ndjson");
 
+    public string MemoryPath => Path.Combine(AgentPath, "memory");
+
+    public string MemoryReadmePath => Path.Combine(MemoryPath, "README.md");
+
+    public string ConversationMemoryPath => Path.Combine(MemoryPath, "conversations");
+
+    public string CurrentConversationPath => Path.Combine(ConversationMemoryPath, "current.ndjson");
+
     public string TasksPath => Path.Combine(AgentPath, "tasks");
 
     public string ExportsPath => Path.Combine(AgentPath, "exports");

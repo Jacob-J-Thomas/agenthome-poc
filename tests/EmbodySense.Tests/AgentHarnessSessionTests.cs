@@ -1,6 +1,8 @@
 using EmbodySense.Core.Harness;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
+using EmbodySense.Core.Memory;
+using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Tests;
 
@@ -47,6 +49,52 @@ public sealed class AgentHarnessSessionTests
         Assert.Equal("streamed response", string.Concat(chunks));
         Assert.Single(client.Requests);
         Assert.Contains(session.Messages, message => message.Role == LlmMessageRole.Assistant && message.Content == "streamed response");
+    }
+
+    [Fact]
+    public async Task SendUserMessageAsync_persists_user_and_assistant_messages_to_conversation_memory()
+    {
+        using var workspace = new TestWorkspace();
+        var memoryStore = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        var client = new ScriptedInferenceClient("remembered response");
+        var session = new AgentHarnessSession(client, memoryStore);
+
+        await session.SendUserMessageAsync("remember this");
+
+        var loadedMessages = await memoryStore.LoadCurrentConversationAsync();
+        Assert.Collection(
+            loadedMessages,
+            message =>
+            {
+                Assert.Equal(LlmMessageRole.User, message.Role);
+                Assert.Equal("remember this", message.Content);
+            },
+            message =>
+            {
+                Assert.Equal(LlmMessageRole.Assistant, message.Role);
+                Assert.Equal("remembered response", message.Content);
+            });
+    }
+
+    [Fact]
+    public async Task SendUserMessageAsync_includes_restored_messages_in_next_inference_request()
+    {
+        var client = new ScriptedInferenceClient("new response");
+        var restoredMessages = new[]
+        {
+            LlmMessage.User("old question"),
+            LlmMessage.Assistant("old answer")
+        };
+        var session = new AgentHarnessSession(client, initialMessages: restoredMessages);
+
+        await session.SendUserMessageAsync("new question");
+
+        var requestMessages = Assert.Single(client.Requests);
+        Assert.Collection(
+            requestMessages,
+            message => Assert.Equal("old question", message.Content),
+            message => Assert.Equal("old answer", message.Content),
+            message => Assert.Equal("new question", message.Content));
     }
 
     private sealed class ScriptedInferenceClient(params string[] outputs) : ILlmInferenceClient

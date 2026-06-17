@@ -59,6 +59,8 @@ public sealed class CliBehaviorTests
         Assert.Contains("EMBODYSENSE HARNESS", result.Output);
         Assert.Equal("", result.Error);
         Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
+        Assert.True(File.Exists(workspace.File(".agent", "memory", "README.md")));
+        Assert.True(Directory.Exists(workspace.File(".agent", "memory", "conversations")));
         Assert.Contains("workspace.init", await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson")));
     }
 

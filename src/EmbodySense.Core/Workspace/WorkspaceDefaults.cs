@@ -13,6 +13,8 @@ internal static class WorkspaceDefaults
         [
             paths.RootPath,
             paths.AgentPath,
+            paths.MemoryPath,
+            paths.ConversationMemoryPath,
             paths.TasksPath,
             paths.LogsPath,
             paths.AuditPath,
@@ -40,6 +42,7 @@ internal static class WorkspaceDefaults
             new WorkspaceSeedFile(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("MEMORY.md"), DefaultMemoryMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("models.json"), DefaultModelsJson(), Overwrite: false),
+            new WorkspaceSeedFile(paths.MemoryReadmePath, DefaultMemoryReadme(), Overwrite: true),
             new WorkspaceSeedFile(paths.AuditReadmePath, DefaultAuditReadme(), Overwrite: true),
             new WorkspaceSeedFile(paths.PermissionsReadmePath, DefaultPermissionsReadme(), Overwrite: true),
             new WorkspaceSeedFile(paths.PermissionsPath, permissions.ToJson() + Environment.NewLine, Overwrite: false),
@@ -78,7 +81,22 @@ internal static class WorkspaceDefaults
     private static string DefaultMemoryMd() => """
             # Memory
 
-            Durable memory belongs here or in structured files under `.agent/memory/` once that directory is added.
+            Durable memory belongs here and in structured files under `.agent/memory/`.
+
+            Conversation history is stored under `.agent/memory/conversations/` so it can be retrieved and loaded into later model sessions.
+
+            Do not store secrets here.
+
+            """;
+
+    private static string DefaultMemoryReadme() => """
+            # Memory Registry
+
+            This folder stores EmbodySense memory data that should survive a single provider thread.
+
+            `conversations/current.ndjson` is the current conversation transcript as JSON lines. Each line stores one role/content message with sequence and timestamp metadata so the harness can restore the conversation into a future session.
+
+            This registry is not the audit log. Audit metadata intentionally avoids raw prompts and model responses by default, while conversation memory stores the user-visible conversation so it can be searched and reloaded later.
 
             Do not store secrets here.
 
