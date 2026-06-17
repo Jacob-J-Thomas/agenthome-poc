@@ -33,12 +33,13 @@ public sealed class AgentHarnessSession
 
         var userMessage = LlmMessage.User(input);
         _messages.Add(userMessage);
-        _conversationMemoryStore?.AppendMessageAsync(userMessage, cancellationToken);
+        if (_conversationMemoryStore is not null) await _conversationMemoryStore.AppendMessageAsync(userMessage, cancellationToken);
 
         var response = await _inferenceClient.GenerateAsync(new LlmInferenceRequest(_messages), responseChunkHandler, cancellationToken);
         var assistantMessage = LlmMessage.Assistant(response.OutputText);
         _messages.Add(assistantMessage);
-        _conversationMemoryStore?.AppendMessageAsync(assistantMessage, cancellationToken);
+        if (_conversationMemoryStore is not null) await _conversationMemoryStore.AppendMessageAsync(assistantMessage, cancellationToken);
+
         return response;
     }
 }

@@ -63,6 +63,10 @@ internal static class WorkspaceDefaults
             - Explicit denied directory permissions mean do not repeatedly request the same inappropriate access.
             - Governed workspace commands are requested through the `embodysense.command` dynamic tool and executed only through permission, approval, and audit checks.
             - Write durable task state before substantial work.
+            - Treat `.agent/MEMORY.md` as the primary durable memory registry.
+            - Store, update, create, and retrieve most long-lived memories in `.agent/MEMORY.md`.
+            - Query conversation history only for transcript-specific evidence such as exact wording, chronology, or context that has not yet been distilled into `.agent/MEMORY.md`.
+            - When conversation history contains durable information worth keeping, summarize it back into `.agent/MEMORY.md`.
             - Append meaningful actions to the audit log.
             - Do not treat chat history as the system of record.
             - Do not request or expose raw secrets.
@@ -81,9 +85,15 @@ internal static class WorkspaceDefaults
     private static string DefaultMemoryMd() => """
             # Memory
 
-            Durable memory belongs here and in structured files under `.agent/memory/`.
+            Use this file as the primary durable memory registry.
+
+            Store, update, create, and retrieve most memories here. Use structured files under `.agent/memory/` only for supporting data, indexes, or larger specialized memory records that should be referenced from this file.
 
             Conversation history is stored under `.agent/memory/conversations/` so it can be retrieved and loaded into later model sessions.
+
+            Query conversation history only for specific transcript use cases such as exact wording, turn chronology, or recovering context that has not yet been distilled here.
+
+            When conversation history contains durable information worth keeping, summarize it back into this file so future agents do not have to rediscover it from the transcript.
 
             Do not store secrets here.
 
@@ -92,11 +102,15 @@ internal static class WorkspaceDefaults
     private static string DefaultMemoryReadme() => """
             # Memory Registry
 
-            This folder stores EmbodySense memory data that should survive a single provider thread.
+            This folder stores supporting EmbodySense memory data that should survive a single provider thread.
+
+            The primary durable memory registry is `.agent/MEMORY.md`. Agents should store, update, create, and retrieve most memories there first.
 
             `conversations/current.ndjson` is the current conversation transcript as JSON lines. Each line stores one role/content message with sequence and timestamp metadata so the harness can restore the conversation into a future session.
 
-            This registry is not the audit log. Audit metadata intentionally avoids raw prompts and model responses by default, while conversation memory stores the user-visible conversation so it can be searched and reloaded later.
+            Conversation history is supporting transcript evidence, not the normal memory system of record. Query it only when exact wording, chronology, or missing undistilled context matters, then distill durable takeaways into `.agent/MEMORY.md`.
+
+            This registry is not the audit log. Audit metadata intentionally avoids raw prompts and model responses by default, while conversation memory stores the user-visible conversation so it can be reloaded later and queried for specific transcript evidence.
 
             Do not store secrets here.
 

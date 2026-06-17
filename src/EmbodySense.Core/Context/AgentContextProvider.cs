@@ -46,7 +46,9 @@ public sealed class AgentContextProvider
 
         var builder = new StringBuilder();
         builder.AppendLine("EmbodySense loaded the following startup context from workspace agent documents.");
-        builder.AppendLine("Use it as durable local context, but follow the current user request and higher-priority instructions first."); 
+        builder.AppendLine("Follow the current user request and higher-priority instructions first.");
+        builder.AppendLine("Durable memory policy: treat `.agent/MEMORY.md` as the primary place to store, update, create, and retrieve most memories.");
+        builder.AppendLine("Query conversation history only for transcript-specific evidence such as exact wording, chronology, or context that has not yet been distilled into `.agent/MEMORY.md`.");
         builder.AppendLine();
         builder.AppendLine(string.Join(Environment.NewLine, sections));
 

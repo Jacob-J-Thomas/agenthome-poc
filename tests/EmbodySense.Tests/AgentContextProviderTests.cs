@@ -23,5 +23,7 @@ public sealed class AgentContextProviderTests
         Assert.Contains("agent guide", message.Content);
         Assert.Contains(".agent/MEMORY.md", message.Content);
         Assert.Contains("memory note", message.Content);
+        Assert.Contains("treat `.agent/MEMORY.md` as the primary place", message.Content);
+        Assert.Contains("Query conversation history only for transcript-specific evidence", message.Content);
     }
 }
