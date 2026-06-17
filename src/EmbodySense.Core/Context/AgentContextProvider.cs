@@ -22,6 +22,16 @@ public sealed class AgentContextProvider
         ArgumentNullException.ThrowIfNull(paths);
 
         var sections = new List<string>();
+        var workspaceInstructionsPath = FindWorkspaceInstructionsPath(paths.RootPath);
+        if (workspaceInstructionsPath is not null)
+        {
+            var content = await File.ReadAllTextAsync(workspaceInstructionsPath, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                sections.Add(FormatWorkspaceInstructionsSection(content));
+            }
+        }
+
         foreach (var fileName in AgentContextFiles)
         {
             var path = paths.AgentFile(fileName);
@@ -36,7 +46,7 @@ public sealed class AgentContextProvider
                 continue;
             }
 
-            sections.Add(FormatSection(fileName, content));
+            sections.Add(FormatAgentDocumentSection(fileName, content));
         }
 
         if (sections.Count == 0)
@@ -45,7 +55,7 @@ public sealed class AgentContextProvider
         }
 
         var builder = new StringBuilder();
-        builder.AppendLine("EmbodySense loaded the following startup context from workspace agent documents.");
+        builder.AppendLine("EmbodySense loaded the following startup context from workspace instructions and workspace agent documents.");
         builder.AppendLine("Follow the current user request and higher-priority instructions first.");
         builder.AppendLine("Durable memory policy: treat `.agent/MEMORY.md` as the primary place to store, update, create, and retrieve most memories.");
         builder.AppendLine("Query conversation history only for transcript-specific evidence such as exact wording, chronology, or context that has not yet been distilled into `.agent/MEMORY.md`.");
@@ -55,7 +65,23 @@ public sealed class AgentContextProvider
         return [LlmMessage.System(builder.ToString().Trim())];
     }
 
-    private static string FormatSection(string fileName, string content)
+    private static string? FindWorkspaceInstructionsPath(string rootPath)
+    {
+        var instructionsPath = Path.Combine(Path.GetFullPath(rootPath), "AGENTS.md");
+        return File.Exists(instructionsPath) ? instructionsPath : null;
+    }
+
+    private static string FormatAgentDocumentSection(string fileName, string content)
+    {
+        return FormatSection($".agent/{fileName}", content);
+    }
+
+    private static string FormatWorkspaceInstructionsSection(string content)
+    {
+        return FormatSection("AGENTS.md", content);
+    }
+
+    private static string FormatSection(string displayPath, string content)
     {
         var normalized = content.Trim();
         if (normalized.Length > MaxFileCharacters)
@@ -63,6 +89,6 @@ public sealed class AgentContextProvider
             normalized = normalized[..MaxFileCharacters] + Environment.NewLine + "[truncated]";
         }
 
-        return $"## .agent/{fileName}{Environment.NewLine}{normalized}";
+        return $"## {displayPath}{Environment.NewLine}{normalized}";
     }
 }

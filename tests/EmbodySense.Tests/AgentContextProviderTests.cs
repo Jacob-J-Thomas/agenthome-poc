@@ -26,4 +26,48 @@ public sealed class AgentContextProviderTests
         Assert.Contains("treat `.agent/MEMORY.md` as the primary place", message.Content);
         Assert.Contains("Query conversation history only for transcript-specific evidence", message.Content);
     }
+
+    [Fact]
+    public async Task LoadAsync_builds_system_message_from_workspace_agents_file()
+    {
+        using var workspace = new TestWorkspace();
+        await File.WriteAllTextAsync(workspace.File("AGENTS.md"), "repo guide");
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        var messages = await new AgentContextProvider().LoadAsync(paths);
+
+        var message = Assert.Single(messages);
+        Assert.Equal(LlmMessageRole.System, message.Role);
+        Assert.Contains("AGENTS.md", message.Content);
+        Assert.Contains("repo guide", message.Content);
+    }
+
+    [Fact]
+    public async Task LoadAsync_does_not_load_parent_agents_file()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("scratch"));
+        await File.WriteAllTextAsync(workspace.File("AGENTS.md"), "parent guide");
+        var paths = new WorkspacePaths(workspace.File("scratch"));
+
+        var messages = await new AgentContextProvider().LoadAsync(paths);
+
+        Assert.Empty(messages);
+    }
+
+    [Fact]
+    public async Task LoadAsync_prefers_workspace_agents_file_over_parent_agents_file()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File("scratch"));
+        await File.WriteAllTextAsync(workspace.File("AGENTS.md"), "parent guide");
+        await File.WriteAllTextAsync(workspace.File("scratch", "AGENTS.md"), "workspace guide");
+        var paths = new WorkspacePaths(workspace.File("scratch"));
+
+        var messages = await new AgentContextProvider().LoadAsync(paths);
+
+        var message = Assert.Single(messages);
+        Assert.Contains("workspace guide", message.Content);
+        Assert.DoesNotContain("parent guide", message.Content);
+    }
 }
