@@ -97,6 +97,18 @@ public sealed class AgentHarnessSessionTests
             message => Assert.Equal("new question", message.Content));
     }
 
+    [Fact]
+    public void ReplaceMessages_replaces_in_memory_conversation_state()
+    {
+        var client = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(client, initialMessages: [LlmMessage.User("old prompt")]);
+
+        session.ReplaceMessages([LlmMessage.User("loaded prompt")]);
+
+        var message = Assert.Single(session.Messages);
+        Assert.Equal("loaded prompt", message.Content);
+    }
+
     private sealed class ScriptedInferenceClient(params string[] outputs) : ILlmInferenceClient
     {
         private readonly Queue<string> _outputs = new(outputs);

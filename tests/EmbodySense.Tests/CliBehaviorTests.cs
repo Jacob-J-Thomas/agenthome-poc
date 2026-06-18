@@ -1,6 +1,10 @@
 using System.Diagnostics;
+using System.Text.Json;
 using EmbodySense.Core.Audit;
 using EmbodySense.Core.Audit.Models;
+using EmbodySense.Core.Inference.Models;
+using EmbodySense.Core.Memory;
+using EmbodySense.Core.Memory.Models;
 using EmbodySense.Core.Workspace;
 using EmbodySense.Core.Workspace.Models;
 
@@ -8,6 +12,8 @@ namespace EmbodySense.Tests;
 
 public sealed class CliBehaviorTests
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     [Theory]
     [InlineData("--help")]
     [InlineData("-h")]
@@ -94,6 +100,59 @@ public sealed class CliBehaviorTests
         Assert.Equal(beforeInitEventCount, CountOccurrences(await File.ReadAllTextAsync(auditPath), "workspace.init"));
     }
 
+    [Fact]
+    public async Task Run_command_starts_fresh_conversation_instead_of_restoring_current_transcript()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("old prompt"));
+
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("", await File.ReadAllTextAsync(paths.CurrentConversationPath));
+        var archivedPath = Assert.Single(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
+        Assert.Contains("old prompt", await File.ReadAllTextAsync(archivedPath));
+    }
+
+    [Fact]
+    public async Task Run_command_history_command_lists_and_loads_saved_conversation()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var longPrompt = "Alpha prompt for picker " + new string('x', 120) + " hidden suffix";
+        await WriteConversationAsync(
+            paths,
+            "saved-conversation",
+            Entry("saved-conversation", 1, "user", longPrompt),
+            Entry("saved-conversation", 2, "assistant", "saved answer"));
+
+        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Stored conversations:", result.Output);
+        Assert.Contains("saved-conversation", result.Output);
+        Assert.Contains("Alpha prompt for picker", result.Output);
+        Assert.Contains("...", result.Output);
+        Assert.DoesNotContain("hidden suffix", result.Output);
+        Assert.Contains("Loaded conversation `saved-conversation` (2 messages).", result.Output);
+
+        var loadedMessages = await new ConversationMemoryStore(paths).LoadCurrentConversationAsync();
+        Assert.Collection(
+            loadedMessages,
+            message =>
+            {
+                Assert.StartsWith("Alpha prompt for picker", message.Content);
+            },
+            message =>
+            {
+                Assert.Equal("saved answer", message.Content);
+            });
+    }
+
     [Theory]
     [InlineData("--persist-session")]
     [InlineData("--approval")]
@@ -171,6 +230,22 @@ public sealed class CliBehaviorTests
     private static int CountOccurrences(string text, string value)
     {
         return text.Split(value, StringSplitOptions.None).Length - 1;
+    }
+
+    private static async Task WriteConversationAsync(
+        WorkspacePaths paths,
+        string conversationId,
+        params ConversationMemoryEntry[] entries)
+    {
+        Directory.CreateDirectory(paths.ConversationMemoryPath);
+        var path = Path.Combine(paths.ConversationMemoryPath, conversationId + ".ndjson");
+        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, JsonOptions));
+        await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
+    }
+
+    private static ConversationMemoryEntry Entry(string conversationId, int sequence, string role, string content)
+    {
+        return new ConversationMemoryEntry(1, conversationId, sequence, DateTimeOffset.Parse("2026-06-01T00:00:00+00:00").AddMinutes(sequence), role, content);
     }
 
     private sealed record CliResult(int ExitCode, string Output, string Error);

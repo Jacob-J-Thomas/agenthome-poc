@@ -5,12 +5,16 @@ namespace EmbodySense.Cli.Harness;
 
 internal static class AgentHarnessLoop
 {
-    public static async Task<int> RunHarnessLoopAsync(AgentHarnessSession session)
+    public static async Task<int> RunHarnessLoopAsync(
+        AgentHarnessSession session,
+        HarnessCommandHandler? commandHandler = null)
     {
         ArgumentNullException.ThrowIfNull(session);
 
+        commandHandler ??= new HarnessCommandHandler();
         Console.WriteLine(Constants.HarnessBanner);
         var exitRequested = false;
+        var modelTurnStarted = false;
 
         while (!exitRequested)
         {
@@ -23,14 +27,22 @@ internal static class AgentHarnessLoop
                     exitRequested = true;
                     break;
 
-                case var value when IsExitCommand(value):
-                    exitRequested = true;
-                    break;
-
                 case var value when string.IsNullOrWhiteSpace(value):
                     break;
 
                 default:
+                    var commandResult = await commandHandler.TryHandleAsync(input, session, modelTurnStarted);
+                    if (commandResult == HarnessCommandResult.ExitRequested)
+                    {
+                        exitRequested = true;
+                        break;
+                    }
+
+                    if (commandResult == HarnessCommandResult.Handled)
+                    {
+                        break;
+                    }
+
                     var wroteResponseChunk = false;
                     var responseEndedWithNewLine = false;
                     var response = await session.SendUserMessageAsync(input, (chunk, _) =>
@@ -54,16 +66,12 @@ internal static class AgentHarnessLoop
                         Console.WriteLine();
                     }
 
+                    modelTurnStarted = true;
                     break;
             }
         }
 
         return 0;
-    }
-
-    private static bool IsExitCommand(string input)
-    {
-        return input.Trim().ToLowerInvariant() is "exit" or "quit" or "/exit" or "/quit";
     }
 
     private static bool EndsWithNewLine(string text)

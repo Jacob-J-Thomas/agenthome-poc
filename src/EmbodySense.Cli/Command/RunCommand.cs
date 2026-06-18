@@ -3,7 +3,6 @@ using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Context;
 using EmbodySense.Core.Harness;
 using EmbodySense.Core.Inference.Implementations;
-using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Memory;
 using EmbodySense.Core.Permissions;
 using EmbodySense.Core.Tools;
@@ -34,18 +33,13 @@ internal static class RunCommand
         var permissionService = new ToolPermissionService(paths, permissionPolicy);
         var toolBroker = new ToolBroker(paths, permissionService, new ConsoleToolApprovalPrompt());
         var conversationMemory = new ConversationMemoryStore(paths);
-        var sessionMessages = await LoadSessionMessagesAsync(paths, conversationMemory);
-        await using var inferenceClient = new LlmInferenceClient(options.ToInferenceClientOptions(), toolBroker);
-        var session = new AgentHarnessSession(inferenceClient, conversationMemory, sessionMessages);
-
-        return await AgentHarnessLoop.RunHarnessLoopAsync(session);
-    }
-
-    private static async Task<IReadOnlyList<LlmMessage>> LoadSessionMessagesAsync(WorkspacePaths paths, ConversationMemoryStore conversationMemory)
-    {
         var startupContext = await new AgentContextProvider().LoadAsync(paths);
-        var restoredConversation = await conversationMemory.LoadCurrentConversationAsync();
-        return startupContext.Concat(restoredConversation).ToArray();
+        await conversationMemory.StartFreshConversationAsync();
+        await using var inferenceClient = new LlmInferenceClient(options.ToInferenceClientOptions(), toolBroker);
+        var session = new AgentHarnessSession(inferenceClient, conversationMemory, startupContext);
+        var commandHandler = new HarnessCommandHandler(conversationMemory, startupContext);
+
+        return await AgentHarnessLoop.RunHarnessLoopAsync(session, commandHandler);
     }
 
     private static bool ConfirmWorkspaceInitialization(WorkspacePaths paths)

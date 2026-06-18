@@ -15,6 +15,7 @@ internal static class WorkspaceDefaults
             paths.AgentPath,
             paths.MemoryPath,
             paths.ConversationMemoryPath,
+            paths.ArchivedConversationMemoryPath,
             paths.TasksPath,
             paths.LogsPath,
             paths.AuditPath,
@@ -106,7 +107,9 @@ internal static class WorkspaceDefaults
 
             The primary durable memory registry is `.agent/MEMORY.md`. Agents should store, update, create, and retrieve most memories there first.
 
-            `conversations/current.ndjson` is the current conversation transcript as JSON lines. Each line stores one role/content message with sequence and timestamp metadata so the harness can restore the conversation into a future session.
+            `conversations/current.ndjson` is the active conversation transcript as JSON lines. Each run starts with a fresh active transcript, moving any non-empty previous `current.ndjson` into `conversations/archive/` first.
+
+            Additional `.ndjson` files in `conversations/` and `conversations/archive/` are saved transcripts that can be listed and loaded from the harness loop with `/history`.
 
             Conversation history is supporting transcript evidence, not the normal memory system of record. Query it only when exact wording, chronology, or missing undistilled context matters, then distill durable takeaways into `.agent/MEMORY.md`.
 

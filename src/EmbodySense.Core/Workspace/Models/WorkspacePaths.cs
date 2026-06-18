@@ -31,6 +31,8 @@ public sealed class WorkspacePaths
 
     public string ConversationMemoryPath => Path.Combine(MemoryPath, "conversations");
 
+    public string ArchivedConversationMemoryPath => Path.Combine(ConversationMemoryPath, "archive");
+
     public string CurrentConversationPath => Path.Combine(ConversationMemoryPath, "current.ndjson");
 
     public string TasksPath => Path.Combine(AgentPath, "tasks");

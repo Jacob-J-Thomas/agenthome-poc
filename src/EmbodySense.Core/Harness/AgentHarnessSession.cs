@@ -24,6 +24,14 @@ public sealed class AgentHarnessSession
 
     public IReadOnlyList<LlmMessage> Messages => _messages;
 
+    public void ReplaceMessages(IReadOnlyList<LlmMessage> messages)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        _messages.Clear();
+        _messages.AddRange(messages);
+    }
+
     public async Task<LlmInferenceResponse> SendUserMessageAsync(
         string input,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
