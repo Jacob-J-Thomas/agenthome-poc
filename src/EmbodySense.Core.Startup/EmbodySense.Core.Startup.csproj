@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\EmbodySense.Core.Application\EmbodySense.Core.Application.csproj" />
+    <ProjectReference Include="..\EmbodySense.Core.Clients\EmbodySense.Core.Clients.csproj" />
+    <ProjectReference Include="..\EmbodySense.Core.Common\EmbodySense.Core.Common.csproj" />
+    <ProjectReference Include="..\EmbodySense.Core.Persistence\EmbodySense.Core.Persistence.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
