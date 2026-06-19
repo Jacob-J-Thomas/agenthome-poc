@@ -5,7 +5,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 
-internal static class StatusCommand
+public static class StatusCommand
 {
     public static int Run(CliArguments arguments)
     {
@@ -28,7 +28,7 @@ internal static class StatusCommand
         return paths.IsInitialized ? 0 : 2;
     }
 
-    private static string FormatDefaultAccess(DirectoryPermissionPolicy permissions)
+    private static string FormatDefaultAccess(IDirectoryPermissionPolicy permissions)
     {
         return permissions.HasDocument ? "requires approval for missing or unmatched directory rules" : "requires approval because permissions.json is missing, invalid, or unsupported";
     }

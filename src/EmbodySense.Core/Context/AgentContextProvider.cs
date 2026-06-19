@@ -4,7 +4,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Context;
 
-public sealed class AgentContextProvider
+public sealed class AgentContextProvider : IAgentContextProvider
 {
     private const int MaxFileCharacters = 12_000;
     private static readonly string[] AgentContextFiles =

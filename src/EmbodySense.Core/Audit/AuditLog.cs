@@ -5,7 +5,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Audit;
 
-public sealed class AuditLog
+public sealed class AuditLog : IAuditLog
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

@@ -2,7 +2,7 @@ using EmbodySense.Core.Inference.Models;
 
 namespace EmbodySense.Cli.Command.Models;
 
-internal sealed record RunOptions(
+public sealed record RunOptions(
     string? Model,
     string WorkingDirectory,
     string? CodexExecutablePath,

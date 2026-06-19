@@ -4,7 +4,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Workspace;
 
-public sealed class WorkspaceInitializer
+public sealed class WorkspaceInitializer : IWorkspaceInitializer
 {
     public async Task InitializeAsync(string rootPath, CancellationToken cancellationToken = default)
     {

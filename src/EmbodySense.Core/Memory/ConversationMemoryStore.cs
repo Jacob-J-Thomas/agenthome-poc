@@ -6,7 +6,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Memory;
 
-public sealed class ConversationMemoryStore
+public sealed class ConversationMemoryStore : IConversationMemoryStore
 {
     private const int SchemaVersion = 1;
     private const string CurrentConversationId = "current";

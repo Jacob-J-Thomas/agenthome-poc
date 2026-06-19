@@ -10,11 +10,11 @@ namespace EmbodySense.Core.Tools;
 public sealed class ToolBroker : IToolBroker
 {
     private readonly WorkspacePaths _paths;
-    private readonly ToolPermissionService _permissionService;
+    private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
-    private readonly AuditLog _auditLog;
+    private readonly IAuditLog _auditLog;
 
-    public ToolBroker(WorkspacePaths paths, ToolPermissionService permissionService, IToolApprovalPrompt approvalPrompt)
+    public ToolBroker(WorkspacePaths paths, IToolPermissionService permissionService, IToolApprovalPrompt approvalPrompt, IAuditLog? auditLog = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(permissionService);
@@ -23,7 +23,7 @@ public sealed class ToolBroker : IToolBroker
         _paths = paths;
         _permissionService = permissionService;
         _approvalPrompt = approvalPrompt;
-        _auditLog = new AuditLog(paths);
+        _auditLog = auditLog ?? new AuditLog(paths);
     }
 
     public async Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)

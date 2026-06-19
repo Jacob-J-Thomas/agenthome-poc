@@ -7,12 +7,12 @@ namespace EmbodySense.Core.Harness;
 public sealed class AgentHarnessSession
 {
     private readonly ILlmInferenceClient _inferenceClient;
-    private readonly ConversationMemoryStore? _conversationMemoryStore;
+    private readonly IConversationMemoryStore? _conversationMemoryStore;
     private readonly List<LlmMessage> _messages;
 
     public AgentHarnessSession(
         ILlmInferenceClient inferenceClient,
-        ConversationMemoryStore? conversationMemoryStore = null,
+        IConversationMemoryStore? conversationMemoryStore = null,
         IReadOnlyList<LlmMessage>? initialMessages = null)
     {
         ArgumentNullException.ThrowIfNull(inferenceClient);

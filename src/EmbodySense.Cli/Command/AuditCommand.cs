@@ -6,7 +6,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 
-internal static class AuditCommand
+public static class AuditCommand
 {
     private static readonly IReadOnlySet<string> IgnoredRootTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tail" };
     private static readonly IReadOnlySet<string> OptionsWithValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--limit", "-n" };

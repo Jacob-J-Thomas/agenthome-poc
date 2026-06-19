@@ -4,7 +4,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Permissions;
 
-public sealed class DirectoryPermissionPolicy
+public sealed class DirectoryPermissionPolicy : IDirectoryPermissionPolicy
 {
     private readonly PermissionsDocument? _document;
     private readonly string _workspaceRootPath;

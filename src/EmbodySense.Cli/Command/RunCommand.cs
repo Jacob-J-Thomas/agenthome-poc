@@ -2,7 +2,7 @@ using EmbodySense.Cli.Harness;
 using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Context;
 using EmbodySense.Core.Harness;
-using EmbodySense.Core.Inference.Implementations;
+using EmbodySense.Core.Inference.Services;
 using EmbodySense.Core.Memory;
 using EmbodySense.Core.Permissions;
 using EmbodySense.Core.Tools;

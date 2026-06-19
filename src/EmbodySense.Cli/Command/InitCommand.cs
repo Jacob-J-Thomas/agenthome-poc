@@ -4,7 +4,7 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 
-internal static class InitCommand
+public static class InitCommand
 {
     public static async Task<int> RunAsync(CliArguments arguments)
     {

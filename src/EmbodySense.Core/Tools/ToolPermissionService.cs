@@ -5,12 +5,12 @@ using EmbodySense.Core.Workspace.Models;
 
 namespace EmbodySense.Core.Tools;
 
-public sealed class ToolPermissionService
+public sealed class ToolPermissionService : IToolPermissionService
 {
-    private readonly DirectoryPermissionPolicy _policy;
+    private readonly IDirectoryPermissionPolicy _policy;
     private readonly string _workspaceRootPath;
 
-    public ToolPermissionService(WorkspacePaths paths, DirectoryPermissionPolicy policy)
+    public ToolPermissionService(WorkspacePaths paths, IDirectoryPermissionPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(policy);

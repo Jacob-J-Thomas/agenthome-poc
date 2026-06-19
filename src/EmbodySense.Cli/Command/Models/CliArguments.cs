@@ -1,6 +1,6 @@
 namespace EmbodySense.Cli.Command.Models;
 
-internal sealed class CliArguments
+public sealed class CliArguments
 {
     private readonly string[] _args;
 
