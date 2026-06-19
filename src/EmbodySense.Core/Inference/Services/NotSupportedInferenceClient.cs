@@ -1,7 +1,7 @@
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 
-namespace EmbodySense.Core.Inference.Implementations;
+namespace EmbodySense.Core.Inference.Services;
 
 internal sealed class NotSupportedInferenceClient : ILlmInferenceClient
 {

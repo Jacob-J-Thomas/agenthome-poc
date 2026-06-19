@@ -100,6 +100,67 @@ public sealed class ToolBrokerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_lists_directories_before_files()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        Directory.CreateDirectory(workspace.File("workspace", "shared", "folder"));
+        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "note.txt"), "note");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.List, "workspace/shared"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("folder\\" + Environment.NewLine + "note.txt", result.OutputText.Replace("/", "\\", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_appends_to_allowed_existing_file()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "note.txt"), "first");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "workspace/shared/note.txt", " second"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("appended 7 characters", result.OutputText);
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("workspace", "shared", "note.txt")));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_returns_failed_result_for_missing_allowed_read()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "workspace/shared/missing.txt"));
+
+        Assert.Equal(ToolExecutionOutcome.Failed, result.Outcome);
+        Assert.StartsWith("failed:", result.OutputText, StringComparison.Ordinal);
+        var events = await ReadAuditAsync(workspace);
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "failed");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_deletes_directory_after_approval()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        Directory.CreateDirectory(workspace.File("workspace", "shared", "delete-me"));
+        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "delete-me", "note.txt"), "temporary");
+        var prompt = new FixedApprovalPrompt(ToolApprovalResponse.Approve("test", "approved delete in test"));
+        var broker = CreateBroker(workspace, prompt);
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Delete, "workspace/shared/delete-me"));
+
+        Assert.True(result.Succeeded);
+        Assert.False(Directory.Exists(workspace.File("workspace", "shared", "delete-me")));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_deletes_only_after_default_approval()
     {
         using var workspace = new TestWorkspace();

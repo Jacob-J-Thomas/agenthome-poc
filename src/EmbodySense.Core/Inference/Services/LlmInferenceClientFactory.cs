@@ -1,8 +1,9 @@
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
+using EmbodySense.Core.Inference.AppServer;
 using EmbodySense.Core.Tools;
 
-namespace EmbodySense.Core.Inference.Implementations;
+namespace EmbodySense.Core.Inference.Services;
 
 internal static class LlmInferenceClientFactory
 {

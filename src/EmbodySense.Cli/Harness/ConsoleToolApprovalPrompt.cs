@@ -3,24 +3,31 @@ using EmbodySense.Core.Tools.Models;
 
 namespace EmbodySense.Cli.Harness;
 
-internal sealed class ConsoleToolApprovalPrompt : IToolApprovalPrompt
+public sealed class ConsoleToolApprovalPrompt : IToolApprovalPrompt
 {
+    private readonly IHarnessTerminal _terminal;
+
+    public ConsoleToolApprovalPrompt(IHarnessTerminal? terminal = null)
+    {
+        _terminal = terminal ?? ConsoleHarnessTerminal.Instance;
+    }
+
     public Task<ToolApprovalResponse> RequestApprovalAsync(ToolApprovalRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
 
-        Console.WriteLine();
-        Console.WriteLine("Tool approval required");
-        Console.WriteLine($"Tool:       {request.ToolRequest.Command.ToString().ToLowerInvariant()}");
-        Console.WriteLine($"Target:     {request.ToolRequest.TargetPath}");
-        Console.WriteLine($"Resolved:   {request.ResolvedPath}");
-        Console.WriteLine($"Operation:  {request.Operation.ToString().ToLowerInvariant()}");
-        Console.WriteLine($"Matched:    {FormatMatchedPath(request.PermissionEvaluation.MatchedPath)}");
-        Console.WriteLine($"Reason:     {request.PermissionEvaluation.Detail}");
-        Console.Write("Approve this tool request? [y/N] ");
+        _terminal.WriteLine();
+        _terminal.WriteLine("Tool approval required");
+        _terminal.WriteLine($"Tool:       {request.ToolRequest.Command.ToString().ToLowerInvariant()}");
+        _terminal.WriteLine($"Target:     {request.ToolRequest.TargetPath}");
+        _terminal.WriteLine($"Resolved:   {request.ResolvedPath}");
+        _terminal.WriteLine($"Operation:  {request.Operation.ToString().ToLowerInvariant()}");
+        _terminal.WriteLine($"Matched:    {FormatMatchedPath(request.PermissionEvaluation.MatchedPath)}");
+        _terminal.WriteLine($"Reason:     {request.PermissionEvaluation.Detail}");
+        _terminal.Write("Approve this tool request? [y/N] ");
 
-        var answer = Console.ReadLine();
+        var answer = _terminal.ReadLine();
         var approved = string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) || string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase);
         var response = approved
             ? ToolApprovalResponse.Approve("human.console", "Approved at the console approval prompt.")

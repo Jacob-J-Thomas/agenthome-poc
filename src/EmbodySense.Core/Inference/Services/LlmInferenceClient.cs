@@ -5,13 +5,13 @@ using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Tools;
 
-namespace EmbodySense.Core.Inference.Implementations;
+namespace EmbodySense.Core.Inference.Services;
 
 public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
 {
     private readonly LlmInferenceClientOptions _options;
     private readonly ILlmInferenceClient _innerClient;
-    private readonly AuditLog? _auditLog;
+    private readonly IAuditLog? _auditLog;
 
     public LlmInferenceClient(LlmInferenceClientOptions options, IToolBroker? toolBroker = null, ICodexAppServerTransport? codexAppServerTransport = null)
     {

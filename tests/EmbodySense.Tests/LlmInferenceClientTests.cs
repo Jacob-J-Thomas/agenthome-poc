@@ -1,6 +1,6 @@
 using EmbodySense.Core.Audit;
 using EmbodySense.Core.Audit.Models;
-using EmbodySense.Core.Inference.Implementations;
+using EmbodySense.Core.Inference.Services;
 using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Workspace;
 using EmbodySense.Core.Workspace.Models;

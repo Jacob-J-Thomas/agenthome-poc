@@ -3,49 +3,39 @@ using EmbodySense.Core.Harness;
 
 namespace EmbodySense.Cli.Harness;
 
-internal static class AgentHarnessLoop
+public static class AgentHarnessLoop
 {
     public static async Task<int> RunHarnessLoopAsync(
         AgentHarnessSession session,
-        HarnessCommandHandler? commandHandler = null)
+        HarnessCommandHandler? commandHandler = null,
+        IHarnessTerminal? terminal = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(session);
 
-        commandHandler ??= new HarnessCommandHandler();
-        Console.WriteLine(Constants.HarnessBanner);
-        var exitRequested = false;
-        var modelTurnStarted = false;
+        terminal ??= ConsoleHarnessTerminal.Instance;
+        commandHandler ??= new HarnessCommandHandler(terminal: terminal);
+        terminal.WriteLine(Constants.HarnessBanner);
+        var state = new HarnessLoopState();
 
-        while (!exitRequested)
+        while (!state.ExitRequested)
         {
-            Console.Write("> ");
-            var input = Console.ReadLine();
+            cancellationToken.ThrowIfCancellationRequested();
+            terminal.Write("> ");
+            var input = terminal.ReadLine();
 
             switch (input)
             {
                 case null:
-                    exitRequested = true;
+                    state.RequestExit();
                     break;
 
                 case var value when string.IsNullOrWhiteSpace(value):
                     break;
 
                 default:
-                    var commandResult = await commandHandler.TryHandleAsync(input, session, modelTurnStarted);
-                    if (commandResult == HarnessCommandResult.ExitRequested)
+                    if (await commandHandler.TryHandleAsync(input, session, state, cancellationToken))
                     {
-                        exitRequested = true;
-                        break;
-                    }
-
-                    if (commandResult == HarnessCommandResult.Handled)
-                    {
-                        break;
-                    }
-
-                    if (commandResult == HarnessCommandResult.NewSessionStarted)
-                    {
-                        modelTurnStarted = false;
                         break;
                     }
 
@@ -55,24 +45,24 @@ internal static class AgentHarnessLoop
                     {
                         if (!string.IsNullOrEmpty(chunk))
                         {
-                            Console.Write(chunk);
+                            terminal.Write(chunk);
                             wroteResponseChunk = true;
                             responseEndedWithNewLine = EndsWithNewLine(chunk);
                         }
 
                         return Task.CompletedTask;
-                    });
+                    }, cancellationToken);
 
                     if (!wroteResponseChunk)
                     {
-                        Console.WriteLine(response.OutputText);
+                        terminal.WriteLine(response.OutputText);
                     }
                     else if (!responseEndedWithNewLine)
                     {
-                        Console.WriteLine();
+                        terminal.WriteLine();
                     }
 
-                    modelTurnStarted = true;
+                    state.MarkModelTurnStarted();
                     break;
             }
         }

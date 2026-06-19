@@ -1,5 +1,5 @@
 using System.Text.Json;
-using EmbodySense.Core.Inference.Implementations;
+using EmbodySense.Core.Inference.Services;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Permissions;
@@ -125,6 +125,58 @@ public sealed class CodexAppServerInferenceTests
         Assert.Contains("\"outcome\":\"denied\"", auditText, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("item/fileChange/requestApproval", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","path":"note.txt"}""", "\"decision\":\"decline\"")]
+    [InlineData("applyPatchApproval", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","patch":"diff"}""", "\"decision\":\"decline\"")]
+    [InlineData("execCommandApproval", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","command":"dotnet test"}""", "\"decision\":\"decline\"")]
+    [InlineData("item/permissions/requestApproval", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1"}""", "\"strictAutoReview\":true")]
+    [InlineData("mcpServer/elicitation/request", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1"}""", "\"action\":\"decline\"")]
+    [InlineData("item/tool/requestUserInput", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1"}""", "\"answers\":{}")]
+    public async Task GenerateAsync_declines_other_native_app_server_requests(string method, string parameters, string expectedResponseFragment)
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Request(44, method, parameters),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-2","type":"agentMessage","text":"native request declined","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, workingDirectory: workspace.RootPath);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("native request"), (_, _) => Task.CompletedTask);
+
+        Assert.Equal("native request declined", response.OutputText);
+        var nativeResponse = Assert.Single(transport.Writes, line => line.Contains("\"id\":44", StringComparison.Ordinal));
+        Assert.Contains(expectedResponseFragment, nativeResponse, StringComparison.Ordinal);
+        var auditText = await File.ReadAllTextAsync(new WorkspacePaths(workspace.RootPath).EventsLogPath);
+        Assert.Contains(method, auditText, StringComparison.Ordinal);
+        Assert.Contains("\"outcome\":\"denied\"", auditText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_unsupported_app_server_requests_with_json_rpc_error()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Request(44, "unsupported/nativeRequest", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1"}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-2","type":"agentMessage","text":"unsupported request rejected","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, workingDirectory: workspace.RootPath);
+
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("unsupported request"), (_, _) => Task.CompletedTask);
+
+        Assert.Equal("unsupported request rejected", response.OutputText);
+        var errorResponse = Assert.Single(transport.Writes, line => line.Contains("\"id\":44", StringComparison.Ordinal));
+        Assert.Contains("\"error\"", errorResponse, StringComparison.Ordinal);
+        Assert.Contains("does not support app-server request method", errorResponse, StringComparison.Ordinal);
+        var auditText = await File.ReadAllTextAsync(new WorkspacePaths(workspace.RootPath).EventsLogPath);
+        Assert.Contains("\"outcome\":\"failed\"", auditText, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GenerateAsync_includes_restored_context_in_thread_start_developer_instructions()
     {
@@ -152,6 +204,28 @@ public sealed class CodexAppServerInferenceTests
         Assert.DoesNotContain("new question", developerInstructions);
         using var turnStartDocument = JsonDocument.Parse(transport.Writes.Single(IsTurnStart));
         Assert.Equal("new question", turnStartDocument.RootElement.GetProperty("params").GetProperty("input")[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task GenerateAsync_reports_transport_closure_with_error_output()
+    {
+        var transport = new ScriptedAppServerTransport { ErrorOutput = "transport failed" };
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+
+        Assert.Contains("transport failed", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_disposes_app_server_transport()
+    {
+        var transport = new ScriptedAppServerTransport();
+        var client = CreateClient(transport);
+
+        await client.DisposeAsync();
+
+        Assert.True(transport.Disposed);
     }
 
     private static LlmInferenceClient CreateClient(
@@ -206,12 +280,15 @@ public sealed class CodexAppServerInferenceTests
     {
         private readonly Queue<string> _reads = new(reads);
 
-        public string ErrorOutput => "";
+        public string ErrorOutput { get; init; } = "";
 
         public List<string> Writes { get; } = [];
 
+        public bool Disposed { get; private set; }
+
         public ValueTask DisposeAsync()
         {
+            Disposed = true;
             return ValueTask.CompletedTask;
         }
 

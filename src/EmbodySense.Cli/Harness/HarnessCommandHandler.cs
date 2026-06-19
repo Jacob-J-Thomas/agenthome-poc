@@ -5,52 +5,69 @@ using EmbodySense.Core.Memory;
 
 namespace EmbodySense.Cli.Harness;
 
-internal sealed class HarnessCommandHandler
+public sealed class HarnessCommandHandler
 {
     private const int ConversationPromptPreviewLength = 96;
-    private readonly ConversationMemoryStore? _conversationMemoryStore;
+    private readonly IConversationMemoryStore? _conversationMemoryStore;
     private readonly IReadOnlyList<LlmMessage> _startupMessages;
+    private readonly IHarnessTerminal _terminal;
 
     public HarnessCommandHandler(
-        ConversationMemoryStore? conversationMemoryStore = null,
-        IReadOnlyList<LlmMessage>? startupMessages = null)
+        IConversationMemoryStore? conversationMemoryStore = null,
+        IReadOnlyList<LlmMessage>? startupMessages = null,
+        IHarnessTerminal? terminal = null)
     {
         _conversationMemoryStore = conversationMemoryStore;
         _startupMessages = startupMessages ?? [];
+        _terminal = terminal ?? ConsoleHarnessTerminal.Instance;
     }
 
-    public async Task<HarnessCommandResult> TryHandleAsync(
+    public async Task<bool> TryHandleAsync(
         string input,
         AgentHarnessSession session,
-        bool modelTurnStarted,
+        HarnessLoopState state,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(input);
         ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(state);
 
         var command = input.Trim().ToLowerInvariant();
-        return command switch
+        switch (command)
         {
-            "exit" or "quit" or "/exit" or "/quit" => HarnessCommandResult.ExitRequested,
-            "/help" or "/commands" => HandleHelpCommand(),
-            "/new" or "/new-session" => await HandleNewSessionAsync(session, cancellationToken),
-            "/history" or "/conversations" or "/load" => await HandleConversationLoadAsync(session, modelTurnStarted, cancellationToken),
-            _ => HarnessCommandResult.NotHandled
-        };
+            case "exit" or "quit" or "/exit" or "/quit":
+                state.RequestExit();
+                return true;
+
+            case "/help" or "/commands":
+                HandleHelpCommand();
+                return true;
+
+            case "/new" or "/new-session":
+                await HandleNewSessionAsync(session, state, cancellationToken);
+                return true;
+
+            case "/history" or "/conversations" or "/load":
+                await HandleConversationLoadAsync(session, state, cancellationToken);
+                return true;
+
+            default:
+                return false;
+        }
     }
 
-    private static HarnessCommandResult HandleHelpCommand()
+    private void HandleHelpCommand()
     {
-        Console.WriteLine("Harness commands:");
-        Console.WriteLine("/help, /commands - list harness commands");
-        Console.WriteLine("/new, /new-session - start a fresh conversation without leaving the harness");
-        Console.WriteLine("/history, /conversations, /load - load a saved conversation before the first prompt in the current session");
-        Console.WriteLine("/exit, /quit - leave the harness");
-        return HarnessCommandResult.Handled;
+        _terminal.WriteLine("Harness commands:");
+        _terminal.WriteLine("/help, /commands - list harness commands");
+        _terminal.WriteLine("/new, /new-session - start a fresh conversation without leaving the harness");
+        _terminal.WriteLine("/history, /conversations, /load - load a saved conversation before the first prompt in the current session");
+        _terminal.WriteLine("/exit, /quit - leave the harness");
     }
 
-    private async Task<HarnessCommandResult> HandleNewSessionAsync(
+    private async Task HandleNewSessionAsync(
         AgentHarnessSession session,
+        HarnessLoopState state,
         CancellationToken cancellationToken)
     {
         if (_conversationMemoryStore is not null)
@@ -59,56 +76,56 @@ internal sealed class HarnessCommandHandler
         }
 
         session.ReplaceMessages(_startupMessages);
-        Console.WriteLine("Started a new conversation.");
-        return HarnessCommandResult.NewSessionStarted;
+        state.ResetModelTurn();
+        _terminal.WriteLine("Started a new conversation.");
     }
 
-    private async Task<HarnessCommandResult> HandleConversationLoadAsync(
+    private async Task HandleConversationLoadAsync(
         AgentHarnessSession session,
-        bool modelTurnStarted,
+        HarnessLoopState state,
         CancellationToken cancellationToken)
     {
-        if (modelTurnStarted)
+        if (state.ModelTurnStarted)
         {
-            Console.WriteLine("Load a stored conversation before sending the first prompt in this session. Use /new first to start a fresh session.");
-            return HarnessCommandResult.Handled;
+            _terminal.WriteLine("Load a stored conversation before sending the first prompt in this session. Use /new first to start a fresh session.");
+            return;
         }
 
         if (_conversationMemoryStore is null)
         {
-            Console.WriteLine("Conversation history is not available for this session.");
-            return HarnessCommandResult.Handled;
+            _terminal.WriteLine("Conversation history is not available for this session.");
+            return;
         }
 
         var conversations = await _conversationMemoryStore.ListConversationsAsync(cancellationToken);
         if (conversations.Count == 0)
         {
-            Console.WriteLine("No stored conversations were found.");
-            return HarnessCommandResult.Handled;
+            _terminal.WriteLine("No stored conversations were found.");
+            return;
         }
 
-        Console.WriteLine("Stored conversations:");
+        _terminal.WriteLine("Stored conversations:");
         for (var i = 0; i < conversations.Count; i++)
         {
             var conversation = conversations[i];
             var currentMarker = conversation.IsCurrent ? " (current)" : "";
             var timestamp = conversation.LastTimestampUtc.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture);
             var promptPreview = FormatPromptPreview(conversation.FirstPrompt);
-            Console.WriteLine($"{i + 1}. {conversation.ConversationId}{currentMarker} | {conversation.MessageCount} messages | {timestamp} | {promptPreview}");
+            _terminal.WriteLine($"{i + 1}. {conversation.ConversationId}{currentMarker} | {conversation.MessageCount} messages | {timestamp} | {promptPreview}");
         }
 
-        Console.Write("Select conversation number to load, or press Enter to cancel: ");
-        var answer = Console.ReadLine();
+        _terminal.Write("Select conversation number to load, or press Enter to cancel: ");
+        var answer = _terminal.ReadLine();
         if (string.IsNullOrWhiteSpace(answer))
         {
-            Console.WriteLine("Conversation load cancelled.");
-            return HarnessCommandResult.Handled;
+            _terminal.WriteLine("Conversation load cancelled.");
+            return;
         }
 
         if (!int.TryParse(answer.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var selectedNumber) || selectedNumber < 1 || selectedNumber > conversations.Count)
         {
-            Console.WriteLine("Invalid conversation selection.");
-            return HarnessCommandResult.Handled;
+            _terminal.WriteLine("Invalid conversation selection.");
+            return;
         }
 
         var selectedConversation = conversations[selectedNumber - 1];
@@ -117,14 +134,12 @@ internal sealed class HarnessCommandHandler
             var conversationMessages = await _conversationMemoryStore.LoadConversationAsync(selectedConversation.ConversationId, cancellationToken);
             await _conversationMemoryStore.ResumeConversationAsync(selectedConversation.ConversationId, cancellationToken);
             session.ReplaceMessages(_startupMessages.Concat(conversationMessages).ToArray());
-            Console.WriteLine($"Loaded conversation `{selectedConversation.ConversationId}` ({conversationMessages.Count} messages).");
+            _terminal.WriteLine($"Loaded conversation `{selectedConversation.ConversationId}` ({conversationMessages.Count} messages).");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)
         {
-            Console.WriteLine($"Could not load conversation: {exception.Message}");
+            _terminal.WriteLine($"Could not load conversation: {exception.Message}");
         }
-
-        return HarnessCommandResult.Handled;
     }
 
     private static string FormatPromptPreview(string? prompt)

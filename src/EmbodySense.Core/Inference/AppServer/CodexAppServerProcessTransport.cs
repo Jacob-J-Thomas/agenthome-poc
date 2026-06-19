@@ -1,11 +1,13 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 
-namespace EmbodySense.Core.Inference.Implementations;
+namespace EmbodySense.Core.Inference.AppServer;
 
+[ExcludeFromCodeCoverage]
 internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
 {
     private readonly Process _process;

@@ -2,24 +2,23 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Audit;
-using EmbodySense.Core.Audit.Models;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Tools;
 
-namespace EmbodySense.Core.Inference.Implementations;
+namespace EmbodySense.Core.Inference.AppServer;
 
 internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
 {
     private const string ClientName = "embodysense";
     private const string ClientTitle = "EmbodySense";
     private const string ClientVersion = "0.1.0";
-    private const int MaxDeveloperInstructionContextCharacters = 24_000;
     private readonly LlmInferenceClientOptions _options;
     private ICodexAppServerTransport? _transport;
-    private readonly CodexAppServerToolBridge? _toolBridge;
+    private readonly ICodexAppServerToolBridge? _toolBridge;
+    private readonly ICodexAppServerContextBuilder _contextBuilder;
+    private readonly ICodexAppServerRequestHandler _requestHandler;
     private readonly string _runtimeDirectory;
-    private readonly AuditLog? _auditLog;
     private int _nextRequestId;
     private bool _initialized;
     private string? _threadId;
@@ -34,8 +33,10 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IRese
         _options = options;
         _transport = transport;
         _toolBridge = toolBroker is null ? null : new CodexAppServerToolBridge(toolBroker);
+        _contextBuilder = new CodexAppServerContextBuilder();
         _runtimeDirectory = CreateRuntimeDirectory();
-        _auditLog = AuditLog.TryCreateForExistingWorkspace(options.WorkingDirectory);
+        var auditLog = AuditLog.TryCreateForExistingWorkspace(options.WorkingDirectory);
+        _requestHandler = new CodexAppServerRequestHandler(_toolBridge, auditLog);
     }
 
     public async Task<LlmInferenceResponse> GenerateAsync(
@@ -238,7 +239,7 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IRese
         var parameters = new JsonObject
         {
             ["cwd"] = _runtimeDirectory,
-            ["developerInstructions"] = CreateDeveloperInstructions(request),
+            ["developerInstructions"] = _contextBuilder.CreateDeveloperInstructions(request),
             ["ephemeral"] = true,
             ["approvalPolicy"] = CreateGranularApprovalPolicy(),
             ["sandbox"] = NormalizeSandboxMode(_options.CodexSandbox),
@@ -288,106 +289,14 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IRese
         };
     }
 
-    private static string CreateDeveloperInstructions(LlmInferenceRequest request)
-    {
-        var builder = new StringBuilder();
-        builder.AppendLine("""
-            You are running inside EmbodySense through the Codex app-server protocol.
-
-            EmbodySense governs the user workspace. Do not use Codex-native shell, filesystem, MCP, browser, web-search, subagent, or permission-escalation tools for workspace actions. The app-server working directory is an inert runtime directory, not the user workspace.
-
-            For any workspace action, use only the `embodysense.command` dynamic tool. It enforces `.agent/permissions.json`, routes approval when required, and writes EmbodySense audit events. Do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.
-            """);
-
-        var restoredContext = FormatRestoredContext(request);
-        if (!string.IsNullOrWhiteSpace(restoredContext))
-        {
-            builder.AppendLine();
-            builder.AppendLine(restoredContext);
-        }
-
-        return builder.ToString().TrimEnd();
-    }
-
-    private static string FormatRestoredContext(LlmInferenceRequest request)
-    {
-        var latestUserIndex = FindLatestUserMessageIndex(request.Messages);
-        var contextMessages = request.Messages
-            .Take(latestUserIndex)
-            .Where(message => message.Role is LlmMessageRole.System or LlmMessageRole.User or LlmMessageRole.Assistant)
-            .ToArray();
-
-        if (contextMessages.Length == 0)
-        {
-            return "";
-        }
-
-        var builder = new StringBuilder();
-        builder.AppendLine("Restored EmbodySense context for this fresh provider thread:");
-        foreach (var message in contextMessages)
-        {
-            builder.AppendLine();
-            builder.AppendLine($"[{message.Role.ToString().ToLowerInvariant()}]");
-            builder.AppendLine(message.Content.Trim());
-        }
-
-        var context = builder.ToString().TrimEnd();
-        return context.Length <= MaxDeveloperInstructionContextCharacters
-            ? context
-            : context[^MaxDeveloperInstructionContextCharacters..];
-    }
-
-    private static int FindLatestUserMessageIndex(IReadOnlyList<LlmMessage> messages)
-    {
-        for (var i = messages.Count - 1; i >= 0; i--)
-        {
-            if (messages[i].Role == LlmMessageRole.User)
-            {
-                return i;
-            }
-        }
-
-        return messages.Count;
-    }
-
     private async Task HandleServerRequestAsync(JsonElement message, CancellationToken cancellationToken)
     {
         var requestId = message.GetProperty("id").Clone();
         var method = GetRequiredString(message, "method");
         var parameters = message.GetProperty("params");
-
-        JsonObject? result = method switch
+        var handling = await _requestHandler.HandleAsync(method, parameters, cancellationToken);
+        if (!handling.Handled || handling.Result is null)
         {
-            "item/tool/call" when _toolBridge is not null => await _toolBridge.HandleToolCallAsync(parameters, cancellationToken),
-            "item/commandExecution/requestApproval" => new JsonObject { ["decision"] = "decline" },
-            "item/fileChange/requestApproval" => new JsonObject { ["decision"] = "decline" },
-            "applyPatchApproval" => new JsonObject { ["decision"] = "decline" },
-            "execCommandApproval" => new JsonObject { ["decision"] = "decline" },
-            "item/permissions/requestApproval" => new JsonObject
-            {
-                ["permissions"] = new JsonObject
-                {
-                    ["fileSystem"] = null,
-                    ["network"] = null
-                },
-                ["scope"] = "turn",
-                ["strictAutoReview"] = true
-            },
-            "mcpServer/elicitation/request" => new JsonObject
-            {
-                ["action"] = "decline",
-                ["content"] = null
-            },
-            "item/tool/requestUserInput" => new JsonObject
-            {
-                ["answers"] = new JsonObject()
-            },
-            _ => null
-        };
-
-        if (result is null)
-        {
-            await RecordAppServerRequestAsync(method, parameters, AuditSchema.Outcomes.Failed, "Rejected unsupported Codex app-server request.", cancellationToken);
             await SendAsync(new JsonObject
             {
                 ["id"] = JsonNode.Parse(requestId.GetRawText()),
@@ -400,79 +309,11 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IRese
             return;
         }
 
-        var outcome = GetHandledRequestOutcome(method, result);
-        await RecordAppServerRequestAsync(method, parameters, outcome, GetHandledRequestDetail(method, outcome), cancellationToken);
         await SendAsync(new JsonObject
         {
             ["id"] = JsonNode.Parse(requestId.GetRawText()),
-            ["result"] = result
+            ["result"] = handling.Result
         }, cancellationToken);
-    }
-
-    private Task RecordAppServerRequestAsync(
-        string method,
-        JsonElement parameters,
-        string outcome,
-        string detail,
-        CancellationToken cancellationToken)
-    {
-        if (_auditLog is null)
-        {
-            return Task.CompletedTask;
-        }
-
-        return _auditLog.AppendAsync(AuditEvent.Create(
-            actor: AuditSchema.Actors.Llm,
-            action: AuditSchema.Actions.LlmAppServerRequest,
-            target: method,
-            outcome: outcome,
-            detail: detail,
-            metadata: CreateAppServerRequestMetadata(method, parameters)), cancellationToken);
-    }
-
-    private static Dictionary<string, object?> CreateAppServerRequestMetadata(string method, JsonElement parameters)
-    {
-        var metadata = new Dictionary<string, object?>
-        {
-            ["method"] = method,
-            ["thread_id"] = TryGetString(parameters, "threadId"),
-            ["turn_id"] = TryGetString(parameters, "turnId"),
-            ["item_id"] = TryGetString(parameters, "itemId"),
-            ["call_id"] = TryGetString(parameters, "callId"),
-            ["namespace"] = TryGetString(parameters, "namespace"),
-            ["tool"] = TryGetString(parameters, "tool")
-        };
-
-        return metadata
-            .Where(item => item.Value is not null)
-            .ToDictionary(item => item.Key, item => item.Value);
-    }
-
-    private static string GetHandledRequestOutcome(string method, JsonObject result)
-    {
-        if (method != "item/tool/call")
-        {
-            return AuditSchema.Outcomes.Denied;
-        }
-
-        return IsSuccessfulToolResult(result) ? AuditSchema.Outcomes.Succeeded : AuditSchema.Outcomes.Failed;
-    }
-
-    private static string GetHandledRequestDetail(string method, string outcome)
-    {
-        if (method != "item/tool/call")
-        {
-            return "Declined native Codex app-server request.";
-        }
-
-        return outcome == AuditSchema.Outcomes.Succeeded
-            ? "Handled Codex app-server dynamic tool request."
-            : "Rejected Codex app-server dynamic tool request.";
-    }
-
-    private static bool IsSuccessfulToolResult(JsonObject result)
-    {
-        return result.TryGetPropertyValue("success", out var success) && success is not null && success.GetValue<bool>();
     }
 
     private async Task SendRequestAsync(string method, int requestId, JsonObject parameters, CancellationToken cancellationToken)

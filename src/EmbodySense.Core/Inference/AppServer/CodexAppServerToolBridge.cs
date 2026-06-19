@@ -1,11 +1,12 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Tools;
 using EmbodySense.Core.Tools.Models;
 
-namespace EmbodySense.Core.Inference.Implementations;
+namespace EmbodySense.Core.Inference.AppServer;
 
-internal sealed class CodexAppServerToolBridge
+internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
 {
     private const string Namespace = "embodysense";
     private readonly IToolBroker _toolBroker;
