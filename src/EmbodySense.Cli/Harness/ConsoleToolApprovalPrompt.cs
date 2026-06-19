@@ -1,5 +1,5 @@
-using EmbodySense.Core.Tools;
-using EmbodySense.Core.Tools.Models;
+using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.Governance.Tools.Models;
 
 namespace EmbodySense.Cli.Harness;
 

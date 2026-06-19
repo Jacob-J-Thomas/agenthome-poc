@@ -1,5 +1,5 @@
 using EmbodySense.Cli.Common;
-using EmbodySense.Core.Harness;
+using EmbodySense.Core.Application.Harness;
 
 namespace EmbodySense.Cli.Harness;
 

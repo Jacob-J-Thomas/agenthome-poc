@@ -1,6 +1,6 @@
 using EmbodySense.Cli.Command.Models;
-using EmbodySense.Core.Workspace;
-using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Core.Persistence.Workspace;
+using EmbodySense.Core.Persistence.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 

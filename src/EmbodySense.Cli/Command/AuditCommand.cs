@@ -1,8 +1,8 @@
 using System.Text.Json;
 using EmbodySense.Cli.Command.Models;
-using EmbodySense.Core.Audit;
-using EmbodySense.Core.Audit.Models;
-using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Core.Application.Governance.Audit.Models;
+using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Persistence.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 

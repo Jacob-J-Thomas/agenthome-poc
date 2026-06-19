@@ -1,7 +1,7 @@
 using System.Globalization;
-using EmbodySense.Core.Harness;
-using EmbodySense.Core.Inference.Models;
-using EmbodySense.Core.Memory;
+using EmbodySense.Core.Application.Harness;
+using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Application.Memory;
 
 namespace EmbodySense.Cli.Harness;
 

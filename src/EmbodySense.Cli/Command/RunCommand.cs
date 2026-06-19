@@ -1,13 +1,9 @@
 using EmbodySense.Cli.Harness;
 using EmbodySense.Cli.Command.Models;
-using EmbodySense.Core.Context;
-using EmbodySense.Core.Harness;
-using EmbodySense.Core.Inference.Services;
-using EmbodySense.Core.Memory;
-using EmbodySense.Core.Permissions;
-using EmbodySense.Core.Tools;
-using EmbodySense.Core.Workspace;
-using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Core.Application.Runtime;
+using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Persistence.Workspace;
+using EmbodySense.Core.Persistence.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 
@@ -29,17 +25,10 @@ internal static class RunCommand
             await new WorkspaceInitializer().InitializeAsync(options.WorkingDirectory);
         }
 
-        var permissionPolicy = DirectoryPermissionPolicy.Load(paths);
-        var permissionService = new ToolPermissionService(paths, permissionPolicy);
-        var toolBroker = new ToolBroker(paths, permissionService, new ConsoleToolApprovalPrompt());
-        var conversationMemory = new ConversationMemoryStore(paths);
-        var startupContext = await new AgentContextProvider().LoadAsync(paths);
-        await conversationMemory.StartFreshConversationAsync();
-        await using var inferenceClient = new LlmInferenceClient(options.ToInferenceClientOptions(), toolBroker);
-        var session = new AgentHarnessSession(inferenceClient, conversationMemory, startupContext);
-        var commandHandler = new HarnessCommandHandler(conversationMemory, startupContext);
+        await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt()).CreateAsync(options.ToInferenceClientOptions());
+        var commandHandler = new HarnessCommandHandler(runtime.ConversationMemory, runtime.StartupContext);
 
-        return await AgentHarnessLoop.RunHarnessLoopAsync(session, commandHandler);
+        return await AgentHarnessLoop.RunHarnessLoopAsync(runtime.Session, commandHandler);
     }
 
     private static bool ConfirmWorkspaceInitialization(WorkspacePaths paths)

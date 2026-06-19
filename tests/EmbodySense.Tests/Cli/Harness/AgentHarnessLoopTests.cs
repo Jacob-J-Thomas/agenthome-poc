@@ -1,8 +1,8 @@
 using System.Text;
 using EmbodySense.Cli.Harness;
-using EmbodySense.Core.Harness;
-using EmbodySense.Core.Inference.Interfaces;
-using EmbodySense.Core.Inference.Models;
+using EmbodySense.Core.Application.Harness;
+using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Inference.Models;
 
 namespace EmbodySense.Tests.Cli.Harness;
 

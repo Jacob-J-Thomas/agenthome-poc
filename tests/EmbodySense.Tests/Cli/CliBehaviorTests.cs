@@ -1,12 +1,14 @@
 using System.Diagnostics;
 using System.Text.Json;
-using EmbodySense.Core.Audit;
-using EmbodySense.Core.Audit.Models;
-using EmbodySense.Core.Inference.Models;
-using EmbodySense.Core.Memory;
-using EmbodySense.Core.Memory.Models;
-using EmbodySense.Core.Workspace;
-using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Governance.Audit.Models;
+using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Application.Memory;
+using EmbodySense.Core.Application.Memory.Models;
+using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Workspace;
+using EmbodySense.Core.Persistence.Workspace.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Tests.Cli;

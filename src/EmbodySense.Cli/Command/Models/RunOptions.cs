@@ -1,4 +1,4 @@
-using EmbodySense.Core.Inference.Models;
+using EmbodySense.Core.Application.Inference.Models;
 
 namespace EmbodySense.Cli.Command.Models;
 

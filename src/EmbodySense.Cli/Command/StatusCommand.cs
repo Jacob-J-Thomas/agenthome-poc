@@ -1,7 +1,8 @@
 using EmbodySense.Cli.Command.Models;
-using EmbodySense.Core.Permissions;
-using EmbodySense.Core.Permissions.Models;
-using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Core.Application.Governance.Permissions;
+using EmbodySense.Core.Application.Governance.Permissions.Models;
+using EmbodySense.Core.Persistence.Permissions;
+using EmbodySense.Core.Persistence.Workspace.Models;
 
 namespace EmbodySense.Cli.Command;
 
@@ -20,7 +21,7 @@ public static class StatusCommand
         Console.WriteLine($"Permissions:   {paths.PermissionsPath}");
         Console.WriteLine($"Tasks path:    {paths.TasksPath}");
 
-        var permissions = DirectoryPermissionPolicy.Load(paths);
+        var permissions = new PermissionPolicyStore().Load(paths);
         Console.WriteLine($"Default access: {FormatDefaultAccess(permissions)}");
         Console.WriteLine($"Approved:       {FormatApprovedEntries(permissions.Approved)}");
         Console.WriteLine($"Denied:         {FormatDeniedEntries(permissions.Denied)}");
