@@ -4,7 +4,7 @@ using EmbodySense.Core.Harness;
 using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Cli.Harness;
 
 public sealed class AgentHarnessLoopTests
 {

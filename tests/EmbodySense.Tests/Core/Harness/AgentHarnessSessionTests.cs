@@ -3,8 +3,9 @@ using EmbodySense.Core.Inference.Interfaces;
 using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Memory;
 using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Core.Harness;
 
 public sealed class AgentHarnessSessionTests
 {

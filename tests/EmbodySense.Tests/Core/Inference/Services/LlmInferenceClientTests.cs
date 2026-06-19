@@ -4,8 +4,9 @@ using EmbodySense.Core.Inference.Services;
 using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Workspace;
 using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Core.Inference.Services;
 
 public sealed class LlmInferenceClientTests
 {

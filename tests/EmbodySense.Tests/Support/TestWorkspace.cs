@@ -1,4 +1,4 @@
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Support;
 
 internal sealed class TestWorkspace : IDisposable
 {

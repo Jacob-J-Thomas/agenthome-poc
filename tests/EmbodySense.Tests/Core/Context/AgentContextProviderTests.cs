@@ -1,8 +1,9 @@
 using EmbodySense.Core.Context;
 using EmbodySense.Core.Inference.Models;
 using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Core.Context;
 
 public sealed class AgentContextProviderTests
 {

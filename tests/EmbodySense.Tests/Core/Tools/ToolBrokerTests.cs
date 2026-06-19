@@ -5,8 +5,9 @@ using EmbodySense.Core.Tools;
 using EmbodySense.Core.Tools.Models;
 using EmbodySense.Core.Workspace;
 using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Core.Tools;
 
 public sealed class ToolBrokerTests
 {

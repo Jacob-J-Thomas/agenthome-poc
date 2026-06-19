@@ -1,6 +1,7 @@
 using EmbodySense.Core.Workspace;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Core.Workspace;
 
 public sealed class WorkspaceInitializerTests
 {

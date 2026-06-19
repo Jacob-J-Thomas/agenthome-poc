@@ -1,8 +1,9 @@
 using EmbodySense.Core.Audit;
 using EmbodySense.Core.Audit.Models;
 using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Core.Audit;
 
 public sealed class AuditLogTests
 {

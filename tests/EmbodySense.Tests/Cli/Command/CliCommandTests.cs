@@ -9,8 +9,9 @@ using EmbodySense.Core.Permissions.Models;
 using EmbodySense.Core.Tools.Models;
 using EmbodySense.Core.Workspace;
 using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Cli.Command;
 
 public sealed class CliCommandTests
 {

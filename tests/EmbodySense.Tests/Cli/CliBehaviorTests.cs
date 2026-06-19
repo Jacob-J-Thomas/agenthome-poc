@@ -7,8 +7,9 @@ using EmbodySense.Core.Memory;
 using EmbodySense.Core.Memory.Models;
 using EmbodySense.Core.Workspace;
 using EmbodySense.Core.Workspace.Models;
+using EmbodySense.Tests.Support;
 
-namespace EmbodySense.Tests;
+namespace EmbodySense.Tests.Cli;
 
 public sealed class CliBehaviorTests
 {
