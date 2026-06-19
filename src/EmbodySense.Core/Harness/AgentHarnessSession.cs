@@ -30,6 +30,7 @@ public sealed class AgentHarnessSession
 
         _messages.Clear();
         _messages.AddRange(messages);
+        if (_inferenceClient is IResettableInferenceClient resettableClient) resettableClient.ResetConversation();
     }
 
     public async Task<LlmInferenceResponse> SendUserMessageAsync(

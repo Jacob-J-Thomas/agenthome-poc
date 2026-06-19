@@ -9,7 +9,7 @@ using EmbodySense.Core.Tools;
 
 namespace EmbodySense.Core.Inference.Implementations;
 
-internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IAsyncDisposable
+internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
 {
     private const string ClientName = "embodysense";
     private const string ClientTitle = "EmbodySense";
@@ -147,6 +147,11 @@ internal sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IAsyn
         catch (UnauthorizedAccessException)
         {
         }
+    }
+
+    public void ResetConversation()
+    {
+        _threadId = null;
     }
 
     private async Task EnsureThreadAsync(LlmInferenceRequest request, CancellationToken cancellationToken)

@@ -32,9 +32,35 @@ internal sealed class HarnessCommandHandler
         return command switch
         {
             "exit" or "quit" or "/exit" or "/quit" => HarnessCommandResult.ExitRequested,
+            "/help" or "/commands" => HandleHelpCommand(),
+            "/new" or "/new-session" => await HandleNewSessionAsync(session, cancellationToken),
             "/history" or "/conversations" or "/load" => await HandleConversationLoadAsync(session, modelTurnStarted, cancellationToken),
             _ => HarnessCommandResult.NotHandled
         };
+    }
+
+    private static HarnessCommandResult HandleHelpCommand()
+    {
+        Console.WriteLine("Harness commands:");
+        Console.WriteLine("/help, /commands - list harness commands");
+        Console.WriteLine("/new, /new-session - start a fresh conversation without leaving the harness");
+        Console.WriteLine("/history, /conversations, /load - load a saved conversation before the first prompt in the current session");
+        Console.WriteLine("/exit, /quit - leave the harness");
+        return HarnessCommandResult.Handled;
+    }
+
+    private async Task<HarnessCommandResult> HandleNewSessionAsync(
+        AgentHarnessSession session,
+        CancellationToken cancellationToken)
+    {
+        if (_conversationMemoryStore is not null)
+        {
+            await _conversationMemoryStore.StartFreshConversationAsync(cancellationToken);
+        }
+
+        session.ReplaceMessages(_startupMessages);
+        Console.WriteLine("Started a new conversation.");
+        return HarnessCommandResult.NewSessionStarted;
     }
 
     private async Task<HarnessCommandResult> HandleConversationLoadAsync(
@@ -44,7 +70,7 @@ internal sealed class HarnessCommandHandler
     {
         if (modelTurnStarted)
         {
-            Console.WriteLine("Load a stored conversation before sending the first prompt in this run. Exit and run again to load a different transcript.");
+            Console.WriteLine("Load a stored conversation before sending the first prompt in this session. Use /new first to start a fresh session.");
             return HarnessCommandResult.Handled;
         }
 

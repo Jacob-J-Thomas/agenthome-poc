@@ -4,5 +4,6 @@ internal enum HarnessCommandResult
 {
     NotHandled = 0,
     Handled = 1,
-    ExitRequested = 2
+    ExitRequested = 2,
+    NewSessionStarted = 3
 }

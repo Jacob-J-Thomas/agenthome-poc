@@ -100,11 +100,12 @@ public sealed class AgentHarnessSessionTests
     [Fact]
     public void ReplaceMessages_replaces_in_memory_conversation_state()
     {
-        var client = new ScriptedInferenceClient("unused");
+        var client = new ResettableInferenceClient();
         var session = new AgentHarnessSession(client, initialMessages: [LlmMessage.User("old prompt")]);
 
         session.ReplaceMessages([LlmMessage.User("loaded prompt")]);
 
+        Assert.Equal(1, client.ResetCount);
         var message = Assert.Single(session.Messages);
         Assert.Equal("loaded prompt", message.Content);
     }
@@ -138,6 +139,24 @@ public sealed class AgentHarnessSessionTests
             }
 
             return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex);
+        }
+    }
+
+    private sealed class ResettableInferenceClient : ILlmInferenceClient, IResettableInferenceClient
+    {
+        public int ResetCount { get; private set; }
+
+        public void ResetConversation()
+        {
+            ResetCount++;
+        }
+
+        public Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler = null,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
         }
     }
 }

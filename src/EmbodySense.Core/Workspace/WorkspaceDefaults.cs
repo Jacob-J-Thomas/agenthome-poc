@@ -109,7 +109,7 @@ internal static class WorkspaceDefaults
 
             `conversations/current.ndjson` is the active conversation transcript as JSON lines. Each run starts with a fresh active transcript, moving any non-empty previous `current.ndjson` into `conversations/archive/` first.
 
-            Additional `.ndjson` files in `conversations/` and `conversations/archive/` are saved transcripts that can be listed and loaded from the harness loop with `/history`.
+            Additional `.ndjson` files in `conversations/` and `conversations/archive/` are saved transcripts that can be listed and loaded from the harness loop with `/history`. Use `/new` to start another fresh active transcript without leaving the harness.
 
             Conversation history is supporting transcript evidence, not the normal memory system of record. Query it only when exact wording, chronology, or missing undistilled context matters, then distill durable takeaways into `.agent/MEMORY.md`.
 

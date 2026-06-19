@@ -7,7 +7,7 @@ using EmbodySense.Core.Tools;
 
 namespace EmbodySense.Core.Inference.Implementations;
 
-public sealed class LlmInferenceClient : ILlmInferenceClient, IAsyncDisposable
+public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
 {
     private readonly LlmInferenceClientOptions _options;
     private readonly ILlmInferenceClient _innerClient;
@@ -58,6 +58,14 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IAsyncDisposable
         else if (_innerClient is IDisposable disposable)
         {
             disposable.Dispose();
+        }
+    }
+
+    public void ResetConversation()
+    {
+        if (_innerClient is IResettableInferenceClient resettableClient)
+        {
+            resettableClient.ResetConversation();
         }
     }
 

@@ -153,6 +153,43 @@ public sealed class CliBehaviorTests
             });
     }
 
+    [Fact]
+    public async Task Run_command_help_command_lists_harness_commands()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        var result = await RunCliWithInputAsync("/help" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Harness commands:", result.Output);
+        Assert.Contains("/new, /new-session", result.Output);
+        Assert.Contains("/history, /conversations, /load", result.Output);
+        Assert.Contains("/exit, /quit", result.Output);
+    }
+
+    [Fact]
+    public async Task Run_command_new_command_starts_fresh_conversation_without_exiting()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteConversationAsync(
+            paths,
+            "saved-conversation",
+            Entry("saved-conversation", 1, "user", "saved prompt"),
+            Entry("saved-conversation", 2, "assistant", "saved answer"));
+
+        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/new" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Loaded conversation `saved-conversation` (2 messages).", result.Output);
+        Assert.Contains("Started a new conversation.", result.Output);
+        Assert.Equal("", await File.ReadAllTextAsync(paths.CurrentConversationPath));
+        var archivedPath = Assert.Single(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
+        Assert.Contains("saved prompt", await File.ReadAllTextAsync(archivedPath));
+    }
+
     [Theory]
     [InlineData("--persist-session")]
     [InlineData("--approval")]

@@ -43,6 +43,12 @@ internal static class AgentHarnessLoop
                         break;
                     }
 
+                    if (commandResult == HarnessCommandResult.NewSessionStarted)
+                    {
+                        modelTurnStarted = false;
+                        break;
+                    }
+
                     var wroteResponseChunk = false;
                     var responseEndedWithNewLine = false;
                     var response = await session.SendUserMessageAsync(input, (chunk, _) =>
