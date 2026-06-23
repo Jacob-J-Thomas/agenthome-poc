@@ -1,4 +1,5 @@
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Workspace;
@@ -25,5 +26,17 @@ public sealed class WorkspaceInitializerTests
         var memoryReadme = await File.ReadAllTextAsync(workspace.File(".agent", "memory", "README.md"));
         Assert.Contains("The primary durable memory registry is `.agent/MEMORY.md`.", memoryReadme);
         Assert.Contains("Conversation history is supporting transcript evidence", memoryReadme);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_defaults_workspace_init_audit_to_web_actor()
+    {
+        using var workspace = new TestWorkspace();
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        var auditText = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson"));
+        Assert.Contains(AuditSchema.Actors.Web, auditText);
+        Assert.DoesNotContain(AuditSchema.Actors.Cli, auditText);
     }
 }

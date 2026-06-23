@@ -23,6 +23,7 @@ public sealed class CliCommandTests
         Assert.Contains("Initialized EmbodySense workspace at", result.Output, StringComparison.Ordinal);
         Assert.Contains("Permissions:", result.Output, StringComparison.Ordinal);
         Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
+        Assert.Contains(AuditSchema.Actors.Cli, await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson")));
         Assert.Equal("", result.Error);
     }
 

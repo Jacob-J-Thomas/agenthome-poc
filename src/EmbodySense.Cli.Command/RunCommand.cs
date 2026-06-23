@@ -1,4 +1,5 @@
 using EmbodySense.Cli.Command.Models;
+using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Harness;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -22,7 +23,7 @@ public static class RunCommand
                 return 1;
             }
 
-            await new WorkspaceInitializer().InitializeAsync(options.WorkingDirectory);
+            await new WorkspaceInitializer(AuditSchema.Actors.Cli).InitializeAsync(options.WorkingDirectory);
         }
 
         var client = ConsoleHarnessTerminal.Instance;

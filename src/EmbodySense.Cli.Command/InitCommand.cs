@@ -1,4 +1,5 @@
 using EmbodySense.Cli.Command.Models;
+using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
 
@@ -9,7 +10,7 @@ public static class InitCommand
     public static async Task<int> RunAsync(CliArguments arguments)
     {
         var root = arguments.At(1) ?? Directory.GetCurrentDirectory();
-        var initializer = new WorkspaceInitializer();
+        var initializer = new WorkspaceInitializer(AuditSchema.Actors.Cli);
         await initializer.InitializeAsync(root);
         var paths = new WorkspacePaths(root);
         Console.WriteLine($"Initialized EmbodySense workspace at {Path.GetFullPath(root)}");

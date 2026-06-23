@@ -11,6 +11,7 @@ public sealed class WorkspaceScaffolder
         WorkspacePaths paths,
         IReadOnlyList<string> directories,
         IReadOnlyList<WorkspaceSeedFile> seedFiles,
+        string actor = AuditSchema.Actors.Web,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -29,7 +30,7 @@ public sealed class WorkspaceScaffolder
 
         var audit = new AuditLog(paths);
         await audit.AppendAsync(AuditEvent.Create(
-            actor: AuditSchema.Actors.Cli,
+            actor: actor,
             action: AuditSchema.Actions.WorkspaceInit,
             target: paths.RootPath,
             outcome: AuditSchema.Outcomes.Succeeded,

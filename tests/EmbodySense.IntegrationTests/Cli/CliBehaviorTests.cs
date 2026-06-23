@@ -70,7 +70,9 @@ public sealed class CliBehaviorTests
         Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
         Assert.True(File.Exists(workspace.File(".agent", "memory", "README.md")));
         Assert.True(Directory.Exists(workspace.File(".agent", "memory", "conversations")));
-        Assert.Contains("workspace.init", await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson")));
+        var auditText = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson"));
+        Assert.Contains("workspace.init", auditText);
+        Assert.Contains("embodysense.cli", auditText);
     }
 
     [Fact]
