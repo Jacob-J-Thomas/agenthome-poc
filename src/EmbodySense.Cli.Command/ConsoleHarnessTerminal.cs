@@ -1,6 +1,6 @@
 using EmbodySense.Core.Application.Harness;
 
-namespace EmbodySense.Cli.Harness;
+namespace EmbodySense.Cli.Command;
 
 public sealed class ConsoleHarnessTerminal : IHarnessClient
 {

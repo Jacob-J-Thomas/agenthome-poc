@@ -14,7 +14,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\EmbodySense.Cli\EmbodySense.Cli.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Cli.Command\EmbodySense.Cli.Command.csproj" />
-    <ProjectReference Include="..\..\src\EmbodySense.Cli.Harness\EmbodySense.Cli.Harness.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Application\EmbodySense.Core.Application.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Clients\EmbodySense.Core.Clients.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Common\EmbodySense.Core.Common.csproj" />

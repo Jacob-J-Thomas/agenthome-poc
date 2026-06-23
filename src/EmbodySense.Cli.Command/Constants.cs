@@ -1,8 +1,8 @@
-namespace EmbodySense.Cli.Common;
+namespace EmbodySense.Cli.Command;
 
-public static class Constants
+internal static class Constants
 {
-    public static string HarnessBanner => """
+    public static string Banner => """
         ============================================================
           EMBODYSENSE HARNESS
           Local-first agency, explicit boundaries, auditable action.

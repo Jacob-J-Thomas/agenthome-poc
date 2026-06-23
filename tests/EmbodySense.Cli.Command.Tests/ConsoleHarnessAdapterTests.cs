@@ -5,7 +5,7 @@ using EmbodySense.Core.Application.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.Harness;
 
-namespace EmbodySense.Cli.Harness.Tests;
+namespace EmbodySense.Cli.Command.Tests;
 
 public sealed class ConsoleHarnessAdapterTests
 {

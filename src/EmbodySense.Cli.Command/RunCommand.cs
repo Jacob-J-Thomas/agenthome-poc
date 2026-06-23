@@ -1,5 +1,3 @@
-using EmbodySense.Cli.Common;
-using EmbodySense.Cli.Harness;
 using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Application.Harness;
 using EmbodySense.Core.Startup.Runtime;
@@ -30,7 +28,7 @@ public static class RunCommand
         var client = ConsoleHarnessTerminal.Instance;
         await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client)).CreateAsync(options.ToInferenceClientOptions());
         var commandHandler = new HarnessCommandHandler(client, runtime.ConversationMemory, runtime.StartupContext);
-        var loopOptions = new AgentHarnessLoopOptions { Banner = Constants.HarnessBanner };
+        var loopOptions = new AgentHarnessLoopOptions { Banner = Constants.Banner };
 
         return await AgentHarnessLoop.RunHarnessLoopAsync(runtime.Session, client, commandHandler, loopOptions);
     }

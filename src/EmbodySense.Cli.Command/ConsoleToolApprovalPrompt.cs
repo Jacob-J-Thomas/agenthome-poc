@@ -2,7 +2,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.Harness;
 
-namespace EmbodySense.Cli.Harness;
+namespace EmbodySense.Cli.Command;
 
 public sealed class ConsoleToolApprovalPrompt : IToolApprovalPrompt
 {
