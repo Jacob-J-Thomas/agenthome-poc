@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\EmbodySense.Cli.Common\EmbodySense.Cli.Common.csproj" />
     <ProjectReference Include="..\EmbodySense.Core.Application\EmbodySense.Core.Application.csproj" />
   </ItemGroup>
 

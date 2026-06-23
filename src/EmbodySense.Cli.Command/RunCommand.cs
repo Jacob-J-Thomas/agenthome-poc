@@ -1,5 +1,7 @@
+using EmbodySense.Cli.Common;
 using EmbodySense.Cli.Harness;
 using EmbodySense.Cli.Command.Models;
+using EmbodySense.Core.Application.Harness;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Startup.Workspace;
@@ -25,10 +27,12 @@ public static class RunCommand
             await new WorkspaceInitializer().InitializeAsync(options.WorkingDirectory);
         }
 
-        await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt()).CreateAsync(options.ToInferenceClientOptions());
-        var commandHandler = new HarnessCommandHandler(runtime.ConversationMemory, runtime.StartupContext);
+        var client = ConsoleHarnessTerminal.Instance;
+        await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client)).CreateAsync(options.ToInferenceClientOptions());
+        var commandHandler = new HarnessCommandHandler(client, runtime.ConversationMemory, runtime.StartupContext);
+        var loopOptions = new AgentHarnessLoopOptions { Banner = Constants.HarnessBanner };
 
-        return await AgentHarnessLoop.RunHarnessLoopAsync(runtime.Session, commandHandler);
+        return await AgentHarnessLoop.RunHarnessLoopAsync(runtime.Session, client, commandHandler, loopOptions);
     }
 
     private static bool ConfirmWorkspaceInitialization(WorkspacePaths paths)

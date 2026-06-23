@@ -1,28 +1,32 @@
-using EmbodySense.Cli.Common;
-using EmbodySense.Core.Application.Harness;
-
-namespace EmbodySense.Cli.Harness;
+namespace EmbodySense.Core.Application.Harness;
 
 public static class AgentHarnessLoop
 {
     public static async Task<int> RunHarnessLoopAsync(
         AgentHarnessSession session,
+        IHarnessClient client,
         HarnessCommandHandler? commandHandler = null,
-        IHarnessTerminal? terminal = null,
+        AgentHarnessLoopOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(client);
 
-        terminal ??= ConsoleHarnessTerminal.Instance;
-        commandHandler ??= new HarnessCommandHandler(terminal: terminal);
-        terminal.WriteLine(Constants.HarnessBanner);
+        options ??= new AgentHarnessLoopOptions();
+        commandHandler ??= new HarnessCommandHandler(client);
+
+        if (!string.IsNullOrEmpty(options.Banner))
+        {
+            client.WriteLine(options.Banner);
+        }
+
         var state = new HarnessLoopState();
 
         while (!state.ExitRequested)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            terminal.Write("> ");
-            var input = terminal.ReadLine();
+            client.Write(options.Prompt);
+            var input = client.ReadLine();
 
             switch (input)
             {
@@ -45,7 +49,7 @@ public static class AgentHarnessLoop
                     {
                         if (!string.IsNullOrEmpty(chunk))
                         {
-                            terminal.Write(chunk);
+                            client.Write(chunk);
                             wroteResponseChunk = true;
                             responseEndedWithNewLine = EndsWithNewLine(chunk);
                         }
@@ -55,11 +59,11 @@ public static class AgentHarnessLoop
 
                     if (!wroteResponseChunk)
                     {
-                        terminal.WriteLine(response.OutputText);
+                        client.WriteLine(response.OutputText);
                     }
                     else if (!responseEndedWithNewLine)
                     {
-                        terminal.WriteLine();
+                        client.WriteLine();
                     }
 
                     state.MarkModelTurnStarted();

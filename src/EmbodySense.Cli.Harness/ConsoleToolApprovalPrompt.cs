@@ -1,15 +1,16 @@
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Application.Harness;
 
 namespace EmbodySense.Cli.Harness;
 
 public sealed class ConsoleToolApprovalPrompt : IToolApprovalPrompt
 {
-    private readonly IHarnessTerminal _terminal;
+    private readonly IHarnessClient _client;
 
-    public ConsoleToolApprovalPrompt(IHarnessTerminal? terminal = null)
+    public ConsoleToolApprovalPrompt(IHarnessClient? client = null)
     {
-        _terminal = terminal ?? ConsoleHarnessTerminal.Instance;
+        _client = client ?? ConsoleHarnessTerminal.Instance;
     }
 
     public Task<ToolApprovalResponse> RequestApprovalAsync(ToolApprovalRequest request, CancellationToken cancellationToken = default)
@@ -17,17 +18,17 @@ public sealed class ConsoleToolApprovalPrompt : IToolApprovalPrompt
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
 
-        _terminal.WriteLine();
-        _terminal.WriteLine("Tool approval required");
-        _terminal.WriteLine($"Tool:       {request.ToolRequest.Command.ToString().ToLowerInvariant()}");
-        _terminal.WriteLine($"Target:     {request.ToolRequest.TargetPath}");
-        _terminal.WriteLine($"Resolved:   {request.ResolvedPath}");
-        _terminal.WriteLine($"Operation:  {request.Operation.ToString().ToLowerInvariant()}");
-        _terminal.WriteLine($"Matched:    {FormatMatchedPath(request.PermissionEvaluation.MatchedPath)}");
-        _terminal.WriteLine($"Reason:     {request.PermissionEvaluation.Detail}");
-        _terminal.Write("Approve this tool request? [y/N] ");
+        _client.WriteLine();
+        _client.WriteLine("Tool approval required");
+        _client.WriteLine($"Tool:       {request.ToolRequest.Command.ToString().ToLowerInvariant()}");
+        _client.WriteLine($"Target:     {request.ToolRequest.TargetPath}");
+        _client.WriteLine($"Resolved:   {request.ResolvedPath}");
+        _client.WriteLine($"Operation:  {request.Operation.ToString().ToLowerInvariant()}");
+        _client.WriteLine($"Matched:    {FormatMatchedPath(request.PermissionEvaluation.MatchedPath)}");
+        _client.WriteLine($"Reason:     {request.PermissionEvaluation.Detail}");
+        _client.Write("Approve this tool request? [y/N] ");
 
-        var answer = _terminal.ReadLine();
+        var answer = _client.ReadLine();
         var approved = string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) || string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase);
         var response = approved
             ? ToolApprovalResponse.Approve("human.console", "Approved at the console approval prompt.")

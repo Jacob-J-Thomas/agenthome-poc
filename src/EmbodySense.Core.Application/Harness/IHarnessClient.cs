@@ -1,6 +1,6 @@
-namespace EmbodySense.Cli.Harness;
+namespace EmbodySense.Core.Application.Harness;
 
-public interface IHarnessTerminal
+public interface IHarnessClient
 {
     string? ReadLine();
 

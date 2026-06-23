@@ -1,4 +1,4 @@
-namespace EmbodySense.Cli.Harness;
+namespace EmbodySense.Core.Application.Harness;
 
 public sealed class HarnessLoopState
 {

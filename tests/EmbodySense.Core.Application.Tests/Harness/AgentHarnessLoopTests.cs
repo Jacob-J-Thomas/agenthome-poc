@@ -1,85 +1,100 @@
 using System.Text;
-using EmbodySense.Cli.Harness;
 using EmbodySense.Core.Application.Harness;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Memory.Models;
 
-namespace EmbodySense.Cli.Harness.Tests;
+namespace EmbodySense.Core.Application.Tests.Harness;
 
 public sealed class AgentHarnessLoopTests
 {
     [Fact]
     public async Task RunHarnessLoopAsync_ignores_blank_input_and_exits_on_end_of_input()
     {
-        var terminal = new ScriptedHarnessTerminal("", "   ");
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(terminal: terminal);
+        var harnessClient = new ScriptedHarnessClient("", "   ");
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
 
-        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, commandHandler, terminal);
+        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler);
 
         Assert.Equal(0, exitCode);
-        Assert.Empty(client.Requests);
-        Assert.Equal(3, CountOccurrences(terminal.Output, "> "));
+        Assert.Empty(inferenceClient.Requests);
+        Assert.Equal(3, CountOccurrences(harnessClient.Output, "> "));
+    }
+
+    [Fact]
+    public async Task RunHarnessLoopAsync_writes_configured_banner_and_prompt()
+    {
+        var harnessClient = new ScriptedHarnessClient("/exit");
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
+        var options = new AgentHarnessLoopOptions { Banner = "custom banner", Prompt = "prompt> " };
+
+        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler, options);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("custom banner", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("prompt> ", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task RunHarnessLoopAsync_handles_harness_commands_without_model_inference()
     {
-        var terminal = new ScriptedHarnessTerminal("/help", "/exit");
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(terminal: terminal);
+        var harnessClient = new ScriptedHarnessClient("/help", "/exit");
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
 
-        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, commandHandler, terminal);
+        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler);
 
         Assert.Equal(0, exitCode);
-        Assert.Empty(client.Requests);
-        Assert.Contains("Harness commands:", terminal.Output, StringComparison.Ordinal);
-        Assert.Contains("/new, /new-session", terminal.Output, StringComparison.Ordinal);
+        Assert.Empty(inferenceClient.Requests);
+        Assert.Contains("Harness commands:", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("/new, /new-session", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task RunHarnessLoopAsync_streams_unhandled_input_through_session()
     {
-        var terminal = new ScriptedHarnessTerminal("hello", "/exit");
-        var client = new ScriptedInferenceClient("hello world");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(terminal: terminal);
+        var harnessClient = new ScriptedHarnessClient("hello", "/exit");
+        var inferenceClient = new ScriptedInferenceClient("hello world");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
 
-        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, commandHandler, terminal);
+        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler);
 
         Assert.Equal(0, exitCode);
-        var requestMessages = Assert.Single(client.Requests);
+        var requestMessages = Assert.Single(inferenceClient.Requests);
         Assert.Collection(requestMessages, message => Assert.Equal("hello", message.Content));
-        Assert.Contains("hello world", terminal.Output, StringComparison.Ordinal);
-        Assert.Equal(1, CountOccurrences(terminal.Output, "hello world"));
+        Assert.Contains("hello world", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(harnessClient.Output, "hello world"));
     }
 
     [Fact]
     public async Task RunHarnessLoopAsync_writes_response_text_when_client_does_not_stream()
     {
-        var terminal = new ScriptedHarnessTerminal("hello", "/exit");
-        var client = new ScriptedInferenceClient("fallback response") { StreamResponses = false };
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(terminal: terminal);
+        var harnessClient = new ScriptedHarnessClient("hello", "/exit");
+        var inferenceClient = new ScriptedInferenceClient("fallback response") { StreamResponses = false };
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
 
-        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, commandHandler, terminal);
+        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler);
 
         Assert.Equal(0, exitCode);
-        Assert.Contains("fallback response", terminal.Output, StringComparison.Ordinal);
-        Assert.Equal(1, CountOccurrences(terminal.Output, "fallback response"));
+        Assert.Contains("fallback response", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(harnessClient.Output, "fallback response"));
     }
 
     [Fact]
     public async Task HarnessCommandHandler_new_session_resets_model_turn_state()
     {
-        var terminal = new ScriptedHarnessTerminal();
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client, initialMessages: [LlmMessage.User("old prompt")]);
-        var commandHandler = new HarnessCommandHandler(startupMessages: [LlmMessage.System("startup")], terminal: terminal);
+        var harnessClient = new ScriptedHarnessClient();
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient, initialMessages: [LlmMessage.User("old prompt")]);
+        var commandHandler = new HarnessCommandHandler(harnessClient, startupMessages: [LlmMessage.System("startup")]);
         var state = new HarnessLoopState();
         state.MarkModelTurnStarted();
 
@@ -90,17 +105,17 @@ public sealed class AgentHarnessLoopTests
         var message = Assert.Single(session.Messages);
         Assert.Equal(LlmMessageRole.System, message.Role);
         Assert.Equal("startup", message.Content);
-        Assert.Contains("Started a new conversation.", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("Started a new conversation.", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task HarnessCommandHandler_history_requires_loading_before_model_turn()
     {
-        var terminal = new ScriptedHarnessTerminal();
+        var harnessClient = new ScriptedHarnessClient();
         var store = new FakeConversationMemoryStore();
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(store, terminal: terminal);
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient, store);
         var state = new HarnessLoopState();
         state.MarkModelTurnStarted();
 
@@ -108,43 +123,43 @@ public sealed class AgentHarnessLoopTests
 
         Assert.True(handled);
         Assert.Equal(0, store.ListConversationCallCount);
-        Assert.Contains("Load a stored conversation before sending the first prompt", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("Load a stored conversation before sending the first prompt", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task HarnessCommandHandler_history_reports_unavailable_store()
     {
-        var terminal = new ScriptedHarnessTerminal();
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(terminal: terminal);
+        var harnessClient = new ScriptedHarnessClient();
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
 
         var handled = await commandHandler.TryHandleAsync("/history", session, new HarnessLoopState());
 
         Assert.True(handled);
-        Assert.Contains("Conversation history is not available for this session.", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("Conversation history is not available for this session.", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task HarnessCommandHandler_history_reports_empty_store()
     {
-        var terminal = new ScriptedHarnessTerminal();
+        var harnessClient = new ScriptedHarnessClient();
         var store = new FakeConversationMemoryStore();
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(store, terminal: terminal);
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient, store);
 
         var handled = await commandHandler.TryHandleAsync("/history", session, new HarnessLoopState());
 
         Assert.True(handled);
         Assert.Equal(1, store.ListConversationCallCount);
-        Assert.Contains("No stored conversations were found.", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("No stored conversations were found.", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task HarnessCommandHandler_history_can_be_cancelled_after_listing_conversations()
     {
-        var terminal = new ScriptedHarnessTerminal("");
+        var harnessClient = new ScriptedHarnessClient("");
         var store = new FakeConversationMemoryStore
         {
             Conversations =
@@ -152,22 +167,22 @@ public sealed class AgentHarnessLoopTests
                 new ConversationTranscriptListItem("conv-1", 3, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, null, true)
             ]
         };
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(store, terminal: terminal);
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient, store);
 
         var handled = await commandHandler.TryHandleAsync("/history", session, new HarnessLoopState());
 
         Assert.True(handled);
-        Assert.Contains("conv-1 (current)", terminal.Output, StringComparison.Ordinal);
-        Assert.Contains("(no user prompt)", terminal.Output, StringComparison.Ordinal);
-        Assert.Contains("Conversation load cancelled.", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("conv-1 (current)", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("(no user prompt)", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("Conversation load cancelled.", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task HarnessCommandHandler_history_rejects_invalid_selection()
     {
-        var terminal = new ScriptedHarnessTerminal("2");
+        var harnessClient = new ScriptedHarnessClient("2");
         var store = new FakeConversationMemoryStore
         {
             Conversations =
@@ -175,20 +190,20 @@ public sealed class AgentHarnessLoopTests
                 new ConversationTranscriptListItem("conv-1", 3, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, "first prompt", false)
             ]
         };
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(store, terminal: terminal);
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient, store);
 
         var handled = await commandHandler.TryHandleAsync("/history", session, new HarnessLoopState());
 
         Assert.True(handled);
-        Assert.Contains("Invalid conversation selection.", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("Invalid conversation selection.", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task HarnessCommandHandler_history_loads_selected_conversation_with_startup_messages()
     {
-        var terminal = new ScriptedHarnessTerminal("1");
+        var harnessClient = new ScriptedHarnessClient("1");
         var store = new FakeConversationMemoryStore
         {
             Conversations =
@@ -197,9 +212,9 @@ public sealed class AgentHarnessLoopTests
             ],
             LoadedMessages = [LlmMessage.User("restored prompt")]
         };
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(store, startupMessages: [LlmMessage.System("startup")], terminal: terminal);
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient, store, [LlmMessage.System("startup")]);
 
         var handled = await commandHandler.TryHandleAsync("/history", session, new HarnessLoopState());
 
@@ -210,13 +225,13 @@ public sealed class AgentHarnessLoopTests
             session.Messages,
             message => Assert.Equal(LlmMessageRole.System, message.Role),
             message => Assert.Equal("restored prompt", message.Content));
-        Assert.Contains("Loaded conversation `conv-1` (1 messages).", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("Loaded conversation `conv-1` (1 messages).", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task HarnessCommandHandler_history_reports_load_failure()
     {
-        var terminal = new ScriptedHarnessTerminal("1");
+        var harnessClient = new ScriptedHarnessClient("1");
         var store = new FakeConversationMemoryStore
         {
             Conversations =
@@ -225,14 +240,14 @@ public sealed class AgentHarnessLoopTests
             ],
             LoadException = new FormatException("bad transcript")
         };
-        var client = new ScriptedInferenceClient("unused");
-        var session = new AgentHarnessSession(client);
-        var commandHandler = new HarnessCommandHandler(store, terminal: terminal);
+        var inferenceClient = new ScriptedInferenceClient("unused");
+        var session = new AgentHarnessSession(inferenceClient);
+        var commandHandler = new HarnessCommandHandler(harnessClient, store);
 
         var handled = await commandHandler.TryHandleAsync("/history", session, new HarnessLoopState());
 
         Assert.True(handled);
-        Assert.Contains("Could not load conversation: bad transcript", terminal.Output, StringComparison.Ordinal);
+        Assert.Contains("Could not load conversation: bad transcript", harnessClient.Output, StringComparison.Ordinal);
     }
 
     private static int CountOccurrences(string text, string value)
@@ -240,7 +255,7 @@ public sealed class AgentHarnessLoopTests
         return text.Split(value, StringSplitOptions.None).Length - 1;
     }
 
-    private sealed class ScriptedHarnessTerminal(params string[] inputs) : IHarnessTerminal
+    private sealed class ScriptedHarnessClient(params string[] inputs) : IHarnessClient
     {
         private readonly Queue<string?> _inputs = new(inputs);
         private readonly StringBuilder _output = new();

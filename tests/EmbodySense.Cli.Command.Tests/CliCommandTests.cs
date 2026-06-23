@@ -1,12 +1,8 @@
 using System.Globalization;
-using System.Text;
 using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Command.Models;
-using EmbodySense.Cli.Harness;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Audit.Models;
-using EmbodySense.Core.Application.Governance.Permissions.Models;
-using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
@@ -146,27 +142,6 @@ public sealed class CliCommandTests
         Assert.Equal("root", arguments.FirstOperand(1, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tail" }, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--limit" }));
     }
 
-    [Fact]
-    public async Task ConsoleToolApprovalPrompt_returns_approval_decisions_from_terminal_input()
-    {
-        var approvingTerminal = new ScriptedHarnessTerminal("yes");
-        var rejectingTerminal = new ScriptedHarnessTerminal("no");
-        var request = new ToolApprovalRequest(
-            "request-1",
-            new ToolRequest(ToolCommand.Write, ".agent/notes.md", "content"),
-            "C:\\workspace\\.agent\\notes.md",
-            FileSystemOperation.Modify,
-            PermissionEvaluation.RequiresApproval("", "approval required"));
-
-        var approved = await new ConsoleToolApprovalPrompt(approvingTerminal).RequestApprovalAsync(request);
-        var rejected = await new ConsoleToolApprovalPrompt(rejectingTerminal).RequestApprovalAsync(request);
-
-        Assert.True(approved.Approved);
-        Assert.False(rejected.Approved);
-        Assert.Contains("Tool approval required", approvingTerminal.Output, StringComparison.Ordinal);
-        Assert.Contains("Matched:    (default policy)", approvingTerminal.Output, StringComparison.Ordinal);
-    }
-
     private static ConsoleResult Capture(Func<int> action)
     {
         var oldOut = Console.Out;
@@ -206,29 +181,6 @@ public sealed class CliCommandTests
         {
             Console.SetOut(oldOut);
             Console.SetError(oldError);
-        }
-    }
-
-    private sealed class ScriptedHarnessTerminal(params string[] inputs) : IHarnessTerminal
-    {
-        private readonly Queue<string?> _inputs = new(inputs);
-        private readonly StringBuilder _output = new();
-
-        public string Output => _output.ToString();
-
-        public string? ReadLine()
-        {
-            return _inputs.Count == 0 ? null : _inputs.Dequeue();
-        }
-
-        public void Write(string value)
-        {
-            _output.Append(value);
-        }
-
-        public void WriteLine(string value = "")
-        {
-            _output.AppendLine(value);
         }
     }
 

@@ -1,6 +1,8 @@
+using EmbodySense.Core.Application.Harness;
+
 namespace EmbodySense.Cli.Harness;
 
-internal sealed class ConsoleHarnessTerminal : IHarnessTerminal
+public sealed class ConsoleHarnessTerminal : IHarnessClient
 {
     public static ConsoleHarnessTerminal Instance { get; } = new();
 
