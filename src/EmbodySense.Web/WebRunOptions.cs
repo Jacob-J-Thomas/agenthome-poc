@@ -1,5 +1,3 @@
-using EmbodySense.Core.Application.Inference.Models;
-
 namespace EmbodySense.Web;
 
 public sealed record WebRunOptions(
@@ -43,18 +41,6 @@ public sealed record WebRunOptions(
             Host: host,
             Port: port,
             PrintHelp: printHelp);
-    }
-
-    public LlmInferenceClientOptions ToInferenceClientOptions()
-    {
-        return new LlmInferenceClientOptions
-        {
-            Surface = LlmInferenceSurface.OpenAiCodex,
-            Model = Model,
-            WorkingDirectory = WorkingDirectory,
-            CodexExecutablePath = CodexExecutablePath,
-            CodexSandbox = CodexSandbox
-        };
     }
 
     private static string? OptionValue(string[] args, string optionName)

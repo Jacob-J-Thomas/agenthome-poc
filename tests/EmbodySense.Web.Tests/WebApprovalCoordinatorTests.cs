@@ -1,5 +1,4 @@
-using EmbodySense.Core.Application.Governance.Permissions.Models;
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 
@@ -113,14 +112,16 @@ public sealed class WebApprovalCoordinatorTests
         Assert.Contains("already completed", alreadyCompleted.Message);
     }
 
-    private static ToolApprovalRequest CreateRequest(string id)
+    private static AgentToolApprovalRequest CreateRequest(string id)
     {
-        return new ToolApprovalRequest(
+        return new AgentToolApprovalRequest(
             id,
-            new ToolRequest(ToolCommand.Read, "workspace/shared/example.txt"),
+            "read",
+            "workspace/shared/example.txt",
             @"C:\workspace\shared\example.txt",
-            FileSystemOperation.Read,
-            PermissionEvaluation.RequiresApproval("workspace/shared/**", "Needs approval."));
+            "read",
+            "workspace/shared/**",
+            "Needs approval.");
     }
 
     private static async Task<IReadOnlyList<WebPendingApproval>> WaitForPendingAsync(WebApprovalCoordinator coordinator)

@@ -1,11 +1,10 @@
 using System.Collections.Concurrent;
-using EmbodySense.Core.Application.Governance.Tools;
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Web.Models;
 
 namespace EmbodySense.Web.Services;
 
-public sealed class WebApprovalCoordinator : IToolApprovalPrompt
+public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
 {
     private readonly ConcurrentDictionary<string, PendingApproval> _pending = new(StringComparer.Ordinal);
     private readonly IWebClientNotifier _notifier;
@@ -16,7 +15,7 @@ public sealed class WebApprovalCoordinator : IToolApprovalPrompt
         _notifier = notifier ?? WebClientNotifier.None;
     }
 
-    public async Task<ToolApprovalResponse> RequestApprovalAsync(ToolApprovalRequest request, CancellationToken cancellationToken = default)
+    public async Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -61,9 +60,7 @@ public sealed class WebApprovalCoordinator : IToolApprovalPrompt
         var responseDetail = string.IsNullOrWhiteSpace(detail)
             ? (approved ? "Approved in the localhost web client." : "Rejected in the localhost web client.")
             : detail.Trim();
-        var response = approved
-            ? ToolApprovalResponse.Approve("human.web", responseDetail)
-            : ToolApprovalResponse.Reject("human.web", responseDetail);
+        var response = (Approved: approved, DecisionBy: "human.web", Detail: responseDetail);
 
         var result = pending.TrySetResult(response)
             ? WebApprovalDecisionResult.Completed(requestId)

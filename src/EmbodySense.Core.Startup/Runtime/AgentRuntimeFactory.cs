@@ -9,6 +9,7 @@ using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.Workspace;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
 
 namespace EmbodySense.Core.Startup.Runtime;
@@ -17,14 +18,35 @@ public sealed class AgentRuntimeFactory
 {
     private readonly IToolApprovalPrompt _approvalPrompt;
 
-    public AgentRuntimeFactory(IToolApprovalPrompt approvalPrompt)
+    public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt) : this(new ToolApprovalPromptAdapter(approvalPrompt))
+    {
+    }
+
+    internal AgentRuntimeFactory(IToolApprovalPrompt approvalPrompt)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
 
         _approvalPrompt = approvalPrompt;
     }
 
-    public async Task<AgentRuntime> CreateAsync(LlmInferenceClientOptions options, CancellationToken cancellationToken = default)
+    public Task<AgentRuntime> CreateAsync(
+        string? model,
+        string workingDirectory,
+        string? codexExecutablePath,
+        string codexSandbox,
+        CancellationToken cancellationToken = default)
+    {
+        return CreateAsync(new LlmInferenceClientOptions
+        {
+            Surface = LlmInferenceSurface.OpenAiCodex,
+            Model = model,
+            WorkingDirectory = workingDirectory,
+            CodexExecutablePath = codexExecutablePath,
+            CodexSandbox = codexSandbox
+        }, cancellationToken);
+    }
+
+    internal async Task<AgentRuntime> CreateAsync(LlmInferenceClientOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
 

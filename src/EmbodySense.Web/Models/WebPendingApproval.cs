@@ -1,4 +1,4 @@
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Startup.Governance;
 
 namespace EmbodySense.Web.Models;
 
@@ -13,7 +13,7 @@ public sealed record WebPendingApproval(
     string MatchedPath,
     string Reason)
 {
-    public static WebPendingApproval FromRequest(ToolApprovalRequest request, long sequence, DateTimeOffset createdAtUtc)
+    public static WebPendingApproval FromRequest(AgentToolApprovalRequest request, long sequence, DateTimeOffset createdAtUtc)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -21,11 +21,11 @@ public sealed record WebPendingApproval(
             request.RequestId,
             sequence,
             createdAtUtc,
-            request.ToolRequest.Command.ToString().ToLowerInvariant(),
-            request.ToolRequest.TargetPath,
+            request.Command,
+            request.TargetPath,
             request.ResolvedPath,
-            request.Operation.ToString().ToLowerInvariant(),
-            string.IsNullOrWhiteSpace(request.PermissionEvaluation.MatchedPath) ? "(default policy)" : request.PermissionEvaluation.MatchedPath,
-            request.PermissionEvaluation.Detail);
+            request.Operation,
+            request.MatchedPath,
+            request.Reason);
     }
 }

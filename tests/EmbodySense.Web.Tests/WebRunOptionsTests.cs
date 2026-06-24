@@ -1,5 +1,3 @@
-using EmbodySense.Core.Application.Inference.Models;
-
 namespace EmbodySense.Web.Tests;
 
 public sealed class WebRunOptionsTests
@@ -20,16 +18,14 @@ public sealed class WebRunOptionsTests
     public void FromArguments_parses_runtime_options()
     {
         var options = WebRunOptions.FromArguments(["--workdir", "work", "--host", "localhost", "--port", "4567", "--model", "gpt-test", "--codex-path", "codex-test", "--sandbox", "workspace-write"]);
-        var inferenceOptions = options.ToInferenceClientOptions();
 
         Assert.Equal("localhost", options.Host);
         Assert.Equal(4567, options.Port);
         Assert.Equal("http://localhost:4567", options.Url);
-        Assert.Equal("work", inferenceOptions.WorkingDirectory);
-        Assert.Equal("gpt-test", inferenceOptions.Model);
-        Assert.Equal("codex-test", inferenceOptions.CodexExecutablePath);
-        Assert.Equal("workspace-write", inferenceOptions.CodexSandbox);
-        Assert.Equal(LlmInferenceSurface.OpenAiCodex, inferenceOptions.Surface);
+        Assert.Equal("work", options.WorkingDirectory);
+        Assert.Equal("gpt-test", options.Model);
+        Assert.Equal("codex-test", options.CodexExecutablePath);
+        Assert.Equal("workspace-write", options.CodexSandbox);
     }
 
     [Fact]

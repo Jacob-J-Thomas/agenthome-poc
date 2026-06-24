@@ -1,5 +1,3 @@
-using EmbodySense.Core.Application.Inference.Models;
-
 namespace EmbodySense.Cli.Command.Models;
 
 public sealed record RunOptions(
@@ -18,18 +16,6 @@ public sealed record RunOptions(
             WorkingDirectory: arguments.OptionValue("--workdir") ?? arguments.OptionValue("--working-directory") ?? Directory.GetCurrentDirectory(),
             CodexExecutablePath: arguments.OptionValue("--codex-path"),
             CodexSandbox: arguments.OptionValue("--sandbox") ?? "read-only");
-    }
-
-    public LlmInferenceClientOptions ToInferenceClientOptions()
-    {
-        return new LlmInferenceClientOptions
-        {
-            Surface = LlmInferenceSurface.OpenAiCodex,
-            Model = Model,
-            WorkingDirectory = WorkingDirectory,
-            CodexExecutablePath = CodexExecutablePath,
-            CodexSandbox = CodexSandbox
-        };
     }
 
     private static string? GetPositionalModel(CliArguments arguments)

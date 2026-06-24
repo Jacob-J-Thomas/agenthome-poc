@@ -13,26 +13,26 @@ public sealed class ToolBroker : IToolBroker
     private readonly WorkspacePaths _paths;
     private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
-    private readonly ILocalWorkspaceClient _workspaceClient;
+    private readonly IWorkspaceToolExecutor _workspaceToolExecutor;
     private readonly IAuditLog _auditLog;
 
     public ToolBroker(
         WorkspacePaths paths,
         IToolPermissionService permissionService,
         IToolApprovalPrompt approvalPrompt,
-        ILocalWorkspaceClient workspaceClient,
+        IWorkspaceToolExecutor workspaceToolExecutor,
         IAuditLog auditLog)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(permissionService);
         ArgumentNullException.ThrowIfNull(approvalPrompt);
-        ArgumentNullException.ThrowIfNull(workspaceClient);
+        ArgumentNullException.ThrowIfNull(workspaceToolExecutor);
         ArgumentNullException.ThrowIfNull(auditLog);
 
         _paths = paths;
         _permissionService = permissionService;
         _approvalPrompt = approvalPrompt;
-        _workspaceClient = workspaceClient;
+        _workspaceToolExecutor = workspaceToolExecutor;
         _auditLog = auditLog;
     }
 
@@ -77,12 +77,12 @@ public sealed class ToolBroker : IToolBroker
         {
             var output = request.Command switch
             {
-                ToolCommand.List => await _workspaceClient.ListAsync(check.ResolvedPath, cancellationToken),
-                ToolCommand.Read => await _workspaceClient.ReadAsync(check.ResolvedPath, cancellationToken),
-                ToolCommand.Search => await _workspaceClient.SearchAsync(check.ResolvedPath, request.Pattern ?? request.Content, cancellationToken),
-                ToolCommand.Append => await _workspaceClient.AppendAsync(check.ResolvedPath, request.Content, cancellationToken),
-                ToolCommand.Write => await _workspaceClient.WriteAsync(check.ResolvedPath, request.Content, cancellationToken),
-                ToolCommand.Delete => await _workspaceClient.DeleteAsync(check.ResolvedPath, cancellationToken),
+                ToolCommand.List => await _workspaceToolExecutor.ListAsync(check.ResolvedPath, cancellationToken),
+                ToolCommand.Read => await _workspaceToolExecutor.ReadAsync(check.ResolvedPath, cancellationToken),
+                ToolCommand.Search => await _workspaceToolExecutor.SearchAsync(check.ResolvedPath, request.Pattern ?? request.Content, cancellationToken),
+                ToolCommand.Append => await _workspaceToolExecutor.AppendAsync(check.ResolvedPath, request.Content, cancellationToken),
+                ToolCommand.Write => await _workspaceToolExecutor.WriteAsync(check.ResolvedPath, request.Content, cancellationToken),
+                ToolCommand.Delete => await _workspaceToolExecutor.DeleteAsync(check.ResolvedPath, cancellationToken),
                 _ => throw new ArgumentOutOfRangeException(nameof(request), request.Command, "Unsupported tool command.")
             };
 

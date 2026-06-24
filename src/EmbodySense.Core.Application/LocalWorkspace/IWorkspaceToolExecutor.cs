@@ -1,6 +1,6 @@
 namespace EmbodySense.Core.Application.LocalWorkspace;
 
-public interface ILocalWorkspaceClient
+public interface IWorkspaceToolExecutor
 {
     Task<LocalWorkspaceResult> ListAsync(string resolvedPath, CancellationToken cancellationToken = default);
 

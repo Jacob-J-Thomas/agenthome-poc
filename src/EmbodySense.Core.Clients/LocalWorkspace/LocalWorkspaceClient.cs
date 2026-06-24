@@ -3,7 +3,7 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Clients.LocalWorkspace;
 
-public sealed class LocalWorkspaceClient : ILocalWorkspaceClient
+public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 {
     private readonly WorkspacePaths _paths;
 

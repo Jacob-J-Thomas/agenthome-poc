@@ -1,8 +1,8 @@
-using EmbodySense.Core.Application.Harness;
+using EmbodySense.Core.Startup.Runtime;
 
 namespace EmbodySense.Cli.Command;
 
-public sealed class ConsoleHarnessTerminal : IHarnessClient
+public sealed class ConsoleHarnessTerminal : IAgentRuntimeConsole
 {
     public static ConsoleHarnessTerminal Instance { get; } = new();
 

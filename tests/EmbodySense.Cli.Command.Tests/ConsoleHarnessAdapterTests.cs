@@ -1,9 +1,7 @@
 using System.Globalization;
 using System.Text;
-using EmbodySense.Core.Application.Governance.Permissions;
-using EmbodySense.Core.Application.Governance.Permissions.Models;
-using EmbodySense.Core.Application.Governance.Tools.Models;
-using EmbodySense.Core.Application.Harness;
+using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Startup.Runtime;
 
 namespace EmbodySense.Cli.Command.Tests;
 
@@ -14,12 +12,14 @@ public sealed class ConsoleHarnessAdapterTests
     {
         var approvingClient = new ScriptedHarnessClient("yes");
         var rejectingClient = new ScriptedHarnessClient("no");
-        var request = new ToolApprovalRequest(
+        var request = new AgentToolApprovalRequest(
             "request-1",
-            new ToolRequest(ToolCommand.Write, ".agent/notes.md", "content"),
+            "write",
+            ".agent/notes.md",
             "C:\\workspace\\.agent\\notes.md",
-            FileSystemOperation.Modify,
-            PermissionEvaluation.RequiresApproval("", "approval required"));
+            "modify",
+            "(default policy)",
+            "approval required");
 
         var approved = await new ConsoleToolApprovalPrompt(approvingClient).RequestApprovalAsync(request);
         var rejected = await new ConsoleToolApprovalPrompt(rejectingClient).RequestApprovalAsync(request);
@@ -57,7 +57,7 @@ public sealed class ConsoleHarnessAdapterTests
         }
     }
 
-    private sealed class ScriptedHarnessClient(params string[] inputs) : IHarnessClient
+    private sealed class ScriptedHarnessClient(params string[] inputs) : IAgentRuntimeConsole
     {
         private readonly Queue<string?> _inputs = new(inputs);
         private readonly StringBuilder _output = new();

@@ -1,8 +1,5 @@
-using System.Text.Json;
 using EmbodySense.Cli.Command.Models;
-using EmbodySense.Core.Application.Governance.Audit.Models;
-using EmbodySense.Core.Persistence.Audit;
-using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Startup.Audit;
 
 namespace EmbodySense.Cli.Command;
 
@@ -54,17 +51,15 @@ public static class AuditCommand
     {
         var root = GetRoot(arguments);
         var limit = GetLimit(arguments);
-        var paths = new WorkspacePaths(root);
-        var auditLog = new AuditLog(paths);
-        var events = await auditLog.ReadTailAsync(limit);
+        var tail = await new AuditTailReader().ReadTailAsync(root, limit);
 
-        if (events.Count == 0)
+        if (tail.Events.Count == 0)
         {
-            Console.WriteLine($"No audit events found at {paths.EventsLogPath}");
+            Console.WriteLine($"No audit events found at {tail.EventsLogPath}");
             return 0;
         }
 
-        foreach (var auditEvent in events)
+        foreach (var auditEvent in tail.Events)
         {
             PrintEvent(auditEvent);
         }
@@ -72,7 +67,7 @@ public static class AuditCommand
         return 0;
     }
 
-    private static void PrintEvent(AuditEvent auditEvent)
+    private static void PrintEvent(AuditTailEvent auditEvent)
     {
         var timestamp = auditEvent.TimestampUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss zzz");
         Console.WriteLine($"{timestamp}  {auditEvent.Action,-24} {auditEvent.Outcome}");
@@ -81,33 +76,10 @@ public static class AuditCommand
 
         foreach (var item in auditEvent.Metadata.OrderBy(item => item.Key))
         {
-            Console.WriteLine($"  {item.Key}: {FormatMetadataValue(item.Value)}");
+            Console.WriteLine($"  {item.Key}: {item.Value}");
         }
 
         Console.WriteLine();
-    }
-
-    private static string FormatMetadataValue(object? value)
-    {
-        return value switch
-        {
-            null => "",
-            JsonElement element => FormatJsonElement(element),
-            _ => value.ToString() ?? ""
-        };
-    }
-
-    private static string FormatJsonElement(JsonElement element)
-    {
-        return element.ValueKind switch
-        {
-            JsonValueKind.String => element.GetString() ?? "",
-            JsonValueKind.Number => element.GetRawText(),
-            JsonValueKind.True => "true",
-            JsonValueKind.False => "false",
-            JsonValueKind.Null => "",
-            _ => element.GetRawText()
-        };
     }
 
     private static string GetRoot(CliArguments arguments)

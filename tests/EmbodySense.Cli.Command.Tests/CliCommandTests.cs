@@ -1,11 +1,8 @@
 using System.Globalization;
+using System.Text.Json;
 using EmbodySense.Cli.Command;
 using EmbodySense.Cli.Command.Models;
-using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Application.Governance.Audit.Models;
-using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Startup.Workspace;
-using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Cli.Command.Tests;
@@ -23,7 +20,7 @@ public sealed class CliCommandTests
         Assert.Contains("Initialized EmbodySense workspace at", result.Output, StringComparison.Ordinal);
         Assert.Contains("Permissions:", result.Output, StringComparison.Ordinal);
         Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
-        Assert.Contains(AuditSchema.Actors.Cli, await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson")));
+        Assert.Contains("embodysense.cli", await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson")));
         Assert.Equal("", result.Error);
     }
 
@@ -69,20 +66,23 @@ public sealed class CliCommandTests
     public async Task AuditCommand_prints_tail_events_and_metadata_values()
     {
         using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var auditLog = new AuditLog(paths);
-        await auditLog.AppendAsync(AuditEvent.Create(
-            "test",
-            "metadata.event",
-            "target",
-            "ok",
-            "has metadata",
-            new Dictionary<string, object?>
+        var auditDirectory = workspace.File(".agent", "audit");
+        Directory.CreateDirectory(auditDirectory);
+        await File.WriteAllTextAsync(Path.Combine(auditDirectory, "events.ndjson"), JsonSerializer.Serialize(new
+        {
+            timestampUtc = DateTimeOffset.UtcNow,
+            actor = "test",
+            action = "metadata.event",
+            target = "target",
+            outcome = "ok",
+            detail = "has metadata",
+            metadata = new Dictionary<string, object?>
             {
                 ["flag"] = true,
                 ["count"] = 3,
                 ["name"] = "sample"
-            }));
+            }
+        }) + Environment.NewLine);
 
         var result = await CaptureAsync(() => AuditCommand.RunAsync(new CliArguments(["audit", workspace.RootPath, "--limit", "1"])));
 

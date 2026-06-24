@@ -1,7 +1,5 @@
-using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
-using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 
@@ -12,6 +10,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
     private readonly WebRunOptions _options;
     private readonly WebApprovalCoordinator _approvalCoordinator;
     private readonly IWorkspaceInitializer _workspaceInitializer;
+    private readonly WorkspaceStatusReader _statusReader;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly object _turnCancellationGate = new();
@@ -19,7 +18,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
     private AgentRuntime? _runtime;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
-        : this(options, approvalCoordinator, new WorkspaceInitializer(AuditSchema.Actors.Web))
+        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb())
     {
     }
 
@@ -32,21 +31,20 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         _options = options;
         _approvalCoordinator = approvalCoordinator;
         _workspaceInitializer = workspaceInitializer;
-        Paths = new WorkspacePaths(options.WorkingDirectory);
+        _statusReader = new WorkspaceStatusReader();
     }
-
-    public WorkspacePaths Paths { get; }
 
     public WebStatus GetStatus()
     {
-        return WebStatusFactory.Create(_options, Paths);
+        return WebStatusFactory.Create(_options, _statusReader.Read(_options.WorkingDirectory));
     }
 
     public async Task<WebStatus> InitializeWorkspaceAsync(CancellationToken cancellationToken = default)
     {
-        if (!Paths.IsInitialized)
+        var status = _statusReader.Read(_options.WorkingDirectory);
+        if (!status.IsInitialized)
         {
-            await _workspaceInitializer.InitializeAsync(Paths.RootPath, cancellationToken);
+            await _workspaceInitializer.InitializeAsync(status.RootPath, cancellationToken);
         }
 
         return GetStatus();
@@ -66,13 +64,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         try
         {
             var runtime = await GetRuntimeAsync(turnCancellation.Token);
-            var response = await runtime.Session.SendUserMessageAsync(message, (chunk, token) =>
+            var responseText = await runtime.SendUserMessageAsync(message, (chunk, token) =>
             {
                 return string.IsNullOrEmpty(chunk)
                     ? Task.CompletedTask
                     : writeEventAsync(WebStreamEvent.AssistantDelta(chunk), token);
             }, turnCancellation.Token);
-            await writeEventAsync(WebStreamEvent.AssistantFinal(response.OutputText, response.Surface.ToString(), response.Model), turnCancellation.Token);
+            await writeEventAsync(WebStreamEvent.AssistantFinal(responseText), turnCancellation.Token);
         }
         finally
         {
@@ -108,7 +106,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
 
     private async Task<AgentRuntime> GetRuntimeAsync(CancellationToken cancellationToken)
     {
-        if (!Paths.IsInitialized)
+        if (!_statusReader.Read(_options.WorkingDirectory).IsInitialized)
         {
             throw new InvalidOperationException("Workspace is not initialized. Initialize it from the web client before starting a session.");
         }
@@ -121,7 +119,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         await _runtimeGate.WaitAsync(cancellationToken);
         try
         {
-            _runtime ??= await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(_options.ToInferenceClientOptions(), cancellationToken);
+            _runtime ??= await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(_options.Model, _options.WorkingDirectory, _options.CodexExecutablePath, _options.CodexSandbox, cancellationToken);
             return _runtime;
         }
         finally

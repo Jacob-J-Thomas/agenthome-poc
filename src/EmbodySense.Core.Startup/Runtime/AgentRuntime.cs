@@ -29,13 +29,36 @@ public sealed class AgentRuntime : IAsyncDisposable
         _inferenceClient = inferenceClient;
     }
 
-    public WorkspacePaths Paths { get; }
+    internal WorkspacePaths Paths { get; }
 
-    public IConversationMemoryStore ConversationMemory { get; }
+    internal IConversationMemoryStore ConversationMemory { get; }
 
-    public IReadOnlyList<LlmMessage> StartupContext { get; }
+    internal IReadOnlyList<LlmMessage> StartupContext { get; }
 
-    public AgentHarnessSession Session { get; }
+    internal AgentHarnessSession Session { get; }
+
+    public async Task<string> SendUserMessageAsync(
+        string message,
+        Func<string, CancellationToken, Task>? responseChunkHandler = null,
+        CancellationToken cancellationToken = default)
+    {
+        var response = await Session.SendUserMessageAsync(message, responseChunkHandler, cancellationToken);
+        return response.OutputText;
+    }
+
+    public Task<int> RunConsoleLoopAsync(
+        IAgentRuntimeConsole console,
+        string? banner = null,
+        string prompt = "> ",
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(console);
+
+        var client = new HarnessClientAdapter(console);
+        var commandHandler = new HarnessCommandHandler(client, ConversationMemory, StartupContext);
+        var options = new AgentHarnessLoopOptions { Banner = banner, Prompt = prompt };
+        return AgentHarnessLoop.RunHarnessLoopAsync(Session, client, commandHandler, options, cancellationToken);
+    }
 
     public async ValueTask DisposeAsync()
     {
