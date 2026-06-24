@@ -82,6 +82,22 @@ public sealed class ProgramTests
     }
 
     [Fact]
+    public void ResolveContentRoot_finds_repo_style_source_project_from_fallback()
+    {
+        using var workspace = new TestWorkspace();
+        var outputDirectory = workspace.File("external-bin");
+        var repoRoot = workspace.File("repo");
+        var nestedProject = Path.Combine(repoRoot, "src", "EmbodySense.Web");
+        Directory.CreateDirectory(outputDirectory);
+        Directory.CreateDirectory(Path.Combine(nestedProject, "wwwroot"));
+        File.WriteAllText(Path.Combine(nestedProject, "EmbodySense.Web.csproj"), "<Project />");
+
+        var contentRoot = Program.ResolveContentRoot(outputDirectory, repoRoot);
+
+        Assert.Equal(nestedProject, contentRoot);
+    }
+
+    [Fact]
     public void ResolveContentRoot_finds_project_directory_from_nested_child()
     {
         using var workspace = new TestWorkspace();

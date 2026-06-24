@@ -105,6 +105,12 @@ public static class Program
             directory = directory.Parent;
         }
 
+        var fallbackSourceProjectPath = Path.Combine(fallbackDirectory, "src", "EmbodySense.Web");
+        if (File.Exists(Path.Combine(fallbackSourceProjectPath, "EmbodySense.Web.csproj")) && Directory.Exists(Path.Combine(fallbackSourceProjectPath, "wwwroot")))
+        {
+            return fallbackSourceProjectPath;
+        }
+
         return fallbackDirectory;
     }
 

@@ -1,5 +1,7 @@
 using System.Text;
+using EmbodySense.Core.Application.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
@@ -55,6 +57,91 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(0, exitCode);
         Assert.Contains("banner", client.Output, StringComparison.Ordinal);
         Assert.Contains("runtime guide missing: hello", client.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TryHandleHarnessCommandAsync_handles_help_exit_and_unhandled_commands()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+
+        Assert.True(AgentRuntime.TryHandleStaticHarnessCommand("/help", out var staticResult));
+        Assert.Contains("Harness commands:", staticResult.Output, StringComparison.Ordinal);
+
+        var help = await runtime.TryHandleHarnessCommandAsync("/commands");
+        var exit = await runtime.TryHandleHarnessCommandAsync("/quit");
+        var unhandled = await runtime.TryHandleHarnessCommandAsync("/not-a-command");
+
+        Assert.True(help.Handled);
+        Assert.Contains("/new, /new-session", help.Output, StringComparison.Ordinal);
+        Assert.True(exit.Handled);
+        Assert.True(exit.ExitRequested);
+        Assert.False(unhandled.Handled);
+    }
+
+    [Fact]
+    public async Task TryHandleHarnessCommandAsync_loads_pending_history_selection()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
+        await store.AppendMessageAsync(LlmMessage.Assistant("saved answer"));
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+
+        var history = await runtime.TryHandleHarnessCommandAsync("/history");
+        var loaded = await runtime.TryHandleHarnessCommandAsync("1");
+
+        Assert.True(history.Handled);
+        Assert.Contains("Stored conversations:", history.Output, StringComparison.Ordinal);
+        Assert.Contains("saved prompt", history.Output, StringComparison.Ordinal);
+        Assert.Contains("Send conversation number to load", history.Output, StringComparison.Ordinal);
+        Assert.True(loaded.Handled);
+        Assert.Contains("Loaded conversation `archive/", loaded.Output, StringComparison.Ordinal);
+        var currentMessages = await store.LoadCurrentConversationAsync();
+        Assert.Collection(
+            currentMessages,
+            message => Assert.Equal("saved prompt", message.Content),
+            message => Assert.Equal("saved answer", message.Content));
+    }
+
+    [Fact]
+    public async Task TryHandleHarnessCommandAsync_handles_pending_history_cancel_and_invalid_selection()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+
+        _ = await runtime.TryHandleHarnessCommandAsync("/history");
+        var cancelled = await runtime.TryHandleHarnessCommandAsync("/cancel");
+        _ = await runtime.TryHandleHarnessCommandAsync("/history");
+        var invalid = await runtime.TryHandleHarnessCommandAsync("99");
+
+        Assert.True(cancelled.Handled);
+        Assert.Equal("Conversation load cancelled.", cancelled.Output);
+        Assert.True(invalid.Handled);
+        Assert.Equal("Invalid conversation selection.", invalid.Output);
+    }
+
+    [Fact]
+    public async Task TryHandleHarnessCommandAsync_requires_history_before_model_turn_and_new_resets_state()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+
+        _ = await runtime.SendUserMessageAsync("hello");
+        var historyAfterTurn = await runtime.TryHandleHarnessCommandAsync("/history");
+        var fresh = await runtime.TryHandleHarnessCommandAsync("/new");
+        var historyAfterNew = await runtime.TryHandleHarnessCommandAsync("/history");
+
+        Assert.Contains("before sending the first prompt", historyAfterTurn.Output, StringComparison.Ordinal);
+        Assert.Equal("Started a new conversation.", fresh.Output);
+        Assert.Contains("Stored conversations:", historyAfterNew.Output, StringComparison.Ordinal);
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)

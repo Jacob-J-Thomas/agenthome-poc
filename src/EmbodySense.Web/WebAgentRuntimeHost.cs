@@ -63,7 +63,20 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         SetTurnCancellation(turnCancellation);
         try
         {
+            if (AgentRuntime.TryHandleStaticHarnessCommand(message, out var staticCommandResult))
+            {
+                await WriteCommandResultAsync(staticCommandResult, writeEventAsync, turnCancellation.Token);
+                return;
+            }
+
             var runtime = await GetRuntimeAsync(turnCancellation.Token);
+            var commandResult = await runtime.TryHandleHarnessCommandAsync(message, turnCancellation.Token);
+            if (commandResult.Handled)
+            {
+                await WriteCommandResultAsync(commandResult, writeEventAsync, turnCancellation.Token);
+                return;
+            }
+
             var responseText = await runtime.SendUserMessageAsync(message, (chunk, token) =>
             {
                 return string.IsNullOrEmpty(chunk)
@@ -126,6 +139,19 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         {
             _runtimeGate.Release();
         }
+    }
+
+    private static Task WriteCommandResultAsync(
+        AgentRuntimeCommandResult result,
+        Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
+        CancellationToken cancellationToken)
+    {
+        var output = result.ExitRequested
+            ? "The web client is still connected. Close the browser tab or stop the web server to leave."
+            : result.Output;
+        return string.IsNullOrWhiteSpace(output)
+            ? Task.CompletedTask
+            : writeEventAsync(WebStreamEvent.AssistantFinal(output), cancellationToken);
     }
 
     private void SetTurnCancellation(CancellationTokenSource cancellation)
