@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Governance.Tools;

@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Governance.Tools;
+namespace EmbodySense.Core.Application.LocalWorkspace;
 
 public interface ILocalWorkspaceClient
 {

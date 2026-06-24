@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Authentication;
+using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 
 namespace EmbodySense.Web;
@@ -42,11 +44,21 @@ public static class Program
         ArgumentNullException.ThrowIfNull(options);
 
         services.AddControllers().AddApplicationPart(typeof(Program).Assembly);
+        services.AddSignalR();
+        services.AddAuthentication(WebSessionAuthenticationDefaults.Scheme).AddScheme<AuthenticationSchemeOptions, WebSessionAuthenticationHandler>(WebSessionAuthenticationDefaults.Scheme, _ => { });
+        services.AddAuthorization(options =>
+        {
+            options.AddPolicy(WebAuthPolicies.LocalSession, policy =>
+            {
+                policy.AuthenticationSchemes.Add(WebSessionAuthenticationDefaults.Scheme);
+                policy.RequireAuthenticatedUser();
+            });
+        });
         services.AddSingleton(options);
         services.AddSingleton<WebSessionSecurity>();
+        services.AddSingleton<IWebClientNotifier, SignalRWebClientNotifier>();
         services.AddSingleton<WebApprovalCoordinator>();
         services.AddSingleton<WebAgentRuntimeHost>();
-        services.AddSingleton<WebStreamWriter>();
     }
 
     public static void ConfigurePipeline(WebApplication app)
@@ -55,8 +67,10 @@ public static class Program
 
         app.UseDefaultFiles();
         app.UseStaticFiles();
-        app.UseMiddleware<WebSessionMiddleware>();
+        app.UseAuthentication();
+        app.UseAuthorization();
         app.MapControllers();
+        app.MapHub<WebSessionHub>("/hubs/session").RequireAuthorization(WebAuthPolicies.LocalSession);
     }
 
     public static string ResolveContentRoot()

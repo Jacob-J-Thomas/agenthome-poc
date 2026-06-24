@@ -1,10 +1,12 @@
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace EmbodySense.Web.Controllers;
 
 [ApiController]
+[Authorize(Policy = WebAuthPolicies.LocalSession)]
 [Route("api/approvals")]
 public sealed class ApprovalsController : ControllerBase
 {
@@ -24,9 +26,9 @@ public sealed class ApprovalsController : ControllerBase
     }
 
     [HttpPost("{requestId}")]
-    public IActionResult Decide(string requestId, WebApprovalDecision decision)
+    public async Task<IActionResult> Decide(string requestId, WebApprovalDecision? decision, CancellationToken cancellationToken)
     {
-        var result = _approvals.SubmitDecision(requestId, decision.Approved, decision.Detail);
+        var result = await _approvals.SubmitDecisionAsync(requestId, decision?.Approved ?? false, decision?.Detail, cancellationToken);
         return result.Accepted
             ? NoContent()
             : NotFound(new { error = result.Message });

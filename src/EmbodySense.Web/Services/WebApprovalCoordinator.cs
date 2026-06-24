@@ -8,7 +8,13 @@ namespace EmbodySense.Web.Services;
 public sealed class WebApprovalCoordinator : IToolApprovalPrompt
 {
     private readonly ConcurrentDictionary<string, PendingApproval> _pending = new(StringComparer.Ordinal);
+    private readonly IWebClientNotifier _notifier;
     private long _lastSequence;
+
+    public WebApprovalCoordinator(IWebClientNotifier? notifier = null)
+    {
+        _notifier = notifier ?? WebClientNotifier.None;
+    }
 
     public async Task<ToolApprovalResponse> RequestApprovalAsync(ToolApprovalRequest request, CancellationToken cancellationToken = default)
     {
@@ -22,12 +28,16 @@ public sealed class WebApprovalCoordinator : IToolApprovalPrompt
 
         try
         {
+            await PublishPendingAsync(CancellationToken.None);
             using var registration = cancellationToken.Register(() => pending.TryCancel(cancellationToken));
             return await pending.WaitAsync(cancellationToken);
         }
         finally
         {
-            _pending.TryRemove(request.RequestId, out _);
+            if (_pending.TryRemove(request.RequestId, out _))
+            {
+                await PublishPendingAsync(CancellationToken.None);
+            }
         }
     }
 
@@ -39,7 +49,7 @@ public sealed class WebApprovalCoordinator : IToolApprovalPrompt
             .ToArray();
     }
 
-    public WebApprovalDecisionResult SubmitDecision(string requestId, bool approved, string? detail)
+    public async Task<WebApprovalDecisionResult> SubmitDecisionAsync(string requestId, bool approved, string? detail, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
 
@@ -55,41 +65,15 @@ public sealed class WebApprovalCoordinator : IToolApprovalPrompt
             ? ToolApprovalResponse.Approve("human.web", responseDetail)
             : ToolApprovalResponse.Reject("human.web", responseDetail);
 
-        return pending.TrySetResult(response)
+        var result = pending.TrySetResult(response)
             ? WebApprovalDecisionResult.Completed(requestId)
             : WebApprovalDecisionResult.AlreadyCompleted(requestId);
+        await PublishPendingAsync(CancellationToken.None);
+        return result;
     }
 
-    private sealed class PendingApproval
+    private Task PublishPendingAsync(CancellationToken cancellationToken)
     {
-        private readonly TaskCompletionSource<ToolApprovalResponse> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public PendingApproval(ToolApprovalRequest request, long sequence, DateTimeOffset createdAtUtc)
-        {
-            Request = request;
-            Sequence = sequence;
-            CreatedAtUtc = createdAtUtc;
-        }
-
-        public ToolApprovalRequest Request { get; }
-
-        public long Sequence { get; }
-
-        public DateTimeOffset CreatedAtUtc { get; }
-
-        public Task<ToolApprovalResponse> WaitAsync(CancellationToken cancellationToken)
-        {
-            return _completion.Task.WaitAsync(cancellationToken);
-        }
-
-        public bool TrySetResult(ToolApprovalResponse response)
-        {
-            return _completion.TrySetResult(response);
-        }
-
-        public bool TryCancel(CancellationToken cancellationToken)
-        {
-            return _completion.TrySetCanceled(cancellationToken);
-        }
+        return _notifier.ApprovalsChangedAsync(GetPending(), cancellationToken);
     }
 }

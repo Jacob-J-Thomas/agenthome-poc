@@ -1,10 +1,12 @@
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace EmbodySense.Web.Controllers;
 
 [ApiController]
+[AllowAnonymous]
 [Route("api/session")]
 public sealed class SessionController : ControllerBase
 {

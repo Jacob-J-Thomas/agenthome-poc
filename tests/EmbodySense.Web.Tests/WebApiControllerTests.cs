@@ -2,11 +2,14 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using EmbodySense.Core.Application.Governance.Permissions.Models;
+using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace EmbodySense.Web.Tests;
 
@@ -32,20 +35,24 @@ public sealed class WebApiControllerTests
             initRequest.Content = JsonContent.Create(new { }, options: JsonOptions);
             var initialized = await client.SendAsync(initRequest);
             var after = await initialized.Content.ReadFromJsonAsync<WebStatus>(JsonOptions);
-            var approvals = await client.GetFromJsonAsync<WebPendingApproval[]>("/api/approvals/pending", JsonOptions);
+            var approvalsRequest = new HttpRequestMessage(HttpMethod.Get, "/api/approvals/pending");
+            approvalsRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            var approvalsResponse = await client.SendAsync(approvalsRequest);
+            var approvals = await approvalsResponse.Content.ReadFromJsonAsync<WebPendingApproval[]>(JsonOptions);
             var missingApproval = new HttpRequestMessage(HttpMethod.Post, "/api/approvals/missing");
             missingApproval.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
             missingApproval.Content = JsonContent.Create(new WebApprovalDecision(true, null), options: JsonOptions);
             var missingApprovalResponse = await client.SendAsync(missingApproval);
 
             Assert.False(before!.Initialized);
-            Assert.Equal(HttpStatusCode.Forbidden, rejectedInit.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedInit.StatusCode);
             Assert.True(initialized.IsSuccessStatusCode);
             Assert.True(after!.Initialized);
             Assert.Equal("web", after.Client);
             Assert.True(after.PrimaryClient);
             Assert.Equal(options.Url, after.Url);
             Assert.Contains("CLI remains supported", after.CliRole);
+            Assert.True(approvalsResponse.IsSuccessStatusCode);
             Assert.Empty(approvals!);
             Assert.Equal(HttpStatusCode.NotFound, missingApprovalResponse.StatusCode);
         }
@@ -56,7 +63,7 @@ public sealed class WebApiControllerTests
     }
 
     [Fact]
-    public async Task Message_endpoint_rejects_empty_message()
+    public async Task Hub_negotiate_requires_session_token()
     {
         using var workspace = new TestWorkspace();
         await using var app = CreateApp(workspace.RootPath, out var options);
@@ -66,14 +73,11 @@ public sealed class WebApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
-            var request = new HttpRequestMessage(HttpMethod.Post, "/api/messages");
-            request.Headers.Add(WebSessionSecurity.HeaderName, token);
-            request.Content = JsonContent.Create(new WebMessageRequest(" "), options: JsonOptions);
+            var rejected = await client.PostAsync("/hubs/session/negotiate?negotiateVersion=1", null);
+            var accepted = await client.PostAsync($"/hubs/session/negotiate?negotiateVersion=1&access_token={Uri.EscapeDataString(token)}", null);
 
-            var response = await client.SendAsync(request);
-
-            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-            Assert.Equal("Message is required.", await response.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
+            Assert.True(accepted.IsSuccessStatusCode);
         }
         finally
         {
@@ -82,7 +86,7 @@ public sealed class WebApiControllerTests
     }
 
     [Fact]
-    public async Task Message_endpoint_streams_error_when_workspace_is_not_initialized()
+    public async Task Approval_decision_defaults_to_reject_when_approved_is_missing()
     {
         using var workspace = new TestWorkspace();
         await using var app = CreateApp(workspace.RootPath, out var options);
@@ -92,23 +96,49 @@ public sealed class WebApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
-            var request = new HttpRequestMessage(HttpMethod.Post, "/api/messages");
+            var coordinator = app.Services.GetRequiredService<WebApprovalCoordinator>();
+            var approvalTask = coordinator.RequestApprovalAsync(CreateRequest("req-default-reject"));
+            await WaitForPendingAsync(coordinator);
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/approvals/req-default-reject");
             request.Headers.Add(WebSessionSecurity.HeaderName, token);
-            request.Content = JsonContent.Create(new WebMessageRequest("hello"), options: JsonOptions);
+            request.Content = JsonContent.Create(new { }, options: JsonOptions);
 
             var response = await client.SendAsync(request);
-            var line = (await response.Content.ReadAsStringAsync()).Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Single();
-            using var json = JsonDocument.Parse(line);
+            var approval = await approvalTask;
 
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-            Assert.Equal("application/x-ndjson", response.Content.Headers.ContentType!.MediaType);
-            Assert.Equal("error", json.RootElement.GetProperty("type").GetString());
-            Assert.Contains("Workspace is not initialized", json.RootElement.GetProperty("error").GetString());
+            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+            Assert.False(approval.Approved);
+            Assert.Equal("Rejected in the localhost web client.", approval.Detail);
         }
         finally
         {
             await app.StopAsync();
         }
+    }
+
+    private static ToolApprovalRequest CreateRequest(string id)
+    {
+        return new ToolApprovalRequest(
+            id,
+            new ToolRequest(ToolCommand.Read, "workspace/shared/example.txt"),
+            @"C:\workspace\shared\example.txt",
+            FileSystemOperation.Read,
+            PermissionEvaluation.RequiresApproval("workspace/shared/**", "Needs approval."));
+    }
+
+    private static async Task WaitForPendingAsync(WebApprovalCoordinator coordinator)
+    {
+        for (var i = 0; i < 20; i++)
+        {
+            if (coordinator.GetPending().Count > 0)
+            {
+                return;
+            }
+
+            await Task.Delay(10);
+        }
+
+        throw new TimeoutException("Approval request was not queued.");
     }
 
     private static WebApplication CreateApp(string rootPath, out WebRunOptions options)

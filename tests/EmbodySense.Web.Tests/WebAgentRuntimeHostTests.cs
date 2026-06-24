@@ -35,6 +35,15 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task CancelCurrentTurn_returns_false_when_no_turn_is_running()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+
+        Assert.False(host.CancelCurrentTurn());
+    }
+
+    [Fact]
     public async Task SendMessageAsync_validates_message()
     {
         using var workspace = new TestWorkspace();

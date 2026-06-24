@@ -10,7 +10,8 @@ public sealed class WebApprovalCoordinatorTests
     [Fact]
     public async Task RequestApprovalAsync_exposes_pending_request_and_returns_browser_decision()
     {
-        var coordinator = new WebApprovalCoordinator();
+        var notifier = new RecordingNotifier();
+        var coordinator = new WebApprovalCoordinator(notifier);
         var request = CreateRequest("req-1");
         var approvalTask = coordinator.RequestApprovalAsync(request);
 
@@ -28,7 +29,7 @@ public sealed class WebApprovalCoordinatorTests
             Assert.True(DateTimeOffset.UtcNow - item.CreatedAtUtc < TimeSpan.FromMinutes(1));
         });
 
-        var result = coordinator.SubmitDecision("req-1", approved: true, detail: null);
+        var result = await coordinator.SubmitDecisionAsync("req-1", approved: true, detail: null);
         var response = await approvalTask;
 
         Assert.True(result.Accepted);
@@ -36,6 +37,8 @@ public sealed class WebApprovalCoordinatorTests
         Assert.Equal("human.web", response.DecisionBy);
         Assert.Equal("Approved in the localhost web client.", response.Detail);
         Assert.Empty(coordinator.GetPending());
+        Assert.Contains(notifier.Snapshots, snapshot => snapshot.Count == 1 && snapshot[0].RequestId == "req-1");
+        Assert.Contains(notifier.Snapshots, snapshot => snapshot.Count == 0);
     }
 
     [Fact]
@@ -46,7 +49,7 @@ public sealed class WebApprovalCoordinatorTests
         var approvalTask = coordinator.RequestApprovalAsync(request);
         _ = await WaitForPendingAsync(coordinator);
 
-        var result = coordinator.SubmitDecision("req-2", approved: false, detail: "No thanks.");
+        var result = await coordinator.SubmitDecisionAsync("req-2", approved: false, detail: "No thanks.");
         var response = await approvalTask;
 
         Assert.True(result.Accepted);
@@ -80,7 +83,7 @@ public sealed class WebApprovalCoordinatorTests
         {
             return coordinator.RequestApprovalAsync(CreateRequest("req-4"));
         });
-        var result = coordinator.SubmitDecision("req-4", approved: true, detail: null);
+        var result = await coordinator.SubmitDecisionAsync("req-4", approved: true, detail: null);
         _ = await firstTask;
 
         Assert.Contains("already pending", exception.Message);
@@ -88,11 +91,11 @@ public sealed class WebApprovalCoordinatorTests
     }
 
     [Fact]
-    public void SubmitDecision_returns_not_found_when_request_is_not_pending()
+    public async Task SubmitDecisionAsync_returns_not_found_when_request_is_not_pending()
     {
         var coordinator = new WebApprovalCoordinator();
 
-        var result = coordinator.SubmitDecision("missing", approved: true, detail: null);
+        var result = await coordinator.SubmitDecisionAsync("missing", approved: true, detail: null);
 
         Assert.False(result.Accepted);
         Assert.Contains("missing", result.Message);
@@ -134,5 +137,16 @@ public sealed class WebApprovalCoordinatorTests
         }
 
         throw new TimeoutException("Approval request was not queued.");
+    }
+
+    private sealed class RecordingNotifier : IWebClientNotifier
+    {
+        public List<IReadOnlyList<WebPendingApproval>> Snapshots { get; } = [];
+
+        public Task ApprovalsChangedAsync(IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
+        {
+            Snapshots.Add(approvals);
+            return Task.CompletedTask;
+        }
     }
 }

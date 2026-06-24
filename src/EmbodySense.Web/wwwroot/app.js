@@ -1,10 +1,12 @@
 let sessionToken = "";
 let status = null;
 let activeAgentMessage = null;
+let hub = null;
 
 const elements = {
   approvals: document.getElementById("approvals"),
   approvalCount: document.getElementById("approvalCount"),
+  cancelButton: document.getElementById("cancelButton"),
   cliRole: document.getElementById("cliRole"),
   clientRole: document.getElementById("clientRole"),
   clientStatus: document.getElementById("clientStatus"),
@@ -17,12 +19,13 @@ const elements = {
   workspaceStatus: document.getElementById("workspaceStatus")
 };
 
+const recordSeparator = "\u001e";
+
 async function boot() {
   const session = await fetchJson("/api/session");
   sessionToken = session.token;
   await refreshStatus();
-  await refreshApprovals();
-  window.setInterval(refreshApprovals, 1200);
+  await connectHub();
 }
 
 async function fetchJson(url, options = {}) {
@@ -34,30 +37,59 @@ async function fetchJson(url, options = {}) {
   return await response.json();
 }
 
-function tokenHeaders() {
-  return {
-    "Content-Type": "application/json",
-    "X-EmbodySense-Session": sessionToken
-  };
-}
-
 async function refreshStatus() {
   status = await fetchJson("/api/status");
-  elements.workspaceRoot.textContent = status.workspaceRoot;
-  elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
-  elements.clientStatus.textContent = status.primaryClient ? "Web primary" : "Web client";
-  elements.clientRole.textContent = status.client;
-  elements.cliRole.textContent = status.cliRole;
-  elements.initButton.disabled = status.initialized;
-  elements.sendButton.disabled = !status.initialized;
+  applyStatus(status);
 }
 
-async function refreshApprovals() {
-  if (!sessionToken) {
-    return;
-  }
+function applyStatus(nextStatus) {
+  status = nextStatus;
+  elements.workspaceRoot.textContent = status.workspaceRoot;
+  elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
+  elements.clientStatus.textContent = hub?.connected ? "Web primary" : "Web reconnecting";
+  elements.clientRole.textContent = status.client;
+  elements.cliRole.textContent = status.cliRole;
+  elements.initButton.disabled = status.initialized || !hub?.connected;
+  elements.sendButton.disabled = !status.initialized || !hub?.connected;
+}
 
-  const approvals = await fetchJson("/api/approvals/pending");
+async function connectHub() {
+  hub = new JsonSignalRConnection(createHubUrl());
+  hub.on("StatusChanged", applyStatus);
+  hub.on("ApprovalsChanged", renderApprovals);
+  hub.on("StreamEvent", handleStreamEvent);
+  hub.onclose = scheduleReconnect;
+  await hub.start();
+  applyStatus(status);
+}
+
+function createHubUrl() {
+  const url = new URL("/hubs/session", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("access_token", sessionToken);
+  return url.toString();
+}
+
+function scheduleReconnect() {
+  applyDisconnectedState();
+  window.setTimeout(async () => {
+    try {
+      await connectHub();
+    } catch (error) {
+      appendMessage("error", `Reconnect failed: ${error.message}`);
+      scheduleReconnect();
+    }
+  }, 1000);
+}
+
+function applyDisconnectedState() {
+  elements.clientStatus.textContent = "Web reconnecting";
+  elements.initButton.disabled = true;
+  elements.sendButton.disabled = true;
+  elements.cancelButton.disabled = true;
+}
+
+function renderApprovals(approvals) {
   elements.approvalCount.textContent = `${approvals.length} pending`;
   elements.approvals.replaceChildren(...approvals.map(renderApproval));
 }
@@ -102,12 +134,10 @@ function renderApproval(approval) {
 }
 
 async function decideApproval(requestId, approved) {
-  await fetch(`/api/approvals/${encodeURIComponent(requestId)}`, {
-    method: "POST",
-    headers: tokenHeaders(),
-    body: JSON.stringify({ approved })
-  });
-  await refreshApprovals();
+  const result = await hub.invoke("DecideApproval", requestId, { approved });
+  if (!result.accepted) {
+    appendMessage("error", result.message);
+  }
 }
 
 function appendMessage(kind, text) {
@@ -141,14 +171,21 @@ function finalizeAgentMessage(text) {
 
 elements.initButton.addEventListener("click", async () => {
   elements.initButton.disabled = true;
-  await fetchJson("/api/workspace/init", { method: "POST", headers: tokenHeaders(), body: "{}" });
-  await refreshStatus();
+  await hub.invoke("InitializeWorkspace");
+});
+
+elements.cancelButton.addEventListener("click", async () => {
+  elements.cancelButton.disabled = true;
+  const cancelled = await hub.invoke("CancelCurrentTurn");
+  if (!cancelled) {
+    appendMessage("error", "No active agent turn is running.");
+  }
 });
 
 elements.messageForm.addEventListener("submit", async event => {
   event.preventDefault();
   const message = elements.messageInput.value.trim();
-  if (!message || !status?.initialized) {
+  if (!message || !status?.initialized || !hub?.connected) {
     return;
   }
 
@@ -156,64 +193,162 @@ elements.messageForm.addEventListener("submit", async event => {
   appendMessage("user", message);
   elements.messageInput.value = "";
   elements.sendButton.disabled = true;
+  elements.cancelButton.disabled = false;
 
   try {
-    const response = await fetch("/api/messages", {
-      method: "POST",
-      headers: tokenHeaders(),
-      body: JSON.stringify({ message })
-    });
-
-    if (!response.ok || !response.body) {
-      throw new Error(await response.text());
-    }
-
-    await readEventStream(response.body);
+    await hub.invoke("SendMessage", message);
   } catch (error) {
     appendMessage("error", error.message);
   } finally {
-    elements.sendButton.disabled = !status?.initialized;
-    await refreshApprovals();
+    elements.cancelButton.disabled = true;
+    elements.sendButton.disabled = !status?.initialized || !hub?.connected;
   }
 });
 
-async function readEventStream(stream) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  for (;;) {
-    const result = await reader.read();
-    if (result.done) {
-      break;
-    }
-
-    buffer += decoder.decode(result.value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      handleStreamLine(line);
-    }
-  }
-
-  if (buffer.trim()) {
-    handleStreamLine(buffer);
-  }
-}
-
-function handleStreamLine(line) {
-  if (!line.trim()) {
-    return;
-  }
-
-  const event = JSON.parse(line);
+function handleStreamEvent(event) {
   if (event.type === "assistant_delta") {
     appendAgentDelta(event.text ?? "");
   } else if (event.type === "assistant_final") {
     finalizeAgentMessage(event.text ?? "");
+  } else if (event.type === "cancelled") {
+    appendMessage("error", event.text ?? "Message cancelled.");
+    activeAgentMessage = null;
   } else if (event.type === "error") {
     appendMessage("error", event.error ?? "Request failed.");
   }
 }
 
+class JsonSignalRConnection {
+  constructor(url) {
+    this.url = url;
+    this.socket = null;
+    this.handlers = new Map();
+    this.invocations = new Map();
+    this.nextInvocationId = 0;
+    this.buffer = "";
+    this.connected = false;
+    this.closedByClient = false;
+    this.isClosed = true;
+    this.handshake = null;
+    this.handshakeReject = null;
+    this.handshakeResolve = null;
+    this.onclose = null;
+  }
+
+  on(target, handler) {
+    this.handlers.set(target, handler);
+  }
+
+  async start() {
+    this.closedByClient = false;
+    this.isClosed = false;
+    this.socket = new WebSocket(this.url);
+    this.socket.onmessage = event => this.receive(event.data);
+    this.socket.onclose = () => this.handleClose();
+
+    await new Promise((resolve, reject) => {
+      this.socket.onopen = () => {
+        resolve();
+      };
+      this.socket.onerror = () => reject(new Error("SignalR connection failed."));
+    });
+
+    this.handshake = new Promise((resolve, reject) => {
+      this.handshakeResolve = resolve;
+      this.handshakeReject = reject;
+      window.setTimeout(() => this.handshakeReject?.(new Error("SignalR handshake timed out.")), 5000);
+    });
+    this.socket.onerror = () => this.handleClose();
+    this.sendRaw({ protocol: "json", version: 1 });
+    await this.handshake;
+    this.connected = true;
+  }
+
+  async invoke(target, ...args) {
+    if (!this.connected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      throw new Error("SignalR connection is not available.");
+    }
+
+    const invocationId = String(this.nextInvocationId++);
+    const completion = new Promise((resolve, reject) => {
+      this.invocations.set(invocationId, { resolve, reject });
+    });
+    this.sendRaw({ type: 1, invocationId, target, arguments: args });
+    return await completion;
+  }
+
+  sendRaw(message) {
+    this.socket.send(`${JSON.stringify(message)}${recordSeparator}`);
+  }
+
+  async receive(data) {
+    const text = typeof data === "string" ? data : await data.text();
+    this.buffer += text;
+    const messages = this.buffer.split(recordSeparator);
+    this.buffer = messages.pop() ?? "";
+
+    for (const messageText of messages) {
+      if (!messageText) {
+        continue;
+      }
+
+      const message = JSON.parse(messageText);
+      if (!message.type) {
+        if (message.error) {
+          this.handshakeReject?.(new Error(message.error));
+        } else {
+          this.handshakeResolve?.();
+        }
+
+        continue;
+      }
+
+      this.handleMessage(message);
+    }
+  }
+
+  handleMessage(message) {
+    if (message.type === 1) {
+      const handler = this.handlers.get(message.target);
+      if (handler) {
+        handler(...(message.arguments ?? []));
+      }
+    } else if (message.type === 3) {
+      const invocation = this.invocations.get(message.invocationId);
+      if (!invocation) {
+        return;
+      }
+
+      this.invocations.delete(message.invocationId);
+      if (message.error) {
+        invocation.reject(new Error(message.error));
+      } else {
+        invocation.resolve(message.result);
+      }
+    } else if (message.type === 7) {
+      this.handleClose();
+    }
+  }
+
+  handleClose() {
+    if (this.isClosed) {
+      return;
+    }
+
+    this.isClosed = true;
+    this.connected = false;
+    this.handshakeReject?.(new Error("SignalR connection closed."));
+    for (const invocation of this.invocations.values()) {
+      invocation.reject(new Error("SignalR connection closed."));
+    }
+
+    this.invocations.clear();
+    this.socket = null;
+    if (!this.closedByClient && this.onclose) {
+      this.onclose();
+    }
+  }
+}
+
+elements.cancelButton.disabled = true;
 boot().catch(error => appendMessage("error", error.message));

@@ -1,4 +1,4 @@
-using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Clients.LocalWorkspace;

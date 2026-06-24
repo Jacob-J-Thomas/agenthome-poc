@@ -21,33 +21,6 @@ public sealed class WebSessionSecurity
 
     public string Token { get; }
 
-    public bool RequiresToken(HttpRequest request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-
-        return request.Path.StartsWithSegments("/api")
-            && !HttpMethods.IsGet(request.Method)
-            && !HttpMethods.IsHead(request.Method)
-            && !HttpMethods.IsOptions(request.Method);
-    }
-
-    public bool IsAuthorized(HttpRequest request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-
-        if (!IsHostAllowed(request.Host))
-        {
-            return false;
-        }
-
-        if (!IsOriginAllowed(request))
-        {
-            return false;
-        }
-
-        return !RequiresToken(request) || string.Equals(request.Headers[HeaderName].ToString(), Token, StringComparison.Ordinal);
-    }
-
     public bool IsHostAllowed(HostString host)
     {
         var normalizedHost = NormalizeHost(host.Host);
@@ -75,6 +48,19 @@ public sealed class WebSessionSecurity
         }
 
         return request.Host.Port is null || originUri.Port == request.Host.Port;
+    }
+
+    public bool HasValidToken(HttpRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var headerToken = request.Headers[HeaderName].ToString();
+        if (string.Equals(headerToken, Token, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return string.Equals(request.Query["access_token"].ToString(), Token, StringComparison.Ordinal);
     }
 
     private static string NormalizeHost(string host)

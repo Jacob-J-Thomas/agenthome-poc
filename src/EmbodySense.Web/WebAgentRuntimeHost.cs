@@ -14,6 +14,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
     private readonly IWorkspaceInitializer _workspaceInitializer;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
+    private readonly object _turnCancellationGate = new();
+    private CancellationTokenSource? _turnCancellation;
     private AgentRuntime? _runtime;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
@@ -59,20 +61,37 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(writeEventAsync);
 
         await _turnGate.WaitAsync(cancellationToken);
+        using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        SetTurnCancellation(turnCancellation);
         try
         {
-            var runtime = await GetRuntimeAsync(cancellationToken);
+            var runtime = await GetRuntimeAsync(turnCancellation.Token);
             var response = await runtime.Session.SendUserMessageAsync(message, (chunk, token) =>
             {
                 return string.IsNullOrEmpty(chunk)
                     ? Task.CompletedTask
                     : writeEventAsync(WebStreamEvent.AssistantDelta(chunk), token);
-            }, cancellationToken);
-            await writeEventAsync(WebStreamEvent.AssistantFinal(response.OutputText, response.Surface.ToString(), response.Model), cancellationToken);
+            }, turnCancellation.Token);
+            await writeEventAsync(WebStreamEvent.AssistantFinal(response.OutputText, response.Surface.ToString(), response.Model), turnCancellation.Token);
         }
         finally
         {
+            ClearTurnCancellation(turnCancellation);
             _turnGate.Release();
+        }
+    }
+
+    public bool CancelCurrentTurn()
+    {
+        lock (_turnCancellationGate)
+        {
+            if (_turnCancellation is null || _turnCancellation.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            _turnCancellation.Cancel();
+            return true;
         }
     }
 
@@ -108,6 +127,25 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         finally
         {
             _runtimeGate.Release();
+        }
+    }
+
+    private void SetTurnCancellation(CancellationTokenSource cancellation)
+    {
+        lock (_turnCancellationGate)
+        {
+            _turnCancellation = cancellation;
+        }
+    }
+
+    private void ClearTurnCancellation(CancellationTokenSource cancellation)
+    {
+        lock (_turnCancellationGate)
+        {
+            if (ReferenceEquals(_turnCancellation, cancellation))
+            {
+                _turnCancellation = null;
+            }
         }
     }
 }

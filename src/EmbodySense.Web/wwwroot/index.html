@@ -31,7 +31,10 @@
         <div id="transcript" class="transcript" aria-live="polite"></div>
         <form id="messageForm" class="composer">
           <textarea id="messageInput" name="message" rows="3" placeholder="Send a message to the agent"></textarea>
-          <button id="sendButton" type="submit">Send</button>
+          <div class="composer-actions">
+            <button id="sendButton" type="submit">Send</button>
+            <button id="cancelButton" type="button">Cancel</button>
+          </div>
         </form>
       </section>
 

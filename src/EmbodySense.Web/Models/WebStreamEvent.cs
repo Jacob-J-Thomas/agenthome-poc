@@ -11,5 +11,7 @@ public sealed record WebStreamEvent(
 
     public static WebStreamEvent AssistantFinal(string text, string surface, string? model) => new("assistant_final", Text: text, Surface: surface, Model: model);
 
+    public static WebStreamEvent Cancelled(string text) => new("cancelled", Text: text);
+
     public static WebStreamEvent Failure(string error) => new("error", Error: error);
 }

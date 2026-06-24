@@ -1,6 +1,9 @@
 using EmbodySense.Tests.Support;
+using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace EmbodySense.Web.Tests;
 
@@ -33,6 +36,7 @@ public sealed class ProgramTests
         using var workspace = new TestWorkspace();
         var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath]);
         var services = new ServiceCollection();
+        services.AddLogging();
 
         Program.ConfigureServices(services, options);
         await using var provider = services.BuildServiceProvider();
@@ -40,7 +44,8 @@ public sealed class ProgramTests
         Assert.NotEmpty(provider.GetRequiredService<WebSessionSecurity>().Token);
         Assert.Empty(provider.GetRequiredService<WebApprovalCoordinator>().GetPending());
         Assert.Equal(workspace.RootPath, provider.GetRequiredService<WebAgentRuntimeHost>().GetStatus().WorkspaceRoot);
-        Assert.NotNull(provider.GetRequiredService<WebStreamWriter>());
+        Assert.NotNull(provider.GetRequiredService<IWebClientNotifier>());
+        Assert.NotNull(provider.GetRequiredService<IHubContext<WebSessionHub, IWebSessionClient>>());
     }
 
     [Fact]
