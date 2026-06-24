@@ -162,17 +162,24 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
             "Localhost web client is the primary browser surface; CLI remains available for verification.");
     }
 
-    private static Task WriteCommandResultAsync(
+    private static async Task WriteCommandResultAsync(
         AgentRuntimeCommandResult result,
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
         CancellationToken cancellationToken)
     {
+        if (result.ReplaceTranscript)
+        {
+            var messages = result.RestoredMessages.Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
+            await writeEventAsync(WebStreamEvent.HistoryLoaded(messages), cancellationToken);
+        }
+
         var output = result.ExitRequested
             ? "The web client is still connected. Close the browser tab or stop the web server to leave."
             : result.Output;
-        return string.IsNullOrWhiteSpace(output)
-            ? Task.CompletedTask
-            : writeEventAsync(WebStreamEvent.AssistantFinal(output), cancellationToken);
+        if (!string.IsNullOrWhiteSpace(output))
+        {
+            await writeEventAsync(WebStreamEvent.AssistantFinal(output), cancellationToken);
+        }
     }
 
     private void SetTurnCancellation(CancellationTokenSource cancellation)

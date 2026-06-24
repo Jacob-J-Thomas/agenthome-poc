@@ -100,6 +100,19 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Contains("Send conversation number to load", history.Output, StringComparison.Ordinal);
         Assert.True(loaded.Handled);
         Assert.Contains("Loaded conversation `archive/", loaded.Output, StringComparison.Ordinal);
+        Assert.True(loaded.ReplaceTranscript);
+        Assert.Collection(
+            loaded.RestoredMessages,
+            message =>
+            {
+                Assert.Equal("user", message.Role);
+                Assert.Equal("saved prompt", message.Content);
+            },
+            message =>
+            {
+                Assert.Equal("assistant", message.Role);
+                Assert.Equal("saved answer", message.Content);
+            });
         var currentMessages = await store.LoadCurrentConversationAsync();
         Assert.Collection(
             currentMessages,
@@ -217,6 +230,10 @@ public sealed class AgentRuntimeFactoryTests
         public string? ReadLine()
         {
             return _inputs.Count == 0 ? null : _inputs.Dequeue();
+        }
+
+        public void Clear()
+        {
         }
 
         public void Write(string value)

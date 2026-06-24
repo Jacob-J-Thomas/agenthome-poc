@@ -69,6 +69,10 @@ public sealed class ConsoleHarnessAdapterTests
             return _inputs.Count == 0 ? null : _inputs.Dequeue();
         }
 
+        public void Clear()
+        {
+        }
+
         public void Write(string value)
         {
             _output.Append(value);

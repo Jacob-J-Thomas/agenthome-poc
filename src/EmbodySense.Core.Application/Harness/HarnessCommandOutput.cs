@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using EmbodySense.Core.Application.Inference.Models;
 using EmbodySense.Core.Application.Memory.Models;
 
 namespace EmbodySense.Core.Application.Harness;
@@ -55,5 +56,38 @@ public static class HarnessCommandOutput
         return normalizedPrompt.Length <= ConversationPromptPreviewLength
             ? normalizedPrompt
             : normalizedPrompt[..(ConversationPromptPreviewLength - 3)] + "...";
+    }
+
+    public static string FormatRestoredConversation(IReadOnlyList<LlmMessage> messages)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        if (messages.Count == 0)
+        {
+            return "Loaded conversation transcript is empty.";
+        }
+
+        var builder = new StringBuilder();
+        builder.AppendLine("Loaded conversation transcript:");
+        foreach (var message in messages)
+        {
+            builder.AppendLine($"{FormatMessageRole(message.Role)}:");
+            builder.AppendLine(message.Content);
+            builder.AppendLine();
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static string FormatMessageRole(LlmMessageRole role)
+    {
+        return role switch
+        {
+            LlmMessageRole.System => "System",
+            LlmMessageRole.User => "User",
+            LlmMessageRole.Assistant => "Assistant",
+            LlmMessageRole.Tool => "Tool",
+            _ => role.ToString()
+        };
     }
 }

@@ -142,7 +142,10 @@ public sealed class CliBehaviorTests
         Assert.Contains("saved-conversation", result.Output);
         Assert.Contains("Alpha prompt for picker", result.Output);
         Assert.Contains("...", result.Output);
-        Assert.DoesNotContain("hidden suffix", result.Output);
+        Assert.Contains("hidden suffix", result.Output);
+        Assert.Contains("Loaded conversation transcript:", result.Output);
+        Assert.Contains("Assistant:", result.Output);
+        Assert.Contains("saved answer", result.Output);
         Assert.Contains("Loaded conversation `saved-conversation` (2 messages).", result.Output);
 
         var loadedMessages = await new ConversationMemoryStore(paths).LoadCurrentConversationAsync();

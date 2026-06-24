@@ -98,9 +98,29 @@ public sealed class WebAgentRuntimeHostTests
             return Task.CompletedTask;
         });
 
-        var loadedEvent = Assert.Single(events);
-        Assert.Equal("assistant_final", loadedEvent.Type);
-        Assert.Contains("Loaded conversation `archive/", loadedEvent.Text);
+        Assert.Collection(
+            events,
+            loadedEvent =>
+            {
+                Assert.Equal("history_loaded", loadedEvent.Type);
+                Assert.Collection(
+                    loadedEvent.Messages,
+                    message =>
+                    {
+                        Assert.Equal("user", message.Role);
+                        Assert.Equal("web archived prompt", message.Content);
+                    },
+                    message =>
+                    {
+                        Assert.Equal("assistant", message.Role);
+                        Assert.Equal("web archived answer", message.Content);
+                    });
+            },
+            confirmationEvent =>
+            {
+                Assert.Equal("assistant_final", confirmationEvent.Type);
+                Assert.Contains("Loaded conversation `archive/", confirmationEvent.Text);
+            });
         Assert.Contains("web archived prompt", await File.ReadAllTextAsync(CurrentTranscriptPath(workspace)));
     }
 

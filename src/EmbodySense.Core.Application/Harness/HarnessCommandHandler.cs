@@ -58,6 +58,13 @@ public sealed class HarnessCommandHandler
 
     private void WriteResult(HarnessCommandResult result)
     {
+        if (result.ReplaceTranscript)
+        {
+            _client.Clear();
+            _client.WriteLine(HarnessCommandOutput.FormatRestoredConversation(result.RestoredMessages));
+            _client.WriteLine();
+        }
+
         if (!string.IsNullOrEmpty(result.Output))
         {
             _client.WriteLine(result.Output);

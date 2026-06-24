@@ -18,6 +18,11 @@ internal sealed class HarnessClientAdapter : IHarnessClient
         return _console.ReadLine();
     }
 
+    public void Clear()
+    {
+        _console.Clear();
+    }
+
     public void Write(string value)
     {
         _console.Write(value);

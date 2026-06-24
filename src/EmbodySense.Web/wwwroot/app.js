@@ -532,12 +532,41 @@ async function decideApproval(requestId, approved) {
 }
 
 function appendMessage(kind, text) {
-  const message = document.createElement("div");
-  message.className = `message ${kind}`;
-  message.textContent = text;
+  const message = createMessage(kind, text);
   elements.transcript.append(message);
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
   return message;
+}
+
+function createMessage(kind, text) {
+  const message = document.createElement("div");
+  message.className = `message ${kind}`;
+  message.textContent = text;
+  return message;
+}
+
+function replaceTranscript(messages) {
+  activeAgentMessage = null;
+  const renderedMessages = (messages ?? []).map(message => createMessage(messageKind(message.role), message.content ?? ""));
+  elements.transcript.replaceChildren(...renderedMessages);
+  elements.transcript.scrollTop = elements.transcript.scrollHeight;
+}
+
+function messageKind(role) {
+  const normalizedRole = String(role ?? "").toLowerCase();
+  if (normalizedRole === "user") {
+    return "user";
+  }
+
+  if (normalizedRole === "assistant") {
+    return "agent";
+  }
+
+  if (normalizedRole === "tool") {
+    return "tool";
+  }
+
+  return "system";
 }
 
 function appendAgentDelta(text) {
@@ -612,6 +641,8 @@ function handleStreamEvent(event) {
     appendAgentDelta(event.text ?? "");
   } else if (event.type === "assistant_final") {
     finalizeAgentMessage(event.text ?? "");
+  } else if (event.type === "history_loaded") {
+    replaceTranscript(event.messages ?? []);
   } else if (event.type === "cancelled") {
     appendMessage("error", event.text ?? "Message cancelled.");
     activeAgentMessage = null;

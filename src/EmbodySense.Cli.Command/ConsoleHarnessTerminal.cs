@@ -15,6 +15,22 @@ public sealed class ConsoleHarnessTerminal : IAgentRuntimeConsole
         return Console.ReadLine();
     }
 
+    public void Clear()
+    {
+        if (Console.IsOutputRedirected)
+        {
+            return;
+        }
+
+        try
+        {
+            Console.Clear();
+        }
+        catch (IOException)
+        {
+        }
+    }
+
     public void Write(string value)
     {
         Console.Write(value);

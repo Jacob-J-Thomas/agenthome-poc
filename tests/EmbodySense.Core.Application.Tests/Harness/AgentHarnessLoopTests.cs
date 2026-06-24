@@ -225,6 +225,10 @@ public sealed class AgentHarnessLoopTests
             session.Messages,
             message => Assert.Equal(LlmMessageRole.System, message.Role),
             message => Assert.Equal("restored prompt", message.Content));
+        Assert.Equal(1, harnessClient.ClearCount);
+        Assert.Contains("Loaded conversation transcript:", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("User:", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("restored prompt", harnessClient.Output, StringComparison.Ordinal);
         Assert.Contains("Loaded conversation `conv-1` (1 messages).", harnessClient.Output, StringComparison.Ordinal);
     }
 
@@ -262,9 +266,16 @@ public sealed class AgentHarnessLoopTests
 
         public string Output => _output.ToString();
 
+        public int ClearCount { get; private set; }
+
         public string? ReadLine()
         {
             return _inputs.Count == 0 ? null : _inputs.Dequeue();
+        }
+
+        public void Clear()
+        {
+            ClearCount++;
         }
 
         public void Write(string value)

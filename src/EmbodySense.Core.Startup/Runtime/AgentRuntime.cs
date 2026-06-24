@@ -97,6 +97,19 @@ public sealed class AgentRuntime : IAsyncDisposable
         var output = string.IsNullOrWhiteSpace(result.Prompt)
             ? result.Output
             : string.IsNullOrWhiteSpace(result.Output) ? result.Prompt : result.Output + Environment.NewLine + result.Prompt;
-        return new AgentRuntimeCommandResult(true, output, result.ExitRequested);
+        var restoredMessages = result.RestoredMessages.Select(message => new AgentRuntimeTranscriptMessage(FormatRole(message.Role), message.Content)).ToArray();
+        return new AgentRuntimeCommandResult(true, output, result.ExitRequested, restoredMessages, result.ReplaceTranscript);
+    }
+
+    private static string FormatRole(LlmMessageRole role)
+    {
+        return role switch
+        {
+            LlmMessageRole.System => "system",
+            LlmMessageRole.User => "user",
+            LlmMessageRole.Assistant => "assistant",
+            LlmMessageRole.Tool => "tool",
+            _ => role.ToString().ToLowerInvariant()
+        };
     }
 }

@@ -156,7 +156,7 @@ public sealed class HarnessCommandService
             var conversationMessages = await _conversationMemoryStore!.LoadConversationAsync(selectedConversation.ConversationId, cancellationToken);
             await _conversationMemoryStore.ResumeConversationAsync(selectedConversation.ConversationId, cancellationToken);
             session.ReplaceMessages(_startupMessages.Concat(conversationMessages).ToArray());
-            return HarnessCommandResult.HandledOutput($"Loaded conversation `{selectedConversation.ConversationId}` ({conversationMessages.Count} messages).");
+            return HarnessCommandResult.HandledOutput($"Loaded conversation `{selectedConversation.ConversationId}` ({conversationMessages.Count} messages).", conversationMessages);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)
         {

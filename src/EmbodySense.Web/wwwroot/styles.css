@@ -204,6 +204,14 @@ h2 {
   border-left: 4px solid var(--red);
 }
 
+.message.system {
+  border-left: 4px solid var(--muted);
+}
+
+.message.tool {
+  border-left: 4px solid var(--green);
+}
+
 .composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 112px;
