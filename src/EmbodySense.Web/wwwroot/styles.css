@@ -188,7 +188,6 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfcfd;
-  white-space: pre-wrap;
 }
 
 .message.agent {
@@ -210,6 +209,18 @@ h2 {
 
 .message.tool {
   border-left: 4px solid var(--green);
+}
+
+.message-role {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.message-content {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .composer {

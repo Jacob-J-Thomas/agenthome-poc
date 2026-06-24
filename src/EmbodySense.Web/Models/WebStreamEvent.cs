@@ -32,5 +32,3 @@ public sealed record WebStreamEvent
 
     public static WebStreamEvent Failure(string error) => new("error", error: error);
 }
-
-public sealed record WebTranscriptMessage(string Role, string Content);

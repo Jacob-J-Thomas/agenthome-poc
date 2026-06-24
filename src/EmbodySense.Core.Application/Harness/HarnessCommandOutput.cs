@@ -8,6 +8,7 @@ namespace EmbodySense.Core.Application.Harness;
 public static class HarnessCommandOutput
 {
     private const int ConversationPromptPreviewLength = 96;
+    public const string UserPrompt = "User: ";
 
     public static IReadOnlyList<string> HelpLines { get; } =
     [
@@ -71,7 +72,7 @@ public static class HarnessCommandOutput
         builder.AppendLine("Loaded conversation transcript:");
         foreach (var message in messages)
         {
-            builder.AppendLine($"{FormatMessageRole(message.Role)}:");
+            builder.AppendLine(FormatMessageHeader(message.Role));
             builder.AppendLine(message.Content);
             builder.AppendLine();
         }
@@ -79,14 +80,14 @@ public static class HarnessCommandOutput
         return builder.ToString().TrimEnd();
     }
 
-    private static string FormatMessageRole(LlmMessageRole role)
+    public static string FormatMessageHeader(LlmMessageRole role)
     {
         return role switch
         {
-            LlmMessageRole.System => "System",
-            LlmMessageRole.User => "User",
-            LlmMessageRole.Assistant => "Assistant",
-            LlmMessageRole.Tool => "Tool",
+            LlmMessageRole.System => "System:",
+            LlmMessageRole.User => "User:",
+            LlmMessageRole.Assistant => "Assistant:",
+            LlmMessageRole.Tool => "Tool:",
             _ => role.ToString()
         };
     }

@@ -56,6 +56,8 @@ public sealed class AgentRuntimeFactoryTests
 
         Assert.Equal(0, exitCode);
         Assert.Contains("banner", client.Output, StringComparison.Ordinal);
+        Assert.Contains("User: ", client.Output, StringComparison.Ordinal);
+        Assert.Contains("Assistant:", client.Output, StringComparison.Ordinal);
         Assert.Contains("runtime guide missing: hello", client.Output, StringComparison.Ordinal);
     }
 

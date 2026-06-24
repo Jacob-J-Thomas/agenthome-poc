@@ -21,7 +21,7 @@ public sealed class AgentHarnessLoopTests
 
         Assert.Equal(0, exitCode);
         Assert.Empty(inferenceClient.Requests);
-        Assert.Equal(3, CountOccurrences(harnessClient.Output, "> "));
+        Assert.Equal(3, CountOccurrences(harnessClient.Output, "User: "));
     }
 
     [Fact]
@@ -69,6 +69,7 @@ public sealed class AgentHarnessLoopTests
         Assert.Equal(0, exitCode);
         var requestMessages = Assert.Single(inferenceClient.Requests);
         Assert.Collection(requestMessages, message => Assert.Equal("hello", message.Content));
+        Assert.Contains("Assistant:", harnessClient.Output, StringComparison.Ordinal);
         Assert.Contains("hello world", harnessClient.Output, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(harnessClient.Output, "hello world"));
     }
@@ -84,6 +85,7 @@ public sealed class AgentHarnessLoopTests
         var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler);
 
         Assert.Equal(0, exitCode);
+        Assert.Contains("Assistant:", harnessClient.Output, StringComparison.Ordinal);
         Assert.Contains("fallback response", harnessClient.Output, StringComparison.Ordinal);
         Assert.Equal(1, CountOccurrences(harnessClient.Output, "fallback response"));
     }

@@ -71,7 +71,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     public Task<int> RunConsoleLoopAsync(
         IAgentRuntimeConsole console,
         string? banner = null,
-        string prompt = "> ",
+        string prompt = HarnessCommandOutput.UserPrompt,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(console);

@@ -38,5 +38,3 @@ public sealed record AgentRuntimeCommandResult
         return new AgentRuntimeCommandResult(true, string.Empty, exitRequested: true);
     }
 }
-
-public sealed record AgentRuntimeTranscriptMessage(string Role, string Content);

@@ -1,3 +1,5 @@
+using EmbodySense.Core.Application.Inference.Models;
+
 namespace EmbodySense.Core.Application.Harness;
 
 public static class AgentHarnessLoop
@@ -45,6 +47,7 @@ public static class AgentHarnessLoop
 
                     var wroteResponseChunk = false;
                     var responseEndedWithNewLine = false;
+                    client.WriteLine(HarnessCommandOutput.FormatMessageHeader(LlmMessageRole.Assistant));
                     var response = await session.SendUserMessageAsync(input, (chunk, _) =>
                     {
                         if (!string.IsNullOrEmpty(chunk))

@@ -541,8 +541,38 @@ function appendMessage(kind, text) {
 function createMessage(kind, text) {
   const message = document.createElement("div");
   message.className = `message ${kind}`;
-  message.textContent = text;
+  const role = document.createElement("strong");
+  role.className = "message-role";
+  role.textContent = messageRoleLabel(kind);
+  const content = document.createElement("p");
+  content.className = "message-content";
+  content.textContent = text;
+  message.append(role, content);
   return message;
+}
+
+function messageRoleLabel(kind) {
+  if (kind === "user") {
+    return "User";
+  }
+
+  if (kind === "agent") {
+    return "Assistant";
+  }
+
+  if (kind === "tool") {
+    return "Tool";
+  }
+
+  if (kind === "system") {
+    return "System";
+  }
+
+  return "Error";
+}
+
+function getMessageContent(message) {
+  return message.querySelector(".message-content") ?? message;
 }
 
 function replaceTranscript(messages) {
@@ -574,13 +604,13 @@ function appendAgentDelta(text) {
     activeAgentMessage = appendMessage("agent", "");
   }
 
-  activeAgentMessage.textContent += text;
+  getMessageContent(activeAgentMessage).textContent += text;
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
 }
 
 function finalizeAgentMessage(text) {
   if (activeAgentMessage) {
-    activeAgentMessage.textContent = text;
+    getMessageContent(activeAgentMessage).textContent = text;
   } else {
     activeAgentMessage = appendMessage("agent", text);
   }
