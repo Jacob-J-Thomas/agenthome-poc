@@ -56,6 +56,21 @@
           </dl>
         </section>
 
+        <section class="panel-section configuration-section" aria-label="Configuration">
+          <div class="section-title">
+            <h2>Configuration</h2>
+            <button id="refreshConfigButton" type="button">Refresh</button>
+          </div>
+          <div class="config-tabs" role="tablist" aria-label="Configuration sections">
+            <button type="button" role="tab" aria-selected="true" data-config-tab="overview">Overview</button>
+            <button type="button" role="tab" aria-selected="false" data-config-tab="permissions">Permissions</button>
+            <button type="button" role="tab" aria-selected="false" data-config-tab="agent">Agent</button>
+            <button type="button" role="tab" aria-selected="false" data-config-tab="audit">Audit</button>
+            <button type="button" role="tab" aria-selected="false" data-config-tab="history">History</button>
+          </div>
+          <div id="configContent" class="config-content" aria-live="polite"></div>
+        </section>
+
         <section class="panel-section approvals-section">
           <div class="section-title">
             <h2>Approvals</h2>

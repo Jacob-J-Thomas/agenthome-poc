@@ -1,5 +1,7 @@
 let sessionToken = "";
 let status = null;
+let configuration = null;
+let activeConfigTab = "overview";
 let activeAgentMessage = null;
 let hub = null;
 
@@ -10,9 +12,12 @@ const elements = {
   cliRole: document.getElementById("cliRole"),
   clientRole: document.getElementById("clientRole"),
   clientStatus: document.getElementById("clientStatus"),
+  configContent: document.getElementById("configContent"),
+  configTabs: Array.from(document.querySelectorAll("[data-config-tab]")),
   initButton: document.getElementById("initButton"),
   messageForm: document.getElementById("messageForm"),
   messageInput: document.getElementById("messageInput"),
+  refreshConfigButton: document.getElementById("refreshConfigButton"),
   sendButton: document.getElementById("sendButton"),
   transcript: document.getElementById("transcript"),
   workspaceRoot: document.getElementById("workspaceRoot"),
@@ -26,10 +31,12 @@ async function boot() {
   sessionToken = session.token;
   await refreshStatus();
   await connectHub();
+  await refreshConfiguration();
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const request = { ...options, headers: { ...(options.headers ?? {}) } };
+  const response = await fetch(url, request);
   if (!response.ok) {
     throw new Error(await response.text());
   }
@@ -37,9 +44,30 @@ async function fetchJson(url, options = {}) {
   return await response.json();
 }
 
+function createSessionHeaders() {
+  return sessionToken ? { "X-EmbodySense-Session": sessionToken } : {};
+}
+
 async function refreshStatus() {
   status = await fetchJson("/api/status");
   applyStatus(status);
+}
+
+async function refreshConfiguration() {
+  if (!sessionToken) {
+    return;
+  }
+
+  elements.refreshConfigButton.disabled = true;
+  renderConfigLoading();
+  try {
+    configuration = await fetchJson("/api/configuration", { headers: createSessionHeaders() });
+    renderConfiguration();
+  } catch (error) {
+    renderConfigError(error.message);
+  } finally {
+    elements.refreshConfigButton.disabled = false;
+  }
 }
 
 function applyStatus(nextStatus) {
@@ -87,6 +115,369 @@ function applyDisconnectedState() {
   elements.initButton.disabled = true;
   elements.sendButton.disabled = true;
   elements.cancelButton.disabled = true;
+}
+
+function renderConfigLoading() {
+  elements.configContent.replaceChildren(createState("Loading configuration"));
+}
+
+function renderConfigError(message) {
+  elements.configContent.replaceChildren(createState(`Configuration unavailable: ${message}`, "error"));
+}
+
+function renderConfiguration() {
+  if (!configuration) {
+    renderConfigLoading();
+    return;
+  }
+
+  for (const tab of elements.configTabs) {
+    const selected = tab.dataset.configTab === activeConfigTab;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+
+  const renderers = {
+    overview: renderOverviewTab,
+    permissions: renderPermissionsTab,
+    agent: renderAgentTab,
+    audit: renderAuditTab,
+    history: renderHistoryTab
+  };
+  elements.configContent.replaceChildren(renderers[activeConfigTab]?.() ?? renderOverviewTab());
+}
+
+function renderOverviewTab() {
+  const fragment = document.createDocumentFragment();
+  fragment.append(renderMetricGrid([
+    ["Workspace", configuration.status.initialized ? "Initialized" : "Needs initialization"],
+    ["Surface", configuration.runtime.surface],
+    ["Model", configuration.runtime.model],
+    ["Sandbox", configuration.runtime.codexSandbox],
+    ["Audit events", String(configuration.audit.events.length)],
+    ["Transcripts", String(configuration.conversationHistory.transcripts.length)]
+  ]));
+  fragment.append(renderPathGroup(configuration.paths));
+  fragment.append(renderConcepts(configuration.concepts));
+  return fragment;
+}
+
+function renderPermissionsTab() {
+  const fragment = document.createDocumentFragment();
+  fragment.append(renderMetricGrid([
+    ["File", configuration.permissions.exists ? "Present" : "Missing"],
+    ["Parsed", configuration.permissions.parsed ? "Yes" : "No"],
+    ["Version", configuration.permissions.version ?? "Missing"],
+    ["Scope", configuration.permissions.scope || "Missing"],
+    ["Default", configuration.permissions.defaultAccess]
+  ]));
+  fragment.append(renderProblems(configuration.permissions.readProblems));
+  fragment.append(renderRuleSection("Approved", configuration.permissions.approved));
+  fragment.append(renderRuleSection("Denied", configuration.permissions.denied));
+  fragment.append(renderDetails("permissions.json", configuration.permissions.rawJson || "Missing"));
+  return fragment;
+}
+
+function renderAgentTab() {
+  const fragment = document.createDocumentFragment();
+  const documents = groupBy(configuration.documents, document => document.category);
+  for (const [category, items] of documents) {
+    fragment.append(renderSectionHeading(category));
+    for (const documentItem of items) {
+      fragment.append(renderDocument(documentItem));
+    }
+  }
+
+  return fragment;
+}
+
+function renderAuditTab() {
+  const fragment = document.createDocumentFragment();
+  fragment.append(renderMetricGrid([
+    ["Path", configuration.audit.path],
+    ["File", configuration.audit.exists ? "Present" : "Missing"],
+    ["Events", String(configuration.audit.events.length)]
+  ]));
+  fragment.append(renderProblems(configuration.audit.readProblems));
+  if (configuration.audit.events.length === 0) {
+    fragment.append(createState("No audit events"));
+    return fragment;
+  }
+
+  for (const event of [...configuration.audit.events].reverse()) {
+    fragment.append(renderAuditEvent(event));
+  }
+
+  return fragment;
+}
+
+function renderHistoryTab() {
+  const fragment = document.createDocumentFragment();
+  fragment.append(renderMetricGrid([
+    ["Directory", configuration.conversationHistory.directoryPath],
+    ["Current", configuration.conversationHistory.currentPath],
+    ["Archive", configuration.conversationHistory.archivePath],
+    ["Transcripts", String(configuration.conversationHistory.transcripts.length)]
+  ]));
+  fragment.append(renderProblems(configuration.conversationHistory.readProblems));
+  for (const transcript of configuration.conversationHistory.transcripts) {
+    fragment.append(renderTranscript(transcript));
+  }
+
+  return fragment;
+}
+
+function renderMetricGrid(items) {
+  const grid = document.createElement("dl");
+  grid.className = "config-metrics";
+  for (const [label, value] of items) {
+    const item = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value ?? "";
+    item.append(term, description);
+    grid.append(item);
+  }
+
+  return grid;
+}
+
+function renderPathGroup(paths) {
+  const section = document.createElement("section");
+  section.className = "config-group";
+  section.append(renderSectionHeading("Paths"));
+  for (const path of paths) {
+    const item = document.createElement("article");
+    item.className = "config-row";
+    item.append(renderRowHeader(path.name, path.exists ? "Present" : "Missing"));
+    item.append(textLine(path.category, "muted"));
+    item.append(textLine(path.path, "path"));
+    item.append(textLine(path.description, "muted"));
+    section.append(item);
+  }
+
+  return section;
+}
+
+function renderConcepts(concepts) {
+  const section = document.createElement("section");
+  section.className = "config-group";
+  section.append(renderSectionHeading("Concepts"));
+  for (const concept of concepts) {
+    const item = document.createElement("article");
+    item.className = "config-row";
+    item.append(renderRowHeader(concept.name, concept.status));
+    item.append(textLine(concept.category, "muted"));
+    item.append(textLine(concept.detail, "muted"));
+    section.append(item);
+  }
+
+  return section;
+}
+
+function renderRuleSection(title, rules) {
+  const section = document.createElement("section");
+  section.className = "config-group";
+  section.append(renderSectionHeading(`${title} (${rules.length})`));
+  if (rules.length === 0) {
+    section.append(createState("No rules"));
+    return section;
+  }
+
+  for (const rule of rules) {
+    const item = document.createElement("article");
+    item.className = "config-row permission-rule";
+    item.append(renderRowHeader(rule.path, rule.requiresApproval ? "Approval" : rule.effect));
+    item.append(renderChipList(rule.operations));
+    item.append(textLine(rule.detail, "muted"));
+    section.append(item);
+  }
+
+  return section;
+}
+
+function renderDocument(documentItem) {
+  const details = document.createElement("details");
+  details.className = "config-document";
+  if (documentItem.exists && ["Agent guide", "Context", "Memory", "Models"].includes(documentItem.name)) {
+    details.open = true;
+  }
+
+  const summary = document.createElement("summary");
+  summary.append(renderRowHeader(documentItem.name, documentItem.exists ? "Present" : "Missing"));
+  details.append(summary);
+  details.append(renderMetricGrid([
+    ["Path", documentItem.path],
+    ["Size", `${documentItem.sizeBytes} bytes`],
+    ["Modified", formatDate(documentItem.lastModifiedUtc)]
+  ]));
+  details.append(renderCodeBlock(documentItem.content || "Missing"));
+  return details;
+}
+
+function renderAuditEvent(event) {
+  const item = document.createElement("article");
+  item.className = "config-row audit-event";
+  item.append(renderRowHeader(`${event.sequence}. ${event.action}`, event.outcome));
+  item.append(renderMetricGrid([
+    ["Time", formatDate(event.timestampUtc)],
+    ["Actor", event.actor],
+    ["Target", event.target],
+    ["Detail", event.detail]
+  ]));
+  const metadata = Object.entries(event.metadata ?? {});
+  if (metadata.length > 0) {
+    item.append(renderKeyValueList("Metadata", metadata));
+  }
+
+  return item;
+}
+
+function renderTranscript(transcript) {
+  const details = document.createElement("details");
+  details.className = "config-document transcript-detail";
+  details.open = transcript.isCurrent;
+
+  const summary = document.createElement("summary");
+  summary.append(renderRowHeader(transcript.conversationId, transcript.exists ? `${transcript.messageCount} messages` : "Missing"));
+  details.append(summary);
+  details.append(renderMetricGrid([
+    ["Path", transcript.path],
+    ["First", formatDate(transcript.firstTimestampUtc)],
+    ["Last", formatDate(transcript.lastTimestampUtc)],
+    ["First prompt", transcript.firstPrompt || "None"]
+  ]));
+  if (transcript.messages.length === 0) {
+    details.append(createState("No messages"));
+    return details;
+  }
+
+  for (const message of transcript.messages) {
+    const item = document.createElement("article");
+    item.className = "history-message";
+    item.append(renderRowHeader(`${message.sequence}. ${message.role}`, formatDate(message.timestampUtc)));
+    item.append(textLine(message.content, "content"));
+    details.append(item);
+  }
+
+  return details;
+}
+
+function renderProblems(problems) {
+  const section = document.createElement("section");
+  section.className = "config-problems";
+  if (!problems || problems.length === 0) {
+    return section;
+  }
+
+  section.append(renderSectionHeading("Read problems"));
+  for (const problem of problems) {
+    section.append(textLine(problem, "error-text"));
+  }
+
+  return section;
+}
+
+function renderDetails(title, content) {
+  const details = document.createElement("details");
+  details.className = "config-document";
+  const summary = document.createElement("summary");
+  summary.textContent = title;
+  details.append(summary, renderCodeBlock(content));
+  return details;
+}
+
+function renderKeyValueList(title, entries) {
+  const section = document.createElement("section");
+  section.className = "config-group";
+  section.append(renderSectionHeading(title));
+  const list = document.createElement("dl");
+  list.className = "metadata-list";
+  for (const [key, value] of entries) {
+    const item = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = key;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    item.append(term, description);
+    list.append(item);
+  }
+
+  section.append(list);
+  return section;
+}
+
+function renderChipList(values) {
+  const list = document.createElement("div");
+  list.className = "chip-list";
+  for (const value of values) {
+    const chip = document.createElement("span");
+    chip.textContent = value;
+    list.append(chip);
+  }
+
+  return list;
+}
+
+function renderRowHeader(title, statusText) {
+  const header = document.createElement("div");
+  header.className = "row-header";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const statusBadge = document.createElement("span");
+  statusBadge.textContent = statusText;
+  header.append(strong, statusBadge);
+  return header;
+}
+
+function renderSectionHeading(text) {
+  const heading = document.createElement("h3");
+  heading.textContent = text;
+  return heading;
+}
+
+function renderCodeBlock(content) {
+  const pre = document.createElement("pre");
+  pre.textContent = content;
+  return pre;
+}
+
+function createState(text, kind = "") {
+  const state = document.createElement("p");
+  state.className = kind ? `empty-state ${kind}` : "empty-state";
+  state.textContent = text;
+  return state;
+}
+
+function textLine(text, className = "") {
+  const line = document.createElement("p");
+  line.className = className;
+  line.textContent = text ?? "";
+  return line;
+}
+
+function formatDate(value) {
+  if (!value) {
+    return "None";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString();
+}
+
+function groupBy(items, selector) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = selector(item);
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+
+    groups.get(key).push(item);
+  }
+
+  return groups;
 }
 
 function renderApprovals(approvals) {
@@ -171,8 +562,19 @@ function finalizeAgentMessage(text) {
 
 elements.initButton.addEventListener("click", async () => {
   elements.initButton.disabled = true;
-  await hub.invoke("InitializeWorkspace");
+  const nextStatus = await hub.invoke("InitializeWorkspace");
+  applyStatus(nextStatus);
+  await refreshConfiguration();
 });
+
+elements.refreshConfigButton.addEventListener("click", refreshConfiguration);
+
+for (const tab of elements.configTabs) {
+  tab.addEventListener("click", () => {
+    activeConfigTab = tab.dataset.configTab ?? "overview";
+    renderConfiguration();
+  });
+}
 
 elements.cancelButton.addEventListener("click", async () => {
   elements.cancelButton.disabled = true;
@@ -351,4 +753,6 @@ class JsonSignalRConnection {
 }
 
 elements.cancelButton.disabled = true;
+elements.refreshConfigButton.disabled = true;
+renderConfigLoading();
 boot().catch(error => appendMessage("error", error.message));

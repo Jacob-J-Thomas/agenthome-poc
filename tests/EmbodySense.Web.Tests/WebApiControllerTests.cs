@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
@@ -38,6 +39,11 @@ public sealed class WebApiControllerTests
             approvalsRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
             var approvalsResponse = await client.SendAsync(approvalsRequest);
             var approvals = await approvalsResponse.Content.ReadFromJsonAsync<WebPendingApproval[]>(JsonOptions);
+            var rejectedConfiguration = await client.GetAsync("/api/configuration");
+            var configurationRequest = new HttpRequestMessage(HttpMethod.Get, "/api/configuration");
+            configurationRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            var configurationResponse = await client.SendAsync(configurationRequest);
+            var configuration = await configurationResponse.Content.ReadFromJsonAsync<WorkspaceConfigurationSnapshot>(JsonOptions);
             var missingApproval = new HttpRequestMessage(HttpMethod.Post, "/api/approvals/missing");
             missingApproval.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
             missingApproval.Content = JsonContent.Create(new WebApprovalDecision(true, null), options: JsonOptions);
@@ -53,6 +59,12 @@ public sealed class WebApiControllerTests
             Assert.Contains("CLI remains supported", after.CliRole);
             Assert.True(approvalsResponse.IsSuccessStatusCode);
             Assert.Empty(approvals!);
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedConfiguration.StatusCode);
+            Assert.True(configurationResponse.IsSuccessStatusCode);
+            Assert.True(configuration!.Status.Initialized);
+            Assert.True(configuration.Permissions.Parsed);
+            Assert.NotEmpty(configuration.Documents);
+            Assert.NotEmpty(configuration.Concepts);
             Assert.Equal(HttpStatusCode.NotFound, missingApprovalResponse.StatusCode);
         }
         finally

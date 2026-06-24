@@ -1,3 +1,4 @@
+using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Web.Models;
@@ -11,6 +12,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
     private readonly WebApprovalCoordinator _approvalCoordinator;
     private readonly IWorkspaceInitializer _workspaceInitializer;
     private readonly WorkspaceStatusReader _statusReader;
+    private readonly WorkspaceConfigurationReader _configurationReader;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly object _turnCancellationGate = new();
@@ -32,6 +34,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         _approvalCoordinator = approvalCoordinator;
         _workspaceInitializer = workspaceInitializer;
         _statusReader = new WorkspaceStatusReader();
+        _configurationReader = new WorkspaceConfigurationReader();
     }
 
     public WebStatus GetStatus()
@@ -48,6 +51,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         }
 
         return GetStatus();
+    }
+
+    public async Task<WorkspaceConfigurationSnapshot> GetConfigurationAsync(CancellationToken cancellationToken = default)
+    {
+        return await _configurationReader.ReadAsync(_options.WorkingDirectory, CreateRuntimeConfiguration(), cancellationToken);
     }
 
     public async Task SendMessageAsync(
@@ -139,6 +147,19 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         {
             _runtimeGate.Release();
         }
+    }
+
+    private WorkspaceRuntimeConfiguration CreateRuntimeConfiguration()
+    {
+        var model = string.IsNullOrWhiteSpace(_options.Model) ? "configured externally" : _options.Model;
+        var codexPath = string.IsNullOrWhiteSpace(_options.CodexExecutablePath) ? "codex from PATH" : _options.CodexExecutablePath;
+        return new WorkspaceRuntimeConfiguration(
+            "web",
+            _options.Url,
+            model,
+            codexPath,
+            _options.CodexSandbox,
+            "Localhost web client is the primary browser surface; CLI remains available for verification.");
     }
 
     private static Task WriteCommandResultAsync(

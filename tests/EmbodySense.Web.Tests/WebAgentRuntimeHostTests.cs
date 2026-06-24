@@ -36,6 +36,22 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task GetConfigurationAsync_returns_read_only_workspace_configuration()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+
+        var configuration = await host.GetConfigurationAsync();
+
+        Assert.True(configuration.Status.Initialized);
+        Assert.Equal("web", configuration.Runtime.Surface);
+        Assert.True(configuration.Permissions.Parsed);
+        Assert.Contains(configuration.Paths, path => path.Name == "Agent home" && path.Exists);
+        Assert.Contains(configuration.Documents, document => document.Name == "Agent guide" && document.Exists);
+    }
+
+    [Fact]
     public async Task SendMessageAsync_handles_help_command_without_initialized_workspace()
     {
         using var workspace = new TestWorkspace();
