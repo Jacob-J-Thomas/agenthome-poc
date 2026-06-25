@@ -16,4 +16,9 @@ public sealed record WebApprovalDecisionResult(bool Accepted, string Message)
     {
         return new WebApprovalDecisionResult(false, $"Approval request `{requestId}` was already completed.");
     }
+
+    public static WebApprovalDecisionResult NotAuthorized(string requestId)
+    {
+        return new WebApprovalDecisionResult(false, $"Approval request `{requestId}` belongs to another browser connection.");
+    }
 }

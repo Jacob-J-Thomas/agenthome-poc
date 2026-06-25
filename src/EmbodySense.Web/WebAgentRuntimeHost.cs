@@ -61,6 +61,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
     public async Task SendMessageAsync(
         string message,
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
+        string? ownerConnectionId = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
@@ -68,6 +69,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
 
         await _turnGate.WaitAsync(cancellationToken);
         using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
         SetTurnCancellation(turnCancellation);
         try
         {

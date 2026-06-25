@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Collections.Concurrent;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Audit.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -8,6 +9,7 @@ namespace EmbodySense.Core.Persistence.Audit;
 
 public sealed class AuditLog : IAuditLog
 {
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> FileLocks = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -41,12 +43,18 @@ public sealed class AuditLog : IAuditLog
         ArgumentNullException.ThrowIfNull(auditEvent);
 
         Directory.CreateDirectory(_paths.AuditPath);
+        var fileLock = FileLocks.GetOrAdd(_paths.EventsLogPath, _ => new SemaphoreSlim(1, 1));
 
-        var line = JsonSerializer.Serialize(auditEvent, JsonOptions);
-        await File.AppendAllTextAsync(
-            _paths.EventsLogPath,
-            line + Environment.NewLine,
-            cancellationToken);
+        await fileLock.WaitAsync(cancellationToken);
+        try
+        {
+            var line = JsonSerializer.Serialize(auditEvent, JsonOptions);
+            await File.AppendAllTextAsync(_paths.EventsLogPath, line + Environment.NewLine, cancellationToken);
+        }
+        finally
+        {
+            fileLock.Release();
+        }
     }
 
     public async Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)
@@ -61,16 +69,40 @@ public sealed class AuditLog : IAuditLog
             return [];
         }
 
-        var lines = await File.ReadAllLinesAsync(_paths.EventsLogPath, cancellationToken);
-        var events = new List<AuditEvent>();
+        var tailLines = new Queue<string>(limit);
+        await using var stream = new FileStream(_paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
 
-        foreach (var line in lines.Where(line => !string.IsNullOrWhiteSpace(line)).TakeLast(limit))
+        while (!reader.EndOfStream)
         {
-            var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, JsonOptions);
-
-            if (auditEvent is not null)
+            cancellationToken.ThrowIfCancellationRequested();
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(line))
             {
-                events.Add(auditEvent);
+                continue;
+            }
+
+            if (tailLines.Count == limit)
+            {
+                tailLines.Dequeue();
+            }
+
+            tailLines.Enqueue(line);
+        }
+
+        var events = new List<AuditEvent>();
+        foreach (var line in tailLines)
+        {
+            try
+            {
+                var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, JsonOptions);
+                if (auditEvent is not null)
+                {
+                    events.Add(auditEvent);
+                }
+            }
+            catch (JsonException)
+            {
             }
         }
 

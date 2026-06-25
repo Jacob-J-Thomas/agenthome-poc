@@ -15,10 +15,12 @@ public sealed class SignalRWebClientNotifier : IWebClientNotifier
         _hubContext = hubContext;
     }
 
-    public Task ApprovalsChangedAsync(IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
+    public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(approvals);
 
-        return _hubContext.Clients.All.ApprovalsChanged(approvals);
+        return string.IsNullOrWhiteSpace(ownerConnectionId)
+            ? _hubContext.Clients.All.ApprovalsChanged(approvals)
+            : _hubContext.Clients.Client(ownerConnectionId).ApprovalsChanged(approvals);
     }
 }

@@ -9,6 +9,7 @@ namespace EmbodySense.Core.Clients.CodexAppServer;
 [ExcludeFromCodeCoverage]
 internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
 {
+    private const int MaxErrorOutputCharacters = 32_000;
     private readonly Process _process;
     private readonly Task _errorReaderTask;
     private readonly StringBuilder _errorOutput = new();
@@ -94,6 +95,13 @@ internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
             lock (_errorOutput)
             {
                 _errorOutput.AppendLine(line);
+                if (_errorOutput.Length > MaxErrorOutputCharacters)
+                {
+                    const string marker = "[stderr truncated]";
+                    var keepCharacters = MaxErrorOutputCharacters - marker.Length - Environment.NewLine.Length;
+                    _errorOutput.Remove(0, _errorOutput.Length - keepCharacters);
+                    _errorOutput.Insert(0, marker + Environment.NewLine);
+                }
             }
         }
     }

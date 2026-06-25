@@ -28,10 +28,12 @@ public sealed class WebApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
-            var before = await client.GetFromJsonAsync<WebStatus>("/api/status", JsonOptions);
+            using var beforeResponse = await client.GetAsync("/api/status");
+            var before = await beforeResponse.Content.ReadFromJsonAsync<WebStatus>(JsonOptions);
             var rejectedInit = await client.PostAsJsonAsync("/api/workspace/init", new { }, JsonOptions);
+            var rejectedQueryTokenConfiguration = await client.GetAsync($"/api/configuration?access_token={Uri.EscapeDataString(session!.Token)}");
             var initRequest = new HttpRequestMessage(HttpMethod.Post, "/api/workspace/init");
-            initRequest.Headers.Add(WebSessionSecurity.HeaderName, session!.Token);
+            initRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
             initRequest.Content = JsonContent.Create(new { }, options: JsonOptions);
             var initialized = await client.SendAsync(initRequest);
             var after = await initialized.Content.ReadFromJsonAsync<WebStatus>(JsonOptions);
@@ -50,7 +52,14 @@ public sealed class WebApiControllerTests
             var missingApprovalResponse = await client.SendAsync(missingApproval);
 
             Assert.False(before!.Initialized);
+            Assert.True(beforeResponse.Headers.TryGetValues("Content-Security-Policy", out var csp));
+            Assert.Contains("frame-ancestors 'none'", csp.Single());
+            Assert.True(beforeResponse.Headers.TryGetValues("X-Content-Type-Options", out var contentTypeOptions));
+            Assert.Equal("nosniff", contentTypeOptions.Single());
+            Assert.True(beforeResponse.Headers.TryGetValues("Referrer-Policy", out var referrerPolicy));
+            Assert.Equal("no-referrer", referrerPolicy.Single());
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedInit.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedQueryTokenConfiguration.StatusCode);
             Assert.True(initialized.IsSuccessStatusCode);
             Assert.True(after!.Initialized);
             Assert.Equal("web", after.Client);

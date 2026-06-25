@@ -127,7 +127,7 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
-            var status = await WaitForStatusAsync(client);
+            var status = await WaitForStatusAsync(client, process);
 
             Assert.False(status.Initialized);
             Assert.Equal("web", status.Client);
@@ -165,7 +165,7 @@ public sealed class WebClientFlowTests
         await socket.ConnectAsync(CreateHubUri(baseUrl, sessionToken), CancellationToken.None);
     }
 
-    private static Process StartWebProcess(string rootPath, int port)
+    private static WebProcess StartWebProcess(string rootPath, int port)
     {
         var webAssemblyPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.Web.dll");
         Assert.True(File.Exists(webAssemblyPath), $"Expected Web assembly at {webAssemblyPath}.");
@@ -185,10 +185,17 @@ public sealed class WebClientFlowTests
                 port.ToString(CultureInfo.InvariantCulture)
             }
         });
-        return process ?? throw new InvalidOperationException("Web process did not start.");
+        process = process ?? throw new InvalidOperationException("Web process did not start.");
+        var output = new BoundedProcessOutput();
+        var error = new BoundedProcessOutput();
+        process.OutputDataReceived += (_, args) => output.Append(args.Data);
+        process.ErrorDataReceived += (_, args) => error.Append(args.Data);
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        return new WebProcess(process, output, error);
     }
 
-    private static async Task<WebStatus> WaitForStatusAsync(HttpClient client)
+    private static async Task<WebStatus> WaitForStatusAsync(HttpClient client, WebProcess process)
     {
         Exception? lastException = null;
         for (var i = 0; i < 50; i++)
@@ -205,18 +212,18 @@ public sealed class WebClientFlowTests
             }
         }
 
-        throw new TimeoutException("Web process did not serve /api/status.", lastException);
+        throw new TimeoutException("Web process did not serve /api/status." + Environment.NewLine + process.FormatOutput(), lastException);
     }
 
-    private static async Task StopProcessAsync(Process process)
+    private static async Task StopProcessAsync(WebProcess process)
     {
-        if (process.HasExited)
+        if (process.Process.HasExited)
         {
             return;
         }
 
-        process.Kill(entireProcessTree: true);
-        await process.WaitForExitAsync();
+        process.Process.Kill(entireProcessTree: true);
+        await process.Process.WaitForExitAsync();
     }
 
     private static async Task WriteCurrentTranscriptAsync(TestWorkspace workspace, string prompt, string answer)
@@ -249,6 +256,65 @@ public sealed class WebClientFlowTests
     }
 
     private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
+
+    private sealed class WebProcess : IDisposable
+    {
+        private readonly BoundedProcessOutput _output;
+        private readonly BoundedProcessOutput _error;
+
+        public WebProcess(Process process, BoundedProcessOutput output, BoundedProcessOutput error)
+        {
+            Process = process;
+            _output = output;
+            _error = error;
+        }
+
+        public Process Process { get; }
+
+        public string FormatOutput()
+        {
+            return "stdout:" + Environment.NewLine + _output.Text + Environment.NewLine + "stderr:" + Environment.NewLine + _error.Text;
+        }
+
+        public void Dispose()
+        {
+            Process.Dispose();
+        }
+    }
+
+    private sealed class BoundedProcessOutput
+    {
+        private const int MaxCharacters = 16_000;
+        private readonly StringBuilder _builder = new();
+
+        public string Text
+        {
+            get
+            {
+                lock (_builder)
+                {
+                    return _builder.ToString();
+                }
+            }
+        }
+
+        public void Append(string? line)
+        {
+            if (line is null)
+            {
+                return;
+            }
+
+            lock (_builder)
+            {
+                _builder.AppendLine(line);
+                if (_builder.Length > MaxCharacters)
+                {
+                    _builder.Remove(0, _builder.Length - MaxCharacters);
+                }
+            }
+        }
+    }
 
     private sealed class SignalRTestClient : IAsyncDisposable
     {

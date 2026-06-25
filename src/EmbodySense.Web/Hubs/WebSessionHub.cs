@@ -23,7 +23,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     public override async Task OnConnectedAsync()
     {
         await Clients.Caller.StatusChanged(_host.GetStatus());
-        await Clients.Caller.ApprovalsChanged(_approvals.GetPending());
+        await Clients.Caller.ApprovalsChanged(_approvals.GetPending(Context.ConnectionId));
         await base.OnConnectedAsync();
     }
 
@@ -36,12 +36,12 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
 
     public Task<IReadOnlyList<WebPendingApproval>> GetPendingApprovals()
     {
-        return Task.FromResult(_approvals.GetPending());
+        return Task.FromResult(_approvals.GetPending(Context.ConnectionId));
     }
 
     public async Task<WebApprovalDecisionResult> DecideApproval(string requestId, WebApprovalDecision? decision)
     {
-        return await _approvals.SubmitDecisionAsync(requestId, decision?.Approved ?? false, decision?.Detail, Context.ConnectionAborted);
+        return await _approvals.SubmitDecisionAsync(requestId, decision?.Approved ?? false, decision?.Detail, Context.ConnectionId, Context.ConnectionAborted);
     }
 
     public async Task SendMessage(string message)
@@ -54,7 +54,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
 
         try
         {
-            await _host.SendMessageAsync(message, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionAborted);
+            await _host.SendMessageAsync(message, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionId, Context.ConnectionAborted);
         }
         catch (OperationCanceledException)
         {
@@ -62,7 +62,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
         {
-            await Clients.Caller.StreamEvent(WebStreamEvent.Failure(exception.Message));
+            await Clients.Caller.StreamEvent(WebStreamEvent.Failure("The web runtime could not process that message. Check configuration and audit details for diagnostics."));
         }
     }
 

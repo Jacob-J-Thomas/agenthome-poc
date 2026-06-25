@@ -32,12 +32,14 @@ public sealed record WebRunOptions(
 
         var portText = OptionValue(args, "--port");
         var port = string.IsNullOrWhiteSpace(portText) ? DefaultPort : ParsePort(portText);
+        var sandbox = OptionValue(args, "--sandbox") ?? "read-only";
+        ValidateSandbox(sandbox);
 
         return new WebRunOptions(
             Model: OptionValue(args, "--model") ?? OptionValue(args, "-m"),
             WorkingDirectory: OptionValue(args, "--workdir") ?? OptionValue(args, "--working-directory") ?? Directory.GetCurrentDirectory(),
             CodexExecutablePath: OptionValue(args, "--codex-path"),
-            CodexSandbox: OptionValue(args, "--sandbox") ?? "read-only",
+            CodexSandbox: sandbox,
             Host: host,
             Port: port,
             PrintHelp: printHelp);
@@ -45,11 +47,11 @@ public sealed record WebRunOptions(
 
     private static string? OptionValue(string[] args, string optionName)
     {
-        for (var i = 0; i < args.Length - 1; i++)
+        for (var i = 0; i < args.Length; i++)
         {
             if (string.Equals(args[i], optionName, StringComparison.OrdinalIgnoreCase))
             {
-                return args[i + 1];
+                return RequireOptionValue(args, optionName, i);
             }
         }
 
@@ -71,5 +73,23 @@ public sealed record WebRunOptions(
         return string.Equals(value, "help", StringComparison.OrdinalIgnoreCase)
             || string.Equals(value, "--help", StringComparison.OrdinalIgnoreCase)
             || string.Equals(value, "-h", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string RequireOptionValue(string[] args, string optionName, int optionIndex)
+    {
+        if (optionIndex + 1 >= args.Length || args[optionIndex + 1].StartsWith('-'))
+        {
+            throw new ArgumentException($"Option {optionName} requires a value.");
+        }
+
+        return args[optionIndex + 1];
+    }
+
+    private static void ValidateSandbox(string sandbox)
+    {
+        if (sandbox is not ("read-only" or "workspace-write" or "danger-full-access"))
+        {
+            throw new ArgumentException($"Unsupported sandbox mode: {sandbox}");
+        }
     }
 }

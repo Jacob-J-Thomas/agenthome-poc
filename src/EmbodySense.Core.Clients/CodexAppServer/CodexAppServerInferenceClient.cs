@@ -13,6 +13,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private const string ClientName = "embodysense";
     private const string ClientTitle = "EmbodySense";
     private const string ClientVersion = "0.1.0";
+    private const int MaxProtocolLineCharacters = 1_000_000;
+    private static readonly TimeSpan ProtocolReadTimeout = TimeSpan.FromMinutes(2);
     private readonly LlmInferenceClientOptions _options;
     private ICodexAppServerTransport? _transport;
     private readonly ICodexAppServerToolBridge? _toolBridge;
@@ -49,7 +51,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         await EnsureThreadAsync(request, cancellationToken);
 
         var requestId = NextRequestId();
-        var userText = GetLatestUserMessage(request);
+        var userText = _contextBuilder.CreateTurnInput(request);
         await SendRequestAsync("turn/start", requestId, new JsonObject
         {
             ["threadId"] = _threadId,
@@ -343,7 +345,17 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private async Task<JsonDocument> ReadMessageAsync(CancellationToken cancellationToken)
     {
         var transport = GetTransport();
-        var line = await transport.ReadLineAsync(cancellationToken);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(ProtocolReadTimeout);
+        string? line;
+        try
+        {
+            line = await transport.ReadLineAsync(timeout.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Timed out waiting for Codex app-server protocol message after {ProtocolReadTimeout.TotalSeconds:N0} seconds.");
+        }
 
         if (line is null)
         {
@@ -351,6 +363,11 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                 ? "Codex app-server closed its output stream."
                 : $"Codex app-server closed its output stream: {transport.ErrorOutput.Trim()}";
             throw new InvalidOperationException(detail);
+        }
+
+        if (line.Length > MaxProtocolLineCharacters)
+        {
+            throw new InvalidOperationException($"Codex app-server protocol message exceeded {MaxProtocolLineCharacters} characters.");
         }
 
         return JsonDocument.Parse(line);
@@ -469,18 +486,12 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         return lastFinalAnswer ?? lastAgentMessage;
     }
 
-    private static string GetLatestUserMessage(LlmInferenceRequest request)
-    {
-        return request.Messages.LastOrDefault(message => message.Role == LlmMessageRole.User)?.Content
-            ?? throw new InvalidOperationException("Codex app-server inference requires a user message.");
-    }
-
     private static string NormalizeSandboxMode(string sandbox)
     {
         return sandbox switch
         {
             "read-only" or "workspace-write" or "danger-full-access" => sandbox,
-            _ => "read-only"
+            _ => throw new ArgumentException($"Unsupported Codex sandbox mode: {sandbox}", nameof(sandbox))
         };
     }
 

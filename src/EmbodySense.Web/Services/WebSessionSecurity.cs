@@ -60,7 +60,12 @@ public sealed class WebSessionSecurity
             return true;
         }
 
-        return string.Equals(request.Query["access_token"].ToString(), Token, StringComparison.Ordinal);
+        return IsHubRequest(request.Path) && string.Equals(request.Query["access_token"].ToString(), Token, StringComparison.Ordinal);
+    }
+
+    private static bool IsHubRequest(PathString path)
+    {
+        return path.StartsWithSegments("/hubs/session", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormalizeHost(string host)

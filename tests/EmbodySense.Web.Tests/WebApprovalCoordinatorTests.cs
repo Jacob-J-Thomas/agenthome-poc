@@ -58,6 +58,42 @@ public sealed class WebApprovalCoordinatorTests
     }
 
     [Fact]
+    public async Task RequestApprovalAsync_scopes_pending_request_to_owner_connection()
+    {
+        var coordinator = new WebApprovalCoordinator();
+        using var scope = coordinator.BeginApprovalScope("connection-1");
+        var approvalTask = coordinator.RequestApprovalAsync(CreateRequest("req-owned"));
+        _ = await WaitForPendingAsync(coordinator, "connection-1");
+
+        var hiddenFromOtherConnection = coordinator.GetPending("connection-2");
+        var rejectedDecision = await coordinator.SubmitDecisionAsync("req-owned", approved: true, detail: null, decisionConnectionId: "connection-2");
+        var acceptedDecision = await coordinator.SubmitDecisionAsync("req-owned", approved: true, detail: null, decisionConnectionId: "connection-1");
+        var response = await approvalTask;
+
+        Assert.Empty(hiddenFromOtherConnection);
+        Assert.False(rejectedDecision.Accepted);
+        Assert.Contains("another browser connection", rejectedDecision.Message);
+        Assert.True(acceptedDecision.Accepted);
+        Assert.True(response.Approved);
+        Assert.Equal("human.web:connection-1", response.DecisionBy);
+    }
+
+    [Fact]
+    public async Task SubmitDecisionAsync_allows_unowned_requests_from_rest_path()
+    {
+        var coordinator = new WebApprovalCoordinator();
+        var approvalTask = coordinator.RequestApprovalAsync(CreateRequest("req-unowned"));
+        _ = await WaitForPendingAsync(coordinator);
+
+        var result = await coordinator.SubmitDecisionAsync("req-unowned", approved: true, detail: null, decisionConnectionId: null);
+        var response = await approvalTask;
+
+        Assert.True(result.Accepted);
+        Assert.True(response.Approved);
+        Assert.Equal("human.web", response.DecisionBy);
+    }
+
+    [Fact]
     public async Task RequestApprovalAsync_removes_cancelled_request()
     {
         var coordinator = new WebApprovalCoordinator();
@@ -124,11 +160,11 @@ public sealed class WebApprovalCoordinatorTests
             "Needs approval.");
     }
 
-    private static async Task<IReadOnlyList<WebPendingApproval>> WaitForPendingAsync(WebApprovalCoordinator coordinator)
+    private static async Task<IReadOnlyList<WebPendingApproval>> WaitForPendingAsync(WebApprovalCoordinator coordinator, string? ownerConnectionId = null)
     {
         for (var i = 0; i < 20; i++)
         {
-            var pending = coordinator.GetPending();
+            var pending = coordinator.GetPending(ownerConnectionId);
             if (pending.Count > 0)
             {
                 return pending;
@@ -144,7 +180,7 @@ public sealed class WebApprovalCoordinatorTests
     {
         public List<IReadOnlyList<WebPendingApproval>> Snapshots { get; } = [];
 
-        public Task ApprovalsChangedAsync(IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
+        public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
         {
             Snapshots.Add(approvals);
             return Task.CompletedTask;

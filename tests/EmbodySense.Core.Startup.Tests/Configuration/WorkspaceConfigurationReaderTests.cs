@@ -82,6 +82,35 @@ public sealed class WorkspaceConfigurationReaderTests
         Assert.NotEmpty(snapshot.ConversationHistory.ReadProblems);
     }
 
+    [Fact]
+    public async Task ReadAsync_caps_sensitive_snapshot_content()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await File.WriteAllTextAsync(paths.PermissionsPath, """{"version":2,"scope":"test","access_token":"secret-value","approved":[],"denied":[]}""");
+        await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "api_key=secret-value" + Environment.NewLine + new string('a', 41_000));
+        await WriteLongTranscriptAsync(paths.CurrentConversationPath);
+        var auditLog = new AuditLog(paths);
+        for (var i = 0; i < 205; i++)
+        {
+            await auditLog.AppendAsync(AuditEvent.Create("test", "event." + i, "target", "ok", "detail"));
+        }
+
+        var snapshot = await new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime());
+
+        Assert.Contains("access_token\": [redacted]", snapshot.Permissions.RawJson);
+        var agentGuide = Assert.Single(snapshot.Documents, document => document.Name == "Agent guide");
+        Assert.Contains("api_key= [redacted]", agentGuide.Content);
+        Assert.Contains("[truncated after", agentGuide.Content);
+        Assert.Equal(200, snapshot.Audit.Events.Count);
+        Assert.Contains(snapshot.Audit.ReadProblems, problem => problem.Contains("omits", StringComparison.Ordinal) && problem.Contains("older events", StringComparison.Ordinal));
+        var current = Assert.Single(snapshot.ConversationHistory.Transcripts, transcript => transcript.ConversationId == "current");
+        Assert.Equal(205, current.MessageCount);
+        Assert.Equal(200, current.Messages.Count);
+        Assert.Contains(snapshot.ConversationHistory.ReadProblems, problem => problem.Contains("omits 5 later messages", StringComparison.Ordinal));
+    }
+
     private static WorkspaceRuntimeConfiguration Runtime()
     {
         return new WorkspaceRuntimeConfiguration(
@@ -100,5 +129,16 @@ public sealed class WorkspaceConfigurationReaderTests
             {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","role":"user","content":"{{prompt}}"}
             {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","role":"assistant","content":"{{answer}}"}
             """);
+    }
+
+    private static async Task WriteLongTranscriptAsync(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var lines = Enumerable.Range(1, 205).Select(index =>
+        {
+            var role = index % 2 == 0 ? "assistant" : "user";
+            return $$"""{"schemaVersion":1,"conversationId":"current","sequence":{{index}},"timestampUtc":"2026-06-01T00:01:00+00:00","role":"{{role}}","content":"message {{index}}"}""";
+        });
+        await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
     }
 }

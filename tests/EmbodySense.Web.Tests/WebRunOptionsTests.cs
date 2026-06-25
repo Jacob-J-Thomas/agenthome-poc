@@ -57,6 +57,25 @@ public sealed class WebRunOptionsTests
         Assert.Contains("Port must be", exception.Message);
     }
 
+    [Theory]
+    [InlineData("--workdir")]
+    [InlineData("--model")]
+    [InlineData("--port")]
+    public void FromArguments_rejects_options_without_values(string option)
+    {
+        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments([option, "--host"]));
+
+        Assert.Contains("requires a value", exception.Message);
+    }
+
+    [Fact]
+    public void FromArguments_rejects_unknown_sandbox_mode()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(["--sandbox", "loose"]));
+
+        Assert.Contains("Unsupported sandbox mode", exception.Message);
+    }
+
     [Fact]
     public void FromArguments_prints_help_without_validating_other_options()
     {

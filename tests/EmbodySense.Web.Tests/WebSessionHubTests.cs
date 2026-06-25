@@ -80,7 +80,7 @@ public sealed class WebSessionHubTests
 
         var streamEvent = Assert.Single(clients.CallerClient.StreamEvents);
         Assert.Equal("error", streamEvent.Type);
-        Assert.Contains("Workspace is not initialized", streamEvent.Error);
+        Assert.Contains("could not process", streamEvent.Error);
     }
 
     [Fact]

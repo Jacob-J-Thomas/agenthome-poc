@@ -11,11 +11,14 @@ public sealed record RunOptions(
         ArgumentNullException.ThrowIfNull(arguments);
         RejectUnsupportedFlags(arguments, "--persist-session", "--approval", "--skip-git-repo-check");
 
+        var sandbox = arguments.OptionValue("--sandbox") ?? "read-only";
+        ValidateSandbox(sandbox);
+
         return new RunOptions(
             Model: arguments.OptionValueInTokenOrder("--model", "-m") ?? GetPositionalModel(arguments),
             WorkingDirectory: arguments.OptionValue("--workdir") ?? arguments.OptionValue("--working-directory") ?? Directory.GetCurrentDirectory(),
             CodexExecutablePath: arguments.OptionValue("--codex-path"),
-            CodexSandbox: arguments.OptionValue("--sandbox") ?? "read-only");
+            CodexSandbox: sandbox);
     }
 
     private static string? GetPositionalModel(CliArguments arguments)
@@ -32,6 +35,14 @@ public sealed record RunOptions(
             {
                 throw new ArgumentException($"unsupported run option: {flag}");
             }
+        }
+    }
+
+    private static void ValidateSandbox(string sandbox)
+    {
+        if (sandbox is not ("read-only" or "workspace-write" or "danger-full-access"))
+        {
+            throw new ArgumentException($"unsupported sandbox mode: {sandbox}");
         }
     }
 }

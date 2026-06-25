@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 using EmbodySense.Core.Application.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Memory.Models;
@@ -9,6 +10,14 @@ namespace EmbodySense.Core.Startup.Configuration;
 
 public sealed class WorkspaceConfigurationReader
 {
+    // TODO: revisit what appropriate figures should actually be.
+    private const int MaxRawJsonCharacters = 40_000;
+    private const int MaxDocumentCharacters = 40_000;
+    private const int MaxAuditEvents = 200;
+    private const int MaxReadProblems = 100;
+    private const int MaxConversationFiles = 50;
+    private const int MaxConversationMessagesPerTranscript = 200;
+    private const int MaxConversationMessageCharacters = 4_000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     public async Task<WorkspaceConfigurationSnapshot> ReadAsync(string rootPath, WorkspaceRuntimeConfiguration runtime, CancellationToken cancellationToken = default)
@@ -83,11 +92,19 @@ public sealed class WorkspaceConfigurationReader
         }
 
         var problems = new List<string>();
-        var rawJson = await File.ReadAllTextAsync(paths.PermissionsPath, cancellationToken);
+        var (rawJson, rawJsonTruncated) = await ReadCappedTextAsync(paths.PermissionsPath, MaxRawJsonCharacters, cancellationToken);
+        var rawJsonForParsing = rawJson;
+        var displayRawJson = RedactLikelySecrets(rawJson);
+        if (rawJsonTruncated)
+        {
+            AddProblem(problems, $"permissions.json was truncated after {MaxRawJsonCharacters} characters.");
+            displayRawJson += Environment.NewLine + $"[truncated after {MaxRawJsonCharacters} characters]";
+        }
+
         PermissionsDocument? document = null;
         try
         {
-            document = PermissionsDocument.FromJson(rawJson);
+            document = PermissionsDocument.FromJson(rawJsonForParsing);
             if (document is null)
             {
                 problems.Add("permissions.json is unsupported or does not declare version 2.");
@@ -105,7 +122,7 @@ public sealed class WorkspaceConfigurationReader
             document?.Version,
             document?.Scope ?? "",
             defaultAccess,
-            rawJson,
+            displayRawJson,
             FormatApprovedRules(document?.Approved ?? []),
             FormatDeniedRules(document?.Denied ?? []),
             problems);
@@ -188,7 +205,13 @@ public sealed class WorkspaceConfigurationReader
         var fileInfo = new FileInfo(path);
         try
         {
-            var content = await File.ReadAllTextAsync(path, cancellationToken);
+            var (content, truncated) = await ReadCappedTextAsync(path, MaxDocumentCharacters, cancellationToken);
+            content = RedactLikelySecrets(content);
+            if (truncated)
+            {
+                content += Environment.NewLine + $"[truncated after {MaxDocumentCharacters} characters]";
+            }
+
             return new WorkspaceConfigurationDocument(
                 name,
                 category,
@@ -221,6 +244,7 @@ public sealed class WorkspaceConfigurationReader
         var events = new List<WorkspaceAuditLogEvent>();
         var problems = new List<string>();
         var lineNumber = 0;
+        var omittedEvents = 0;
         await foreach (var line in File.ReadLinesAsync(paths.EventsLogPath, cancellationToken))
         {
             lineNumber++;
@@ -234,8 +258,14 @@ public sealed class WorkspaceConfigurationReader
                 var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, JsonOptions);
                 if (auditEvent is null)
                 {
-                    problems.Add($"Audit line {lineNumber} was empty after parsing.");
+                    AddProblem(problems, $"Audit line {lineNumber} was empty after parsing.");
                     continue;
+                }
+
+                if (events.Count == MaxAuditEvents)
+                {
+                    events.RemoveAt(0);
+                    omittedEvents++;
                 }
 
                 events.Add(new WorkspaceAuditLogEvent(
@@ -250,8 +280,13 @@ public sealed class WorkspaceConfigurationReader
             }
             catch (JsonException exception)
             {
-                problems.Add($"Audit line {lineNumber}: {exception.Message}");
+                AddProblem(problems, $"Audit line {lineNumber}: {exception.Message}");
             }
+        }
+
+        if (omittedEvents > 0)
+        {
+            AddProblem(problems, $"Audit snapshot includes the latest {MaxAuditEvents} events and omits {omittedEvents} older events.");
         }
 
         return new WorkspaceAuditConfiguration(paths.EventsLogPath, true, events, problems);
@@ -295,6 +330,12 @@ public sealed class WorkspaceConfigurationReader
         {
             foreach (var path in Directory.EnumerateFiles(paths.ConversationMemoryPath, "*.ndjson", SearchOption.TopDirectoryOnly).Where(path => !SamePath(path, paths.CurrentConversationPath)).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
             {
+                if (transcripts.Count >= MaxConversationFiles)
+                {
+                    AddProblem(problems, $"Conversation snapshot includes {MaxConversationFiles} transcript files and omits additional files.");
+                    break;
+                }
+
                 cancellationToken.ThrowIfCancellationRequested();
                 transcripts.Add(await ReadTranscriptAsync(path, Path.GetFileNameWithoutExtension(path), false, cancellationToken, problems));
             }
@@ -304,6 +345,12 @@ public sealed class WorkspaceConfigurationReader
         {
             foreach (var path in Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson", SearchOption.TopDirectoryOnly).OrderByDescending(File.GetLastWriteTimeUtc))
             {
+                if (transcripts.Count >= MaxConversationFiles)
+                {
+                    AddProblem(problems, $"Conversation snapshot includes {MaxConversationFiles} transcript files and omits additional files.");
+                    break;
+                }
+
                 cancellationToken.ThrowIfCancellationRequested();
                 transcripts.Add(await ReadTranscriptAsync(path, "archive/" + Path.GetFileNameWithoutExtension(path), false, cancellationToken, problems));
             }
@@ -336,6 +383,8 @@ public sealed class WorkspaceConfigurationReader
 
         var messages = new List<WorkspaceConversationMessage>();
         var lineNumber = 0;
+        var parsedMessageCount = 0;
+        var omittedMessages = 0;
         await foreach (var line in File.ReadLinesAsync(path, cancellationToken))
         {
             lineNumber++;
@@ -349,20 +398,33 @@ public sealed class WorkspaceConfigurationReader
                 var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, JsonOptions);
                 if (entry is null)
                 {
-                    problems.Add($"{conversationId} line {lineNumber} was empty after parsing.");
+                    AddProblem(problems, $"{conversationId} line {lineNumber} was empty after parsing.");
                     continue;
                 }
 
-                messages.Add(new WorkspaceConversationMessage(
-                    entry.Sequence,
-                    entry.TimestampUtc,
-                    entry.Role,
-                    entry.Content));
+                parsedMessageCount++;
+                if (messages.Count < MaxConversationMessagesPerTranscript)
+                {
+                    messages.Add(new WorkspaceConversationMessage(
+                        entry.Sequence,
+                        entry.TimestampUtc,
+                        entry.Role,
+                        Truncate(entry.Content, MaxConversationMessageCharacters)));
+                }
+                else
+                {
+                    omittedMessages++;
+                }
             }
             catch (JsonException exception)
             {
-                problems.Add($"{conversationId} line {lineNumber}: {exception.Message}");
+                AddProblem(problems, $"{conversationId} line {lineNumber}: {exception.Message}");
             }
+        }
+
+        if (omittedMessages > 0)
+        {
+            AddProblem(problems, $"{conversationId} snapshot includes the first {MaxConversationMessagesPerTranscript} messages and omits {omittedMessages} later messages.");
         }
 
         var orderedMessages = messages.OrderBy(message => message.Sequence).ThenBy(message => message.TimestampUtc).ToArray();
@@ -374,7 +436,7 @@ public sealed class WorkspaceConfigurationReader
             path,
             true,
             isCurrent,
-            orderedMessages.Length,
+            parsedMessageCount,
             firstTimestamp,
             lastTimestamp,
             firstPrompt,
@@ -384,6 +446,58 @@ public sealed class WorkspaceConfigurationReader
     private static bool SamePath(string left, string right)
     {
         return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<(string Text, bool Truncated)> ReadCappedTextAsync(string path, int maxCharacters, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var buffer = new char[maxCharacters + 1];
+        var count = await reader.ReadBlockAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+        var take = Math.Min(count, maxCharacters);
+        return (new string(buffer, 0, take), count > maxCharacters || stream.Position < stream.Length);
+    }
+
+    private static string RedactLikelySecrets(string text)
+    {
+        var markers = new[] { "api_key", "apikey", "access_token", "auth_token", "password", "client_secret", "secret_key" };
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var lower = lines[i].ToLowerInvariant();
+            var marker = markers.FirstOrDefault(lower.Contains);
+            if (marker is null)
+            {
+                continue;
+            }
+
+            var markerIndex = lower.IndexOf(marker, StringComparison.Ordinal);
+            var separatorIndex = lines[i].IndexOfAny([':', '='], markerIndex + marker.Length);
+            lines[i] = separatorIndex >= 0
+                ? lines[i][..(separatorIndex + 1)] + " [redacted]"
+                : "[redacted likely secret-bearing line]";
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string Truncate(string value, int maxCharacters)
+    {
+        return value.Length <= maxCharacters
+            ? value
+            : value[..maxCharacters] + Environment.NewLine + $"[truncated after {maxCharacters} characters]";
+    }
+
+    private static void AddProblem(List<string> problems, string problem)
+    {
+        if (problems.Count < MaxReadProblems)
+        {
+            problems.Add(problem);
+        }
+        else if (problems.Count == MaxReadProblems)
+        {
+            problems.Add("Additional read problems omitted.");
+        }
     }
 
     private static IReadOnlyList<WorkspaceConfigurationConcept> GetConcepts(WorkspacePaths paths)

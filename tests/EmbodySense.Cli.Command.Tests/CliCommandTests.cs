@@ -131,6 +131,15 @@ public sealed class CliCommandTests
     }
 
     [Fact]
+    public void RunOptions_rejects_missing_option_values_and_unknown_sandbox_modes()
+    {
+        Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run", "--workdir", "--model"])));
+        var exception = Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run", "--sandbox", "loose"])));
+
+        Assert.Contains("unsupported sandbox mode", exception.Message);
+    }
+
+    [Fact]
     public void CliArguments_finds_operands_options_and_flags()
     {
         var arguments = new CliArguments(["audit", "tail", "--limit", "5", "root"]);

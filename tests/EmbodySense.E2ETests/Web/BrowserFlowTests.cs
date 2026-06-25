@@ -16,7 +16,7 @@ public sealed class BrowserFlowTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    [Fact]
+    [InstalledBrowserFact]
     public async Task Headless_browser_initializes_workspace_and_restores_history()
     {
         using var workspace = new TestWorkspace();
@@ -88,66 +88,116 @@ public sealed class BrowserFlowTests
 
     private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
 
+    private sealed class InstalledBrowserFactAttribute : FactAttribute
+    {
+        public InstalledBrowserFactAttribute()
+        {
+            if (Environment.GetEnvironmentVariable("EMBODYSENSE_RUN_BROWSER_E2E") != "1")
+            {
+                Skip = "Installed-browser E2E is opt-in because local Edge/Chrome GPU startup can be host-specific; set EMBODYSENSE_RUN_BROWSER_E2E=1 to run it.";
+            }
+        }
+    }
+
     private sealed class HeadlessBrowserSession : IAsyncDisposable
     {
         private readonly Process _process;
         private readonly ClientWebSocket _socket;
         private readonly string _userDataDirectory;
+        private readonly BoundedProcessOutput _output;
+        private readonly BoundedProcessOutput _error;
         private readonly byte[] _buffer = new byte[65536];
         private int _nextCommandId;
 
-        private HeadlessBrowserSession(Process process, ClientWebSocket socket, string userDataDirectory)
+        private HeadlessBrowserSession(Process process, ClientWebSocket socket, string userDataDirectory, BoundedProcessOutput output, BoundedProcessOutput error)
         {
             _process = process;
             _socket = socket;
             _userDataDirectory = userDataDirectory;
+            _output = output;
+            _error = error;
         }
 
         public static async Task<HeadlessBrowserSession> StartAsync(string targetUrl)
         {
             var executablePath = FindBrowserExecutable();
+            Exception? lastException = null;
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                try
+                {
+                    return await StartAttemptAsync(executablePath, targetUrl);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    lastException = exception;
+                    await Task.Delay(250);
+                }
+            }
+
+            throw new InvalidOperationException("Headless browser startup failed after 3 attempts.", lastException);
+        }
+
+        private static async Task<HeadlessBrowserSession> StartAttemptAsync(string executablePath, string targetUrl)
+        {
             var debugPort = GetFreePort();
             var userDataDirectory = Path.Combine(Path.GetTempPath(), "embodysense-browser-e2e-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(userDataDirectory);
+            var output = new BoundedProcessOutput();
+            var error = new BoundedProcessOutput();
             var process = Process.Start(new ProcessStartInfo
             {
                 FileName = executablePath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 ArgumentList =
                 {
                     "--headless=new",
                     "--disable-gpu",
+                    "--disable-gpu-compositing",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-accelerated-video-decode",
+                    "--disable-features=CanvasOopRasterization,DawnGraphite,SkiaGraphite,UseDawn,UseSkiaRenderer,Vulkan",
                     "--no-first-run",
                     "--disable-default-apps",
+                    "--disable-background-networking",
+                    "--disable-dev-shm-usage",
+                    "--no-default-browser-check",
                     "--remote-debugging-port=" + debugPort.ToString(CultureInfo.InvariantCulture),
                     "--user-data-dir=" + userDataDirectory,
                     "about:blank"
                 }
             }) ?? throw new InvalidOperationException("Headless browser process did not start.");
+            process.OutputDataReceived += (_, args) => output.Append(args.Data);
+            process.ErrorDataReceived += (_, args) => error.Append(args.Data);
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
 
             try
             {
-                var websocketUrl = await CreatePageAsync(debugPort, targetUrl);
+                var websocketUrl = await GetInitialPageWebSocketUrlAsync(debugPort);
                 var socket = new ClientWebSocket();
                 await socket.ConnectAsync(new Uri(websocketUrl), CancellationToken.None);
-                var session = new HeadlessBrowserSession(process, socket, userDataDirectory);
+                var session = new HeadlessBrowserSession(process, socket, userDataDirectory, output, error);
                 await session.SendCommandAsync("Page.enable");
                 await session.SendCommandAsync("Runtime.enable");
+                await session.SendCommandAsync("Page.navigate", new { url = targetUrl });
                 return session;
             }
-            catch
+            catch (Exception exception)
             {
                 await StopProcessAsync(process);
                 TryDeleteDirectory(userDataDirectory);
-                throw;
+                throw new InvalidOperationException("Headless browser startup failed." + Environment.NewLine + FormatOutput(output, error), exception);
             }
         }
 
         public async Task WaitForExpressionAsync(string expression)
         {
             Exception? lastException = null;
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             while (!timeout.IsCancellationRequested)
             {
                 try
@@ -216,7 +266,14 @@ public sealed class BrowserFlowTests
                 ? JsonSerializer.Serialize(new { id = commandId, method }, JsonOptions)
                 : JsonSerializer.Serialize(new { id = commandId, method, @params = parameters }, JsonOptions);
             var bytes = Encoding.UTF8.GetBytes(payload);
-            await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
+            try
+            {
+                await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
+            }
+            catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException)
+            {
+                throw new InvalidOperationException("Browser DevTools command send failed." + Environment.NewLine + FormatOutput(), exception);
+            }
 
             while (true)
             {
@@ -235,10 +292,18 @@ public sealed class BrowserFlowTests
             WebSocketReceiveResult result;
             do
             {
-                result = await _socket.ReceiveAsync(_buffer, cancellationToken);
+                try
+                {
+                    result = await _socket.ReceiveAsync(_buffer, cancellationToken);
+                }
+                catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException)
+                {
+                    throw new InvalidOperationException("Browser DevTools command receive failed." + Environment.NewLine + FormatOutput(), exception);
+                }
+
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    throw new InvalidOperationException("Browser DevTools websocket closed before the expected response arrived.");
+                    throw new InvalidOperationException("Browser DevTools websocket closed before the expected response arrived." + Environment.NewLine + FormatOutput());
                 }
 
                 builder.Append(Encoding.UTF8.GetString(_buffer, 0, result.Count));
@@ -247,16 +312,43 @@ public sealed class BrowserFlowTests
             return JsonDocument.Parse(builder.ToString());
         }
 
-        private static async Task<string> CreatePageAsync(int debugPort, string targetUrl)
+        private string FormatOutput()
+        {
+            return FormatOutput(_output, _error);
+        }
+
+        private static string FormatOutput(BoundedProcessOutput output, BoundedProcessOutput error)
+        {
+            return "browser stdout:" + Environment.NewLine + output.Text + Environment.NewLine + "browser stderr:" + Environment.NewLine + error.Text;
+        }
+
+        private static async Task<string> GetInitialPageWebSocketUrlAsync(int debugPort)
         {
             using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{debugPort}") };
             await WaitForDevToolsAsync(client);
-            using var request = new HttpRequestMessage(HttpMethod.Put, "/json/new?" + Uri.EscapeDataString(targetUrl));
-            using var response = await client.SendAsync(request);
-            response.EnsureSuccessStatusCode();
-            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            return document.RootElement.GetProperty("webSocketDebuggerUrl").GetString()
-                ?? throw new InvalidOperationException("Browser DevTools target did not include a websocket URL.");
+            for (var i = 0; i < 50; i++)
+            {
+                using var response = await client.GetAsync("/json/list");
+                response.EnsureSuccessStatusCode();
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                foreach (var target in document.RootElement.EnumerateArray())
+                {
+                    if (target.TryGetProperty("type", out var type) && type.GetString() != "page")
+                    {
+                        continue;
+                    }
+
+                    if (target.TryGetProperty("webSocketDebuggerUrl", out var websocketUrl))
+                    {
+                        return websocketUrl.GetString()
+                            ?? throw new InvalidOperationException("Browser DevTools target included an empty websocket URL.");
+                    }
+                }
+
+                await Task.Delay(100);
+            }
+
+            throw new TimeoutException("Browser DevTools target list did not expose a page websocket URL.");
         }
 
         private static async Task WaitForDevToolsAsync(HttpClient client)
@@ -327,6 +419,40 @@ public sealed class BrowserFlowTests
             }
             catch (UnauthorizedAccessException)
             {
+            }
+        }
+    }
+
+    private sealed class BoundedProcessOutput
+    {
+        private const int MaxCharacters = 16_000;
+        private readonly StringBuilder _builder = new();
+
+        public string Text
+        {
+            get
+            {
+                lock (_builder)
+                {
+                    return _builder.ToString();
+                }
+            }
+        }
+
+        public void Append(string? line)
+        {
+            if (line is null)
+            {
+                return;
+            }
+
+            lock (_builder)
+            {
+                _builder.AppendLine(line);
+                if (_builder.Length > MaxCharacters)
+                {
+                    _builder.Remove(0, _builder.Length - MaxCharacters);
+                }
             }
         }
     }

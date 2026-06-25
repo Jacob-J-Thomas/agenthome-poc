@@ -37,11 +37,11 @@ public sealed class CliArguments
 
     public string? OptionValue(string optionName, int startIndex = 1)
     {
-        for (var i = startIndex; i < _args.Length - 1; i++)
+        for (var i = startIndex; i < _args.Length; i++)
         {
             if (TokenEquals(_args[i], optionName))
             {
-                return _args[i + 1];
+                return RequireOptionValue(optionName, i);
             }
         }
 
@@ -50,11 +50,11 @@ public sealed class CliArguments
 
     public string? OptionValueInTokenOrder(params string[] optionNames)
     {
-        for (var i = 1; i < _args.Length - 1; i++)
+        for (var i = 1; i < _args.Length; i++)
         {
             if (optionNames.Any(optionName => TokenEquals(_args[i], optionName)))
             {
-                return _args[i + 1];
+                return RequireOptionValue(_args[i], i);
             }
         }
 
@@ -105,5 +105,16 @@ public sealed class CliArguments
     private static bool TokenEquals(string? left, string right)
     {
         return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string RequireOptionValue(string optionName, int optionIndex)
+    {
+        var value = At(optionIndex + 1);
+        if (value is null || IsOption(value))
+        {
+            throw new ArgumentException($"option {optionName} requires a value");
+        }
+
+        return value;
     }
 }

@@ -183,7 +183,7 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
-    public async Task GenerateAsync_includes_restored_context_in_thread_start_developer_instructions()
+    public async Task GenerateAsync_sends_restored_context_as_lower_authority_turn_input()
     {
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
@@ -203,12 +203,98 @@ public sealed class CodexAppServerInferenceTests
 
         using var threadStartDocument = JsonDocument.Parse(transport.Writes.Single(IsThreadStart));
         var developerInstructions = threadStartDocument.RootElement.GetProperty("params").GetProperty("developerInstructions").GetString();
-        Assert.Contains("startup context", developerInstructions);
-        Assert.Contains("old question", developerInstructions);
-        Assert.Contains("old answer", developerInstructions);
+        Assert.Contains("EmbodySense governs the user workspace", developerInstructions);
+        Assert.DoesNotContain("startup context", developerInstructions);
+        Assert.DoesNotContain("old question", developerInstructions);
+        Assert.DoesNotContain("old answer", developerInstructions);
         Assert.DoesNotContain("new question", developerInstructions);
         using var turnStartDocument = JsonDocument.Parse(transport.Writes.Single(IsTurnStart));
-        Assert.Equal("new question", turnStartDocument.RootElement.GetProperty("params").GetProperty("input")[0].GetProperty("text").GetString());
+        var turnInput = turnStartDocument.RootElement.GetProperty("params").GetProperty("input")[0].GetProperty("text").GetString();
+        Assert.Contains("lower-authority reference material", turnInput);
+        Assert.Contains("[restored system message]", turnInput);
+        Assert.Contains("startup context", turnInput);
+        Assert.Contains("old question", turnInput);
+        Assert.Contains("old answer", turnInput);
+        Assert.Contains("Current user message:", turnInput);
+        Assert.Contains("new question", turnInput);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_unknown_sandbox_modes()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""));
+        var client = new LlmInferenceClient(new LlmInferenceClientOptions
+        {
+            Surface = LlmInferenceSurface.OpenAiCodex,
+            Model = "gpt-test",
+            WorkingDirectory = Directory.GetCurrentDirectory(),
+            CodexSandbox = "unknown-mode"
+        }, codexAppServerTransport: transport);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+
+        Assert.Contains("Unsupported Codex sandbox mode", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_reports_initialize_errors()
+    {
+        var transport = new ScriptedAppServerTransport("""{"id":1,"error":{"message":"init denied"}}""");
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+
+        Assert.Contains("init denied", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_reports_missing_thread_ids()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{}}"""));
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+
+        Assert.Contains("thread id", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_reports_failed_turns()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"model refused"},"items":[]}}"""));
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+
+        Assert.Contains("model refused", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_oversized_protocol_messages()
+    {
+        var oversizedLine = "{\"id\":1,\"result\":{\"serverInfo\":\"" + new string('x', 1_000_001) + "\"}}";
+        var transport = new ScriptedAppServerTransport(oversizedLine);
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+
+        Assert.Contains("protocol message exceeded", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_reports_malformed_protocol_json()
+    {
+        var transport = new ScriptedAppServerTransport("not-json");
+        var client = CreateClient(transport);
+
+        await Assert.ThrowsAnyAsync<JsonException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
     }
 
     [Fact]

@@ -5,6 +5,8 @@ namespace EmbodySense.Core.Application.Governance.Tools;
 
 public static class ToolResultFormatter
 {
+    private const int MaxOutputCharacters = 64_000;
+
     public static string FormatResults(IReadOnlyList<ToolResult> results)
     {
         ArgumentNullException.ThrowIfNull(results);
@@ -29,7 +31,10 @@ public static class ToolResultFormatter
 
     private static string Indent(string text)
     {
-        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        var formatted = text.Length <= MaxOutputCharacters
+            ? text
+            : text[..MaxOutputCharacters] + Environment.NewLine + $"[tool output truncated after {MaxOutputCharacters} characters]";
+        var lines = formatted.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         return string.Join(Environment.NewLine, lines.Select(line => "    " + line));
     }
 

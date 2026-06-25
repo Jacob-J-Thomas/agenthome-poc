@@ -196,7 +196,12 @@ public sealed class AgentRuntimeFactoryTests
                     "turn/start" {
                         $turnId = "turn-test"
                         $userText = [string]$message.params.input[0].text
-                        $prefix = if ($developerInstructions.Contains("runtime guide")) { "runtime guide observed" } else { "runtime guide missing" }
+                        $prefix = if ($developerInstructions.Contains("runtime guide") -or $userText.Contains("runtime guide")) { "runtime guide observed" } else { "runtime guide missing" }
+                        $currentUserMarker = "Current user message:"
+                        $currentUserIndex = $userText.IndexOf($currentUserMarker)
+                        if ($currentUserIndex -ge 0) {
+                            $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim()
+                        }
                         $text = "${prefix}: $userText"
 
                         Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }

@@ -28,7 +28,7 @@ public sealed class ApprovalsController : ControllerBase
     [HttpPost("{requestId}")]
     public async Task<IActionResult> Decide(string requestId, WebApprovalDecision? decision, CancellationToken cancellationToken)
     {
-        var result = await _approvals.SubmitDecisionAsync(requestId, decision?.Approved ?? false, decision?.Detail, cancellationToken);
+        var result = await _approvals.SubmitDecisionAsync(requestId, decision?.Approved ?? false, decision?.Detail, decisionConnectionId: null, cancellationToken);
         return result.Accepted
             ? NoContent()
             : NotFound(new { error = result.Message });

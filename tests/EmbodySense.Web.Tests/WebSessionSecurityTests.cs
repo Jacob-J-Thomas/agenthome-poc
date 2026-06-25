@@ -15,17 +15,20 @@ public sealed class WebSessionSecurityTests
     }
 
     [Fact]
-    public void HasValidToken_accepts_header_or_query_token()
+    public void HasValidToken_accepts_header_or_hub_query_token()
     {
         var session = new WebSessionSecurity("secret");
         var header = CreateContext(HttpMethods.Post, "/api/workspace/init");
         header.Request.Headers[WebSessionSecurity.HeaderName] = "secret";
         var query = CreateContext(HttpMethods.Get, "/hubs/session");
         query.Request.QueryString = QueryString.Create("access_token", "secret");
+        var apiQuery = CreateContext(HttpMethods.Get, "/api/configuration");
+        apiQuery.Request.QueryString = QueryString.Create("access_token", "secret");
         var denied = CreateContext(HttpMethods.Post, "/api/workspace/init");
 
         Assert.True(session.HasValidToken(header.Request));
         Assert.True(session.HasValidToken(query.Request));
+        Assert.False(session.HasValidToken(apiQuery.Request));
         Assert.False(session.HasValidToken(denied.Request));
     }
 

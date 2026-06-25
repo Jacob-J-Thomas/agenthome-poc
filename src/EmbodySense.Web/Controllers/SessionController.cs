@@ -23,6 +23,11 @@ public sealed class SessionController : ControllerBase
     public ActionResult<WebSessionInfo> Get()
     {
         // TODO: Replace this anonymous bootstrap token with an explicit local pairing flow before treating browser auth as hardened.
+        if (!_sessionSecurity.IsHostAllowed(Request.Host) || !_sessionSecurity.IsOriginAllowed(Request))
+        {
+            return Unauthorized();
+        }
+
         return Ok(new WebSessionInfo(_sessionSecurity.Token));
     }
 }

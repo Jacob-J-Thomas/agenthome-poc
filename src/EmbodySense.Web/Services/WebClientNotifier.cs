@@ -10,7 +10,7 @@ public sealed class WebClientNotifier : IWebClientNotifier
     {
     }
 
-    public Task ApprovalsChangedAsync(IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
+    public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(approvals);
 

@@ -45,4 +45,19 @@ public sealed class AuditLogTests
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => auditLog.ReadTailAsync(0));
     }
+
+    [Fact]
+    public async Task ReadTailAsync_skips_malformed_lines()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AuditPath);
+        await File.WriteAllTextAsync(paths.EventsLogPath, "{not-json}" + Environment.NewLine);
+        var auditLog = new AuditLog(paths);
+
+        await auditLog.AppendAsync(AuditEvent.Create("test", "valid", "target", "ok", "valid event"));
+
+        var auditEvent = Assert.Single(await auditLog.ReadTailAsync(10));
+        Assert.Equal("valid", auditEvent.Action);
+    }
 }

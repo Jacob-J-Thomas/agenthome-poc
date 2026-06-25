@@ -1,3 +1,4 @@
+using System.Text;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.Workspace;
 
@@ -5,6 +6,12 @@ namespace EmbodySense.Core.Clients.LocalWorkspace;
 
 public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 {
+    // TODO: revisit what an appropriate figures should actually be.
+    private const int MaxReadCharacters = 120_000;
+    private const int MaxSearchFiles = 500;
+    private const int MaxSearchMatches = 200;
+    private const int MaxMatchLineCharacters = 500;
+    private const long MaxSearchFileBytes = 1_048_576;
     private readonly WorkspacePaths _paths;
 
     public LocalWorkspaceClient(WorkspacePaths paths)
@@ -39,8 +46,10 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             throw new FileNotFoundException($"File not found: {resolvedPath}", resolvedPath);
         }
 
-        var text = await File.ReadAllTextAsync(resolvedPath, cancellationToken);
-        return new LocalWorkspaceResult(text, new Dictionary<string, object?> { ["character_count"] = text.Length });
+        var (text, truncated) = await ReadTextPrefixAsync(resolvedPath, cancellationToken);
+        var fileSize = new FileInfo(resolvedPath).Length;
+        var output = truncated ? text + Environment.NewLine + $"[truncated after {MaxReadCharacters} characters]" : text;
+        return new LocalWorkspaceResult(output, new Dictionary<string, object?> { ["character_count"] = text.Length, ["file_size_bytes"] = fileSize, ["truncated"] = truncated });
     }
 
     public async Task<LocalWorkspaceResult> SearchAsync(string resolvedPath, string? pattern, CancellationToken cancellationToken = default)
@@ -51,10 +60,11 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         }
 
         var matches = new List<string>();
+        var state = new SearchState();
 
         if (File.Exists(resolvedPath))
         {
-            await SearchFileAsync(resolvedPath, pattern, matches, cancellationToken);
+            await SearchFileAsync(resolvedPath, pattern, matches, state, cancellationToken);
         }
         else if (Directory.Exists(resolvedPath))
         {
@@ -65,9 +75,26 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
                 RecurseSubdirectories = true
             };
 
-            foreach (var file in Directory.EnumerateFiles(resolvedPath, "*", options).Order(StringComparer.OrdinalIgnoreCase))
+            var searchFiles = new List<string>(MaxSearchFiles);
+            foreach (var file in Directory.EnumerateFiles(resolvedPath, "*", options))
             {
-                await SearchFileAsync(file, pattern, matches, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (searchFiles.Count >= MaxSearchFiles)
+                {
+                    state.Truncated = true;
+                    break;
+                }
+
+                searchFiles.Add(file);
+            }
+
+            foreach (var file in searchFiles.Order(StringComparer.OrdinalIgnoreCase))
+            {
+                await SearchFileAsync(file, pattern, matches, state, cancellationToken);
+                if (matches.Count >= MaxSearchMatches)
+                {
+                    break;
+                }
             }
         }
         else
@@ -76,7 +103,19 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         }
 
         var text = matches.Count == 0 ? "(no matches)" : string.Join(Environment.NewLine, matches);
-        return new LocalWorkspaceResult(text, new Dictionary<string, object?> { ["match_count"] = matches.Count, ["pattern_length"] = pattern.Length });
+        if (state.Truncated)
+        {
+            text += Environment.NewLine + $"[truncated after {state.FilesScanned} files and {matches.Count} matches]";
+        }
+
+        return new LocalWorkspaceResult(text, new Dictionary<string, object?>
+        {
+            ["match_count"] = matches.Count,
+            ["pattern_length"] = pattern.Length,
+            ["files_scanned"] = state.FilesScanned,
+            ["skipped_large_files"] = state.SkippedLargeFiles,
+            ["truncated"] = state.Truncated
+        });
     }
 
     public async Task<LocalWorkspaceResult> AppendAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default)
@@ -132,17 +171,77 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         throw new FileNotFoundException($"Delete target not found: {resolvedPath}", resolvedPath);
     }
 
-    private async Task SearchFileAsync(string file, string pattern, List<string> matches, CancellationToken cancellationToken)
+    private static async Task<(string Text, bool Truncated)> ReadTextPrefixAsync(string file, CancellationToken cancellationToken)
     {
-        var lines = await File.ReadAllLinesAsync(file, cancellationToken);
-        var displayPath = Path.GetRelativePath(_paths.RootPath, file);
-
-        for (var i = 0; i < lines.Length; i++)
+        await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var buffer = new char[MaxReadCharacters + 1];
+        var count = await reader.ReadBlockAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+        var take = Math.Min(count, MaxReadCharacters);
+        var text = new string(buffer, 0, take);
+        if (text.Contains('\0'))
         {
-            if (lines[i].Contains(pattern, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("File appears to be binary or contains null bytes.");
+        }
+
+        return (text, count > MaxReadCharacters || stream.Position < stream.Length);
+    }
+
+    private async Task SearchFileAsync(string file, string pattern, List<string> matches, SearchState state, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        state.FilesScanned++;
+        var fileSize = new FileInfo(file).Length;
+        if (fileSize > MaxSearchFileBytes)
+        {
+            state.SkippedLargeFiles++;
+            state.Truncated = true;
+            return;
+        }
+
+        var displayPath = Path.GetRelativePath(_paths.RootPath, file);
+        await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var lineNumber = 0;
+
+        while (!reader.EndOfStream)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var line = await reader.ReadLineAsync(cancellationToken) ?? "";
+            lineNumber++;
+            if (line.Contains('\0'))
             {
-                matches.Add($"{displayPath}:{i + 1}: {lines[i]}");
+                state.Truncated = true;
+                return;
+            }
+
+            if (!line.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            matches.Add($"{displayPath}:{lineNumber}: {FormatMatchLine(line)}");
+            if (matches.Count >= MaxSearchMatches)
+            {
+                state.Truncated = true;
+                return;
             }
         }
+    }
+
+    private static string FormatMatchLine(string line)
+    {
+        return line.Length <= MaxMatchLineCharacters
+            ? line
+            : line[..MaxMatchLineCharacters] + " [line truncated]";
+    }
+
+    private sealed class SearchState
+    {
+        public int FilesScanned { get; set; }
+
+        public int SkippedLargeFiles { get; set; }
+
+        public bool Truncated { get; set; }
     }
 }
