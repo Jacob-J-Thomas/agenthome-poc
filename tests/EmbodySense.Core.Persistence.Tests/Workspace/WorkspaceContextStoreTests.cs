@@ -13,11 +13,15 @@ public sealed class WorkspaceContextStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.AgentPath);
         await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "agent guide");
+        await File.WriteAllTextAsync(paths.AgentFile("SOUL.md"), "stable purpose");
+        await File.WriteAllTextAsync(paths.AgentFile("PERSONALITY.md"), "interaction style");
         await File.WriteAllTextAsync(paths.AgentFile("MEMORY.md"), "memory note");
 
         var documents = await new WorkspaceContextStore().LoadDocumentsAsync(paths);
 
         Assert.Contains(documents, document => document.DisplayPath == ".agent/AGENT.md" && document.Content == "agent guide");
+        Assert.Contains(documents, document => document.DisplayPath == ".agent/SOUL.md" && document.Content == "stable purpose");
+        Assert.Contains(documents, document => document.DisplayPath == ".agent/PERSONALITY.md" && document.Content == "interaction style");
         Assert.Contains(documents, document => document.DisplayPath == ".agent/MEMORY.md" && document.Content == "memory note");
     }
 

@@ -37,7 +37,8 @@ public sealed class WorkspaceConfigurationReaderTests
         Assert.NotEmpty(snapshot.Permissions.Denied);
         Assert.Contains("\"version\": 2", snapshot.Permissions.RawJson);
         Assert.Contains(snapshot.Documents, document => document.Name == "Agent guide" && document.Exists && document.Content.Contains("Agent operating guide", StringComparison.Ordinal));
-        Assert.Contains(snapshot.Documents, document => document.Name == "Soul" && !document.Exists);
+        Assert.Contains(snapshot.Documents, document => document.Name == "Soul" && document.Exists);
+        Assert.Contains(snapshot.Documents, document => document.Name == "Personality" && document.Exists);
         Assert.Contains(snapshot.Audit.Events, auditEvent => auditEvent.Actor == "test.actor" && auditEvent.Metadata["count"] == "2");
         Assert.Contains(snapshot.ConversationHistory.Transcripts, transcript => transcript.ConversationId == "current" && transcript.MessageCount == 2 && transcript.FirstPrompt == "current prompt");
         Assert.Contains(snapshot.ConversationHistory.Transcripts, transcript => transcript.ConversationId == "archive/20260601" && transcript.Messages.Any(message => message.Content == "archived answer"));

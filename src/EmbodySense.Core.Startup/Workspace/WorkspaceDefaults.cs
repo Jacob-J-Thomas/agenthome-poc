@@ -40,6 +40,8 @@ internal static class WorkspaceDefaults
         return
         [
             new WorkspaceSeedFile(paths.AgentFile("AGENT.md"), DefaultAgentMd(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AgentFile("SOUL.md"), DefaultSoulMd(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AgentFile("PERSONALITY.md"), DefaultPersonalityMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("MEMORY.md"), DefaultMemoryMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("models.json"), DefaultModelsJson(), Overwrite: false),
@@ -64,13 +66,40 @@ internal static class WorkspaceDefaults
             - Explicit denied directory permissions mean do not repeatedly request the same inappropriate access.
             - Governed workspace commands are requested through the `embodysense.command` dynamic tool and executed only through permission, approval, and audit checks.
             - Write durable task state before substantial work.
+            - Keep agent documents current when durable identity, purpose, operating context, or user preferences change.
+            - Use `.agent/SOUL.md` for stable purpose and values.
+            - Use `.agent/PERSONALITY.md` for durable interaction style and behavioral defaults.
+            - Use `.agent/CONTEXT.md` for project, environment, and user-specific working context.
             - Treat `.agent/MEMORY.md` as the primary durable memory registry.
             - Store, update, create, and retrieve most long-lived memories in `.agent/MEMORY.md`.
             - Query conversation history only for transcript-specific evidence such as exact wording, chronology, or context that has not yet been distilled into `.agent/MEMORY.md`.
             - When conversation history contains durable information worth keeping, summarize it back into `.agent/MEMORY.md`.
+            - If automatic hooks are later enabled, use the configured agent-document review cadence; until then, propose durable document updates deliberately before changing them.
             - Append meaningful actions to the audit log.
             - Do not treat chat history as the system of record.
             - Do not request or expose raw secrets.
+
+            """;
+
+    private static string DefaultSoulMd() => """
+            # Soul
+
+            Describe the stable purpose, values, and identity of this agent here.
+
+            This file should change slowly. Keep it focused on what the agent is for, what kind of help it should provide, what boundaries matter, and what would make it a poor fit for the user's intent.
+
+            Do not store secrets here.
+
+            """;
+
+    private static string DefaultPersonalityMd() => """
+            # Personality
+
+            Describe durable interaction style, behavioral defaults, and communication preferences here.
+
+            This file should help future runs act consistently without turning temporary conversation tone into permanent identity. Update it when the user intentionally sets or corrects lasting preferences.
+
+            Do not store secrets here.
 
             """;
 
@@ -80,6 +109,10 @@ internal static class WorkspaceDefaults
             Describe the project, repository, human preferences, constraints, and important operating context here.
 
             This file is intended to be coauthored by humans and agents.
+
+            Prefer concrete facts that are useful for future work: project purpose, local setup, important commands, current constraints, and user-approved operating boundaries.
+
+            Do not store secrets here.
 
             """;
 
@@ -95,6 +128,8 @@ internal static class WorkspaceDefaults
             Query conversation history only for specific transcript use cases such as exact wording, turn chronology, or recovering context that has not yet been distilled here.
 
             When conversation history contains durable information worth keeping, summarize it back into this file so future agents do not have to rediscover it from the transcript.
+
+            Prefer short entries that cite or summarize why they matter. Link supporting structured memory or compaction artifacts from here when the detail is too large for this registry.
 
             Do not store secrets here.
 

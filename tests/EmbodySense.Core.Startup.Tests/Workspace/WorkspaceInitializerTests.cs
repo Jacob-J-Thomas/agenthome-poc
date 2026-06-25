@@ -14,9 +14,18 @@ public sealed class WorkspaceInitializerTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
 
         var agentGuide = await File.ReadAllTextAsync(workspace.File(".agent", "AGENT.md"));
+        Assert.Contains("Keep agent documents current when durable identity, purpose, operating context, or user preferences change.", agentGuide);
+        Assert.Contains("Use `.agent/SOUL.md` for stable purpose and values.", agentGuide);
+        Assert.Contains("Use `.agent/PERSONALITY.md` for durable interaction style and behavioral defaults.", agentGuide);
         Assert.Contains("Treat `.agent/MEMORY.md` as the primary durable memory registry.", agentGuide);
         Assert.Contains("Store, update, create, and retrieve most long-lived memories in `.agent/MEMORY.md`.", agentGuide);
         Assert.Contains("Query conversation history only for transcript-specific evidence", agentGuide);
+
+        var soulGuide = await File.ReadAllTextAsync(workspace.File(".agent", "SOUL.md"));
+        Assert.Contains("stable purpose, values, and identity", soulGuide);
+
+        var personalityGuide = await File.ReadAllTextAsync(workspace.File(".agent", "PERSONALITY.md"));
+        Assert.Contains("durable interaction style", personalityGuide);
 
         var memoryGuide = await File.ReadAllTextAsync(workspace.File(".agent", "MEMORY.md"));
         Assert.Contains("Use this file as the primary durable memory registry.", memoryGuide);
