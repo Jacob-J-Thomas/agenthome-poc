@@ -78,6 +78,22 @@ test("configuration tabs render permission details without creating markup from 
   assert.equal(findByTag(app.elements.configContent, "script").length, 0);
 });
 
+test("verbose toggle invokes hub and verbose context renders as system text", async () => {
+  const app = await loadApp();
+  app.elements.transcript.replaceChildren();
+
+  app.elements.verboseToggle.checked = true;
+  await app.elements.verboseToggle.change();
+  app.socket.serverSendInvocation("StreamEvent", { type: "verbose_context", text: "visible <script>context</script>" });
+  await flushAsyncWork();
+
+  assert.deepEqual(app.socket.sentInvocations("SetVerboseMode").map(invocation => invocation.arguments), [[true]]);
+  assert.equal(app.elements.transcript.children.length, 1);
+  assert.equal(messageRole(app.elements.transcript.children[0]), "System");
+  assert.equal(messageContent(app.elements.transcript.children[0]), "visible <script>context</script>");
+  assert.equal(findByTag(app.elements.transcript, "script").length, 0);
+});
+
 test("approval panel renders pending requests and dispatches approve and reject decisions", async () => {
   const app = await loadApp();
 
@@ -275,6 +291,7 @@ class FakeElement {
     this.listeners = new Map();
     this.className = "";
     this.disabled = false;
+    this.checked = false;
     this.open = false;
     this.scrollHeight = 0;
     this.scrollTop = 0;
@@ -322,6 +339,10 @@ class FakeElement {
 
   click() {
     return this.listeners.get("click")?.({ preventDefault() { } });
+  }
+
+  change() {
+    return this.listeners.get("change")?.({ preventDefault() { } });
   }
 
   querySelector(selector) {

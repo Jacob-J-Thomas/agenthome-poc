@@ -121,12 +121,13 @@ public sealed class CliCommandTests
     [Fact]
     public void RunOptions_parses_supported_options_and_rejects_removed_flags()
     {
-        var options = RunOptions.FromArguments(new CliArguments(["run", "--workdir", "work", "--model", "gpt-test", "--codex-path", "codex-test", "--sandbox", "workspace-write"]));
+        var options = RunOptions.FromArguments(new CliArguments(["run", "--workdir", "work", "--model", "gpt-test", "--codex-path", "codex-test", "--sandbox", "workspace-write", "--verbose"]));
 
         Assert.Equal("gpt-test", options.Model);
         Assert.Equal("work", options.WorkingDirectory);
         Assert.Equal("codex-test", options.CodexExecutablePath);
         Assert.Equal("workspace-write", options.CodexSandbox);
+        Assert.True(options.Verbose);
         Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run", "--persist-session"])));
     }
 

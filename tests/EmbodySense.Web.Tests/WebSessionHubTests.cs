@@ -84,6 +84,23 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
+    public async Task SetVerboseMode_streams_system_status_to_caller()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace.RootPath, approvals);
+        var clients = new RecordingHubClients();
+        var hub = CreateHub(host, approvals, clients);
+        _ = await hub.InitializeWorkspace();
+
+        await hub.SetVerboseMode(true);
+
+        var streamEvent = Assert.Single(clients.CallerClient.StreamEvents);
+        Assert.Equal("system", streamEvent.Type);
+        Assert.Contains("Verbose mode enabled", streamEvent.Text);
+    }
+
+    [Fact]
     public async Task DecideApproval_defaults_missing_decision_to_rejection()
     {
         using var workspace = new TestWorkspace();

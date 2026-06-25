@@ -4,7 +4,8 @@ public sealed record RunOptions(
     string? Model,
     string WorkingDirectory,
     string? CodexExecutablePath,
-    string CodexSandbox)
+    string CodexSandbox,
+    bool Verbose)
 {
     public static RunOptions FromArguments(CliArguments arguments)
     {
@@ -18,7 +19,8 @@ public sealed record RunOptions(
             Model: arguments.OptionValueInTokenOrder("--model", "-m") ?? GetPositionalModel(arguments),
             WorkingDirectory: arguments.OptionValue("--workdir") ?? arguments.OptionValue("--working-directory") ?? Directory.GetCurrentDirectory(),
             CodexExecutablePath: arguments.OptionValue("--codex-path"),
-            CodexSandbox: sandbox);
+            CodexSandbox: sandbox,
+            Verbose: arguments.HasFlag("--verbose") || arguments.HasFlag("--verbose-context"));
     }
 
     private static string? GetPositionalModel(CliArguments arguments)

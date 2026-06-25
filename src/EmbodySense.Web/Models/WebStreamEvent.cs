@@ -26,6 +26,10 @@ public sealed record WebStreamEvent
 
     public static WebStreamEvent AssistantFinal(string text) => new("assistant_final", text: text);
 
+    public static WebStreamEvent System(string text) => new("system", text: text);
+
+    public static WebStreamEvent VerboseContext(string text) => new("verbose_context", text: text);
+
     public static WebStreamEvent HistoryLoaded(IReadOnlyList<WebTranscriptMessage> messages) => new("history_loaded", messages: messages);
 
     public static WebStreamEvent Cancelled(string text) => new("cancelled", text: text);

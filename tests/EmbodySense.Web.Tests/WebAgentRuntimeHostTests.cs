@@ -125,6 +125,52 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task SendMessageAsync_emits_verbose_context_when_web_verbose_mode_is_enabled()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+        var events = new List<WebStreamEvent>();
+
+        await host.SetVerboseModeAsync(true, (streamEvent, _) =>
+        {
+            events.Add(streamEvent);
+            return Task.CompletedTask;
+        });
+        await host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        {
+            events.Add(streamEvent);
+            return Task.CompletedTask;
+        });
+
+        Assert.Collection(
+            events,
+            statusEvent =>
+            {
+                Assert.Equal("system", statusEvent.Type);
+                Assert.Contains("Verbose mode enabled", statusEvent.Text);
+            },
+            contextEvent =>
+            {
+                Assert.Equal("verbose_context", contextEvent.Type);
+                Assert.Contains("[verbose] Visible inference context follows.", contextEvent.Text);
+                Assert.Contains("This is not private model reasoning", contextEvent.Text);
+                Assert.Contains("hello from web", contextEvent.Text);
+            },
+            deltaEvent =>
+            {
+                Assert.Equal("assistant_delta", deltaEvent.Type);
+                Assert.Contains("web response: hello from web", deltaEvent.Text);
+            },
+            finalEvent =>
+            {
+                Assert.Equal("assistant_final", finalEvent.Type);
+                Assert.Contains("web response: hello from web", finalEvent.Text);
+            });
+    }
+
+    [Fact]
     public async Task CancelCurrentTurn_returns_false_when_no_turn_is_running()
     {
         using var workspace = new TestWorkspace();
@@ -210,6 +256,21 @@ public sealed class WebAgentRuntimeHostTests
 
                     "thread/start" {
                         Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } }
+                    }
+
+                    "turn/start" {
+                        $turnId = "turn-test"
+                        $userText = [string]$message.params.input[0].text
+                        $currentUserMarker = "Current user message:"
+                        $currentUserIndex = $userText.IndexOf($currentUserMarker)
+                        if ($currentUserIndex -ge 0) {
+                            $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim()
+                        }
+
+                        $text = "web response: $userText"
+                        Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
+                        Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
+                        Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
                     }
                 }
             }

@@ -20,6 +20,7 @@ const elements = {
   refreshConfigButton: document.getElementById("refreshConfigButton"),
   sendButton: document.getElementById("sendButton"),
   transcript: document.getElementById("transcript"),
+  verboseToggle: document.getElementById("verboseToggle"),
   workspaceRoot: document.getElementById("workspaceRoot"),
   workspaceStatus: document.getElementById("workspaceStatus")
 };
@@ -79,6 +80,7 @@ function applyStatus(nextStatus) {
   elements.cliRole.textContent = status.cliRole;
   elements.initButton.disabled = status.initialized || !hub?.connected;
   elements.sendButton.disabled = !status.initialized || !hub?.connected;
+  elements.verboseToggle.disabled = !status.initialized || !hub?.connected;
 }
 
 async function connectHub() {
@@ -115,6 +117,7 @@ function applyDisconnectedState() {
   elements.initButton.disabled = true;
   elements.sendButton.disabled = true;
   elements.cancelButton.disabled = true;
+  elements.verboseToggle.disabled = true;
 }
 
 function renderConfigLoading() {
@@ -628,6 +631,19 @@ elements.initButton.addEventListener("click", async () => {
 
 elements.refreshConfigButton.addEventListener("click", refreshConfiguration);
 
+elements.verboseToggle.addEventListener("change", async () => {
+  const enabled = elements.verboseToggle.checked;
+  elements.verboseToggle.disabled = true;
+  try {
+    await hub.invoke("SetVerboseMode", enabled);
+  } catch (error) {
+    elements.verboseToggle.checked = !enabled;
+    appendMessage("error", error.message);
+  } finally {
+    applyStatus(status);
+  }
+});
+
 for (const tab of elements.configTabs) {
   tab.addEventListener("click", () => {
     activeConfigTab = tab.dataset.configTab ?? "overview";
@@ -673,6 +689,8 @@ function handleStreamEvent(event) {
     finalizeAgentMessage(event.text ?? "");
   } else if (event.type === "history_loaded") {
     replaceTranscript(event.messages ?? []);
+  } else if (event.type === "verbose_context" || event.type === "system") {
+    appendMessage("system", event.text ?? "");
   } else if (event.type === "cancelled") {
     appendMessage("error", event.text ?? "Message cancelled.");
     activeAgentMessage = null;

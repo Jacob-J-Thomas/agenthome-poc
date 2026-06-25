@@ -11,7 +11,7 @@ public static class HelpCommand
 
             usage:
               embodysense init [root]
-              embodysense run [--model model] [--workdir path]
+              embodysense run [--model model] [--workdir path] [--verbose]
               embodysense status [root]
               embodysense audit [tail] [root] [--limit count]
 

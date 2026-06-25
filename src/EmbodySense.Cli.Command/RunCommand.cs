@@ -24,7 +24,7 @@ public static class RunCommand
 
         var client = ConsoleHarnessTerminal.Instance;
         await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client)).CreateAsync(options.Model, options.WorkingDirectory, options.CodexExecutablePath, options.CodexSandbox);
-        return await runtime.RunConsoleLoopAsync(client, banner: Constants.Banner);
+        return await runtime.RunConsoleLoopAsync(client, banner: Constants.Banner, verbose: options.Verbose);
     }
 
     private static bool ConfirmWorkspaceInitialization(WorkspaceStatusSnapshot status)

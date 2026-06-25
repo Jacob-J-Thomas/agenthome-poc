@@ -66,6 +66,18 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         }
     }
 
+    public async Task SetVerboseMode(bool enabled)
+    {
+        try
+        {
+            await _host.SetVerboseModeAsync(enabled, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionAborted);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+        {
+            await Clients.Caller.StreamEvent(WebStreamEvent.Failure("Verbose mode requires an initialized workspace."));
+        }
+    }
+
     public Task<bool> CancelCurrentTurn()
     {
         return Task.FromResult(_host.CancelCurrentTurn());

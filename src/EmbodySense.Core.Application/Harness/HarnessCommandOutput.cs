@@ -14,12 +14,15 @@ public static class HarnessCommandOutput
     [
         "Harness commands:",
         "/help, /commands - list harness commands",
+        "/verbose, /verbose on, /verbose off - show or change visible-context debug output",
         "/new, /new-session - start a fresh conversation without leaving the harness",
         "/history, /conversations, /load - load a saved conversation before the first prompt in the current session",
         "/exit, /quit - leave the harness"
     ];
 
     public static string HelpText => string.Join(Environment.NewLine, HelpLines);
+
+    public const string VerboseEnabledText = "Verbose mode enabled. EmbodySense will print visible inference context; this is not private model reasoning or hidden chain-of-thought.";
 
     public static string FormatConversationList(IReadOnlyList<ConversationTranscriptListItem> conversations)
     {
@@ -70,6 +73,24 @@ public static class HarnessCommandOutput
 
         var builder = new StringBuilder();
         builder.AppendLine("Loaded conversation transcript:");
+        foreach (var message in messages)
+        {
+            builder.AppendLine(FormatMessageHeader(message.Role));
+            builder.AppendLine(message.Content);
+            builder.AppendLine();
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    public static string FormatVerboseContext(IReadOnlyList<LlmMessage> messages)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        var builder = new StringBuilder();
+        builder.AppendLine("[verbose] Visible inference context follows.");
+        builder.AppendLine("[verbose] This is the startup, restored, and session context EmbodySense is sending for the next model turn.");
+        builder.AppendLine("[verbose] This is not private model reasoning, hidden chain-of-thought, or provider-internal state.");
         foreach (var message in messages)
         {
             builder.AppendLine(FormatMessageHeader(message.Role));

@@ -43,12 +43,25 @@ public sealed class AgentRuntime : IAsyncDisposable
     public async Task<string> SendUserMessageAsync(
         string message,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
+        Func<string, CancellationToken, Task>? verboseContextHandler = null,
         CancellationToken cancellationToken = default)
     {
+        if (_state.Verbose && verboseContextHandler is not null)
+        {
+            var visibleContext = Session.Messages.Concat([LlmMessage.User(message)]).ToArray();
+            await verboseContextHandler(HarnessCommandOutput.FormatVerboseContext(visibleContext), cancellationToken);
+        }
+
         var response = await Session.SendUserMessageAsync(message, responseChunkHandler, cancellationToken);
         _commandService.ClearPendingInput();
         _state.MarkModelTurnStarted();
         return response.OutputText;
+    }
+
+    public AgentRuntimeCommandResult SetVerbose(bool enabled)
+    {
+        _state.SetVerbose(enabled);
+        return AgentRuntimeCommandResult.HandledOutput(enabled ? HarnessCommandOutput.VerboseEnabledText : "Verbose mode disabled.");
     }
 
     public static bool TryHandleStaticHarnessCommand(string input, out AgentRuntimeCommandResult result)
@@ -72,13 +85,14 @@ public sealed class AgentRuntime : IAsyncDisposable
         IAgentRuntimeConsole console,
         string? banner = null,
         string prompt = HarnessCommandOutput.UserPrompt,
+        bool verbose = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(console);
 
         var client = new HarnessClientAdapter(console);
         var commandHandler = new HarnessCommandHandler(client, ConversationMemory, StartupContext);
-        var options = new AgentHarnessLoopOptions { Banner = banner, Prompt = prompt };
+        var options = new AgentHarnessLoopOptions { Banner = banner, Prompt = prompt, Verbose = verbose };
         return AgentHarnessLoop.RunHarnessLoopAsync(Session, client, commandHandler, options, cancellationToken);
     }
 

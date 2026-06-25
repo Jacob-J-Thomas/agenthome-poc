@@ -6,6 +6,8 @@ public sealed class HarnessLoopState
 
     public bool ModelTurnStarted { get; private set; }
 
+    public bool Verbose { get; private set; }
+
     public void RequestExit()
     {
         ExitRequested = true;
@@ -19,5 +21,10 @@ public sealed class HarnessLoopState
     public void ResetModelTurn()
     {
         ModelTurnStarted = false;
+    }
+
+    public void SetVerbose(bool enabled)
+    {
+        Verbose = enabled;
     }
 }

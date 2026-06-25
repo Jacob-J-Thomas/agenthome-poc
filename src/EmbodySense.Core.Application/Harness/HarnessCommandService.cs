@@ -66,6 +66,19 @@ public sealed class HarnessCommandService
 
         switch (command)
         {
+            case "/verbose":
+                return HarnessCommandResult.HandledOutput(state.Verbose ? "Verbose mode is on." : "Verbose mode is off.");
+
+            case "/verbose on" or "/verbose true":
+                state.SetVerbose(true);
+                ClearPendingInput();
+                return HarnessCommandResult.HandledOutput(HarnessCommandOutput.VerboseEnabledText);
+
+            case "/verbose off" or "/verbose false":
+                state.SetVerbose(false);
+                ClearPendingInput();
+                return HarnessCommandResult.HandledOutput("Verbose mode disabled.");
+
             case "exit" or "quit" or "/exit" or "/quit":
                 state.RequestExit();
                 ClearPendingInput();
@@ -171,7 +184,7 @@ public sealed class HarnessCommandService
 
     private static bool IsKnownHarnessCommand(string command)
     {
-        return command is "exit" or "quit" or "/exit" or "/quit" or "/help" or "/commands" or "/new" or "/new-session" or "/history" or "/conversations" or "/load";
+        return command is "exit" or "quit" or "/exit" or "/quit" or "/help" or "/commands" or "/verbose" or "/verbose on" or "/verbose true" or "/verbose off" or "/verbose false" or "/new" or "/new-session" or "/history" or "/conversations" or "/load";
     }
 
     private static bool IsPendingConversationSelectionCommand(string command)

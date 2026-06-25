@@ -92,7 +92,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
                 return string.IsNullOrEmpty(chunk)
                     ? Task.CompletedTask
                     : writeEventAsync(WebStreamEvent.AssistantDelta(chunk), token);
-            }, turnCancellation.Token);
+            }, (context, token) => writeEventAsync(WebStreamEvent.VerboseContext(context), token), turnCancellation.Token);
             await writeEventAsync(WebStreamEvent.AssistantFinal(responseText), turnCancellation.Token);
         }
         finally
@@ -100,6 +100,18 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
             ClearTurnCancellation(turnCancellation);
             _turnGate.Release();
         }
+    }
+
+    public async Task SetVerboseModeAsync(
+        bool enabled,
+        Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(writeEventAsync);
+
+        var runtime = await GetRuntimeAsync(cancellationToken);
+        var result = runtime.SetVerbose(enabled);
+        await writeEventAsync(WebStreamEvent.System(result.Output), cancellationToken);
     }
 
     public bool CancelCurrentTurn()

@@ -45,6 +45,31 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task SendUserMessageAsync_emits_visible_context_when_verbose_is_enabled()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "AGENT.md"), "runtime guide");
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        var contexts = new List<string>();
+
+        var verboseResult = runtime.SetVerbose(true);
+        var response = await runtime.SendUserMessageAsync("hello", null, (context, _) =>
+        {
+            contexts.Add(context);
+            return Task.CompletedTask;
+        });
+
+        Assert.Contains("Verbose mode enabled", verboseResult.Output, StringComparison.Ordinal);
+        Assert.Equal("runtime guide observed: hello", response);
+        var context = Assert.Single(contexts);
+        Assert.Contains("[verbose] Visible inference context follows.", context, StringComparison.Ordinal);
+        Assert.Contains("This is not private model reasoning", context, StringComparison.Ordinal);
+        Assert.Contains("runtime guide", context, StringComparison.Ordinal);
+        Assert.Contains("hello", context, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunConsoleLoopAsync_runs_reusable_loop_through_public_runtime()
     {
         using var workspace = new TestWorkspace();

@@ -53,7 +53,46 @@ public sealed class AgentHarnessLoopTests
         Assert.Equal(0, exitCode);
         Assert.Empty(inferenceClient.Requests);
         Assert.Contains("Harness commands:", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("/verbose, /verbose on, /verbose off", harnessClient.Output, StringComparison.Ordinal);
         Assert.Contains("/new, /new-session", harnessClient.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunHarnessLoopAsync_verbose_mode_prints_visible_context_without_claiming_model_reasoning()
+    {
+        var harnessClient = new ScriptedHarnessClient("/verbose on", "hello", "/verbose off", "quiet", "/exit");
+        var inferenceClient = new ScriptedInferenceClient("first response", "second response");
+        var session = new AgentHarnessSession(inferenceClient, initialMessages: [LlmMessage.System("startup context")]);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
+
+        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(2, inferenceClient.Requests.Count);
+        Assert.Contains(HarnessCommandOutput.VerboseEnabledText, harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("[verbose] Visible inference context follows.", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("This is not private model reasoning", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("startup context", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("hello", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(harnessClient.Output, "[verbose] Visible inference context follows."));
+    }
+
+    [Fact]
+    public async Task RunHarnessLoopAsync_initial_verbose_option_prints_visible_context()
+    {
+        var harnessClient = new ScriptedHarnessClient("hello", "/exit");
+        var inferenceClient = new ScriptedInferenceClient("hello world");
+        var session = new AgentHarnessSession(inferenceClient, initialMessages: [LlmMessage.System("startup context")]);
+        var commandHandler = new HarnessCommandHandler(harnessClient);
+        var options = new AgentHarnessLoopOptions { Verbose = true };
+
+        var exitCode = await AgentHarnessLoop.RunHarnessLoopAsync(session, harnessClient, commandHandler, options);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains(HarnessCommandOutput.VerboseEnabledText, harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("[verbose] Visible inference context follows.", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("startup context", harnessClient.Output, StringComparison.Ordinal);
+        Assert.Contains("hello", harnessClient.Output, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -23,6 +23,11 @@ public static class AgentHarnessLoop
         }
 
         var state = new HarnessLoopState();
+        state.SetVerbose(options.Verbose);
+        if (state.Verbose)
+        {
+            client.WriteLine(HarnessCommandOutput.VerboseEnabledText);
+        }
 
         while (!state.ExitRequested)
         {
@@ -47,6 +52,13 @@ public static class AgentHarnessLoop
 
                     var wroteResponseChunk = false;
                     var responseEndedWithNewLine = false;
+                    if (state.Verbose)
+                    {
+                        var visibleContext = session.Messages.Concat([LlmMessage.User(input)]).ToArray();
+                        client.WriteLine(HarnessCommandOutput.FormatVerboseContext(visibleContext));
+                        client.WriteLine();
+                    }
+
                     client.WriteLine(HarnessCommandOutput.FormatMessageHeader(LlmMessageRole.Assistant));
                     var response = await session.SendUserMessageAsync(input, (chunk, _) =>
                     {

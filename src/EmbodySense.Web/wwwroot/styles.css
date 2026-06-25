@@ -306,6 +306,22 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
+.toggle-row {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 14px 14px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.toggle-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--teal);
+}
+
 .approvals {
   display: grid;
   gap: 10px;
