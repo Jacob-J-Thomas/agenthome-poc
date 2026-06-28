@@ -50,7 +50,7 @@ public sealed class WorkspaceConfigurationReader
         [
             PathItem("Root", "Workspace", paths.RootPath, "Selected harness workspace root."),
             PathItem("Agent home", "Agent", paths.AgentPath, "Durable agent environment and configuration root."),
-            PathItem("Workspace area", "Workspace", paths.WorkspacePath, "Agent working area with human/agent boundary folders."),
+            PathItem("Working area", "Workspace", paths.WorkspacePath, "Same as the selected root; contains human/agent boundary folders."),
             PathItem("Private workspace", "Workspace", paths.WorkspacePrivatePath, "Human-private workspace area denied by default."),
             PathItem("Shared workspace", "Workspace", paths.WorkspaceSharedPath, "Human and agent shared workspace area."),
             PathItem("Generated workspace", "Workspace", paths.WorkspaceGeneratedPath, "Agent-generated workspace output area."),

@@ -31,7 +31,7 @@ public static class RunCommand
     {
         Console.WriteLine("Warning: this EmbodySense workspace is not initialized.");
         Console.WriteLine($"Root: {status.RootPath}");
-        Console.WriteLine("Initializing will create .agent/ and workspace/ scaffolding with a default permissions policy.");
+        Console.WriteLine("Initializing will create .agent/ scaffolding and root-level workspace folders with a default permissions policy.");
         Console.Write("Initialize this workspace now? [y/N] ");
 
         var answer = Console.ReadLine()?.Trim();

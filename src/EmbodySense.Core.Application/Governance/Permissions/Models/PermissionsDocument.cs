@@ -23,9 +23,9 @@ public sealed class PermissionsDocument
             Scope = "single-file-system-directory-level",
             Approved =
             [
-                new ApprovedFileSystemPermission { Path = "workspace/shared", Operations = StandardWritableOperations(), RequiresApproval = false },
-                new ApprovedFileSystemPermission { Path = "workspace/generated", Operations = StandardWritableOperations(), RequiresApproval = false },
-                new ApprovedFileSystemPermission { Path = "workspace/system", Operations = ReadOnlyOperations(), RequiresApproval = false },
+                new ApprovedFileSystemPermission { Path = "shared", Operations = StandardWritableOperations(), RequiresApproval = false },
+                new ApprovedFileSystemPermission { Path = "generated", Operations = StandardWritableOperations(), RequiresApproval = false },
+                new ApprovedFileSystemPermission { Path = "system", Operations = ReadOnlyOperations(), RequiresApproval = false },
                 new ApprovedFileSystemPermission { Path = ".agent/tasks", Operations = StandardWritableOperations(), RequiresApproval = false },
                 new ApprovedFileSystemPermission { Path = ".agent/exports", Operations = StandardWritableOperations(), RequiresApproval = false },
                 new ApprovedFileSystemPermission { Path = ".agent/skills", Operations = ReadOnlyOperations(), RequiresApproval = false },
@@ -35,7 +35,7 @@ public sealed class PermissionsDocument
             ],
             Denied =
             [
-                new DeniedFileSystemPermission { Path = "workspace/private", Operations = AllOperations() },
+                new DeniedFileSystemPermission { Path = "private", Operations = AllOperations() },
                 new DeniedFileSystemPermission { Path = ".agent/audit", Operations = AllOperations() },
                 new DeniedFileSystemPermission { Path = ".agent/logs", Operations = AllOperations() },
                 new DeniedFileSystemPermission { Path = ".agent/hooks", Operations = AllOperations() }

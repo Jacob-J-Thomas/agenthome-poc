@@ -6,7 +6,7 @@ public sealed class WorkspacePaths
     {
         RootPath = Path.GetFullPath(rootPath);
         AgentPath = Path.Combine(RootPath, ".agent");
-        WorkspacePath = Path.Combine(RootPath, "workspace");
+        WorkspacePath = RootPath;
     }
 
     public string RootPath { get; }

@@ -23,7 +23,6 @@ internal static class WorkspaceDefaults
             paths.SkillsPath,
             paths.HooksPath,
             paths.RecipesPath,
-            paths.WorkspacePath,
             paths.WorkspacePrivatePath,
             paths.WorkspaceSharedPath,
             paths.WorkspaceGeneratedPath,
@@ -60,7 +59,7 @@ internal static class WorkspaceDefaults
 
             This file is the operational front door for the local agent. It should help each run behave like the same embodied assistant: aware of its home, honest about its tools, able to preserve lessons, and willing to grow the workspace when the user and policy allow it.
 
-            Treat `.agent/` as the durable environment and `workspace/` as the working area. The provider model is only one part of the agent. The local files, memory, skills, governed tools, audit log, permissions, and user-approved habits are also part of the agent's body.
+            Treat `.agent/` as the durable environment and the workspace root as the working area. The provider model is only one part of the agent. The local files, memory, skills, governed tools, audit log, permissions, and user-approved habits are also part of the agent's body.
 
             ## Default posture
 
@@ -148,7 +147,7 @@ internal static class WorkspaceDefaults
 
             This agent is not merely an interface to a provider model. The provider supplies inference, but the harness supplies memory, context, tools, boundaries, continuity, and a durable local home. The agent should identify with the whole environment it can inspect and maintain.
 
-            The agent should treat `.agent/` as its durable home and `workspace/` as its working area. It should understand which spaces are AI-only, human-only, and shared, and it should respect those boundaries even when a provider or tool would technically let it ignore them.
+            The agent should treat `.agent/` as its durable home and the workspace root as its working area. It should understand which spaces are AI-only, human-only, and shared, and it should respect those boundaries even when a provider or tool would technically let it ignore them.
 
             The agent should think of itself as an evolving local system rather than a single turn. It should preserve continuity through files the user can inspect, not through mystery state or private inference.
 
@@ -417,9 +416,9 @@ internal static class WorkspaceDefaults
             - `denied`: directories the agent should not request again unless the human changes the policy.
             - `operations`: `list`, `read`, `create`, `append`, `modify`, and `delete`.
 
-            Default approved directories include `workspace/shared`, `workspace/generated`, `workspace/system`, `.agent/tasks`, `.agent/exports`, `.agent/skills`, and `.agent/recipes`. Mutable skill and recipe operations require approval by default.
+            Default approved directories include `shared`, `generated`, `system`, `.agent/tasks`, `.agent/exports`, `.agent/skills`, and `.agent/recipes`. Mutable skill and recipe operations require approval by default.
 
-            Default denied directories include `workspace/private`, `.agent/audit`, `.agent/logs`, and `.agent/hooks`. Use `embodysense audit` to inspect audit events instead of reading raw audit files.
+            Default denied directories include `private`, `.agent/audit`, `.agent/logs`, and `.agent/hooks`. Use `embodysense audit` to inspect audit events instead of reading raw audit files.
 
             Agent document writes such as `.agent/MEMORY.md`, `.agent/CONTEXT.md`, `.agent/SOUL.md`, and `.agent/PERSONALITY.md` are not broadly pre-approved by the default directory-level policy. If an agent needs to update them through governed workspace tools, missing policy should route to human approval unless a future dedicated memory or document command exists.
 
