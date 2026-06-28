@@ -20,13 +20,13 @@ public sealed class WorkspaceContextStore : IWorkspaceContextStore
         ArgumentNullException.ThrowIfNull(paths);
 
         var documents = new List<WorkspaceContextDocument>();
-        var workspaceInstructionsPath = FindWorkspaceInstructionsPath(paths.RootPath);
+        var workspaceInstructionsPath = WorkspaceInstructionLocator.FindNearest(paths.RootPath);
         if (workspaceInstructionsPath is not null)
         {
             var content = await File.ReadAllTextAsync(workspaceInstructionsPath, cancellationToken);
             if (!string.IsNullOrWhiteSpace(content))
             {
-                documents.Add(new WorkspaceContextDocument("AGENTS.md", content));
+                documents.Add(new WorkspaceContextDocument(WorkspaceInstructionLocator.GetDisplayPath(paths.RootPath, workspaceInstructionsPath), content));
             }
         }
 
@@ -46,11 +46,5 @@ public sealed class WorkspaceContextStore : IWorkspaceContextStore
         }
 
         return documents;
-    }
-
-    private static string? FindWorkspaceInstructionsPath(string rootPath)
-    {
-        var instructionsPath = Path.Combine(Path.GetFullPath(rootPath), "AGENTS.md");
-        return File.Exists(instructionsPath) ? instructionsPath : null;
     }
 }

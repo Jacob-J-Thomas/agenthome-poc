@@ -161,7 +161,7 @@ public sealed class WorkspaceConfigurationReader
     {
         var documentPaths = new[]
         {
-            DocumentPath("Workspace AGENTS", "Repository", Path.Combine(paths.RootPath, "AGENTS.md")),
+            DocumentPath("Nearest AGENTS", "Repository", WorkspaceInstructionLocator.FindNearest(paths.RootPath) ?? Path.Combine(paths.RootPath, WorkspaceInstructionLocator.FileName)),
             DocumentPath("Agent guide", "Agent", paths.AgentFile("AGENT.md")),
             DocumentPath("Soul", "Agent", paths.AgentFile("SOUL.md")),
             DocumentPath("Personality", "Agent", paths.AgentFile("PERSONALITY.md")),
