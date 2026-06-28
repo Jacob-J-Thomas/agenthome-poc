@@ -49,13 +49,13 @@ public sealed class CodexAppServerInferenceTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "note.txt"), "tool-visible note");
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "tool-visible note");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
             Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
-            Request(99, "item/tool/call", """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","namespace":"embodysense","tool":"command","arguments":{"command":"read","path":"workspace/shared/note.txt"}}"""),
+            Request(99, "item/tool/call", """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","namespace":"embodysense","tool":"command","arguments":{"command":"read","path":"shared/note.txt"}}"""),
             Notification("item/agentMessage/delta", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"The note says tool-visible note."}"""),
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"The note says tool-visible note.","phase":"final_answer"}]}}"""));
         var client = CreateClient(transport, broker, workspace.RootPath);
@@ -87,7 +87,7 @@ public sealed class CodexAppServerInferenceTests
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
             Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
-            Request(99, "item/tool/call", """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","namespace":"embodysense","tool":"read","arguments":{"path":"workspace/shared/note.txt"}}"""),
+            Request(99, "item/tool/call", """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","namespace":"embodysense","tool":"read","arguments":{"path":"shared/note.txt"}}"""),
             Notification("item/agentMessage/delta", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"Use embodysense.command."}"""),
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"Use embodysense.command.","phase":"final_answer"}]}}"""));
         var client = CreateClient(transport, broker, workspace.RootPath);

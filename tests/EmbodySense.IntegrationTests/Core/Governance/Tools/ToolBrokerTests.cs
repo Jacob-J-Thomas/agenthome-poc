@@ -19,11 +19,11 @@ public sealed class ToolBrokerTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        var target = workspace.File("workspace", "shared", "note.txt");
+        var target = workspace.File("shared", "note.txt");
         await File.WriteAllTextAsync(target, "hello from shared");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "workspace/shared/note.txt"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt"));
 
         Assert.True(result.Succeeded);
         Assert.Equal("hello from shared", result.OutputText);
@@ -37,11 +37,11 @@ public sealed class ToolBrokerTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        var target = workspace.File("workspace", "private", "secret.txt");
+        var target = workspace.File("private", "secret.txt");
         await File.WriteAllTextAsync(target, "private");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "workspace/private/secret.txt"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "private/secret.txt"));
 
         Assert.Equal(ToolExecutionOutcome.Denied, result.Outcome);
         Assert.StartsWith("denied:", result.OutputText, StringComparison.Ordinal);
@@ -92,11 +92,11 @@ public sealed class ToolBrokerTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "one.txt"), "alpha" + Environment.NewLine + "beta");
-        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "two.txt"), "gamma");
+        await File.WriteAllTextAsync(workspace.File("shared", "one.txt"), "alpha" + Environment.NewLine + "beta");
+        await File.WriteAllTextAsync(workspace.File("shared", "two.txt"), "gamma");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Search, "workspace/shared", Pattern: "alp"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Search, "shared", Pattern: "alp"));
 
         Assert.True(result.Succeeded);
         Assert.Contains("one.txt:1: alpha", result.OutputText);
@@ -108,11 +108,11 @@ public sealed class ToolBrokerTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        Directory.CreateDirectory(workspace.File("workspace", "shared", "folder"));
-        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "note.txt"), "note");
+        Directory.CreateDirectory(workspace.File("shared", "folder"));
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "note");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.List, "workspace/shared"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.List, "shared"));
 
         Assert.True(result.Succeeded);
         Assert.Equal("folder\\" + Environment.NewLine + "note.txt", result.OutputText.Replace("/", "\\", StringComparison.Ordinal));
@@ -123,14 +123,14 @@ public sealed class ToolBrokerTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "note.txt"), "first");
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "workspace/shared/note.txt", " second"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"));
 
         Assert.True(result.Succeeded);
         Assert.Equal("appended 7 characters", result.OutputText);
-        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("workspace", "shared", "note.txt")));
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
     }
 
     [Fact]
@@ -140,7 +140,7 @@ public sealed class ToolBrokerTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "workspace/shared/missing.txt"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/missing.txt"));
 
         Assert.Equal(ToolExecutionOutcome.Failed, result.Outcome);
         Assert.StartsWith("failed:", result.OutputText, StringComparison.Ordinal);
@@ -153,15 +153,15 @@ public sealed class ToolBrokerTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        Directory.CreateDirectory(workspace.File("workspace", "shared", "delete-me"));
-        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "delete-me", "note.txt"), "temporary");
+        Directory.CreateDirectory(workspace.File("shared", "delete-me"));
+        await File.WriteAllTextAsync(workspace.File("shared", "delete-me", "note.txt"), "temporary");
         var prompt = new FixedApprovalPrompt(ToolApprovalResponse.Approve("test", "approved delete in test"));
         var broker = CreateBroker(workspace, prompt);
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Delete, "workspace/shared/delete-me"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Delete, "shared/delete-me"));
 
         Assert.True(result.Succeeded);
-        Assert.False(Directory.Exists(workspace.File("workspace", "shared", "delete-me")));
+        Assert.False(Directory.Exists(workspace.File("shared", "delete-me")));
     }
 
     [Fact]
@@ -169,14 +169,14 @@ public sealed class ToolBrokerTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await File.WriteAllTextAsync(workspace.File("workspace", "shared", "delete-me.txt"), "temporary");
+        await File.WriteAllTextAsync(workspace.File("shared", "delete-me.txt"), "temporary");
         var prompt = new FixedApprovalPrompt(ToolApprovalResponse.Approve("test", "approved delete in test"));
         var broker = CreateBroker(workspace, prompt);
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Delete, "workspace/shared/delete-me.txt"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Delete, "shared/delete-me.txt"));
 
         Assert.True(result.Succeeded);
-        Assert.False(File.Exists(workspace.File("workspace", "shared", "delete-me.txt")));
+        Assert.False(File.Exists(workspace.File("shared", "delete-me.txt")));
         Assert.Single(prompt.Requests);
     }
 

@@ -13,7 +13,7 @@ public sealed class DirectoryPermissionPolicyTests
         using var workspace = new TestWorkspace();
         var policy = DirectoryPermissionPolicy.Create(new WorkspacePaths(workspace.RootPath), null);
 
-        var evaluation = policy.EvaluateDirectory(workspace.File("workspace", "shared"), FileSystemOperation.Read);
+        var evaluation = policy.EvaluateDirectory(workspace.File("shared"), FileSystemOperation.Read);
 
         Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
         Assert.Contains("permissions.json", evaluation.Detail);
@@ -27,17 +27,17 @@ public sealed class DirectoryPermissionPolicyTests
         {
             Approved =
             [
-                new ApprovedFileSystemPermission { Path = "workspace", Operations = [FileSystemOperation.Read], RequiresApproval = false }
+                new ApprovedFileSystemPermission { Path = ".", Operations = [FileSystemOperation.Read], RequiresApproval = false }
             ],
             Denied =
             [
-                new DeniedFileSystemPermission { Path = "workspace/private", Operations = [FileSystemOperation.Read] }
+                new DeniedFileSystemPermission { Path = "private", Operations = [FileSystemOperation.Read] }
             ]
         });
-        var evaluation = policy.EvaluateDirectory(workspace.File("workspace", "private"), FileSystemOperation.Read);
+        var evaluation = policy.EvaluateDirectory(workspace.File("private"), FileSystemOperation.Read);
 
         Assert.Equal(PermissionDecision.Deny, evaluation.Decision);
-        Assert.Equal("workspace/private", evaluation.MatchedPath);
+        Assert.Equal("private", evaluation.MatchedPath);
     }
 
     [Fact]
@@ -48,12 +48,12 @@ public sealed class DirectoryPermissionPolicyTests
         {
             Approved =
             [
-                new ApprovedFileSystemPermission { Path = "workspace/generated", Operations = [FileSystemOperation.Modify], RequiresApproval = true }
+                new ApprovedFileSystemPermission { Path = "generated", Operations = [FileSystemOperation.Modify], RequiresApproval = true }
             ]
         });
-        var evaluation = policy.EvaluateDirectory(workspace.File("workspace", "generated"), FileSystemOperation.Modify);
+        var evaluation = policy.EvaluateDirectory(workspace.File("generated"), FileSystemOperation.Modify);
 
         Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
-        Assert.Equal("workspace/generated", evaluation.MatchedPath);
+        Assert.Equal("generated", evaluation.MatchedPath);
     }
 }

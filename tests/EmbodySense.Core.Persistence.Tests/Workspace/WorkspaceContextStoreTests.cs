@@ -40,7 +40,7 @@ public sealed class WorkspaceContextStoreTests
     }
 
     [Fact]
-    public async Task LoadDocumentsAsync_does_not_load_parent_agents_file()
+    public async Task LoadDocumentsAsync_loads_nearest_parent_agents_file()
     {
         using var workspace = new TestWorkspace();
         Directory.CreateDirectory(workspace.File("scratch"));
@@ -49,7 +49,9 @@ public sealed class WorkspaceContextStoreTests
 
         var documents = await new WorkspaceContextStore().LoadDocumentsAsync(paths);
 
-        Assert.Empty(documents);
+        var document = Assert.Single(documents);
+        Assert.Equal("../AGENTS.md", document.DisplayPath);
+        Assert.Equal("parent guide", document.Content);
     }
 
     [Fact]

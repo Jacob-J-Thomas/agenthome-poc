@@ -61,6 +61,11 @@ public sealed class WorkspaceInitializerTests
         var modelsJson = await File.ReadAllTextAsync(workspace.File(".agent", "models.json"));
         Assert.Contains("placeholder-not-runtime-binding", modelsJson);
         Assert.Contains("configuration_agent", modelsJson);
+        Assert.False(Directory.Exists(workspace.File("workspace")));
+        Assert.True(Directory.Exists(workspace.File("shared")));
+        Assert.True(Directory.Exists(workspace.File("generated")));
+        Assert.True(Directory.Exists(workspace.File("system")));
+        Assert.True(Directory.Exists(workspace.File("private")));
     }
 
     [Fact]

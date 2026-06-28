@@ -63,7 +63,7 @@ test("configuration tabs render permission details without creating markup from 
         scope: "workspace",
         defaultAccess: "ask",
         readProblems: [],
-        approved: [{ path: "workspace/shared/**", requiresApproval: true, effect: "allow", operations: ["read"], detail: "Read requires approval." }],
+        approved: [{ path: "shared/**", requiresApproval: true, effect: "allow", operations: ["read"], detail: "Read requires approval." }],
         denied: [],
         rawJson
       }
@@ -73,7 +73,7 @@ test("configuration tabs render permission details without creating markup from 
   await configTab(app, "permissions").click();
 
   assert.equal(configTab(app, "permissions").attributes.get("aria-selected"), "true");
-  assert.match(app.elements.configContent.textContent, /workspace\/shared\/\*\*/);
+  assert.match(app.elements.configContent.textContent, /shared\/\*\*/);
   assert.match(app.elements.configContent.textContent, /<script>bad\(\)<\/script>/);
   assert.equal(findByTag(app.elements.configContent, "script").length, 0);
 });
@@ -101,16 +101,16 @@ test("approval panel renders pending requests and dispatches approve and reject 
     requestId: "req-1",
     command: "read",
     operation: "file",
-    targetPath: "workspace/shared/note.txt",
+    targetPath: "shared/note.txt",
     resolvedPath: "C:/workspace/shared/note.txt",
-    matchedPath: "workspace/shared/**",
+    matchedPath: "shared/**",
     reason: "Need to inspect the note."
   }]);
   await flushAsyncWork();
 
   assert.equal(app.elements.approvalCount.textContent, "1 pending");
   assert.match(app.elements.approvals.textContent, /read file/);
-  assert.match(app.elements.approvals.textContent, /workspace\/shared\/note\.txt/);
+  assert.match(app.elements.approvals.textContent, /shared\/note\.txt/);
 
   const buttons = findByTag(app.elements.approvals, "button");
   await buttons.find(button => button.textContent === "Approve").click();

@@ -20,10 +20,10 @@ public sealed class WebApprovalCoordinatorTests
             Assert.Equal("req-1", item.RequestId);
             Assert.Equal(1, item.Sequence);
             Assert.Equal("read", item.Command);
-            Assert.Equal("workspace/shared/example.txt", item.TargetPath);
+            Assert.Equal("shared/example.txt", item.TargetPath);
             Assert.Equal(@"C:\workspace\shared\example.txt", item.ResolvedPath);
             Assert.Equal("read", item.Operation);
-            Assert.Equal("workspace/shared/**", item.MatchedPath);
+            Assert.Equal("shared/**", item.MatchedPath);
             Assert.Equal("Needs approval.", item.Reason);
             Assert.True(DateTimeOffset.UtcNow - item.CreatedAtUtc < TimeSpan.FromMinutes(1));
         });
@@ -153,10 +153,10 @@ public sealed class WebApprovalCoordinatorTests
         return new AgentToolApprovalRequest(
             id,
             "read",
-            "workspace/shared/example.txt",
+            "shared/example.txt",
             @"C:\workspace\shared\example.txt",
             "read",
-            "workspace/shared/**",
+            "shared/**",
             "Needs approval.");
     }
 

@@ -152,10 +152,10 @@ public sealed class WebSessionHubTests
         return new AgentToolApprovalRequest(
             id,
             "read",
-            "workspace/shared/example.txt",
+            "shared/example.txt",
             @"C:\workspace\shared\example.txt",
             "read",
-            "workspace/shared/**",
+            "shared/**",
             "Needs approval.");
     }
 
