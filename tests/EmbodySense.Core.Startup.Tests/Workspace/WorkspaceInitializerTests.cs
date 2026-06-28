@@ -1,5 +1,8 @@
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Workspace;
@@ -66,6 +69,9 @@ public sealed class WorkspaceInitializerTests
         Assert.True(Directory.Exists(workspace.File("generated")));
         Assert.True(Directory.Exists(workspace.File("system")));
         Assert.True(Directory.Exists(workspace.File("private")));
+        Assert.True(Directory.Exists(workspace.File(".agent", "loops")));
+        Assert.True(Directory.Exists(workspace.File(".agent", "loops", "definitions")));
+        Assert.True(Directory.Exists(workspace.File(".agent", "loops", "runs")));
     }
 
     [Fact]
@@ -78,5 +84,25 @@ public sealed class WorkspaceInitializerTests
         var auditText = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson"));
         Assert.Contains(AuditSchema.Actors.Web, auditText);
         Assert.DoesNotContain(AuditSchema.Actors.Cli, auditText);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_seeds_default_conversation_loop_definition()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        var definition = await new LoopDefinitionStore(paths).LoadAsync("default-conversation");
+        Assert.NotNull(definition);
+        Assert.Equal(LoopDefinition.CurrentSchemaVersion, definition.SchemaVersion);
+        Assert.Equal("Default conversation loop", definition.DisplayName);
+        Assert.Equal("default-assistant", definition.RoleId);
+        Assert.Equal("human-message", definition.Trigger);
+        Assert.Equal("workspace-startup-context", definition.MemoryScope);
+        Assert.Contains("workspace.command", definition.CapabilityIds);
+        Assert.Contains("approval.request", definition.CapabilityIds);
+        Assert.Equal("enabled", definition.State);
     }
 }

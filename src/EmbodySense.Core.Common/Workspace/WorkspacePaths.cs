@@ -35,6 +35,14 @@ public sealed class WorkspacePaths
 
     public string CurrentConversationPath => Path.Combine(ConversationMemoryPath, "current.ndjson");
 
+    public string LoopsPath => Path.Combine(AgentPath, "loops");
+
+    public string LoopDefinitionsPath => Path.Combine(LoopsPath, "definitions");
+
+    public string LoopRunsPath => Path.Combine(LoopsPath, "runs");
+
+    public string DefaultConversationLoopDefinitionPath => Path.Combine(LoopDefinitionsPath, "default-conversation.json");
+
     public string TasksPath => Path.Combine(AgentPath, "tasks");
 
     public string ExportsPath => Path.Combine(AgentPath, "exports");

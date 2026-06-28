@@ -1,10 +1,14 @@
+using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Permissions.Models;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Startup.Workspace;
 
 internal static class WorkspaceDefaults
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+
     public static IReadOnlyList<string> GetDirectories(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -16,6 +20,9 @@ internal static class WorkspaceDefaults
             paths.MemoryPath,
             paths.ConversationMemoryPath,
             paths.ArchivedConversationMemoryPath,
+            paths.LoopsPath,
+            paths.LoopDefinitionsPath,
+            paths.LoopRunsPath,
             paths.TasksPath,
             paths.LogsPath,
             paths.AuditPath,
@@ -47,9 +54,15 @@ internal static class WorkspaceDefaults
             new WorkspaceSeedFile(paths.MemoryReadmePath, DefaultMemoryReadme(), Overwrite: true),
             new WorkspaceSeedFile(paths.AuditReadmePath, DefaultAuditReadme(), Overwrite: true),
             new WorkspaceSeedFile(paths.PermissionsReadmePath, DefaultPermissionsReadme(), Overwrite: true),
+            new WorkspaceSeedFile(paths.DefaultConversationLoopDefinitionPath, DefaultConversationLoopJson(), Overwrite: false),
             new WorkspaceSeedFile(paths.PermissionsPath, permissions.ToJson() + Environment.NewLine, Overwrite: false),
             new WorkspaceSeedFile(paths.EventsLogPath, string.Empty, Overwrite: false)
         ];
+    }
+
+    private static string DefaultConversationLoopJson()
+    {
+        return JsonSerializer.Serialize(LoopDefinition.CreateDefaultConversation(), JsonOptions) + Environment.NewLine;
     }
 
     private static string DefaultAgentMd() => """

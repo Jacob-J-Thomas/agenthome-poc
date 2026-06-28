@@ -14,6 +14,10 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.GetFullPath(workspace.RootPath), paths.RootPath);
         Assert.Equal(Path.Combine(paths.RootPath, ".agent"), paths.AgentPath);
         Assert.Equal(paths.RootPath, paths.WorkspacePath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops"), paths.LoopsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions"), paths.LoopDefinitionsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs"), paths.LoopRunsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "default-conversation.json"), paths.DefaultConversationLoopDefinitionPath);
         Assert.Equal(Path.Combine(paths.RootPath, "shared"), paths.WorkspaceSharedPath);
         Assert.Equal(Path.Combine(paths.RootPath, "private"), paths.WorkspacePrivatePath);
     }
