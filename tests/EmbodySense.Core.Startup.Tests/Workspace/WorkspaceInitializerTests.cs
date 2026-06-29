@@ -99,10 +99,13 @@ public sealed class WorkspaceInitializerTests
         Assert.Equal(LoopDefinition.CurrentSchemaVersion, definition.SchemaVersion);
         Assert.Equal("Default conversation loop", definition.DisplayName);
         Assert.Equal("default-assistant", definition.RoleId);
-        Assert.Equal("human-message", definition.Trigger);
-        Assert.Equal("workspace-startup-context", definition.MemoryScope);
+        Assert.Equal(LoopTrigger.HumanMessage, definition.Trigger);
+        Assert.Equal(LoopMemoryScope.WorkspaceStartupContext, definition.MemoryScope);
         Assert.Contains("workspace.command", definition.CapabilityIds);
         Assert.Contains("approval.request", definition.CapabilityIds);
-        Assert.Equal("enabled", definition.State);
+        Assert.Equal(LoopState.Enabled, definition.State);
+        var json = await File.ReadAllTextAsync(paths.DefaultConversationLoopDefinitionPath);
+        Assert.Contains("\"trigger\": \"human-message\"", json);
+        Assert.Contains("\"state\": \"enabled\"", json);
     }
 }

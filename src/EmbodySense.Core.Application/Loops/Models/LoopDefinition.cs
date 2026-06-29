@@ -6,12 +6,12 @@ public sealed record LoopDefinition(
     string DisplayName,
     string Description,
     string RoleId,
-    string Trigger,
-    string MemoryScope,
+    LoopTrigger Trigger,
+    LoopMemoryScope MemoryScope,
     string[] CapabilityIds,
-    string ReviewPolicy,
-    string FailurePolicy,
-    string State)
+    LoopReviewPolicy ReviewPolicy,
+    LoopFailurePolicy FailurePolicy,
+    LoopState State)
 {
     public const int CurrentSchemaVersion = 1;
 
@@ -23,8 +23,8 @@ public sealed record LoopDefinition(
             "Default conversation loop",
             "The governed loop behind ordinary chat turns in this workspace.",
             "default-assistant",
-            "human-message",
-            "workspace-startup-context",
+            LoopTrigger.HumanMessage,
+            LoopMemoryScope.WorkspaceStartupContext,
             [
                 "conversation.turn",
                 "conversation.history",
@@ -34,8 +34,8 @@ public sealed record LoopDefinition(
                 "approval.request",
                 "audit.write"
             ],
-            "review-at-authority-boundaries",
-            "record-failure-and-surface-to-user",
-            "enabled");
+            LoopReviewPolicy.ReviewAtAuthorityBoundaries,
+            LoopFailurePolicy.RecordFailureAndSurfaceToUser,
+            LoopState.Enabled);
     }
 }

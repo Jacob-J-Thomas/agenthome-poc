@@ -18,6 +18,12 @@ public sealed class LoopDefinitionStoreTests
         await store.SaveAsync(definition);
 
         Assert.True(File.Exists(paths.DefaultConversationLoopDefinitionPath));
+        var json = await File.ReadAllTextAsync(paths.DefaultConversationLoopDefinitionPath);
+        Assert.Contains("\"trigger\": \"human-message\"", json);
+        Assert.Contains("\"memoryScope\": \"workspace-startup-context\"", json);
+        Assert.Contains("\"reviewPolicy\": \"review-at-authority-boundaries\"", json);
+        Assert.Contains("\"failurePolicy\": \"record-failure-and-surface-to-user\"", json);
+        Assert.Contains("\"state\": \"enabled\"", json);
         var loaded = await store.LoadAsync("default-conversation");
         Assert.NotNull(loaded);
         Assert.Equal(definition.SchemaVersion, loaded.SchemaVersion);
@@ -31,6 +37,42 @@ public sealed class LoopDefinitionStoreTests
         Assert.Equal(definition.ReviewPolicy, loaded.ReviewPolicy);
         Assert.Equal(definition.FailurePolicy, loaded.FailurePolicy);
         Assert.Equal(definition.State, loaded.State);
+    }
+
+    [Fact]
+    public async Task LoadAsync_reads_current_draft_loop_json()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.LoopDefinitionsPath);
+        await File.WriteAllTextAsync(paths.DefaultConversationLoopDefinitionPath, """
+            {
+              "schemaVersion": 1,
+              "id": "default-conversation",
+              "displayName": "Default conversation loop",
+              "description": "The governed loop behind ordinary chat turns in this workspace.",
+              "roleId": "default-assistant",
+              "trigger": "human-message",
+              "memoryScope": "workspace-startup-context",
+              "capabilityIds": [
+                "conversation.turn",
+                "conversation.history"
+              ],
+              "reviewPolicy": "review-at-authority-boundaries",
+              "failurePolicy": "record-failure-and-surface-to-user",
+              "state": "enabled"
+            }
+            """);
+        var store = new LoopDefinitionStore(paths);
+
+        var definition = await store.LoadAsync("default-conversation");
+
+        Assert.NotNull(definition);
+        Assert.Equal(LoopTrigger.HumanMessage, definition.Trigger);
+        Assert.Equal(LoopMemoryScope.WorkspaceStartupContext, definition.MemoryScope);
+        Assert.Equal(LoopReviewPolicy.ReviewAtAuthorityBoundaries, definition.ReviewPolicy);
+        Assert.Equal(LoopFailurePolicy.RecordFailureAndSurfaceToUser, definition.FailurePolicy);
+        Assert.Equal(LoopState.Enabled, definition.State);
     }
 
     [Fact]
@@ -81,6 +123,42 @@ public sealed class LoopDefinitionStoreTests
         var definition = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [] };
 
         await Assert.ThrowsAsync<ArgumentException>(() => store.SaveAsync(definition));
+    }
+
+    [Fact]
+    public async Task SaveAsync_rejects_unknown_enum_values()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new LoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var definition = LoopDefinition.CreateDefaultConversation() with { Trigger = LoopTrigger.Unknown };
+
+        await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(definition));
+    }
+
+    [Fact]
+    public async Task LoadAsync_rejects_unknown_enum_values()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.LoopDefinitionsPath);
+        await File.WriteAllTextAsync(paths.DefaultConversationLoopDefinitionPath, """
+            {
+              "schemaVersion": 1,
+              "id": "default-conversation",
+              "displayName": "Default conversation loop",
+              "description": "The governed loop behind ordinary chat turns in this workspace.",
+              "roleId": "default-assistant",
+              "trigger": "unapproved-trigger",
+              "memoryScope": "workspace-startup-context",
+              "capabilityIds": ["conversation.turn"],
+              "reviewPolicy": "review-at-authority-boundaries",
+              "failurePolicy": "record-failure-and-surface-to-user",
+              "state": "enabled"
+            }
+            """);
+        var store = new LoopDefinitionStore(paths);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.LoadAsync("default-conversation"));
     }
 
     [Fact]

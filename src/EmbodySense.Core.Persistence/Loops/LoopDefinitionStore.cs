@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -7,7 +8,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class LoopDefinitionStore : ILoopDefinitionStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
     private readonly WorkspacePaths _paths;
 
     public LoopDefinitionStore(WorkspacePaths paths)
@@ -56,9 +57,22 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
 
     private static async Task<LoopDefinition> ReadDefinitionAsync(string path, CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-        var definition = await JsonSerializer.DeserializeAsync<LoopDefinition>(stream, JsonOptions, cancellationToken)
-            ?? throw new FormatException($"Loop definition `{path}` was empty.");
+        LoopDefinition? definition;
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            definition = await JsonSerializer.DeserializeAsync<LoopDefinition>(stream, JsonOptions, cancellationToken);
+        }
+        catch (JsonException exception)
+        {
+            throw new FormatException($"Loop definition `{path}` contains invalid JSON or unsupported enum values.", exception);
+        }
+
+        if (definition is null)
+        {
+            throw new FormatException($"Loop definition `{path}` was empty.");
+        }
+
         ValidateDefinition(definition);
         return definition;
     }
@@ -76,14 +90,22 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         ArgumentException.ThrowIfNullOrWhiteSpace(definition.DisplayName);
         ArgumentException.ThrowIfNullOrWhiteSpace(definition.Description);
         ArgumentException.ThrowIfNullOrWhiteSpace(definition.RoleId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(definition.Trigger);
-        ArgumentException.ThrowIfNullOrWhiteSpace(definition.MemoryScope);
-        ArgumentException.ThrowIfNullOrWhiteSpace(definition.ReviewPolicy);
-        ArgumentException.ThrowIfNullOrWhiteSpace(definition.FailurePolicy);
-        ArgumentException.ThrowIfNullOrWhiteSpace(definition.State);
+        ValidateEnum(definition.Trigger, nameof(definition.Trigger));
+        ValidateEnum(definition.MemoryScope, nameof(definition.MemoryScope));
+        ValidateEnum(definition.ReviewPolicy, nameof(definition.ReviewPolicy));
+        ValidateEnum(definition.FailurePolicy, nameof(definition.FailurePolicy));
+        ValidateEnum(definition.State, nameof(definition.State));
         if (definition.CapabilityIds is null || definition.CapabilityIds.Length == 0 || definition.CapabilityIds.Any(string.IsNullOrWhiteSpace))
         {
             throw new ArgumentException("Loop definitions must include at least one capability id.", nameof(definition));
+        }
+    }
+
+    private static void ValidateEnum<TEnum>(TEnum value, string name) where TEnum : struct, Enum
+    {
+        if (!Enum.IsDefined(value) || Convert.ToInt32(value) == 0)
+        {
+            throw new FormatException($"Loop definition has unsupported {name} value `{value}`.");
         }
     }
 }

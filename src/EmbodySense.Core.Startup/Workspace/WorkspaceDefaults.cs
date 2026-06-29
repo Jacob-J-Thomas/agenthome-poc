@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -7,7 +8,7 @@ namespace EmbodySense.Core.Startup.Workspace;
 
 internal static class WorkspaceDefaults
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
 
     public static IReadOnlyList<string> GetDirectories(WorkspacePaths paths)
     {
