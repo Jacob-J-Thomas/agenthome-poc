@@ -1,5 +1,5 @@
 using System.Text;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 

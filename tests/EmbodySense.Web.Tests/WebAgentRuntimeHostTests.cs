@@ -66,7 +66,7 @@ public sealed class WebAgentRuntimeHostTests
 
         var streamEvent = Assert.Single(events);
         Assert.Equal("assistant_final", streamEvent.Type);
-        Assert.Contains("Harness commands:", streamEvent.Text);
+        Assert.Contains("Runtime commands:", streamEvent.Text);
         Assert.Contains("/history, /conversations, /load", streamEvent.Text);
     }
 

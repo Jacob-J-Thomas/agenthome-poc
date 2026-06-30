@@ -1,7 +1,9 @@
 using EmbodySense.Core.Common;
 using EmbodySense.Core.Application.Governance.Permissions;
-using EmbodySense.Core.Application.Governance.Permissions.Models;
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
+using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Governance.Tools;

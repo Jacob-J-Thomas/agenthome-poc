@@ -1,6 +1,6 @@
 using EmbodySense.Core.Startup.Workspace;
-using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;

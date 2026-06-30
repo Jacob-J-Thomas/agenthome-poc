@@ -1,8 +1,8 @@
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Governance.Tools;
-using EmbodySense.Core.Application.Harness;
-using EmbodySense.Core.Application.Inference;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Application.Loops.Execution;
+using EmbodySense.Core.Application.Runtime;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Memory;
@@ -34,8 +34,11 @@ public sealed class AgentRuntimeFactory
         string workingDirectory,
         string? codexExecutablePath,
         string codexSandbox,
+        string runtimeSurface,
         CancellationToken cancellationToken = default)
     {
+        // TODO(runtime-surface-api): Replace the loose "cli"/"web" runtimeSurface strings with a Core.Startup-owned surface identifier API.
+        // Deferred to keep this cutover focused; revisit when runtime factory ergonomics are cleaned up without blocking future custom surfaces.
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
@@ -43,13 +46,14 @@ public sealed class AgentRuntimeFactory
             WorkingDirectory = workingDirectory,
             CodexExecutablePath = codexExecutablePath,
             CodexSandbox = codexSandbox
-        }, cancellationToken);
+        }, runtimeSurface, cancellationToken);
     }
 
-    internal async Task<AgentRuntime> CreateAsync(LlmInferenceClientOptions options, CancellationToken cancellationToken = default)
+    internal async Task<AgentRuntime> CreateAsync(LlmInferenceClientOptions options, string runtimeSurface, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
 
+        var surface = RuntimeSurface.Create(runtimeSurface);
         var workingDirectory = string.IsNullOrWhiteSpace(options.WorkingDirectory) ? Directory.GetCurrentDirectory() : options.WorkingDirectory;
         var effectiveOptions = options with { WorkingDirectory = workingDirectory };
         var paths = new WorkspacePaths(workingDirectory);
@@ -62,8 +66,16 @@ public sealed class AgentRuntimeFactory
         var startupContext = await new AgentContextProvider(new WorkspaceContextStore()).LoadAsync(paths, cancellationToken);
         await conversationMemory.StartFreshConversationAsync(cancellationToken);
         var inferenceClient = new LlmInferenceClient(effectiveOptions, toolBroker);
-        var session = new AgentHarnessSession(inferenceClient, conversationMemory, startupContext);
+        var conversationState = new ConversationRuntimeState(startupContext, inferenceClient);
+        var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory);
 
-        return new AgentRuntime(paths, conversationMemory, startupContext, session, inferenceClient);
+        return new AgentRuntime(
+            paths,
+            conversationMemory,
+            startupContext,
+            conversationState,
+            inferenceClient,
+            loopRunner,
+            surface);
     }
 }

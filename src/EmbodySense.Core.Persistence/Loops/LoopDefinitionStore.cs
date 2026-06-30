@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
-using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;

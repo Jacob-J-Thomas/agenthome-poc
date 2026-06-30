@@ -1,7 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Governance.Tools;
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 

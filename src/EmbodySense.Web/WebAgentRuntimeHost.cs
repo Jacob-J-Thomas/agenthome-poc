@@ -73,14 +73,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         SetTurnCancellation(turnCancellation);
         try
         {
-            if (AgentRuntime.TryHandleStaticHarnessCommand(message, out var staticCommandResult))
+            if (AgentRuntime.TryHandleStaticRuntimeCommand(message, out var staticCommandResult))
             {
                 await WriteCommandResultAsync(staticCommandResult, writeEventAsync, turnCancellation.Token);
                 return;
             }
 
             var runtime = await GetRuntimeAsync(turnCancellation.Token);
-            var commandResult = await runtime.TryHandleHarnessCommandAsync(message, turnCancellation.Token);
+            var commandResult = await runtime.TryHandleRuntimeCommandAsync(message, turnCancellation.Token);
             if (commandResult.Handled)
             {
                 await WriteCommandResultAsync(commandResult, writeEventAsync, turnCancellation.Token);
@@ -154,7 +154,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         await _runtimeGate.WaitAsync(cancellationToken);
         try
         {
-            _runtime ??= await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(_options.Model, _options.WorkingDirectory, _options.CodexExecutablePath, _options.CodexSandbox, cancellationToken);
+            _runtime ??= await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(
+                _options.Model,
+                _options.WorkingDirectory,
+                _options.CodexExecutablePath,
+                _options.CodexSandbox,
+                "web",
+                cancellationToken);
             return _runtime;
         }
         finally

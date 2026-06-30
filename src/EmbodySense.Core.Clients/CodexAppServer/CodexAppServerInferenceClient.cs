@@ -3,7 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Inference;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;

@@ -1,5 +1,5 @@
 using EmbodySense.Core.Application.Governance.Tools;
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Startup.Governance;
 

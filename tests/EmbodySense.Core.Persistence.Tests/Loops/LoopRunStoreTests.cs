@@ -1,4 +1,4 @@
-using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;

@@ -1,5 +1,6 @@
 using System.Text;
 using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Common.LocalWorkspace;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Clients.LocalWorkspace;

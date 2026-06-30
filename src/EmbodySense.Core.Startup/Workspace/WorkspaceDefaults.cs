@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using EmbodySense.Core.Application.Governance.Permissions.Models;
-using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Startup.Workspace;
@@ -387,7 +387,7 @@ internal static class WorkspaceDefaults
 
             `conversations/current.ndjson` is the active conversation transcript as JSON lines. Each run starts with a fresh active transcript, moving any non-empty previous `current.ndjson` into `conversations/archive/` first.
 
-            Additional `.ndjson` files in `conversations/` and `conversations/archive/` are saved transcripts that can be listed and loaded from the harness loop with `/history`. Use `/new` to start another fresh active transcript without leaving the harness.
+            Additional `.ndjson` files in `conversations/` and `conversations/archive/` are saved transcripts that can be listed and loaded from the runtime session with `/history`. Use `/new` to start another fresh active transcript without leaving the session.
 
             Conversation history is supporting transcript evidence, not the normal memory system of record. Query it only when exact wording, chronology, or missing undistilled context matters, then distill durable takeaways into `.agent/MEMORY.md`.
 
@@ -451,7 +451,7 @@ internal static class WorkspaceDefaults
 
             The audit registry is intended to explain what the harness did without becoming a raw transcript, secret store, or prompt dump. LLM inference and app-server request handling events should record provider, model, message counts, character counts, request method, duration, and outcome where applicable, but should not store raw prompts or model responses by default.
 
-            The harness may write this folder. Humans and trusted harness commands may inspect it. Agent context should not include raw audit events unless a human or policy explicitly requests that context.
+            The harness may write this folder. Humans and trusted runtime commands may inspect it. Agent context should not include raw audit events unless a human or policy explicitly requests that context.
 
             ## How agents should reason about audit
 

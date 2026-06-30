@@ -1,8 +1,9 @@
 using System.Diagnostics;
 using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Application.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Inference;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Clients.CodexAppServer;
 using EmbodySense.Core.Persistence.Audit;

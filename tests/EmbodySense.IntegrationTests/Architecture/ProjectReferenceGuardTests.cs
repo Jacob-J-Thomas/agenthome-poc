@@ -67,6 +67,32 @@ public sealed class ProjectReferenceGuardTests
         Assert.Empty(violations);
     }
 
+    [Fact]
+    public void Clients_and_persistence_do_not_reference_application_orchestration()
+    {
+        var root = FindRepositoryRoot();
+        var violations = new[] { "EmbodySense.Core.Clients", "EmbodySense.Core.Persistence" }
+            .Select(projectName => Path.Combine(root, "src", projectName))
+            .SelectMany(projectDirectory => Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories))
+            .Where(ContainsApplicationOrchestrationReference)
+            .Select(file => Path.GetRelativePath(root, file))
+            .ToArray();
+
+        Assert.Empty(violations);
+    }
+
+    private static bool ContainsApplicationOrchestrationReference(string file)
+    {
+        var text = File.ReadAllText(file);
+        var forbiddenNamespaces = new[]
+        {
+            "EmbodySense.Core.Application.Loops.Execution",
+            "EmbodySense.Core.Application.Runtime"
+        };
+
+        return forbiddenNamespaces.Any(namespaceName => text.Contains(namespaceName, StringComparison.Ordinal));
+    }
+
     private static bool ContainsForbiddenCoreReference(string file)
     {
         var text = File.ReadAllText(file);

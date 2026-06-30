@@ -22,8 +22,13 @@ public static class RunCommand
             await WorkspaceInitializer.ForCli().InitializeAsync(options.WorkingDirectory);
         }
 
-        var client = ConsoleHarnessTerminal.Instance;
-        await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client)).CreateAsync(options.Model, options.WorkingDirectory, options.CodexExecutablePath, options.CodexSandbox);
+        var client = ConsoleRuntimeTerminal.Instance;
+        await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client)).CreateAsync(
+            options.Model,
+            options.WorkingDirectory,
+            options.CodexExecutablePath,
+            options.CodexSandbox,
+            "cli");
         return await runtime.RunConsoleLoopAsync(client, banner: Constants.Banner, verbose: options.Verbose);
     }
 

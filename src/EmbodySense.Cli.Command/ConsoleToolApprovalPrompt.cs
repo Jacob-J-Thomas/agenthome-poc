@@ -9,7 +9,7 @@ public sealed class ConsoleToolApprovalPrompt : IAgentToolApprovalPrompt
 
     public ConsoleToolApprovalPrompt(IAgentRuntimeConsole? client = null)
     {
-        _client = client ?? ConsoleHarnessTerminal.Instance;
+        _client = client ?? ConsoleRuntimeTerminal.Instance;
     }
 
     public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)

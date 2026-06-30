@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Context;
+using EmbodySense.Core.Common.Context;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Workspace;

@@ -1,8 +1,8 @@
 using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Application.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Permissions;

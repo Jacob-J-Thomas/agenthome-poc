@@ -1,4 +1,4 @@
-using EmbodySense.Core.Application.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Startup.Audit;

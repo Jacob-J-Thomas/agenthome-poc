@@ -1,6 +1,6 @@
 using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Application.Governance.Audit.Models;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;

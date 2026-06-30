@@ -1,9 +1,9 @@
 using System.Text.Json;
 using EmbodySense.Core.Application.Inference;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
-using EmbodySense.Core.Application.Governance.Tools.Models;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Clients.CodexAppServer;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;

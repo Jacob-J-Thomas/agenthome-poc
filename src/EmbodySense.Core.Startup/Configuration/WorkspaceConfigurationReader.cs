@@ -1,8 +1,8 @@
 using System.Text.Json;
 using System.Text;
-using EmbodySense.Core.Application.Governance.Audit.Models;
-using EmbodySense.Core.Application.Governance.Permissions.Models;
-using EmbodySense.Core.Application.Memory.Models;
+using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
+using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Workspace;
 

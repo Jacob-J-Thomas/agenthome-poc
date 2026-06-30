@@ -1,4 +1,4 @@
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Context;

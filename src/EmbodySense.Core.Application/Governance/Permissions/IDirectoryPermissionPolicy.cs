@@ -1,4 +1,4 @@
-using EmbodySense.Core.Application.Governance.Permissions.Models;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
 
 namespace EmbodySense.Core.Application.Governance.Permissions;
 

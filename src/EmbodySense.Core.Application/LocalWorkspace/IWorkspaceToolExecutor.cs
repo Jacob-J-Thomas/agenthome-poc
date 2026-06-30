@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.LocalWorkspace;
+
 namespace EmbodySense.Core.Application.LocalWorkspace;
 
 public interface IWorkspaceToolExecutor

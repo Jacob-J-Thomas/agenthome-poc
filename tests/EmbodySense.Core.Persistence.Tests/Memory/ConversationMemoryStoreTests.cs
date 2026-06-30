@@ -1,7 +1,7 @@
 using System.Text.Json;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
-using EmbodySense.Core.Application.Memory.Models;
+using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Tests.Support;

@@ -1,5 +1,5 @@
 using System.Text;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Governance;
@@ -19,10 +19,25 @@ public sealed class AgentRuntimeFactoryTests
         var paths = new WorkspacePaths(workspace.RootPath);
         await File.WriteAllTextAsync(paths.CurrentConversationPath, "old transcript" + Environment.NewLine);
 
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        await using var runtime = await CreateRuntimeAsync(workspace);
 
         Assert.Equal(string.Empty, await File.ReadAllTextAsync(paths.CurrentConversationPath));
         Assert.NotEmpty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
+    }
+
+    [Fact]
+    public async Task CreateAsync_requires_explicit_runtime_surface()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var fakeCodex = await CreateFakeCodexExecutableAsync(workspace);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+            null,
+            workspace.RootPath,
+            fakeCodex,
+            "read-only",
+            " "));
     }
 
     [Fact]
@@ -31,7 +46,7 @@ public sealed class AgentRuntimeFactoryTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "AGENT.md"), "runtime guide");
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        await using var runtime = await CreateRuntimeAsync(workspace, "web");
         var chunks = new List<string>();
 
         var response = await runtime.SendUserMessageAsync("hello", (chunk, _) =>
@@ -50,7 +65,7 @@ public sealed class AgentRuntimeFactoryTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "AGENT.md"), "runtime guide");
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        await using var runtime = await CreateRuntimeAsync(workspace, "web");
         var contexts = new List<string>();
 
         var verboseResult = runtime.SetVerbose(true);
@@ -74,8 +89,8 @@ public sealed class AgentRuntimeFactoryTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
-        var client = new ScriptedHarnessClient("hello", "/exit");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var client = new ScriptedRuntimeClient("hello", "/exit");
 
         var exitCode = await runtime.RunConsoleLoopAsync(client, banner: "banner");
 
@@ -87,18 +102,18 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task TryHandleHarnessCommandAsync_handles_help_exit_and_unhandled_commands()
+    public async Task TryHandleRuntimeCommandAsync_handles_help_exit_and_unhandled_commands()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        await using var runtime = await CreateRuntimeAsync(workspace);
 
-        Assert.True(AgentRuntime.TryHandleStaticHarnessCommand("/help", out var staticResult));
-        Assert.Contains("Harness commands:", staticResult.Output, StringComparison.Ordinal);
+        Assert.True(AgentRuntime.TryHandleStaticRuntimeCommand("/help", out var staticResult));
+        Assert.Contains("Runtime commands:", staticResult.Output, StringComparison.Ordinal);
 
-        var help = await runtime.TryHandleHarnessCommandAsync("/commands");
-        var exit = await runtime.TryHandleHarnessCommandAsync("/quit");
-        var unhandled = await runtime.TryHandleHarnessCommandAsync("/not-a-command");
+        var help = await runtime.TryHandleRuntimeCommandAsync("/commands");
+        var exit = await runtime.TryHandleRuntimeCommandAsync("/quit");
+        var unhandled = await runtime.TryHandleRuntimeCommandAsync("/not-a-command");
 
         Assert.True(help.Handled);
         Assert.Contains("/new, /new-session", help.Output, StringComparison.Ordinal);
@@ -108,7 +123,7 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task TryHandleHarnessCommandAsync_loads_pending_history_selection()
+    public async Task TryHandleRuntimeCommandAsync_loads_pending_history_selection()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
@@ -116,10 +131,10 @@ public sealed class AgentRuntimeFactoryTests
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
         await store.AppendMessageAsync(LlmMessage.Assistant("saved answer"));
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        await using var runtime = await CreateRuntimeAsync(workspace);
 
-        var history = await runtime.TryHandleHarnessCommandAsync("/history");
-        var loaded = await runtime.TryHandleHarnessCommandAsync("1");
+        var history = await runtime.TryHandleRuntimeCommandAsync("/history");
+        var loaded = await runtime.TryHandleRuntimeCommandAsync("1");
 
         Assert.True(history.Handled);
         Assert.Contains("Stored conversations:", history.Output, StringComparison.Ordinal);
@@ -148,18 +163,18 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task TryHandleHarnessCommandAsync_handles_pending_history_cancel_and_invalid_selection()
+    public async Task TryHandleRuntimeCommandAsync_handles_pending_history_cancel_and_invalid_selection()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
         await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        await using var runtime = await CreateRuntimeAsync(workspace);
 
-        _ = await runtime.TryHandleHarnessCommandAsync("/history");
-        var cancelled = await runtime.TryHandleHarnessCommandAsync("/cancel");
-        _ = await runtime.TryHandleHarnessCommandAsync("/history");
-        var invalid = await runtime.TryHandleHarnessCommandAsync("99");
+        _ = await runtime.TryHandleRuntimeCommandAsync("/history");
+        var cancelled = await runtime.TryHandleRuntimeCommandAsync("/cancel");
+        _ = await runtime.TryHandleRuntimeCommandAsync("/history");
+        var invalid = await runtime.TryHandleRuntimeCommandAsync("99");
 
         Assert.True(cancelled.Handled);
         Assert.Equal("Conversation load cancelled.", cancelled.Output);
@@ -168,16 +183,16 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task TryHandleHarnessCommandAsync_requires_history_before_model_turn_and_new_resets_state()
+    public async Task TryHandleRuntimeCommandAsync_requires_history_before_model_turn_and_new_resets_state()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(null, workspace.RootPath, await CreateFakeCodexExecutableAsync(workspace), "read-only");
+        await using var runtime = await CreateRuntimeAsync(workspace);
 
         _ = await runtime.SendUserMessageAsync("hello");
-        var historyAfterTurn = await runtime.TryHandleHarnessCommandAsync("/history");
-        var fresh = await runtime.TryHandleHarnessCommandAsync("/new");
-        var historyAfterNew = await runtime.TryHandleHarnessCommandAsync("/history");
+        var historyAfterTurn = await runtime.TryHandleRuntimeCommandAsync("/history");
+        var fresh = await runtime.TryHandleRuntimeCommandAsync("/new");
+        var historyAfterNew = await runtime.TryHandleRuntimeCommandAsync("/history");
 
         Assert.Contains("before sending the first prompt", historyAfterTurn.Output, StringComparison.Ordinal);
         Assert.Equal("Started a new conversation.", fresh.Output);
@@ -244,6 +259,16 @@ public sealed class AgentRuntimeFactoryTests
         return commandPath;
     }
 
+    private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, string runtimeSurface = "cli")
+    {
+        return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+            null,
+            workspace.RootPath,
+            await CreateFakeCodexExecutableAsync(workspace),
+            "read-only",
+            runtimeSurface);
+    }
+
     private sealed class RejectingApprovalPrompt : IAgentToolApprovalPrompt
     {
         public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
@@ -252,7 +277,7 @@ public sealed class AgentRuntimeFactoryTests
         }
     }
 
-    private sealed class ScriptedHarnessClient(params string[] inputs) : IAgentRuntimeConsole
+    private sealed class ScriptedRuntimeClient(params string[] inputs) : IAgentRuntimeConsole
     {
         private readonly Queue<string?> _inputs = new(inputs);
         private readonly StringBuilder _output = new();

@@ -1,10 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Application.Governance.Audit.Models;
-using EmbodySense.Core.Application.Inference.Models;
+using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
-using EmbodySense.Core.Application.Memory.Models;
+using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Workspace;
@@ -162,7 +162,7 @@ public sealed class CliBehaviorTests
     }
 
     [Fact]
-    public async Task Run_command_help_command_lists_harness_commands()
+    public async Task Run_command_help_command_lists_runtime_commands()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
@@ -170,7 +170,7 @@ public sealed class CliBehaviorTests
         var result = await RunCliWithInputAsync("/help" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
 
         Assert.Equal(0, result.ExitCode);
-        Assert.Contains("Harness commands:", result.Output);
+        Assert.Contains("Runtime commands:", result.Output);
         Assert.Contains("/new, /new-session", result.Output);
         Assert.Contains("/history, /conversations, /load", result.Output);
         Assert.Contains("/exit, /quit", result.Output);

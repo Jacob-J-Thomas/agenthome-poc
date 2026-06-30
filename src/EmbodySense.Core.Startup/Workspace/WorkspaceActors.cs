@@ -1,4 +1,4 @@
-using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Common.Governance.Audit;
 
 namespace EmbodySense.Core.Startup.Workspace;
 
