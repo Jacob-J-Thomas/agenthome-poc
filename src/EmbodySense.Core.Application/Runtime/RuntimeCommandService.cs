@@ -19,6 +19,8 @@ public sealed class RuntimeCommandService
         _startupMessages = startupMessages ?? [];
     }
 
+    // TODO(runtime-command-organization): Move command matching/state/output contracts under a Runtime.Commands namespace without duplicating Web/CLI command behavior.
+    // Deferred until the current cutover is committed; revisit when AgentRuntime exposes one host-facing command/model-turn event API.
     public static bool TryHandleStaticCommand(string input, out RuntimeCommandResult result)
     {
         if (string.IsNullOrWhiteSpace(input))

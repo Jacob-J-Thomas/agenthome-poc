@@ -5,6 +5,8 @@ namespace EmbodySense.Core.Application.Loops.Execution;
 
 public sealed record DefaultConversationLoopTurnRequest
 {
+    // TODO(default-loop-models): Move default-loop request/result/status contracts under a Models folder or collapse the Execution namespace if no sibling loop namespaces emerge.
+    // Deferred to keep this cutover reviewable; revisit once the current harness-to-runtime rename is committed and folder moves can be staged cleanly.
     public DefaultConversationLoopTurnRequest(
         string input,
         RuntimeSurface surface,
@@ -24,6 +26,8 @@ public sealed record DefaultConversationLoopTurnRequest
 
     public string Input { get; }
 
+    // TODO(default-loop-surface): Wire Surface into run identity/audit metadata or remove it from this request contract.
+    // Deferred because surface ids are only validated today; revisit when default-loop run records are persisted instead of inferred from host context.
     public RuntimeSurface Surface { get; }
 
     public Func<string, CancellationToken, Task>? ResponseChunkHandler { get; }

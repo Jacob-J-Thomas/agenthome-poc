@@ -4,6 +4,8 @@ namespace EmbodySense.Core.Application.Runtime;
 
 public sealed record RuntimeCommandResult
 {
+    // TODO(runtime-model-organization): Move runtime value contracts like command results, diagnostics, transcript messages, and surfaces into Runtime.Models if the runtime folder is split.
+    // Deferred until after the current staged cutover; revisit when folder moves can be reviewed separately from behavior changes.
     public RuntimeCommandResult(
         bool handled,
         string output = "",

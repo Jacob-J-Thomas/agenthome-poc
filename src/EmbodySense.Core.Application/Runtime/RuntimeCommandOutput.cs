@@ -7,6 +7,8 @@ namespace EmbodySense.Core.Application.Runtime;
 
 public static class RuntimeCommandOutput
 {
+    // TODO(runtime-command-output): Split command constants from transcript/verbose formatters if this grows beyond the current small shared command surface.
+    // Deferred because Web and CLI intentionally share the same text today; revisit when runtime events carry structured payloads instead of formatted strings.
     private const int ConversationPromptPreviewLength = 96;
     public const string UserPrompt = "User: ";
 

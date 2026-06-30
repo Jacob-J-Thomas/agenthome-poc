@@ -12,6 +12,8 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     private readonly ConversationRuntimeState _conversationState;
     private readonly InferenceRequestBuilder _requestBuilder;
 
+    // TODO(default-loop-contract): Revisit whether the default loop runner should own request building, diagnostics, and transcript projection directly.
+    // Deferred until the runtime host API settles; revisit when loop execution gains real run identity, audit events, or resumable failure handling.
     public DefaultConversationLoopRunner(
         ILlmInferenceClient inferenceClient,
         ConversationRuntimeState conversationState,
@@ -81,6 +83,8 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             return;
         }
 
+        // TODO(runtime-diagnostics): Move visible-context formatting out of RuntimeCommandOutput so loop diagnostics are not coupled to slash-command text.
+        // Deferred because the current text is already shared by Web and CLI; revisit when diagnostics become typed runtime events instead of formatted strings.
         var content = RuntimeCommandOutput.FormatVerboseContext(messages);
         await request.DiagnosticHandler(new RuntimeDiagnosticMessage(RuntimeDiagnosticKind.VerboseContext, content), request.CancellationToken);
     }

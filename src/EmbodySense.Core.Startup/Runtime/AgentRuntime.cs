@@ -50,6 +50,8 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     internal IReadOnlyList<LlmMessage> Messages => _conversationState.Messages;
 
+    // TODO(runtime-host-api): Replace the split SendUserMessageAsync/TryHandleRuntimeCommandAsync/RunConsoleLoopAsync surface with one host-facing turn API.
+    // Deferred until after the namespace cutover; revisit when Web and CLI can both consume the same command/model-turn event stream without duplicating host logic.
     public async Task<string> SendUserMessageAsync(
         string message,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
@@ -103,6 +105,8 @@ public sealed class AgentRuntime : IAsyncDisposable
         return handled;
     }
 
+    // TODO(runtime-command-host): Extract command-result adaptation out of AgentRuntime while keeping RuntimeCommandService as the shared command authority.
+    // Deferred to avoid mixing behavior changes into this cutover; revisit when command output needs a single Web/CLI projection path.
     public async Task<AgentRuntimeCommandResult> TryHandleRuntimeCommandAsync(
         string input,
         CancellationToken cancellationToken = default)
@@ -113,6 +117,8 @@ public sealed class AgentRuntime : IAsyncDisposable
         return ToRuntimeResult(result);
     }
 
+    // TODO(console-host-adapter): Move console-loop rendering/input mechanics behind a small CLI host adapter that consumes the same runtime events as Web.
+    // Deferred because the current loop is behaviorally covered; revisit when AgentRuntime is split so console support is not an independent runtime path.
     public async Task<int> RunConsoleLoopAsync(
         IAgentRuntimeConsole console,
         string? banner = null,
