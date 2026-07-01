@@ -136,14 +136,13 @@ public sealed class AgentRuntimeConsoleHost
 
     private void WriteCommandResult(AgentRuntimeTurnResult result)
     {
+        WriteTranscriptReplacement(result.Events.FirstOrDefault(turnEvent => turnEvent.Kind == AgentRuntimeTurnEventKind.TranscriptReplacement));
+
         foreach (var turnEvent in result.Events)
         {
             switch (turnEvent.Kind)
             {
                 case AgentRuntimeTurnEventKind.TranscriptReplacement:
-                    _console.Clear();
-                    _console.WriteLine(FormatRestoredConversation(turnEvent.TranscriptMessages));
-                    _console.WriteLine();
                     break;
 
                 case AgentRuntimeTurnEventKind.CommandOutput:
@@ -160,6 +159,18 @@ public sealed class AgentRuntimeConsoleHost
                     break;
             }
         }
+    }
+
+    private void WriteTranscriptReplacement(AgentRuntimeTurnEvent? turnEvent)
+    {
+        if (turnEvent is null)
+        {
+            return;
+        }
+
+        _console.Clear();
+        _console.WriteLine(FormatRestoredConversation(turnEvent.TranscriptMessages));
+        _console.WriteLine();
     }
 
     private static string FormatRestoredConversation(IReadOnlyList<AgentRuntimeTranscriptMessage> messages)
