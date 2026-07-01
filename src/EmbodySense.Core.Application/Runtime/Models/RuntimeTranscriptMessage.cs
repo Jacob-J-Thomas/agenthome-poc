@@ -1,6 +1,6 @@
 using EmbodySense.Core.Common.Inference.Models;
 
-namespace EmbodySense.Core.Application.Runtime;
+namespace EmbodySense.Core.Application.Runtime.Models;
 
 public sealed record RuntimeTranscriptMessage(LlmMessageRole Role, string Content)
 {

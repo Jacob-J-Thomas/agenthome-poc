@@ -1,8 +1,12 @@
 using EmbodySense.Core.Application.Loops.Execution;
-using EmbodySense.Core.Application.Runtime;
-using EmbodySense.Core.Common.Workspace;
-using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Application.Loops.Execution.Models;
 using EmbodySense.Core.Application.Memory;
+using EmbodySense.Core.Application.Runtime.Commands;
+using EmbodySense.Core.Application.Runtime.Models;
+using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Startup.Runtime.Models;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
@@ -10,39 +14,43 @@ public sealed class AgentRuntime : IAsyncDisposable
 {
     private readonly IAsyncDisposable _inferenceClient;
     private readonly IDefaultConversationLoopRunner _loopRunner;
-    private readonly RuntimeSurface _surface;
+    // TODO(runtime-turn-api-ergonomics): AgentRuntime still adapts command results, loop results, and transcript projections directly.
+    // Revisit when the runtime can expose typed turn events that Web, CLI, and future loop-builder surfaces can consume without
+    // each host reconstructing presentation-specific behavior.
     private readonly RuntimeSessionState _state = new();
     private readonly RuntimeCommandService _commandService;
     private readonly ConversationRuntimeState _conversationState;
 
     internal AgentRuntime(
         WorkspacePaths paths,
+        AgentRuntimeSurface surface,
         IConversationMemoryStore conversationMemory,
         IReadOnlyList<LlmMessage> startupContext,
         ConversationRuntimeState conversationState,
         IAsyncDisposable inferenceClient,
-        IDefaultConversationLoopRunner loopRunner,
-        RuntimeSurface surface)
+        IDefaultConversationLoopRunner loopRunner)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(surface);
         ArgumentNullException.ThrowIfNull(conversationMemory);
         ArgumentNullException.ThrowIfNull(startupContext);
         ArgumentNullException.ThrowIfNull(conversationState);
         ArgumentNullException.ThrowIfNull(inferenceClient);
         ArgumentNullException.ThrowIfNull(loopRunner);
-        ArgumentNullException.ThrowIfNull(surface);
 
         Paths = paths;
+        Surface = surface;
         ConversationMemory = conversationMemory;
         StartupContext = startupContext;
         _conversationState = conversationState;
         _inferenceClient = inferenceClient;
         _loopRunner = loopRunner;
-        _surface = surface;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
     }
 
     internal WorkspacePaths Paths { get; }
+
+    public AgentRuntimeSurface Surface { get; }
 
     internal IConversationMemoryStore ConversationMemory { get; }
 
@@ -50,13 +58,45 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     internal IReadOnlyList<LlmMessage> Messages => _conversationState.Messages;
 
-    // TODO(runtime-host-api): Replace the split SendUserMessageAsync/TryHandleRuntimeCommandAsync/RunConsoleLoopAsync surface with one host-facing turn API.
-    // Deferred until after the namespace cutover; revisit when Web and CLI can both consume the same command/model-turn event stream without duplicating host logic.
-    public async Task<string> SendUserMessageAsync(
-        string message,
+    public async Task<AgentRuntimeTurnResult> RunTurnAsync(
+        string input,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         Func<string, CancellationToken, Task>? verboseContextHandler = null,
         CancellationToken cancellationToken = default)
+    {
+        var commandResult = await _commandService.TryHandleAsync(input, _conversationState, _state, cancellationToken);
+        if (commandResult.Handled)
+        {
+            return ToRuntimeResult(commandResult);
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(input);
+        return await RunModelTurnAsync(input, responseChunkHandler, verboseContextHandler, cancellationToken);
+    }
+
+    public AgentRuntimeTurnResult SetVerbose(bool enabled)
+    {
+        _state.SetVerbose(enabled);
+        return AgentRuntimeTurnResult.CommandOutput(enabled ? RuntimeCommandOutput.VerboseEnabledText : "Verbose mode disabled.");
+    }
+
+    public static bool TryHandleStaticRuntimeCommand(string input, out AgentRuntimeTurnResult result)
+    {
+        var handled = RuntimeCommandService.TryHandleStaticCommand(input, out var commandResult);
+        result = ToRuntimeResult(commandResult);
+        return handled;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _inferenceClient.DisposeAsync();
+    }
+
+    private async Task<AgentRuntimeTurnResult> RunModelTurnAsync(
+        string message,
+        Func<string, CancellationToken, Task>? responseChunkHandler,
+        Func<string, CancellationToken, Task>? verboseContextHandler,
+        CancellationToken cancellationToken)
     {
         Func<RuntimeDiagnosticMessage, CancellationToken, Task>? diagnosticHandler = null;
         if (_state.Verbose && verboseContextHandler is not null)
@@ -69,220 +109,50 @@ public sealed class AgentRuntime : IAsyncDisposable
             };
         }
 
-        var request = new DefaultConversationLoopTurnRequest(
-            message,
-            _surface,
-            responseChunkHandler,
-            diagnosticHandler,
-            cancellationToken);
+        var request = new DefaultConversationLoopTurnRequest(message, responseChunkHandler, diagnosticHandler, cancellationToken);
         var result = await _loopRunner.RunTurnAsync(request);
         _commandService.ClearPendingInput();
+        if (result.UserMessageAccepted)
+        {
+            _state.MarkModelTurnStarted();
+        }
+
+        var runIdentity = ToRuntimeRunIdentity(result.RunIdentity);
 
         if (result.Status == DefaultConversationLoopTurnStatus.Completed)
         {
-            _state.MarkModelTurnStarted();
-            return result.AssistantOutput;
+            return AgentRuntimeTurnResult.MessageCompleted(result.AssistantOutput, runIdentity);
         }
 
         if (result.Status == DefaultConversationLoopTurnStatus.Cancelled)
         {
-            throw new OperationCanceledException(result.FailureDetail ?? "Turn was cancelled.", cancellationToken);
+            return AgentRuntimeTurnResult.MessageCancelled(result.FailureDetail ?? "Turn was cancelled.", runIdentity);
         }
 
-        throw new InvalidOperationException(result.FailureDetail ?? "Default conversation loop turn failed.");
+        if (result.Status == DefaultConversationLoopTurnStatus.Failed)
+        {
+            return AgentRuntimeTurnResult.MessageFailed(result.FailureDetail ?? "Default conversation loop turn failed.", runIdentity);
+        }
+
+        throw new InvalidOperationException($"Unsupported default conversation loop status: {result.Status}.");
     }
 
-    public AgentRuntimeCommandResult SetVerbose(bool enabled)
+    private static AgentRuntimeTurnResult ToRuntimeResult(RuntimeCommandResult result)
     {
-        _state.SetVerbose(enabled);
-        return AgentRuntimeCommandResult.HandledOutput(enabled ? RuntimeCommandOutput.VerboseEnabledText : "Verbose mode disabled.");
-    }
-
-    public static bool TryHandleStaticRuntimeCommand(string input, out AgentRuntimeCommandResult result)
-    {
-        var handled = RuntimeCommandService.TryHandleStaticCommand(input, out var commandResult);
-        result = ToRuntimeResult(commandResult);
-        return handled;
-    }
-
-    // TODO(runtime-command-host): Extract command-result adaptation out of AgentRuntime while keeping RuntimeCommandService as the shared command authority.
-    // Deferred to avoid mixing behavior changes into this cutover; revisit when command output needs a single Web/CLI projection path.
-    public async Task<AgentRuntimeCommandResult> TryHandleRuntimeCommandAsync(
-        string input,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(input);
-
-        var result = await _commandService.TryHandleAsync(input, _conversationState, _state, RuntimeCommandInteractionMode.DeferredSelection, cancellationToken);
-        return ToRuntimeResult(result);
-    }
-
-    // TODO(console-host-adapter): Move console-loop rendering/input mechanics behind a small CLI host adapter that consumes the same runtime events as Web.
-    // Deferred because the current loop is behaviorally covered; revisit when AgentRuntime is split so console support is not an independent runtime path.
-    public async Task<int> RunConsoleLoopAsync(
-        IAgentRuntimeConsole console,
-        string? banner = null,
-        string prompt = RuntimeCommandOutput.UserPrompt,
-        bool verbose = false,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(console);
-
-        if (!string.IsNullOrEmpty(banner))
+        if (result.ExitRequested)
         {
-            console.WriteLine(banner);
+            return AgentRuntimeTurnResult.Exit();
         }
 
-        _state.SetVerbose(verbose);
-        if (_state.Verbose)
-        {
-            console.WriteLine(RuntimeCommandOutput.VerboseEnabledText);
-        }
-
-        while (!_state.ExitRequested)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            console.Write(prompt);
-            var input = console.ReadLine();
-
-            switch (input)
-            {
-                case null:
-                    _state.RequestExit();
-                    break;
-
-                case var value when string.IsNullOrWhiteSpace(value):
-                    break;
-
-                default:
-                    if (await TryHandleConsoleCommandAsync(input, console, cancellationToken))
-                    {
-                        break;
-                    }
-
-                    await RunConsoleModelTurnAsync(input, console, cancellationToken);
-                    break;
-            }
-        }
-
-        return 0;
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        await _inferenceClient.DisposeAsync();
-    }
-
-    private async Task<bool> TryHandleConsoleCommandAsync(
-        string input,
-        IAgentRuntimeConsole console,
-        CancellationToken cancellationToken)
-    {
-        var result = await _commandService.TryHandleAsync(input, _conversationState, _state, cancellationToken: cancellationToken);
-        if (!result.Handled)
-        {
-            return false;
-        }
-
-        await WriteConsoleCommandResultAsync(result, console, cancellationToken);
-        return true;
-    }
-
-    private async Task WriteConsoleCommandResultAsync(
-        RuntimeCommandResult result,
-        IAgentRuntimeConsole console,
-        CancellationToken cancellationToken)
-    {
-        WriteConsoleCommandResult(result, console);
-        if (!result.AwaitingInput)
-        {
-            return;
-        }
-
-        var answer = console.ReadLine() ?? "";
-        var answerResult = await _commandService.TryHandleAsync(answer, _conversationState, _state, cancellationToken: cancellationToken);
-        WriteConsoleCommandResult(answerResult, console);
-    }
-
-    private static void WriteConsoleCommandResult(RuntimeCommandResult result, IAgentRuntimeConsole console)
-    {
-        if (result.ReplaceTranscript)
-        {
-            console.Clear();
-            console.WriteLine(RuntimeCommandOutput.FormatRestoredConversation(result.RestoredMessages));
-            console.WriteLine();
-        }
-
-        if (!string.IsNullOrEmpty(result.Output))
-        {
-            console.WriteLine(result.Output);
-        }
-
-        if (!string.IsNullOrEmpty(result.Prompt))
-        {
-            console.Write(result.Prompt);
-        }
-    }
-
-    private async Task RunConsoleModelTurnAsync(
-        string input,
-        IAgentRuntimeConsole console,
-        CancellationToken cancellationToken)
-    {
-        var wroteAssistantHeader = false;
-        var wroteResponseChunk = false;
-        var responseEndedWithNewLine = false;
-
-        var response = await SendUserMessageAsync(
-            input,
-            (chunk, _) =>
-            {
-                if (!string.IsNullOrEmpty(chunk))
-                {
-                    if (!wroteAssistantHeader)
-                    {
-                        console.WriteLine(RuntimeCommandOutput.FormatMessageHeader(LlmMessageRole.Assistant));
-                        wroteAssistantHeader = true;
-                    }
-
-                    console.Write(chunk);
-                    wroteResponseChunk = true;
-                    responseEndedWithNewLine = EndsWithNewLine(chunk);
-                }
-
-                return Task.CompletedTask;
-            },
-            (context, token) =>
-            {
-                console.WriteLine(context);
-                console.WriteLine();
-                return Task.CompletedTask;
-            },
-            cancellationToken);
-
-        if (!wroteResponseChunk)
-        {
-            console.WriteLine(RuntimeCommandOutput.FormatMessageHeader(LlmMessageRole.Assistant));
-            console.WriteLine(response);
-        }
-        else if (!responseEndedWithNewLine)
-        {
-            console.WriteLine();
-        }
-    }
-
-    private static AgentRuntimeCommandResult ToRuntimeResult(RuntimeCommandResult result)
-    {
-        if (!result.Handled)
-        {
-            return AgentRuntimeCommandResult.NotHandled;
-        }
-
-        var output = string.IsNullOrWhiteSpace(result.Prompt)
-            ? result.Output
-            : string.IsNullOrWhiteSpace(result.Output) ? result.Prompt : result.Output + Environment.NewLine + result.Prompt;
         var restoredMessages = result.RestoredMessages.Select(message => new AgentRuntimeTranscriptMessage(FormatRole(message.Role), message.Content)).ToArray();
-        return new AgentRuntimeCommandResult(true, output, result.ExitRequested, restoredMessages, result.ReplaceTranscript);
+        return AgentRuntimeTurnResult.CommandOutput(result.Output, result.Prompt, result.AwaitingInput, restoredMessages, result.ReplaceTranscript);
+    }
+
+    private static AgentRuntimeRunIdentity? ToRuntimeRunIdentity(LoopRunIdentity? runIdentity)
+    {
+        return runIdentity is null
+            ? null
+            : new AgentRuntimeRunIdentity(runIdentity.LoopId, runIdentity.RunId, runIdentity.RoleId);
     }
 
     private static string FormatRole(LlmMessageRole role)
@@ -295,10 +165,5 @@ public sealed class AgentRuntime : IAsyncDisposable
             LlmMessageRole.Tool => "tool",
             _ => role.ToString().ToLowerInvariant()
         };
-    }
-
-    private static bool EndsWithNewLine(string text)
-    {
-        return text.Length > 0 && text[^1] is '\n' or '\r';
     }
 }

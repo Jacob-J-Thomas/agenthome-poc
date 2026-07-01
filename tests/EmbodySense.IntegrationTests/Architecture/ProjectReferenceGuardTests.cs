@@ -12,6 +12,14 @@ public sealed class ProjectReferenceGuardTests
         "EmbodySense.Core.Persistence"
     ];
 
+    private static readonly string[] ForbiddenCoreSurfaceTokens =
+    [
+        "IAgentRuntimeConsole",
+        "AgentRuntimeConsoleHost",
+        "UserPrompt",
+        "FormatRestoredConversation"
+    ];
+
     private static readonly IReadOnlyDictionary<string, string[]> ExpectedProductionReferences = new Dictionary<string, string[]>
     {
         ["EmbodySense.Core.Common"] = [],
@@ -76,6 +84,22 @@ public sealed class ProjectReferenceGuardTests
             .SelectMany(projectDirectory => Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories))
             .Where(ContainsApplicationOrchestrationReference)
             .Select(file => Path.GetRelativePath(root, file))
+            .ToArray();
+
+        Assert.Empty(violations);
+    }
+
+    [Fact]
+    public void Core_projects_do_not_define_interface_surface_adapters()
+    {
+        var root = FindRepositoryRoot();
+        var coreDirectories = new[] { "EmbodySense.Core.Application", "EmbodySense.Core.Startup" }
+            .Select(projectName => Path.Combine(root, "src", projectName));
+        var violations = coreDirectories
+            .SelectMany(projectDirectory => Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories))
+            .SelectMany(file => ForbiddenCoreSurfaceTokens
+                .Where(token => File.ReadAllText(file).Contains(token, StringComparison.Ordinal))
+                .Select(token => $"{Path.GetRelativePath(root, file)} contains {token}"))
             .ToArray();
 
         Assert.Empty(violations);

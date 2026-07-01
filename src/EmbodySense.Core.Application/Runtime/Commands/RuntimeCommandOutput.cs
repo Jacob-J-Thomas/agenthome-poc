@@ -1,16 +1,12 @@
 using System.Globalization;
 using System.Text;
-using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Memory.Models;
 
-namespace EmbodySense.Core.Application.Runtime;
+namespace EmbodySense.Core.Application.Runtime.Commands;
 
 public static class RuntimeCommandOutput
 {
-    // TODO(runtime-command-output): Split command constants from transcript/verbose formatters if this grows beyond the current small shared command surface.
-    // Deferred because Web and CLI intentionally share the same text today; revisit when runtime events carry structured payloads instead of formatted strings.
     private const int ConversationPromptPreviewLength = 96;
-    public const string UserPrompt = "User: ";
 
     public static IReadOnlyList<string> HelpLines { get; } =
     [
@@ -62,56 +58,5 @@ public static class RuntimeCommandOutput
         return normalizedPrompt.Length <= ConversationPromptPreviewLength
             ? normalizedPrompt
             : normalizedPrompt[..(ConversationPromptPreviewLength - 3)] + "...";
-    }
-
-    public static string FormatRestoredConversation(IReadOnlyList<LlmMessage> messages)
-    {
-        ArgumentNullException.ThrowIfNull(messages);
-
-        if (messages.Count == 0)
-        {
-            return "Loaded conversation transcript is empty.";
-        }
-
-        var builder = new StringBuilder();
-        builder.AppendLine("Loaded conversation transcript:");
-        foreach (var message in messages)
-        {
-            builder.AppendLine(FormatMessageHeader(message.Role));
-            builder.AppendLine(message.Content);
-            builder.AppendLine();
-        }
-
-        return builder.ToString().TrimEnd();
-    }
-
-    public static string FormatVerboseContext(IReadOnlyList<LlmMessage> messages)
-    {
-        ArgumentNullException.ThrowIfNull(messages);
-
-        var builder = new StringBuilder();
-        builder.AppendLine("[verbose] Visible inference context follows.");
-        builder.AppendLine("[verbose] This is the startup, restored, and session context EmbodySense is sending for the next model turn.");
-        builder.AppendLine("[verbose] This is not private model reasoning, hidden chain-of-thought, or provider-internal state.");
-        foreach (var message in messages)
-        {
-            builder.AppendLine(FormatMessageHeader(message.Role));
-            builder.AppendLine(message.Content);
-            builder.AppendLine();
-        }
-
-        return builder.ToString().TrimEnd();
-    }
-
-    public static string FormatMessageHeader(LlmMessageRole role)
-    {
-        return role switch
-        {
-            LlmMessageRole.System => "System:",
-            LlmMessageRole.User => "User:",
-            LlmMessageRole.Assistant => "Assistant:",
-            LlmMessageRole.Tool => "Tool:",
-            _ => role.ToString()
-        };
     }
 }

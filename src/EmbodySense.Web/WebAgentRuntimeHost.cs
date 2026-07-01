@@ -1,5 +1,6 @@
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
@@ -70,34 +71,49 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         await _turnGate.WaitAsync(cancellationToken);
         using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
+        var discardRuntime = false;
         SetTurnCancellation(turnCancellation);
         try
         {
             if (AgentRuntime.TryHandleStaticRuntimeCommand(message, out var staticCommandResult))
             {
-                await WriteCommandResultAsync(staticCommandResult, writeEventAsync, turnCancellation.Token);
+                await WriteTurnResultAsync(staticCommandResult, writeEventAsync, cancellationToken);
                 return;
             }
 
             var runtime = await GetRuntimeAsync(turnCancellation.Token);
-            var commandResult = await runtime.TryHandleRuntimeCommandAsync(message, turnCancellation.Token);
-            if (commandResult.Handled)
+            var turnResult = await runtime.RunTurnAsync(
+                message,
+                (chunk, token) =>
+                {
+                    return string.IsNullOrEmpty(chunk)
+                        ? Task.CompletedTask
+                        : writeEventAsync(WebStreamEvent.AssistantDelta(chunk), token);
+                },
+                (context, token) => writeEventAsync(WebStreamEvent.VerboseContext(context), token),
+                cancellationToken: turnCancellation.Token);
+            if (turnResult.IsMessageTurn)
             {
-                await WriteCommandResultAsync(commandResult, writeEventAsync, turnCancellation.Token);
+                await writeEventAsync(WebStreamEvent.AssistantFinal(turnResult.Output), cancellationToken);
                 return;
             }
 
-            var responseText = await runtime.SendUserMessageAsync(message, (chunk, token) =>
-            {
-                return string.IsNullOrEmpty(chunk)
-                    ? Task.CompletedTask
-                    : writeEventAsync(WebStreamEvent.AssistantDelta(chunk), token);
-            }, (context, token) => writeEventAsync(WebStreamEvent.VerboseContext(context), token), turnCancellation.Token);
-            await writeEventAsync(WebStreamEvent.AssistantFinal(responseText), turnCancellation.Token);
+            discardRuntime = turnResult.IsCancelled;
+            await WriteTurnResultAsync(turnResult, writeEventAsync, cancellationToken);
+        }
+        catch (OperationCanceledException) when (turnCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            discardRuntime = true;
+            await writeEventAsync(WebStreamEvent.Cancelled("Message cancelled."), cancellationToken);
         }
         finally
         {
             ClearTurnCancellation(turnCancellation);
+            if (discardRuntime)
+            {
+                await DiscardRuntimeAsync();
+            }
+
             _turnGate.Release();
         }
     }
@@ -130,10 +146,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_runtime is not null)
-        {
-            await _runtime.DisposeAsync();
-        }
+        await DiscardRuntimeAsync();
 
         _runtimeGate.Dispose();
         _turnGate.Dispose();
@@ -159,7 +172,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
                 _options.WorkingDirectory,
                 _options.CodexExecutablePath,
                 _options.CodexSandbox,
-                "web",
+                AgentRuntimeSurface.Web,
                 cancellationToken);
             return _runtime;
         }
@@ -169,12 +182,32 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         }
     }
 
+    private async Task DiscardRuntimeAsync()
+    {
+        AgentRuntime? runtime;
+        await _runtimeGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            runtime = _runtime;
+            _runtime = null;
+        }
+        finally
+        {
+            _runtimeGate.Release();
+        }
+
+        if (runtime is not null)
+        {
+            await runtime.DisposeAsync();
+        }
+    }
+
     private WorkspaceRuntimeConfiguration CreateRuntimeConfiguration()
     {
         var model = string.IsNullOrWhiteSpace(_options.Model) ? "configured externally" : _options.Model;
         var codexPath = string.IsNullOrWhiteSpace(_options.CodexExecutablePath) ? "codex from PATH" : _options.CodexExecutablePath;
         return new WorkspaceRuntimeConfiguration(
-            "web",
+            AgentRuntimeSurface.Web.Id,
             _options.Url,
             model,
             codexPath,
@@ -182,11 +215,23 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
             "Localhost web client is the primary browser surface; CLI remains available for verification.");
     }
 
-    private static async Task WriteCommandResultAsync(
-        AgentRuntimeCommandResult result,
+    private static async Task WriteTurnResultAsync(
+        AgentRuntimeTurnResult result,
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
         CancellationToken cancellationToken)
     {
+        if (result.IsCancelled)
+        {
+            await writeEventAsync(WebStreamEvent.Cancelled(result.FailureDetail ?? "Message cancelled."), cancellationToken);
+            return;
+        }
+
+        if (result.IsFailure)
+        {
+            await writeEventAsync(WebStreamEvent.Failure(result.FailureDetail ?? "The runtime could not process that message."), cancellationToken);
+            return;
+        }
+
         if (result.ReplaceTranscript)
         {
             var messages = result.RestoredMessages.Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
@@ -195,7 +240,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
 
         var output = result.ExitRequested
             ? "The web client is still connected. Close the browser tab or stop the web server to leave."
-            : result.Output;
+            : string.IsNullOrEmpty(result.Prompt) ? result.Output : $"{result.Output}{Environment.NewLine}{result.Prompt}";
         if (!string.IsNullOrWhiteSpace(output))
         {
             await writeEventAsync(WebStreamEvent.AssistantFinal(output), cancellationToken);

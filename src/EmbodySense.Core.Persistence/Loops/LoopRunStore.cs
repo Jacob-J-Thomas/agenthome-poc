@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Runtime.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -92,7 +93,12 @@ public sealed class LoopRunStore : ILoopRunStore
         LoopArtifactPaths.ValidateArtifactId(run.RunId);
         LoopArtifactPaths.ValidateArtifactId(run.LoopId);
         ArgumentException.ThrowIfNullOrWhiteSpace(run.RoleId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(run.Surface);
+        var surface = RuntimeSurfaceId.Create(run.Surface);
+        if (!string.Equals(run.Surface, surface.Id, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Loop run surface must be a canonical runtime surface id.", nameof(run));
+        }
+
         ValidateEnum(run.Status, nameof(run.Status));
         ValidateEnum(run.Trigger, nameof(run.Trigger));
         if (run.Metadata is null || run.Metadata.Keys.Any(string.IsNullOrWhiteSpace) || run.Metadata.Values.Any(value => value is null))

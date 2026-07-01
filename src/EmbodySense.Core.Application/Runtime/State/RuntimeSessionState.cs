@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Runtime;
+namespace EmbodySense.Core.Application.Runtime.State;
 
 public sealed class RuntimeSessionState
 {

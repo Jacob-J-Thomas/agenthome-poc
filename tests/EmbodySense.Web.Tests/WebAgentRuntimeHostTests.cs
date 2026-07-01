@@ -171,6 +171,98 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task SendMessageAsync_surfaces_loop_failure_as_error_event()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, "provider down");
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+        var events = new List<WebStreamEvent>();
+
+        await host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        {
+            events.Add(streamEvent);
+            return Task.CompletedTask;
+        });
+
+        var streamEvent = Assert.Single(events);
+        Assert.Equal("error", streamEvent.Type);
+        Assert.Equal("Codex app-server turn failed: provider down", streamEvent.Error);
+    }
+
+    [Fact]
+    public async Task SendMessageAsync_surfaces_disabled_loop_as_error_event()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+        var definitionPath = workspace.File(".agent", "loops", "definitions", "default-conversation.json");
+        var definitionJson = await File.ReadAllTextAsync(definitionPath);
+        await File.WriteAllTextAsync(definitionPath, definitionJson.Replace("\"state\": \"enabled\"", "\"state\": \"disabled\"", StringComparison.Ordinal));
+        var events = new List<WebStreamEvent>();
+
+        await host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        {
+            events.Add(streamEvent);
+            return Task.CompletedTask;
+        });
+
+        var streamEvent = Assert.Single(events);
+        Assert.Equal("error", streamEvent.Type);
+        Assert.Equal("Loop `default-conversation` is not enabled.", streamEvent.Error);
+    }
+
+    [Fact]
+    public async Task SendMessageAsync_emits_cancelled_event_after_active_turn_is_cancelled()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: 5000);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+        var events = new List<WebStreamEvent>();
+
+        var sendTask = host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        {
+            events.Add(streamEvent);
+            return Task.CompletedTask;
+        });
+        var cancelled = false;
+        for (var attempt = 0; attempt < 200 && !cancelled; attempt++)
+        {
+            cancelled = host.CancelCurrentTurn();
+            await Task.Delay(10);
+        }
+
+        Assert.True(cancelled);
+        await sendTask;
+
+        var streamEvent = Assert.Single(events);
+        Assert.Equal("cancelled", streamEvent.Type);
+        Assert.Equal("Message cancelled.", streamEvent.Text);
+
+        events.Clear();
+        await host.SendMessageAsync("after cancel", (streamEvent, _) =>
+        {
+            events.Add(streamEvent);
+            return Task.CompletedTask;
+        });
+
+        Assert.Collection(
+            events,
+            deltaEvent =>
+            {
+                Assert.Equal("assistant_delta", deltaEvent.Type);
+                Assert.Equal("web response: after cancel", deltaEvent.Text);
+            },
+            finalEvent =>
+            {
+                Assert.Equal("assistant_final", finalEvent.Type);
+                Assert.Equal("web response: after cancel", finalEvent.Text);
+            });
+    }
+
+    [Fact]
     public async Task CancelCurrentTurn_returns_false_when_no_turn_is_running()
     {
         using var workspace = new TestWorkspace();
@@ -226,7 +318,7 @@ public sealed class WebAgentRuntimeHostTests
         return workspace.File(".agent", "memory", "conversations", "current.ndjson");
     }
 
-    private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
+    private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null, int turnDelayMilliseconds = 0)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -235,8 +327,11 @@ public sealed class WebAgentRuntimeHostTests
 
         var scriptPath = workspace.File("fake-codex.ps1");
         var commandPath = workspace.File("fake-codex.cmd");
-        await File.WriteAllTextAsync(scriptPath, """
+        await File.WriteAllTextAsync(scriptPath, $$"""
             $threadId = "thread-test"
+            $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
+            $turnDelayMilliseconds = {{turnDelayMilliseconds}}
+            $turnNumber = 0
 
             function Write-ProtocolJson($value) {
                 $value | ConvertTo-Json -Compress -Depth 20
@@ -259,6 +354,7 @@ public sealed class WebAgentRuntimeHostTests
                     }
 
                     "turn/start" {
+                        $turnNumber++
                         $turnId = "turn-test"
                         $userText = [string]$message.params.input[0].text
                         $currentUserMarker = "Current user message:"
@@ -269,6 +365,15 @@ public sealed class WebAgentRuntimeHostTests
 
                         $text = "web response: $userText"
                         Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
+                        if ($turnDelayMilliseconds -gt 0 -and $userText.Contains("hello from web")) {
+                            Start-Sleep -Milliseconds $turnDelayMilliseconds
+                        }
+
+                        if ($turnFailureMessage) {
+                            Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "failed"; error = @{ message = $turnFailureMessage }; items = @() } } }
+                            break
+                        }
+
                         Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
                         Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
                     }
@@ -281,5 +386,10 @@ public sealed class WebAgentRuntimeHostTests
             """);
 
         return commandPath;
+    }
+
+    private static string FormatPowerShellStringLiteral(string? value)
+    {
+        return value is null ? "$null" : "'" + value.Replace("'", "''") + "'";
     }
 }

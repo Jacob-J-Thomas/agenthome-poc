@@ -1,5 +1,6 @@
-using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Runtime.Commands;
+using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Memory.Models;
@@ -76,7 +77,7 @@ public sealed class RuntimeCommandServiceTests
     }
 
     [Fact]
-    public async Task History_supports_deferred_cancel_and_invalid_selection()
+    public async Task History_supports_cancel_invalid_selection_and_command_interruption()
     {
         var memory = new FakeConversationMemoryStore
         {
@@ -88,13 +89,19 @@ public sealed class RuntimeCommandServiceTests
         var service = new RuntimeCommandService(memory);
         var state = new ConversationRuntimeState();
 
-        _ = await service.TryHandleAsync("/history", state, new RuntimeSessionState(), RuntimeCommandInteractionMode.DeferredSelection);
-        var cancelled = await service.TryHandleAsync("/cancel", state, new RuntimeSessionState(), RuntimeCommandInteractionMode.DeferredSelection);
-        _ = await service.TryHandleAsync("/history", state, new RuntimeSessionState(), RuntimeCommandInteractionMode.DeferredSelection);
-        var invalid = await service.TryHandleAsync("99", state, new RuntimeSessionState(), RuntimeCommandInteractionMode.DeferredSelection);
+        _ = await service.TryHandleAsync("/history", state, new RuntimeSessionState());
+        var cancelled = await service.TryHandleAsync("/cancel", state, new RuntimeSessionState());
+        _ = await service.TryHandleAsync("/history", state, new RuntimeSessionState());
+        var invalid = await service.TryHandleAsync("99", state, new RuntimeSessionState());
+        _ = await service.TryHandleAsync("/history", state, new RuntimeSessionState());
+        var invalidSlash = await service.TryHandleAsync("/not-a-command", state, new RuntimeSessionState());
+        _ = await service.TryHandleAsync("/history", state, new RuntimeSessionState());
+        var interrupted = await service.TryHandleAsync("/new", state, new RuntimeSessionState());
 
         Assert.Equal("Conversation load cancelled.", cancelled.Output);
         Assert.Equal("Invalid conversation selection.", invalid.Output);
+        Assert.Equal("Invalid conversation selection.", invalidSlash.Output);
+        Assert.Equal("Started a new conversation.", interrupted.Output);
     }
 
     private sealed class FakeConversationMemoryStore : IConversationMemoryStore

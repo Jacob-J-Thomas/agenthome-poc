@@ -1,16 +1,18 @@
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Loops.Execution;
-using EmbodySense.Core.Application.Runtime;
+using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
+using EmbodySense.Core.Startup.Runtime.Models;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
@@ -34,11 +36,9 @@ public sealed class AgentRuntimeFactory
         string workingDirectory,
         string? codexExecutablePath,
         string codexSandbox,
-        string runtimeSurface,
+        AgentRuntimeSurface runtimeSurface,
         CancellationToken cancellationToken = default)
     {
-        // TODO(runtime-surface-api): Replace the loose "cli"/"web" runtimeSurface strings with a Core.Startup-owned surface identifier API.
-        // Deferred to keep this cutover focused; revisit when runtime factory ergonomics are cleaned up without blocking future custom surfaces.
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
@@ -49,11 +49,14 @@ public sealed class AgentRuntimeFactory
         }, runtimeSurface, cancellationToken);
     }
 
-    internal async Task<AgentRuntime> CreateAsync(LlmInferenceClientOptions options, string runtimeSurface, CancellationToken cancellationToken = default)
+    internal async Task<AgentRuntime> CreateAsync(
+        LlmInferenceClientOptions options,
+        AgentRuntimeSurface runtimeSurface,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(runtimeSurface);
 
-        var surface = RuntimeSurface.Create(runtimeSurface);
         var workingDirectory = string.IsNullOrWhiteSpace(options.WorkingDirectory) ? Directory.GetCurrentDirectory() : options.WorkingDirectory;
         var effectiveOptions = options with { WorkingDirectory = workingDirectory };
         var paths = new WorkspacePaths(workingDirectory);
@@ -61,21 +64,26 @@ public sealed class AgentRuntimeFactory
         var permissionService = new ToolPermissionService(paths, permissionPolicy);
         var auditLog = new AuditLog(paths);
         var workspaceClient = new LocalWorkspaceClient(paths);
+        var loopDefinitionStore = new LoopDefinitionStore(paths);
+        var defaultLoop = await loopDefinitionStore.LoadAsync("default-conversation", cancellationToken) ?? EmbodySense.Core.Common.Loops.Models.LoopDefinition.CreateDefaultConversation();
+        // TODO(loop-tool-authority): Runtime tools are still brokered by workspace policy rather than filtered by LoopDefinition.CapabilityIds.
+        // Revisit when loop invocation owns tool assignment and run audit can prove which loop authority exposed each tool.
         var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog);
         var conversationMemory = new ConversationMemoryStore(paths);
+        var loopRunStore = new LoopRunStore(paths);
         var startupContext = await new AgentContextProvider(new WorkspaceContextStore()).LoadAsync(paths, cancellationToken);
         await conversationMemory.StartFreshConversationAsync(cancellationToken);
         var inferenceClient = new LlmInferenceClient(effectiveOptions, toolBroker);
         var conversationState = new ConversationRuntimeState(startupContext, inferenceClient);
-        var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory);
+        var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId);
 
         return new AgentRuntime(
             paths,
+            runtimeSurface,
             conversationMemory,
             startupContext,
             conversationState,
             inferenceClient,
-            loopRunner,
-            surface);
+            loopRunner);
     }
 }

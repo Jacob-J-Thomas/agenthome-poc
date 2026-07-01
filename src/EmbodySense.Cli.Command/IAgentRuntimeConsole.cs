@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Runtime;
+namespace EmbodySense.Cli.Command;
 
 public interface IAgentRuntimeConsole
 {

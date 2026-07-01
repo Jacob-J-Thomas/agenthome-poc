@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Runtime.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;
@@ -129,6 +130,18 @@ public sealed class LoopRunStoreTests
         await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(run));
     }
 
+    [Theory]
+    [InlineData("web/ui")]
+    [InlineData(" Web ")]
+    public async Task SaveAsync_rejects_non_canonical_surface_ids(string surface)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new LoopRunStore(new WorkspacePaths(workspace.RootPath));
+        var run = CreateRun("run-1", DateTimeOffset.Parse("2026-06-28T12:00:00+00:00")) with { Surface = surface };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.SaveAsync(run));
+    }
+
     [Fact]
     public async Task LoadAsync_rejects_unknown_enum_values()
     {
@@ -154,6 +167,33 @@ public sealed class LoopRunStoreTests
         var store = new LoopRunStore(paths);
 
         await Assert.ThrowsAsync<FormatException>(() => store.LoadAsync("default-conversation", "run-1"));
+    }
+
+    [Fact]
+    public async Task LoadAsync_rejects_non_canonical_surface_ids()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runDirectory = Path.Combine(paths.LoopRunsPath, "default-conversation");
+        Directory.CreateDirectory(runDirectory);
+        await File.WriteAllTextAsync(Path.Combine(runDirectory, "run-1.json"), """
+            {
+              "schemaVersion": 1,
+              "runId": "run-1",
+              "loopId": "default-conversation",
+              "roleId": "default-assistant",
+              "status": "started",
+              "surface": "web/ui",
+              "trigger": "human-message",
+              "startedAtUtc": "2026-06-28T12:00:00+00:00",
+              "completedAtUtc": null,
+              "failureDetail": null,
+              "metadata": {}
+            }
+            """);
+        var store = new LoopRunStore(paths);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.LoadAsync("default-conversation", "run-1"));
     }
 
     [Fact]
@@ -203,7 +243,7 @@ public sealed class LoopRunStoreTests
             runId,
             "default-conversation",
             "default-assistant",
-            "web",
+            RuntimeSurfaceId.Web,
             LoopTrigger.HumanMessage,
             startedAtUtc,
             new Dictionary<string, string> { ["connection"] = "test" });

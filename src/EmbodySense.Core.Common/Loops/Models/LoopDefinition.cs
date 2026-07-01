@@ -15,6 +15,9 @@ public sealed record LoopDefinition(
 {
     public const int CurrentSchemaVersion = 1;
 
+    // TODO(loop-graph-definition): This flat seed artifact is not sufficient for user/system-authored graph editing.
+    // Revisit when the loop-builder begins storing nodes, edges, system-owned locks, and editable vs system loop boundaries.
+
     public static LoopDefinition CreateDefaultConversation()
     {
         return new LoopDefinition(

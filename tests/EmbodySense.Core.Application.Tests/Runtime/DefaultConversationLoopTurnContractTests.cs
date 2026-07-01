@@ -1,34 +1,19 @@
+using EmbodySense.Core.Application.Loops.Execution.Models;
+using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Common.Inference.Models;
-using EmbodySense.Core.Application.Loops.Execution;
-using EmbodySense.Core.Application.Runtime;
 
 namespace EmbodySense.Core.Application.Tests.Runtime;
 
 public sealed class DefaultConversationLoopTurnContractTests
 {
     [Fact]
-    public void Runtime_surface_requires_explicit_safe_identifier()
+    public void Loop_turn_request_requires_input_without_defaulting_context()
     {
-        var web = RuntimeSurface.Create(" web ");
-        var custom = RuntimeSurface.Create("editor-panel");
-
-        Assert.Equal("web", web.Id);
-        Assert.Equal("editor-panel", custom.Id);
-        Assert.Equal("cli", RuntimeSurface.Cli.Id);
-        Assert.Throws<ArgumentException>(() => RuntimeSurface.Create(" "));
-        Assert.Throws<ArgumentException>(() => RuntimeSurface.Create("web/ui"));
-    }
-
-    [Fact]
-    public void Loop_turn_request_requires_input_and_surface_without_defaulting_to_cli()
-    {
-        var request = new DefaultConversationLoopTurnRequest("hello", RuntimeSurface.Web);
+        var request = new DefaultConversationLoopTurnRequest("hello");
 
         Assert.Equal("hello", request.Input);
-        Assert.Equal("web", request.Surface.Id);
         Assert.Equal(LlmMessageRole.User, request.ToUserMessage().Role);
-        Assert.Throws<ArgumentException>(() => new DefaultConversationLoopTurnRequest(" ", RuntimeSurface.Web));
-        Assert.Throws<ArgumentNullException>(() => new DefaultConversationLoopTurnRequest("hello", null!));
+        Assert.Throws<ArgumentException>(() => new DefaultConversationLoopTurnRequest(" "));
     }
 
     [Fact]
@@ -39,7 +24,6 @@ public sealed class DefaultConversationLoopTurnContractTests
         var diagnostics = new List<RuntimeDiagnosticMessage>();
         var request = new DefaultConversationLoopTurnRequest(
             "hello",
-            RuntimeSurface.Web,
             (chunk, _) =>
             {
                 chunks.Add(chunk);
@@ -75,11 +59,16 @@ public sealed class DefaultConversationLoopTurnContractTests
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, completed.Status);
         Assert.Equal("done", completed.AssistantOutput);
         Assert.Equal(run, completed.RunIdentity);
+        Assert.True(completed.UserMessageAccepted);
         Assert.Equal(transcript, completed.TranscriptMessages);
         Assert.Equal(DefaultConversationLoopTurnStatus.Failed, failed.Status);
         Assert.Equal("provider failed", failed.FailureDetail);
+        Assert.Equal(run, failed.RunIdentity);
+        Assert.False(failed.UserMessageAccepted);
         Assert.Equal(DefaultConversationLoopTurnStatus.Cancelled, cancelled.Status);
         Assert.Equal("caller cancelled", cancelled.FailureDetail);
+        Assert.Equal(run, cancelled.RunIdentity);
+        Assert.False(cancelled.UserMessageAccepted);
     }
 
     [Fact]

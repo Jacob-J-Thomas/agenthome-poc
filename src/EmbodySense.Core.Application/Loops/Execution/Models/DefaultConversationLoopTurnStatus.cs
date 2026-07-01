@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Loops.Execution;
+namespace EmbodySense.Core.Application.Loops.Execution.Models;
 
 public enum DefaultConversationLoopTurnStatus
 {

@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Runtime.Models;
+
 namespace EmbodySense.Core.Common.Loops.Models;
 
 public sealed record LoopRunRecord(
@@ -19,7 +21,7 @@ public sealed record LoopRunRecord(
         string runId,
         string loopId,
         string roleId,
-        string surface,
+        RuntimeSurfaceId surface,
         LoopTrigger trigger,
         DateTimeOffset startedAtUtc,
         Dictionary<string, string>? metadata = null)
@@ -27,7 +29,7 @@ public sealed record LoopRunRecord(
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(loopId);
         ArgumentException.ThrowIfNullOrWhiteSpace(roleId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(surface);
+        ArgumentNullException.ThrowIfNull(surface);
         if (!Enum.IsDefined(trigger) || trigger == LoopTrigger.Unknown)
         {
             throw new ArgumentOutOfRangeException(nameof(trigger), trigger, "Choose a concrete loop trigger.");
@@ -39,7 +41,7 @@ public sealed record LoopRunRecord(
             loopId,
             roleId,
             LoopRunStatus.Started,
-            surface,
+            surface.Id,
             trigger,
             startedAtUtc,
             null,

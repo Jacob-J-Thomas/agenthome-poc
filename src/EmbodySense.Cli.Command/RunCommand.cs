@@ -1,5 +1,6 @@
 using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Cli.Command;
@@ -28,8 +29,8 @@ public static class RunCommand
             options.WorkingDirectory,
             options.CodexExecutablePath,
             options.CodexSandbox,
-            "cli");
-        return await runtime.RunConsoleLoopAsync(client, banner: Constants.Banner, verbose: options.Verbose);
+            AgentRuntimeSurface.Cli);
+        return await new AgentRuntimeConsoleHost(runtime, client).RunAsync(banner: Constants.Banner, verbose: options.Verbose);
     }
 
     private static bool ConfirmWorkspaceInitialization(WorkspaceStatusSnapshot status)

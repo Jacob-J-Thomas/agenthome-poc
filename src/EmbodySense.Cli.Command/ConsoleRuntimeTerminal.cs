@@ -1,5 +1,3 @@
-using EmbodySense.Core.Startup.Runtime;
-
 namespace EmbodySense.Cli.Command;
 
 public sealed class ConsoleRuntimeTerminal : IAgentRuntimeConsole

@@ -1,12 +1,16 @@
 using System.Globalization;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
+using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Memory.Models;
 
-namespace EmbodySense.Core.Application.Runtime;
+namespace EmbodySense.Core.Application.Runtime.Commands;
 
 public sealed class RuntimeCommandService
 {
+    // TODO(runtime-command-registry): Runtime command names and aliases are still hard-coded in this service.
+    // Revisit when commands need a typed registry shared by help text, pending-input handling, tests, and future agent-facing
+    // runtime controls without moving command authority into individual UI clients.
     private readonly IConversationMemoryStore? _conversationMemoryStore;
     private readonly IReadOnlyList<LlmMessage> _startupMessages;
     private IReadOnlyList<ConversationTranscriptListItem>? _pendingConversationLoad;
@@ -19,8 +23,6 @@ public sealed class RuntimeCommandService
         _startupMessages = startupMessages ?? [];
     }
 
-    // TODO(runtime-command-organization): Move command matching/state/output contracts under a Runtime.Commands namespace without duplicating Web/CLI command behavior.
-    // Deferred until the current cutover is committed; revisit when AgentRuntime exposes one host-facing command/model-turn event API.
     public static bool TryHandleStaticCommand(string input, out RuntimeCommandResult result)
     {
         if (string.IsNullOrWhiteSpace(input))
@@ -41,7 +43,6 @@ public sealed class RuntimeCommandService
         string input,
         ConversationRuntimeState conversationState,
         RuntimeSessionState state,
-        RuntimeCommandInteractionMode interactionMode = RuntimeCommandInteractionMode.InlineSelection,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -51,14 +52,18 @@ public sealed class RuntimeCommandService
         var command = NormalizeCommand(input);
         if (_pendingConversationLoad is not null)
         {
-            if (interactionMode == RuntimeCommandInteractionMode.DeferredSelection && IsKnownRuntimeCommand(command) && !IsPendingConversationSelectionCommand(command))
+            if (string.IsNullOrWhiteSpace(input) || IsPendingConversationSelectionCommand(command))
             {
-                _pendingConversationLoad = null;
+                ClearPendingInput();
+                return RuntimeCommandResult.HandledOutput("Conversation load cancelled.");
             }
-            else
+
+            if (!IsKnownRuntimeCommand(command))
             {
-                return await CompleteConversationLoadAsync(input, conversationState, interactionMode, cancellationToken);
+                return await CompleteConversationLoadAsync(input, conversationState, cancellationToken);
             }
+
+            ClearPendingInput();
         }
 
         if (TryHandleStaticCommand(input, out var staticResult))
@@ -91,7 +96,7 @@ public sealed class RuntimeCommandService
                 return RuntimeCommandResult.HandledOutput("Started a new conversation.");
 
             case "/history" or "/conversations" or "/load":
-                return await BeginConversationLoadAsync(state, interactionMode, cancellationToken);
+                return await BeginConversationLoadAsync(state, cancellationToken);
 
             default:
                 return RuntimeCommandResult.NotHandled;
@@ -120,7 +125,6 @@ public sealed class RuntimeCommandService
 
     private async Task<RuntimeCommandResult> BeginConversationLoadAsync(
         RuntimeSessionState state,
-        RuntimeCommandInteractionMode interactionMode,
         CancellationToken cancellationToken)
     {
         if (state.ModelTurnStarted)
@@ -140,22 +144,19 @@ public sealed class RuntimeCommandService
         }
 
         _pendingConversationLoad = conversations;
-        var prompt = interactionMode == RuntimeCommandInteractionMode.DeferredSelection
-            ? "Send conversation number to load, or /cancel."
-            : "Select conversation number to load, or press Enter to cancel: ";
+        const string prompt = "Send conversation number to load, or /cancel.";
         return RuntimeCommandResult.HandledPrompt(RuntimeCommandOutput.FormatConversationList(conversations), prompt);
     }
 
     private async Task<RuntimeCommandResult> CompleteConversationLoadAsync(
         string input,
         ConversationRuntimeState conversationState,
-        RuntimeCommandInteractionMode interactionMode,
         CancellationToken cancellationToken)
     {
         var conversations = _pendingConversationLoad ?? [];
         ClearPendingInput();
         var answer = input.Trim();
-        if (string.IsNullOrWhiteSpace(answer) || interactionMode == RuntimeCommandInteractionMode.DeferredSelection && IsPendingConversationSelectionCommand(answer))
+        if (string.IsNullOrWhiteSpace(answer) || IsPendingConversationSelectionCommand(answer))
         {
             return RuntimeCommandResult.HandledOutput("Conversation load cancelled.");
         }

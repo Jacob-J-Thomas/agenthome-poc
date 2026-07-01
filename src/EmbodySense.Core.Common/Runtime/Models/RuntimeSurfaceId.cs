@@ -1,19 +1,21 @@
-namespace EmbodySense.Core.Application.Runtime;
+namespace EmbodySense.Core.Common.Runtime.Models;
 
-public sealed record RuntimeSurface
+public sealed record RuntimeSurfaceId
 {
-    private RuntimeSurface(string id)
+    private RuntimeSurfaceId(string id)
     {
         Id = id;
     }
 
     public string Id { get; }
 
-    public static RuntimeSurface Web { get; } = Create("web");
+    public static RuntimeSurfaceId Web { get; } = Create("web");
 
-    public static RuntimeSurface Cli { get; } = Create("cli");
+    public static RuntimeSurfaceId Cli { get; } = Create("cli");
 
-    public static RuntimeSurface Create(string id)
+    public static RuntimeSurfaceId Runtime { get; } = Create("runtime");
+
+    public static RuntimeSurfaceId Create(string id)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         var normalized = id.Trim().ToLowerInvariant();
@@ -22,7 +24,7 @@ public sealed record RuntimeSurface
             throw new ArgumentException("Runtime surface ids must contain only ASCII letters, digits, or hyphens.", nameof(id));
         }
 
-        return new RuntimeSurface(normalized);
+        return new RuntimeSurfaceId(normalized);
     }
 
     public override string ToString()
