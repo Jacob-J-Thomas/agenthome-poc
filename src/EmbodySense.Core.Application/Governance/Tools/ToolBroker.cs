@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
@@ -179,7 +180,7 @@ public sealed class ToolBroker : IToolBroker
             action: AuditSchema.Actions.ToolExecute,
             target: check.ResolvedPath,
             outcome: outcome,
-            detail: $"Executed {FormatCommand(request.Command)} tool request.",
+            detail: $"Executed {ToolCommandFormatter.Format(request.Command)} tool request.",
             metadata: metadata), cancellationToken);
     }
 
@@ -193,7 +194,7 @@ public sealed class ToolBroker : IToolBroker
         var metadata = new Dictionary<string, object?>
         {
             ["request_id"] = requestId,
-            ["command"] = FormatCommand(request.Command),
+            ["command"] = ToolCommandFormatter.Format(request.Command),
             ["target_path"] = request.TargetPath,
             ["resolved_path"] = resolvedPath,
             ["loop_id"] = _loopDefinition.Id,
@@ -201,7 +202,7 @@ public sealed class ToolBroker : IToolBroker
             ["loop_trigger"] = _loopDefinition.Trigger.ToString(),
             ["required_capability"] = LoopCapabilityIds.WorkspaceCommandFor(request.Command),
             ["fallback_capability"] = LoopCapabilityIds.WorkspaceCommand,
-            ["available_commands"] = string.Join(",", AvailableCommands.Select(FormatCommand)),
+            ["available_commands"] = string.Join(",", AvailableCommands.Select(ToolCommandFormatter.Format)),
             ["loop_capability_ids"] = string.Join(",", _loopDefinition.CapabilityIds)
         };
         AddCorrelationMetadata(metadata, request);
@@ -212,8 +213,8 @@ public sealed class ToolBroker : IToolBroker
             target: resolvedPath,
             outcome: outcome,
             detail: outcome == AuditSchema.Outcomes.Allowed
-                ? $"Loop `{_loopDefinition.Id}` allowed {FormatCommand(request.Command)} workspace command authority."
-                : $"Loop `{_loopDefinition.Id}` denied {FormatCommand(request.Command)} workspace command authority.",
+                ? $"Loop `{_loopDefinition.Id}` allowed {ToolCommandFormatter.Format(request.Command)} workspace command authority."
+                : $"Loop `{_loopDefinition.Id}` denied {ToolCommandFormatter.Format(request.Command)} workspace command authority.",
             metadata: metadata), cancellationToken);
     }
 
@@ -227,7 +228,7 @@ public sealed class ToolBroker : IToolBroker
         var metadata = new Dictionary<string, object?>
         {
             ["request_id"] = requestId,
-            ["command"] = FormatCommand(request.Command),
+            ["command"] = ToolCommandFormatter.Format(request.Command),
             ["target_path"] = request.TargetPath,
             ["resolved_path"] = resolvedPath,
             ["workspace_root"] = _paths.RootPath,
@@ -272,8 +273,4 @@ public sealed class ToolBroker : IToolBroker
         };
     }
 
-    private static string FormatCommand(ToolCommand command)
-    {
-        return command.ToString().ToLowerInvariant();
-    }
 }

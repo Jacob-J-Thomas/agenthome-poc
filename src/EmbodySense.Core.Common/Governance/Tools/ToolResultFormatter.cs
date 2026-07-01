@@ -17,7 +17,7 @@ public static class ToolResultFormatter
         foreach (var result in results)
         {
             builder.AppendLine($"- request_id: {result.RequestId}");
-            builder.AppendLine($"  tool: {FormatCommand(result.Request.Command)}");
+            builder.AppendLine($"  tool: {ToolCommandFormatter.Format(result.Request.Command)}");
             builder.AppendLine($"  target_path: {result.Request.TargetPath}");
             builder.AppendLine($"  resolved_path: {result.ResolvedPath}");
             builder.AppendLine($"  outcome: {FormatOutcome(result.Outcome)}");
@@ -36,11 +36,6 @@ public static class ToolResultFormatter
             : text[..MaxOutputCharacters] + Environment.NewLine + $"[tool output truncated after {MaxOutputCharacters} characters]";
         var lines = formatted.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         return string.Join(Environment.NewLine, lines.Select(line => "    " + line));
-    }
-
-    private static string FormatCommand(ToolCommand command)
-    {
-        return command.ToString().ToLowerInvariant();
     }
 
     private static string FormatOutcome(ToolExecutionOutcome outcome)
