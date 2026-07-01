@@ -9,9 +9,6 @@ namespace EmbodySense.Core.Application.Runtime.Commands;
 
 public sealed class RuntimeCommandService
 {
-    // TODO(runtime-command-registry): Runtime command names and aliases are still hard-coded in this service.
-    // Revisit when commands need a typed registry shared by help text, pending-input handling, tests, and future agent-facing
-    // runtime controls without moving command authority into individual UI clients.
     private readonly IConversationMemoryStore? _conversationMemoryStore;
     private readonly IReadOnlyList<LlmMessage> _startupMessages;
     private IReadOnlyList<ConversationTranscriptListItem>? _pendingConversationLoad;
@@ -32,12 +29,14 @@ public sealed class RuntimeCommandService
             return false;
         }
 
-        result = NormalizeCommand(input) switch
+        if (!RuntimeCommandRegistry.TryMatch(input, out var command) || command.Id != RuntimeCommandId.Help)
         {
-            "/help" or "/commands" => RuntimeCommandResult.HandledOutput(RuntimeCommandOutput.HelpText),
-            _ => RuntimeCommandResult.NotHandled
-        };
-        return result.Handled;
+            result = RuntimeCommandResult.NotHandled;
+            return false;
+        }
+
+        result = RuntimeCommandResult.HandledOutput(RuntimeCommandOutput.HelpText);
+        return true;
     }
 
     public async Task<RuntimeCommandResult> TryHandleAsync(
@@ -50,16 +49,16 @@ public sealed class RuntimeCommandService
         ArgumentNullException.ThrowIfNull(conversationState);
         ArgumentNullException.ThrowIfNull(state);
 
-        var command = NormalizeCommand(input);
+        var commandText = RuntimeCommandRegistry.Normalize(input);
         if (_pendingConversationLoad is not null)
         {
-            if (string.IsNullOrWhiteSpace(input) || IsPendingConversationSelectionCommand(command))
+            if (string.IsNullOrWhiteSpace(input) || RuntimeCommandRegistry.IsPendingInputCancellation(commandText))
             {
                 ClearPendingInput();
                 return RuntimeCommandResult.HandledOutput("Conversation load cancelled.");
             }
 
-            if (!IsKnownRuntimeCommand(command))
+            if (!RuntimeCommandRegistry.IsKnown(commandText))
             {
                 return await CompleteConversationLoadAsync(input, conversationState, cancellationToken);
             }
@@ -72,31 +71,36 @@ public sealed class RuntimeCommandService
             return staticResult;
         }
 
-        switch (command)
+        if (!RuntimeCommandRegistry.TryMatch(commandText, out var command))
         {
-            case "/verbose":
+            return RuntimeCommandResult.NotHandled;
+        }
+
+        switch (command.Id)
+        {
+            case RuntimeCommandId.VerboseStatus:
                 return RuntimeCommandResult.HandledOutput(state.Verbose ? "Verbose mode is on." : "Verbose mode is off.");
 
-            case "/verbose on" or "/verbose true":
+            case RuntimeCommandId.VerboseEnable:
                 state.SetVerbose(true);
                 ClearPendingInput();
                 return RuntimeCommandResult.HandledOutput(RuntimeCommandOutput.VerboseEnabledText);
 
-            case "/verbose off" or "/verbose false":
+            case RuntimeCommandId.VerboseDisable:
                 state.SetVerbose(false);
                 ClearPendingInput();
                 return RuntimeCommandResult.HandledOutput("Verbose mode disabled.");
 
-            case "exit" or "quit" or "/exit" or "/quit":
+            case RuntimeCommandId.Exit:
                 state.RequestExit();
                 ClearPendingInput();
                 return RuntimeCommandResult.HandledExit();
 
-            case "/new" or "/new-session":
+            case RuntimeCommandId.NewSession:
                 await HandleNewSessionAsync(conversationState, state, cancellationToken);
                 return RuntimeCommandResult.HandledOutput("Started a new conversation.");
 
-            case "/history" or "/conversations" or "/load":
+            case RuntimeCommandId.ConversationHistory:
                 return await BeginConversationLoadAsync(state, cancellationToken);
 
             default:
@@ -157,7 +161,7 @@ public sealed class RuntimeCommandService
         var conversations = _pendingConversationLoad ?? [];
         ClearPendingInput();
         var answer = input.Trim();
-        if (string.IsNullOrWhiteSpace(answer) || IsPendingConversationSelectionCommand(answer))
+        if (string.IsNullOrWhiteSpace(answer) || RuntimeCommandRegistry.IsPendingInputCancellation(answer))
         {
             return RuntimeCommandResult.HandledOutput("Conversation load cancelled.");
         }
@@ -185,18 +189,4 @@ public sealed class RuntimeCommandService
         }
     }
 
-    private static string NormalizeCommand(string input)
-    {
-        return input.Trim().ToLowerInvariant();
-    }
-
-    private static bool IsKnownRuntimeCommand(string command)
-    {
-        return command is "exit" or "quit" or "/exit" or "/quit" or "/help" or "/commands" or "/verbose" or "/verbose on" or "/verbose true" or "/verbose off" or "/verbose false" or "/new" or "/new-session" or "/history" or "/conversations" or "/load";
-    }
-
-    private static bool IsPendingConversationSelectionCommand(string command)
-    {
-        return string.Equals(command, "/cancel", StringComparison.OrdinalIgnoreCase) || string.Equals(command, "cancel", StringComparison.OrdinalIgnoreCase);
-    }
 }

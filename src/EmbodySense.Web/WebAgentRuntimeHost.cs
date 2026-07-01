@@ -92,11 +92,6 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
                 },
                 (context, token) => writeEventAsync(WebStreamEvent.VerboseContext(context), token),
                 cancellationToken: turnCancellation.Token);
-            if (turnResult.IsMessageTurn)
-            {
-                await writeEventAsync(WebStreamEvent.AssistantFinal(turnResult.Output), cancellationToken);
-                return;
-            }
 
             discardRuntime = turnResult.IsCancelled;
             await WriteTurnResultAsync(turnResult, writeEventAsync, cancellationToken);
@@ -220,27 +215,40 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
         CancellationToken cancellationToken)
     {
-        if (result.IsCancelled)
+        var commandOutputParts = new List<string>();
+        foreach (var turnEvent in result.Events)
         {
-            await writeEventAsync(WebStreamEvent.Cancelled(result.FailureDetail ?? "Message cancelled."), cancellationToken);
-            return;
+            switch (turnEvent.Kind)
+            {
+                case AgentRuntimeTurnEventKind.TranscriptReplacement:
+                    var messages = turnEvent.TranscriptMessages.Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
+                    await writeEventAsync(WebStreamEvent.HistoryLoaded(messages), cancellationToken);
+                    break;
+
+                case AgentRuntimeTurnEventKind.CommandOutput:
+                case AgentRuntimeTurnEventKind.Prompt:
+                    commandOutputParts.Add(turnEvent.Text);
+                    break;
+
+                case AgentRuntimeTurnEventKind.AssistantMessage:
+                    await writeEventAsync(WebStreamEvent.AssistantFinal(turnEvent.Text), cancellationToken);
+                    break;
+
+                case AgentRuntimeTurnEventKind.Failure:
+                    await writeEventAsync(WebStreamEvent.Failure(turnEvent.Text), cancellationToken);
+                    break;
+
+                case AgentRuntimeTurnEventKind.Cancellation:
+                    await writeEventAsync(WebStreamEvent.Cancelled(turnEvent.Text), cancellationToken);
+                    break;
+
+                case AgentRuntimeTurnEventKind.ExitRequested:
+                    commandOutputParts.Add("The web client is still connected. Close the browser tab or stop the web server to leave.");
+                    break;
+            }
         }
 
-        if (result.IsFailure)
-        {
-            await writeEventAsync(WebStreamEvent.Failure(result.FailureDetail ?? "The runtime could not process that message."), cancellationToken);
-            return;
-        }
-
-        if (result.ReplaceTranscript)
-        {
-            var messages = result.RestoredMessages.Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
-            await writeEventAsync(WebStreamEvent.HistoryLoaded(messages), cancellationToken);
-        }
-
-        var output = result.ExitRequested
-            ? "The web client is still connected. Close the browser tab or stop the web server to leave."
-            : string.IsNullOrEmpty(result.Prompt) ? result.Output : $"{result.Output}{Environment.NewLine}{result.Prompt}";
+        var output = string.Join(Environment.NewLine, commandOutputParts.Where(part => !string.IsNullOrWhiteSpace(part)));
         if (!string.IsNullOrWhiteSpace(output))
         {
             await writeEventAsync(WebStreamEvent.AssistantFinal(output), cancellationToken);

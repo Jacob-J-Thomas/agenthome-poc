@@ -14,9 +14,6 @@ public sealed class AgentRuntime : IAsyncDisposable
 {
     private readonly IAsyncDisposable _inferenceClient;
     private readonly IDefaultConversationLoopRunner _loopRunner;
-    // TODO(runtime-turn-api-ergonomics): AgentRuntime still adapts command results, loop results, and transcript projections directly.
-    // Revisit when the runtime can expose typed turn events that Web, CLI, and future loop-builder surfaces can consume without
-    // each host reconstructing presentation-specific behavior.
     private readonly RuntimeSessionState _state = new();
     private readonly RuntimeCommandService _commandService;
     private readonly ConversationRuntimeState _conversationState;
@@ -67,7 +64,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         var commandResult = await _commandService.TryHandleAsync(input, _conversationState, _state, cancellationToken);
         if (commandResult.Handled)
         {
-            return ToRuntimeResult(commandResult);
+            return AgentRuntimeTurnResultFactory.FromCommand(commandResult);
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(input);
@@ -83,7 +80,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     public static bool TryHandleStaticRuntimeCommand(string input, out AgentRuntimeTurnResult result)
     {
         var handled = RuntimeCommandService.TryHandleStaticCommand(input, out var commandResult);
-        result = ToRuntimeResult(commandResult);
+        result = AgentRuntimeTurnResultFactory.FromCommand(commandResult);
         return handled;
     }
 
@@ -117,53 +114,6 @@ public sealed class AgentRuntime : IAsyncDisposable
             _state.MarkModelTurnStarted();
         }
 
-        var runIdentity = ToRuntimeRunIdentity(result.RunIdentity);
-
-        if (result.Status == DefaultConversationLoopTurnStatus.Completed)
-        {
-            return AgentRuntimeTurnResult.MessageCompleted(result.AssistantOutput, runIdentity);
-        }
-
-        if (result.Status == DefaultConversationLoopTurnStatus.Cancelled)
-        {
-            return AgentRuntimeTurnResult.MessageCancelled(result.FailureDetail ?? "Turn was cancelled.", runIdentity);
-        }
-
-        if (result.Status == DefaultConversationLoopTurnStatus.Failed)
-        {
-            return AgentRuntimeTurnResult.MessageFailed(result.FailureDetail ?? "Default conversation loop turn failed.", runIdentity);
-        }
-
-        throw new InvalidOperationException($"Unsupported default conversation loop status: {result.Status}.");
-    }
-
-    private static AgentRuntimeTurnResult ToRuntimeResult(RuntimeCommandResult result)
-    {
-        if (result.ExitRequested)
-        {
-            return AgentRuntimeTurnResult.Exit();
-        }
-
-        var restoredMessages = result.RestoredMessages.Select(message => new AgentRuntimeTranscriptMessage(FormatRole(message.Role), message.Content)).ToArray();
-        return AgentRuntimeTurnResult.CommandOutput(result.Output, result.Prompt, result.AwaitingInput, restoredMessages, result.ReplaceTranscript);
-    }
-
-    private static AgentRuntimeRunIdentity? ToRuntimeRunIdentity(LoopRunIdentity? runIdentity)
-    {
-        return runIdentity is null
-            ? null
-            : new AgentRuntimeRunIdentity(runIdentity.LoopId, runIdentity.RunId, runIdentity.RoleId);
-    }
-
-    private static string FormatRole(LlmMessageRole role)
-    {
-        return role switch
-        {
-            LlmMessageRole.System => "system",
-            LlmMessageRole.User => "user",
-            LlmMessageRole.Assistant => "assistant",
-            LlmMessageRole.Tool => "tool",
-            _ => role.ToString().ToLowerInvariant()
-        };
+        return AgentRuntimeTurnResultFactory.FromDefaultLoop(result);
     }
 }

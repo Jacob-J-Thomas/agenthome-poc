@@ -77,6 +77,10 @@ public sealed class AgentRuntimeFactoryTests
         Assert.NotNull(response.RunIdentity);
         Assert.Equal("default-conversation", response.RunIdentity.LoopId);
         Assert.Equal("default-assistant", response.RunIdentity.RoleId);
+        var assistantEvent = Assert.Single(response.Events);
+        Assert.Equal(AgentRuntimeTurnEventKind.AssistantMessage, assistantEvent.Kind);
+        Assert.Equal(response.Output, assistantEvent.Text);
+        Assert.Equal(response.RunIdentity, assistantEvent.RunIdentity);
         Assert.Equal(["runtime guide observed: hello"], chunks);
     }
 
@@ -94,6 +98,10 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(AgentRuntimeTurnStatus.MessageFailed, response.Status);
         Assert.Equal("Codex app-server turn failed: provider exploded", response.FailureDetail);
         Assert.Equal(response.FailureDetail, response.Output);
+        var failureEvent = Assert.Single(response.Events);
+        Assert.Equal(AgentRuntimeTurnEventKind.Failure, failureEvent.Kind);
+        Assert.Equal(response.FailureDetail, failureEvent.Text);
+        Assert.Equal(response.RunIdentity, failureEvent.RunIdentity);
         Assert.NotNull(response.RunIdentity);
         Assert.Equal("default-conversation", response.RunIdentity.LoopId);
         Assert.Equal("default-assistant", response.RunIdentity.RoleId);
@@ -154,6 +162,9 @@ public sealed class AgentRuntimeFactoryTests
 
         Assert.True(AgentRuntime.TryHandleStaticRuntimeCommand("/help", out var staticResult));
         Assert.Contains("Runtime commands:", staticResult.Output, StringComparison.Ordinal);
+        var staticEvent = Assert.Single(staticResult.Events);
+        Assert.Equal(AgentRuntimeTurnEventKind.CommandOutput, staticEvent.Kind);
+        Assert.Contains("/help, /commands", staticEvent.Text, StringComparison.Ordinal);
 
         var help = await runtime.RunTurnAsync("/commands");
         var unknown = await runtime.RunTurnAsync("/not-a-command");
@@ -188,6 +199,10 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, loaded.Status);
         Assert.Contains("Loaded conversation `archive/", loaded.Output, StringComparison.Ordinal);
         Assert.True(loaded.ReplaceTranscript);
+        Assert.Collection(
+            loaded.Events,
+            turnEvent => Assert.Equal(AgentRuntimeTurnEventKind.TranscriptReplacement, turnEvent.Kind),
+            turnEvent => Assert.Equal(AgentRuntimeTurnEventKind.CommandOutput, turnEvent.Kind));
         Assert.Collection(
             loaded.RestoredMessages,
             message =>

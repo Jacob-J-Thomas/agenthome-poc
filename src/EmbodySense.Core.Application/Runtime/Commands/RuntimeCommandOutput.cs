@@ -8,15 +8,15 @@ public static class RuntimeCommandOutput
 {
     private const int ConversationPromptPreviewLength = 96;
 
-    public static IReadOnlyList<string> HelpLines { get; } =
-    [
-        "Runtime commands:",
-        "/help, /commands - list runtime commands",
-        "/verbose, /verbose on, /verbose off - show or change visible-context debug output",
-        "/new, /new-session - start a fresh conversation without leaving the session",
-        "/history, /conversations, /load - load a saved conversation before the first prompt in the current session",
-        "/exit, /quit - leave the session"
-    ];
+    public static IReadOnlyList<string> HelpLines
+    {
+        get
+        {
+            var lines = new List<string> { "Runtime commands:" };
+            lines.AddRange(RuntimeCommandRegistry.HelpCommands.Select(command => command.FormatHelpLine()));
+            return lines;
+        }
+    }
 
     public static string HelpText => string.Join(Environment.NewLine, HelpLines);
 

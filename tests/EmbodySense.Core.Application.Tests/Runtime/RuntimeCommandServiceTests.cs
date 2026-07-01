@@ -11,6 +11,28 @@ namespace EmbodySense.Core.Application.Tests.Runtime;
 public sealed class RuntimeCommandServiceTests
 {
     [Fact]
+    public void Help_text_is_generated_from_command_registry()
+    {
+        Assert.True(RuntimeCommandRegistry.TryMatch("/COMMANDS", out var help));
+        Assert.Equal(RuntimeCommandId.Help, help.Id);
+        Assert.True(RuntimeCommandRegistry.TryMatch("/verbose true", out var verboseEnable));
+        Assert.Equal(RuntimeCommandId.VerboseEnable, verboseEnable.Id);
+        Assert.Contains("/history, /conversations, /load - load a saved conversation", RuntimeCommandOutput.HelpText, StringComparison.Ordinal);
+        Assert.DoesNotContain("/cancel", RuntimeCommandOutput.HelpText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Cancel_is_pending_input_command_only()
+    {
+        var service = new RuntimeCommandService();
+        var state = new ConversationRuntimeState();
+
+        var result = await service.TryHandleAsync("/cancel", state, new RuntimeSessionState());
+
+        Assert.False(result.Handled);
+    }
+
+    [Fact]
     public async Task New_session_resets_memory_state_and_model_turn()
     {
         var memory = new FakeConversationMemoryStore();

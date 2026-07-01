@@ -122,10 +122,11 @@ public sealed class AgentRuntimeConsoleHost
 
     private void WriteModelResult(AgentRuntimeTurnResult result, bool wroteResponseChunk, bool responseEndedWithNewLine)
     {
+        var assistantMessage = result.Events.FirstOrDefault(turnEvent => turnEvent.Kind == AgentRuntimeTurnEventKind.AssistantMessage);
         if (!wroteResponseChunk)
         {
             _console.WriteLine(FormatMessageHeader("assistant"));
-            _console.WriteLine(result.Output);
+            _console.WriteLine(assistantMessage?.Text ?? result.Output);
         }
         else if (!responseEndedWithNewLine)
         {
@@ -135,21 +136,29 @@ public sealed class AgentRuntimeConsoleHost
 
     private void WriteCommandResult(AgentRuntimeTurnResult result)
     {
-        if (result.ReplaceTranscript)
+        foreach (var turnEvent in result.Events)
         {
-            _console.Clear();
-            _console.WriteLine(FormatRestoredConversation(result.RestoredMessages));
-            _console.WriteLine();
-        }
+            switch (turnEvent.Kind)
+            {
+                case AgentRuntimeTurnEventKind.TranscriptReplacement:
+                    _console.Clear();
+                    _console.WriteLine(FormatRestoredConversation(turnEvent.TranscriptMessages));
+                    _console.WriteLine();
+                    break;
 
-        if (!string.IsNullOrEmpty(result.Output))
-        {
-            _console.WriteLine(result.Output);
-        }
+                case AgentRuntimeTurnEventKind.CommandOutput:
+                    _console.WriteLine(turnEvent.Text);
+                    break;
 
-        if (!string.IsNullOrEmpty(result.Prompt))
-        {
-            _console.Write(result.Prompt + " ");
+                case AgentRuntimeTurnEventKind.Prompt:
+                    _console.Write(turnEvent.Text + " ");
+                    break;
+
+                case AgentRuntimeTurnEventKind.Failure:
+                case AgentRuntimeTurnEventKind.Cancellation:
+                    _console.WriteLine(turnEvent.Text);
+                    break;
+            }
         }
     }
 
