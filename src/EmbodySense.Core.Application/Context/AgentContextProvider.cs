@@ -54,7 +54,7 @@ public sealed class AgentContextProvider : IAgentContextProvider
         var normalized = content.Trim();
         if (normalized.Length > MaxFileCharacters)
         {
-            normalized = normalized[..MaxFileCharacters] + Environment.NewLine + "[truncated]";
+            normalized = normalized[..MaxFileCharacters] + Environment.NewLine + $"[truncated after {MaxFileCharacters} characters]";
         }
 
         return $"## {displayPath}{Environment.NewLine}{normalized}";

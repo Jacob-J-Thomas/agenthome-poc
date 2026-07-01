@@ -66,9 +66,7 @@ public sealed class AgentRuntimeFactory
         var workspaceClient = new LocalWorkspaceClient(paths);
         var loopDefinitionStore = new LoopDefinitionStore(paths);
         var defaultLoop = await loopDefinitionStore.LoadAsync("default-conversation", cancellationToken) ?? EmbodySense.Core.Common.Loops.Models.LoopDefinition.CreateDefaultConversation();
-        // TODO(loop-tool-authority): Runtime tools are still brokered by workspace policy rather than filtered by LoopDefinition.CapabilityIds.
-        // Revisit when loop invocation owns tool assignment and run audit can prove which loop authority exposed each tool.
-        var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog);
+        var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog, defaultLoop);
         var conversationMemory = new ConversationMemoryStore(paths);
         var loopRunStore = new LoopRunStore(paths);
         var startupContext = await new AgentContextProvider(new WorkspaceContextStore()).LoadAsync(paths, cancellationToken);

@@ -48,7 +48,10 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         ArgumentNullException.ThrowIfNull(request);
 
         var userMessage = request.ToUserMessage();
-        var inferenceMessages = _conversationState.Messages.Concat([userMessage]).ToArray();
+        var inferenceContextMessages = _conversationState.ContextMessages
+            .Concat([new RuntimeContextMessage(userMessage, RuntimeContextSource.CurrentTurnInput, "Current user input being evaluated by the active loop before provider dispatch.")])
+            .ToArray();
+        var inferenceMessages = inferenceContextMessages.Select(message => message.Message).ToArray();
         var inferenceRequest = new LlmInferenceRequest(inferenceMessages);
         var runId = CreateRunId();
         var runIdentity = new LoopRunIdentity(_loopDefinition.Id, runId, _loopDefinition.RoleId);
@@ -82,7 +85,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 return DefaultConversationLoopTurnResult.Failed(IncludeRunPersistenceFailure(detail, saveFailure), runIdentity: runIdentity);
             }
 
-            await EmitVisibleContextAsync(request, inferenceMessages);
+            await EmitVisibleContextAsync(request, runIdentity, inferenceContextMessages);
             _conversationState.AppendMessage(userMessage);
             userMessageAccepted = true;
             if (_conversationMemoryStore is not null)
@@ -160,16 +163,67 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         return "run-" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N")[..8];
     }
 
-    private static async Task EmitVisibleContextAsync(
+    private async Task EmitVisibleContextAsync(
         DefaultConversationLoopTurnRequest request,
-        IReadOnlyList<LlmMessage> messages)
+        LoopRunIdentity runIdentity,
+        IReadOnlyList<RuntimeContextMessage> messages)
     {
         if (request.DiagnosticHandler is null)
         {
             return;
         }
 
-        var content = RuntimeDiagnosticFormatter.FormatVerboseContext(messages);
-        await request.DiagnosticHandler(new RuntimeDiagnosticMessage(RuntimeDiagnosticKind.VerboseContext, content), request.CancellationToken);
+        var content = RuntimeDiagnosticFormatter.FormatVerboseContext(new RuntimeVerboseContext(
+            _loopDefinition,
+            runIdentity,
+            _surface,
+            messages,
+            CreateContextOmissions(messages),
+            "No compaction engine or compaction artifact is active in the default conversation loop yet."));
+        await request.DiagnosticHandler(new RuntimeDiagnosticMessage(RuntimeDiagnosticKind.VerboseContext, content, "Visible inference context"), request.CancellationToken);
+    }
+
+    private static IReadOnlyList<RuntimeContextOmission> CreateContextOmissions(IReadOnlyList<RuntimeContextMessage> messages)
+    {
+        var omissions = new List<RuntimeContextOmission>
+        {
+            new(
+                "provider-adapter",
+                "provider-formatting",
+                "Codex app-server formatting can wrap restored context as lower-authority material and omit older restored messages when its adapter budget is exceeded; this diagnostic is emitted before that provider adapter formatting."),
+            new(
+                "higher-order-memory",
+                "runtime-context-assembly",
+                "No higher-order memory retrieval or consolidation artifact is active in this default loop path yet.")
+        };
+
+        omissions.Add(GetLocalMemoryStatus(messages));
+
+        if (messages.Any(message => message.Message.Content.Contains("[truncated after", StringComparison.OrdinalIgnoreCase) || message.Message.Content.Contains("[truncated]", StringComparison.OrdinalIgnoreCase)))
+        {
+            omissions.Add(new RuntimeContextOmission(
+                "startup-or-restored-context",
+                "runtime-context-assembly",
+                "At least one context message reports in-band truncation from its source reader."));
+        }
+
+        return omissions;
+    }
+
+    private static RuntimeContextOmission GetLocalMemoryStatus(IReadOnlyList<RuntimeContextMessage> messages)
+    {
+        var startupContent = string.Join(Environment.NewLine, messages.Where(message => message.Source == RuntimeContextSource.StartupContext).Select(message => message.Message.Content));
+        if (startupContent.Contains("## .agent/MEMORY.md", StringComparison.Ordinal))
+        {
+            return new RuntimeContextOmission(
+                "local-memory",
+                "runtime-context-assembly",
+                ".agent/MEMORY.md is present in the active startup context.");
+        }
+
+        return new RuntimeContextOmission(
+            "local-memory",
+            "runtime-context-assembly",
+            ".agent/MEMORY.md is not included in the active startup context; it may be missing, empty, or not loaded in this workspace.");
     }
 }

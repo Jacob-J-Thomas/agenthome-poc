@@ -18,8 +18,15 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
         _toolBroker = toolBroker;
     }
 
+    public IReadOnlyList<ToolCommand> AvailableCommands => _toolBroker.AvailableCommands;
+
     public JsonArray CreateToolSpecs()
     {
+        if (AvailableCommands.Count == 0)
+        {
+            return [];
+        }
+
         return
         [
             CreateCommandSpec()
@@ -72,17 +79,18 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
             command,
             GetRequiredString(arguments, "path", "targetPath", "target"),
             GetOptionalString(arguments, "content", "text"),
-            GetOptionalString(arguments, "pattern", "query"));
+            GetOptionalString(arguments, "pattern", "query"),
+            GetOptionalString(parameters, "callId"));
     }
 
-    private static JsonObject CreateCommandSpec()
+    private JsonObject CreateCommandSpec()
     {
         var properties = new JsonObject
         {
             ["command"] = new JsonObject
             {
                 ["type"] = "string",
-                ["enum"] = new JsonArray("list", "read", "search", "write", "append", "delete"),
+                ["enum"] = CreateCommandEnum(),
                 ["description"] = "Governed EmbodySense workspace command."
             },
             ["path"] = new JsonObject
@@ -115,6 +123,17 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
                 ["additionalProperties"] = false
             }
         };
+    }
+
+    private JsonArray CreateCommandEnum()
+    {
+        var values = new JsonArray();
+        foreach (var command in AvailableCommands)
+        {
+            values.Add(FormatCommand(command));
+        }
+
+        return values;
     }
 
     private static JsonObject CreateToolResponse(bool success, string text)
@@ -171,5 +190,10 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
 
         property = default;
         return false;
+    }
+
+    private static string FormatCommand(ToolCommand command)
+    {
+        return command.ToString().ToLowerInvariant();
     }
 }

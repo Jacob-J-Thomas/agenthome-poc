@@ -95,6 +95,19 @@ internal sealed class CodexAppServerRequestHandler : ICodexAppServerRequestHandl
             ["tool"] = TryGetString(parameters, "tool")
         };
 
+        if (string.Equals(method, "item/tool/call", StringComparison.Ordinal) && parameters.TryGetProperty("arguments", out var arguments) && arguments.ValueKind == JsonValueKind.Object)
+        {
+            metadata["tool_request_correlation_id"] = TryGetString(parameters, "callId");
+            metadata["arguments_command"] = TryGetString(arguments, "command");
+            metadata["arguments_path"] = TryGetString(arguments, "path") ?? TryGetString(arguments, "targetPath") ?? TryGetString(arguments, "target");
+            metadata["arguments_pattern_present"] = !string.IsNullOrWhiteSpace(TryGetString(arguments, "pattern") ?? TryGetString(arguments, "query"));
+            var content = TryGetString(arguments, "content") ?? TryGetString(arguments, "text");
+            if (content is not null)
+            {
+                metadata["arguments_content_character_count"] = content.Length;
+            }
+        }
+
         return metadata
             .Where(item => item.Value is not null)
             .ToDictionary(item => item.Key, item => item.Value);

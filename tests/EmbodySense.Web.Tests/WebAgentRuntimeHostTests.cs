@@ -156,6 +156,10 @@ public sealed class WebAgentRuntimeHostTests
                 Assert.Equal("verbose_context", contextEvent.Type);
                 Assert.Contains("[verbose] Visible inference context follows.", contextEvent.Text);
                 Assert.Contains("This is not private model reasoning", contextEvent.Text);
+                Assert.Contains("loop_id: default-conversation", contextEvent.Text);
+                Assert.Contains("source=current-turn-input", contextEvent.Text);
+                Assert.Contains("compaction:", contextEvent.Text);
+                Assert.Contains("workspace_commands_allowed_by_loop:", contextEvent.Text);
                 Assert.Contains("hello from web", contextEvent.Text);
             },
             deltaEvent =>

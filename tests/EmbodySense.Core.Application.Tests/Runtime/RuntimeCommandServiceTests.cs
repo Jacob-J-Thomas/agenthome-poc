@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Memory.Models;
+using EmbodySense.Core.Application.Runtime.Models;
 
 namespace EmbodySense.Core.Application.Tests.Runtime;
 
@@ -74,6 +75,14 @@ public sealed class RuntimeCommandServiceTests
             conversationState.Messages,
             message => Assert.Equal("startup", message.Content),
             message => Assert.Equal("saved prompt", message.Content));
+        Assert.Collection(
+            conversationState.ContextMessages,
+            message => Assert.Equal(RuntimeContextSource.StartupContext, message.Source),
+            message =>
+            {
+                Assert.Equal(RuntimeContextSource.RestoredConversationHistory, message.Source);
+                Assert.Contains("conv-1", message.Detail, StringComparison.Ordinal);
+            });
     }
 
     [Fact]

@@ -29,13 +29,13 @@ public sealed record LoopDefinition(
             LoopTrigger.HumanMessage,
             LoopMemoryScope.WorkspaceStartupContext,
             [
-                "conversation.turn",
-                "conversation.history",
-                "agent.context",
-                "provider.inference",
-                "workspace.command",
-                "approval.request",
-                "audit.write"
+                LoopCapabilityIds.ConversationTurn,
+                LoopCapabilityIds.ConversationHistory,
+                LoopCapabilityIds.AgentContext,
+                LoopCapabilityIds.ProviderInference,
+                LoopCapabilityIds.WorkspaceCommand,
+                LoopCapabilityIds.ApprovalRequest,
+                LoopCapabilityIds.AuditWrite
             ],
             LoopReviewPolicy.ReviewAtAuthorityBoundaries,
             LoopFailurePolicy.RecordFailureAndSurfaceToUser,

@@ -36,7 +36,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         _options = options;
         _transport = transport;
         _toolBridge = toolBroker is null ? null : new CodexAppServerToolBridge(toolBroker);
-        _contextBuilder = new CodexAppServerContextBuilder();
+        _contextBuilder = new CodexAppServerContextBuilder(toolBroker?.AvailableCommands);
         _runtimeDirectory = CreateRuntimeDirectory();
         _requestHandler = new CodexAppServerRequestHandler(_toolBridge, auditLog);
     }
@@ -255,7 +255,11 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         if (_toolBridge is not null)
         {
-            parameters["dynamicTools"] = _toolBridge.CreateToolSpecs();
+            var dynamicTools = _toolBridge.CreateToolSpecs();
+            if (dynamicTools.Count > 0)
+            {
+                parameters["dynamicTools"] = dynamicTools;
+            }
         }
 
         return parameters;

@@ -25,6 +25,8 @@ public static class AuditSchema
 
         public const string ToolPermissionEvaluate = "tool.permission.evaluate";
 
+        public const string ToolLoopAuthorityEvaluate = "tool.loop_authority.evaluate";
+
         public const string ToolApprovalRequest = "tool.approval.request";
 
         public const string ToolApprovalDecision = "tool.approval.decision";

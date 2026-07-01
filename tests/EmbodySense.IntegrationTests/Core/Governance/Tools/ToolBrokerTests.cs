@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Permissions;
@@ -23,7 +24,7 @@ public sealed class ToolBrokerTests
         await File.WriteAllTextAsync(target, "hello from shared");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
-        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt"));
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt", CorrelationId: "call-1"));
 
         Assert.True(result.Succeeded);
         Assert.Equal("hello from shared", result.OutputText);
@@ -194,11 +195,65 @@ public sealed class ToolBrokerTests
         Assert.Contains("workspace root", result.OutputText);
     }
 
-    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt)
+    [Fact]
+    public async Task ExecuteAsync_filters_commands_not_granted_by_active_loop_before_permissions()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "unchanged");
+        var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)] };
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Write, "shared/note.txt", "changed"));
+
+        Assert.Equal(ToolExecutionOutcome.Denied, result.Outcome);
+        Assert.Contains("does not grant", result.OutputText, StringComparison.Ordinal);
+        Assert.Equal("unchanged", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        var events = await ReadAuditAsync(workspace);
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.loop_authority.evaluate" && auditEvent.Outcome == "denied");
+        Assert.DoesNotContain(events, auditEvent => auditEvent.Action == "tool.permission.evaluate");
+        Assert.DoesNotContain(events, auditEvent => auditEvent.Action == "tool.execute");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_records_loop_authority_for_granted_command()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "hello from shared");
+        var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)] };
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt", CorrelationId: "call-1"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal([ToolCommand.Read], broker.AvailableCommands);
+        var events = await ReadAuditAsync(workspace);
+        var authorityEvent = Assert.Single(events, auditEvent => auditEvent.Action == "tool.loop_authority.evaluate");
+        Assert.Equal("allowed", authorityEvent.Outcome);
+        Assert.Equal(result.RequestId, authorityEvent.Metadata["request_id"]?.ToString());
+        Assert.Equal("call-1", authorityEvent.Metadata["tool_request_correlation_id"]?.ToString());
+        Assert.Equal("default-conversation", authorityEvent.Metadata["loop_id"]?.ToString());
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.permission.evaluate" && auditEvent.Outcome == "allowed");
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "succeeded");
+    }
+
+    [Fact]
+    public async Task Constructor_requires_explicit_loop_authority()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = new PermissionPolicyStore().Load(paths);
+
+        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), new LocalWorkspaceClient(paths), new AuditLog(paths), null!));
+    }
+
+    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths));
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation());
     }
 
     private static Task<IReadOnlyList<AuditEvent>> ReadAuditAsync(TestWorkspace workspace)

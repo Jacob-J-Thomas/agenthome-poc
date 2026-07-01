@@ -59,6 +59,17 @@ public sealed class DefaultConversationLoopRunnerTests
             message => Assert.Equal("completed response", message.Content));
         var diagnostic = Assert.Single(diagnostics);
         Assert.Equal(RuntimeDiagnosticKind.VerboseContext, diagnostic.Kind);
+        Assert.Equal("Visible inference context", diagnostic.Title);
+        Assert.Contains("loop_id: default-conversation", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("role_id: default-assistant", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("surface: web", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("capability_ids:", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("workspace_commands_allowed_by_loop:", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("compaction:", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("provider-adapter", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains(".agent/MEMORY.md is not included", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("source=startup-context", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("source=current-turn-input", diagnostic.Content, StringComparison.Ordinal);
         Assert.Contains("startup context", diagnostic.Content, StringComparison.Ordinal);
         Assert.Contains("hello", diagnostic.Content, StringComparison.Ordinal);
         Assert.Collection(
@@ -71,6 +82,28 @@ public sealed class DefaultConversationLoopRunnerTests
             Assert.Equal("default-assistant", run.RoleId);
             Assert.Equal("web", run.Surface);
         });
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_verbose_context_reports_memory_loaded_and_in_band_truncation()
+    {
+        var client = new RecordingInferenceClient("completed response");
+        var state = new ConversationRuntimeState([LlmMessage.System("## .agent/MEMORY.md" + Environment.NewLine + "memory note" + Environment.NewLine + "[truncated]")]);
+        var runner = new DefaultConversationLoopRunner(client, state, loopDefinition: LoopDefinition.CreateDefaultConversation(), surface: RuntimeSurfaceId.Web);
+        var diagnostics = new List<RuntimeDiagnosticMessage>();
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest(
+            "hello",
+            diagnosticHandler: (diagnostic, _) =>
+            {
+                diagnostics.Add(diagnostic);
+                return Task.CompletedTask;
+            }));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Completed, result.Status);
+        var diagnostic = Assert.Single(diagnostics);
+        Assert.Contains(".agent/MEMORY.md is present in the active startup context", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("in-band truncation", diagnostic.Content, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using System.Text;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
@@ -6,6 +7,12 @@ namespace EmbodySense.Core.Clients.CodexAppServer;
 internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuilder
 {
     private const int MaxRestoredContextCharacters = 24_000; // TODO: revisit what an appropriate figures should actually be.
+    private readonly IReadOnlyList<ToolCommand> _availableToolCommands;
+
+    public CodexAppServerContextBuilder(IReadOnlyList<ToolCommand>? availableToolCommands = null)
+    {
+        _availableToolCommands = availableToolCommands ?? [];
+    }
 
     public string CreateDeveloperInstructions(LlmInferenceRequest request)
     {
@@ -16,9 +23,19 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
             You are running inside EmbodySense through the Codex app-server protocol.
 
             EmbodySense governs the user workspace. Do not use Codex-native shell, filesystem, MCP, browser, web-search, subagent, or permission-escalation tools for workspace actions. The app-server working directory is an inert runtime directory, not the user workspace.
-
-            For any workspace action, use only the `embodysense.command` dynamic tool. It enforces `.agent/permissions.json`, routes approval when required, and writes EmbodySense audit events. Do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.
             """);
+
+        if (_availableToolCommands.Count == 0)
+        {
+            builder.AppendLine();
+            builder.AppendLine("The active EmbodySense loop has not assigned any workspace command capabilities to this turn. Do not perform workspace actions, and do not claim a workspace action succeeded.");
+        }
+        else
+        {
+            builder.AppendLine();
+            builder.AppendLine($"The active EmbodySense loop assigned these workspace command capabilities to this turn: {string.Join(", ", _availableToolCommands.Select(FormatCommand))}.");
+            builder.AppendLine("For assigned workspace actions, use only the `embodysense.command` dynamic tool. It enforces loop capability filtering, `.agent/permissions.json`, approval routing, and audit logging. Do not request unassigned workspace commands, and do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.");
+        }
 
         return builder.ToString().TrimEnd();
     }
@@ -108,6 +125,11 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
     private static string FormatRestoredMessage(LlmMessage message)
     {
         return $"[restored {message.Role.ToString().ToLowerInvariant()} message]{Environment.NewLine}{message.Content.Trim()}{Environment.NewLine}[/restored {message.Role.ToString().ToLowerInvariant()} message]";
+    }
+
+    private static string FormatCommand(ToolCommand command)
+    {
+        return command.ToString().ToLowerInvariant();
     }
 
     private static int FindLatestUserMessageIndex(IReadOnlyList<LlmMessage> messages)

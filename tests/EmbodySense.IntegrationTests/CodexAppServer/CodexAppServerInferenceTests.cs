@@ -1,9 +1,11 @@
 using System.Text.Json;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Clients.CodexAppServer;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
@@ -17,6 +19,8 @@ namespace EmbodySense.IntegrationTests.CodexAppServer;
 
 public sealed class CodexAppServerInferenceTests
 {
+    private static readonly JsonSerializerOptions AuditJsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+
     [Fact]
     public async Task GenerateAsync_streams_agent_message_deltas_and_returns_completed_message()
     {
@@ -70,11 +74,78 @@ public sealed class CodexAppServerInferenceTests
         var toolSpecs = threadStartDocument.RootElement.GetProperty("params").GetProperty("dynamicTools");
         var toolSpec = Assert.Single(toolSpecs.EnumerateArray());
         Assert.Equal("command", toolSpec.GetProperty("name").GetString());
+        var commandEnum = toolSpec.GetProperty("inputSchema").GetProperty("properties").GetProperty("command").GetProperty("enum").EnumerateArray().Select(item => item.GetString() ?? "").ToArray();
+        Assert.Contains("read", commandEnum);
+        Assert.Contains("write", commandEnum);
         var auditText = await File.ReadAllTextAsync(new WorkspacePaths(workspace.RootPath).EventsLogPath);
         Assert.Contains("llm.inference.start", auditText, StringComparison.Ordinal);
         Assert.Contains("llm.inference.complete", auditText, StringComparison.Ordinal);
         Assert.Contains("llm.appserver.request", auditText, StringComparison.Ordinal);
         Assert.Contains("tool.execute", auditText, StringComparison.Ordinal);
+        var events = await ReadAuditEventsAsync(workspace);
+        var appServerToolCall = Assert.Single(events, auditEvent => auditEvent.Action == "llm.appserver.request" && GetMetadataString(auditEvent, "call_id") == "call-1");
+        Assert.Equal("call-1", GetMetadataString(appServerToolCall, "tool_request_correlation_id"));
+        Assert.All(events.Where(auditEvent => auditEvent.Action.StartsWith("tool.", StringComparison.Ordinal)), auditEvent =>
+        {
+            Assert.Equal("call-1", GetMetadataString(auditEvent, "tool_request_correlation_id"));
+        });
+    }
+
+    [Fact]
+    public async Task GenerateAsync_advertises_only_loop_assigned_workspace_commands()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)] };
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, broker, workspace.RootPath);
+
+        _ = await client.GenerateAsync(LlmInferenceRequest.FromUserText("hello"), (_, _) => Task.CompletedTask);
+
+        using var threadStartDocument = JsonDocument.Parse(transport.Writes.Single(IsThreadStart));
+        var parameters = threadStartDocument.RootElement.GetProperty("params");
+        var developerInstructions = parameters.GetProperty("developerInstructions").GetString();
+        var toolSpec = Assert.Single(parameters.GetProperty("dynamicTools").EnumerateArray());
+        var commandEnum = toolSpec.GetProperty("inputSchema").GetProperty("properties").GetProperty("command").GetProperty("enum").EnumerateArray().Select(item => item.GetString() ?? "").ToArray();
+        Assert.Equal(["read"], commandEnum);
+        Assert.Contains("assigned these workspace command capabilities", developerInstructions);
+        Assert.Contains("read", developerInstructions);
+        Assert.DoesNotContain("write", developerInstructions);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_omits_dynamic_tools_and_denies_stale_tool_calls_when_loop_grants_no_workspace_commands()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.ProviderInference] };
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Request(99, "item/tool/call", """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","namespace":"embodysense","tool":"command","arguments":{"command":"read","path":"shared/note.txt"}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, broker, workspace.RootPath);
+
+        _ = await client.GenerateAsync(LlmInferenceRequest.FromUserText("hello"), (_, _) => Task.CompletedTask);
+
+        using var threadStartDocument = JsonDocument.Parse(transport.Writes.Single(IsThreadStart));
+        var parameters = threadStartDocument.RootElement.GetProperty("params");
+        Assert.False(parameters.TryGetProperty("dynamicTools", out _));
+        Assert.Contains("has not assigned any workspace command capabilities", parameters.GetProperty("developerInstructions").GetString());
+        var toolResponse = Assert.Single(transport.Writes, line => line.Contains("\"id\":99", StringComparison.Ordinal));
+        Assert.Contains("\"success\":false", toolResponse, StringComparison.Ordinal);
+        Assert.Contains("does not grant", toolResponse, StringComparison.Ordinal);
+        var auditText = await File.ReadAllTextAsync(new WorkspacePaths(workspace.RootPath).EventsLogPath);
+        Assert.Contains("tool.loop_authority.evaluate", auditText, StringComparison.Ordinal);
+        Assert.Contains("\"outcome\":\"denied\"", auditText, StringComparison.Ordinal);
+        Assert.DoesNotContain("tool.permission.evaluate", auditText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -102,6 +173,7 @@ public sealed class CodexAppServerInferenceTests
         Assert.Contains("llm.appserver.request", auditText, StringComparison.Ordinal);
         Assert.Contains("\"outcome\":\"failed\"", auditText, StringComparison.Ordinal);
         Assert.Contains("Rejected Codex app-server dynamic tool request.", auditText, StringComparison.Ordinal);
+        Assert.Contains("\"arguments_path\":\"shared/note.txt\"", auditText, StringComparison.Ordinal);
         Assert.DoesNotContain("tool.execute", auditText, StringComparison.Ordinal);
     }
 
@@ -333,11 +405,11 @@ public sealed class CodexAppServerInferenceTests
         }, broker, transport);
     }
 
-    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt)
+    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths));
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation());
     }
 
     private static string Response(int id, string result)
@@ -365,6 +437,33 @@ public sealed class CodexAppServerInferenceTests
     {
         using var document = JsonDocument.Parse(line);
         return document.RootElement.TryGetProperty("method", out var method) && method.GetString() == "turn/start";
+    }
+
+    private static async Task<IReadOnlyList<AuditEvent>> ReadAuditEventsAsync(TestWorkspace workspace)
+    {
+        var path = new WorkspacePaths(workspace.RootPath).EventsLogPath;
+        var events = new List<AuditEvent>();
+        foreach (var line in await File.ReadAllLinesAsync(path))
+        {
+            if (!string.IsNullOrWhiteSpace(line))
+            {
+                events.Add(JsonSerializer.Deserialize<AuditEvent>(line, AuditJsonOptions)!);
+            }
+        }
+
+        return events;
+    }
+
+    private static string? GetMetadataString(AuditEvent auditEvent, string key)
+    {
+        return auditEvent.Metadata.TryGetValue(key, out var value)
+            ? value switch
+            {
+                JsonElement element when element.ValueKind == JsonValueKind.String => element.GetString(),
+                JsonElement element => element.ToString(),
+                _ => value?.ToString()
+            }
+            : null;
     }
 
     private sealed class ScriptedAppServerTransport(params string[] reads) : ICodexAppServerTransport

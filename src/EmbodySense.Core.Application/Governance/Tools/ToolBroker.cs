@@ -6,44 +6,60 @@ using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Governance.Tools;
 
 public sealed class ToolBroker : IToolBroker
 {
+    private static readonly ToolCommand[] AllCommands = Enum.GetValues<ToolCommand>();
     private readonly WorkspacePaths _paths;
     private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
     private readonly IWorkspaceToolExecutor _workspaceToolExecutor;
     private readonly IAuditLog _auditLog;
+    private readonly LoopDefinition _loopDefinition;
 
     public ToolBroker(
         WorkspacePaths paths,
         IToolPermissionService permissionService,
         IToolApprovalPrompt approvalPrompt,
         IWorkspaceToolExecutor workspaceToolExecutor,
-        IAuditLog auditLog)
+        IAuditLog auditLog,
+        LoopDefinition loopDefinition)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(permissionService);
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         ArgumentNullException.ThrowIfNull(workspaceToolExecutor);
         ArgumentNullException.ThrowIfNull(auditLog);
+        ArgumentNullException.ThrowIfNull(loopDefinition);
 
         _paths = paths;
         _permissionService = permissionService;
         _approvalPrompt = approvalPrompt;
         _workspaceToolExecutor = workspaceToolExecutor;
         _auditLog = auditLog;
+        _loopDefinition = loopDefinition;
+        AvailableCommands = GetAvailableCommands(_loopDefinition);
     }
+
+    public IReadOnlyList<ToolCommand> AvailableCommands { get; }
 
     public async Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         var requestId = Guid.NewGuid().ToString("N");
+        if (!IsCommandAvailable(request.Command))
+        {
+            await RecordLoopAuthorityAsync(requestId, request, request.TargetPath, AuditSchema.Outcomes.Denied, cancellationToken);
+            return new ToolResult(ToolExecutionOutcome.Denied, $"denied: active loop `{_loopDefinition.Id}` does not grant `{LoopCapabilityIds.WorkspaceCommandFor(request.Command)}` or `{LoopCapabilityIds.WorkspaceCommand}`.", requestId, request.TargetPath, request);
+        }
+
         var check = _permissionService.Evaluate(request);
 
+        await RecordLoopAuthorityAsync(requestId, request, check.ResolvedPath, AuditSchema.Outcomes.Allowed, cancellationToken);
         await RecordPermissionAsync(requestId, request, check, cancellationToken);
 
         if (check.Evaluation.Decision == PermissionDecision.Deny)
@@ -172,6 +188,35 @@ public sealed class ToolBroker : IToolBroker
         return _auditLog.AppendAsync(auditEvent, cancellationToken);
     }
 
+    private Task RecordLoopAuthorityAsync(string requestId, ToolRequest request, string resolvedPath, string outcome, CancellationToken cancellationToken)
+    {
+        var metadata = new Dictionary<string, object?>
+        {
+            ["request_id"] = requestId,
+            ["command"] = FormatCommand(request.Command),
+            ["target_path"] = request.TargetPath,
+            ["resolved_path"] = resolvedPath,
+            ["loop_id"] = _loopDefinition.Id,
+            ["role_id"] = _loopDefinition.RoleId,
+            ["loop_trigger"] = _loopDefinition.Trigger.ToString(),
+            ["required_capability"] = LoopCapabilityIds.WorkspaceCommandFor(request.Command),
+            ["fallback_capability"] = LoopCapabilityIds.WorkspaceCommand,
+            ["available_commands"] = string.Join(",", AvailableCommands.Select(FormatCommand)),
+            ["loop_capability_ids"] = string.Join(",", _loopDefinition.CapabilityIds)
+        };
+        AddCorrelationMetadata(metadata, request);
+
+        return AppendAuditAsync(AuditEvent.Create(
+            actor: AuditSchema.Actors.Tool,
+            action: AuditSchema.Actions.ToolLoopAuthorityEvaluate,
+            target: resolvedPath,
+            outcome: outcome,
+            detail: outcome == AuditSchema.Outcomes.Allowed
+                ? $"Loop `{_loopDefinition.Id}` allowed {FormatCommand(request.Command)} workspace command authority."
+                : $"Loop `{_loopDefinition.Id}` denied {FormatCommand(request.Command)} workspace command authority.",
+            metadata: metadata), cancellationToken);
+    }
+
     private Dictionary<string, object?> BaseMetadata(string requestId, ToolRequest request, ToolPermissionCheck check)
     {
         return BaseMetadata(requestId, request, check.ResolvedPath, check.Operation, check.Evaluation.MatchedPath);
@@ -179,7 +224,7 @@ public sealed class ToolBroker : IToolBroker
 
     private Dictionary<string, object?> BaseMetadata(string requestId, ToolRequest request, string resolvedPath, FileSystemOperation operation, string matchedPath)
     {
-        return new Dictionary<string, object?>
+        var metadata = new Dictionary<string, object?>
         {
             ["request_id"] = requestId,
             ["command"] = FormatCommand(request.Command),
@@ -189,6 +234,31 @@ public sealed class ToolBroker : IToolBroker
             ["filesystem_operation"] = operation.ToString().ToLowerInvariant(),
             ["matched_path"] = matchedPath
         };
+
+        metadata["loop_id"] = _loopDefinition.Id;
+        metadata["role_id"] = _loopDefinition.RoleId;
+        metadata["loop_trigger"] = _loopDefinition.Trigger.ToString();
+        AddCorrelationMetadata(metadata, request);
+
+        return metadata;
+    }
+
+    private static void AddCorrelationMetadata(Dictionary<string, object?> metadata, ToolRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.CorrelationId))
+        {
+            metadata["tool_request_correlation_id"] = request.CorrelationId;
+        }
+    }
+
+    private bool IsCommandAvailable(ToolCommand command)
+    {
+        return AvailableCommands.Contains(command);
+    }
+
+    private static IReadOnlyList<ToolCommand> GetAvailableCommands(LoopDefinition loopDefinition)
+    {
+        return AllCommands.Where(command => LoopCapabilityIds.AllowsWorkspaceCommand(loopDefinition.CapabilityIds, command)).ToArray();
     }
 
     private static string FormatDecision(PermissionDecision decision)
@@ -206,5 +276,4 @@ public sealed class ToolBroker : IToolBroker
     {
         return command.ToString().ToLowerInvariant();
     }
-
 }

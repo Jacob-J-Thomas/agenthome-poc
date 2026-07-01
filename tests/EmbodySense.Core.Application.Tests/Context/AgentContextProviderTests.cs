@@ -71,6 +71,19 @@ public sealed class AgentContextProviderTests
         Assert.True(message.Content.IndexOf("first guide", StringComparison.Ordinal) < message.Content.IndexOf("second guide", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task LoadAsync_marks_truncated_context_with_character_limit()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new FakeWorkspaceContextStore(new WorkspaceContextDocument(".agent/AGENT.md", new string('x', 12_001)));
+
+        var messages = await new AgentContextProvider(store).LoadAsync(paths);
+
+        var message = Assert.Single(messages);
+        Assert.Contains("[truncated after 12000 characters]", message.Content, StringComparison.Ordinal);
+    }
+
     private sealed class FakeWorkspaceContextStore(params WorkspaceContextDocument[] documents) : IWorkspaceContextStore
     {
         public Task<IReadOnlyList<WorkspaceContextDocument>> LoadDocumentsAsync(WorkspacePaths paths, CancellationToken cancellationToken = default)

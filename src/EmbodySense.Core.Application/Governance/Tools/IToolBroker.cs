@@ -4,5 +4,7 @@ namespace EmbodySense.Core.Application.Governance.Tools;
 
 public interface IToolBroker
 {
+    IReadOnlyList<ToolCommand> AvailableCommands { get; }
+
     Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default);
 }
