@@ -15,8 +15,9 @@ public sealed record LoopDefinition(
 {
     public const int CurrentSchemaVersion = 1;
 
-    // TODO(loop-graph-definition): This flat seed artifact is not sufficient for user/system-authored graph editing.
-    // Revisit when the loop-builder begins storing nodes, edges, system-owned locks, and editable vs system loop boundaries.
+    public LoopEditMode EditMode { get; init; } = LoopEditMode.SystemLocked;
+
+    public LoopGraphDefinition Graph { get; init; } = LoopGraphDefinition.CreateDefaultConversation();
 
     public static LoopDefinition CreateDefaultConversation()
     {
@@ -39,6 +40,10 @@ public sealed record LoopDefinition(
             ],
             LoopReviewPolicy.ReviewAtAuthorityBoundaries,
             LoopFailurePolicy.RecordFailureAndSurfaceToUser,
-            LoopState.Enabled);
+            LoopState.Enabled)
+        {
+            EditMode = LoopEditMode.SystemLocked,
+            Graph = LoopGraphDefinition.CreateDefaultConversation()
+        };
     }
 }

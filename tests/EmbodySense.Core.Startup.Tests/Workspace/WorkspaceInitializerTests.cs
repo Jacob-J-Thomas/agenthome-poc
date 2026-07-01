@@ -104,8 +104,13 @@ public sealed class WorkspaceInitializerTests
         Assert.Contains("workspace.command", definition.CapabilityIds);
         Assert.Contains("approval.request", definition.CapabilityIds);
         Assert.Equal(LoopState.Enabled, definition.State);
+        Assert.Equal(LoopEditMode.SystemLocked, definition.EditMode);
+        Assert.Equal(DefaultConversationLoopGraphIds.AcceptUserMessage, definition.Graph.EntryNodeId);
+        Assert.Contains(definition.Graph.Nodes, node => node.Id == DefaultConversationLoopGraphIds.AssembleContext);
         var json = await File.ReadAllTextAsync(paths.DefaultConversationLoopDefinitionPath);
         Assert.Contains("\"trigger\": \"human-message\"", json);
         Assert.Contains("\"state\": \"enabled\"", json);
+        Assert.Contains("\"graph\"", json);
+        Assert.Contains("\"entryNodeId\": \"accept-user-message\"", json);
     }
 }

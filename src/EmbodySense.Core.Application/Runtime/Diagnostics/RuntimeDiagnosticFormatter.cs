@@ -38,6 +38,10 @@ public static class RuntimeDiagnosticFormatter
         builder.AppendLine($"[verbose] - surface: {context.Surface.Id}");
         builder.AppendLine($"[verbose] - trigger: {context.LoopDefinition.Trigger}");
         builder.AppendLine($"[verbose] - memory_scope: {context.LoopDefinition.MemoryScope}");
+        builder.AppendLine($"[verbose] - edit_mode: {context.LoopDefinition.EditMode}");
+        builder.AppendLine($"[verbose] - graph_entry_node: {context.LoopDefinition.Graph?.EntryNodeId ?? "(none)"}");
+        builder.AppendLine($"[verbose] - graph_terminal_nodes: {FormatList(context.LoopDefinition.Graph?.TerminalNodeIds ?? [])}");
+        builder.AppendLine($"[verbose] - graph_nodes: {FormatGraphNodes(context.LoopDefinition.Graph?.Nodes ?? [])}");
         builder.AppendLine($"[verbose] - review_policy: {context.LoopDefinition.ReviewPolicy}");
         builder.AppendLine($"[verbose] - failure_policy: {context.LoopDefinition.FailurePolicy}");
     }
@@ -111,5 +115,15 @@ public static class RuntimeDiagnosticFormatter
     private static string FormatList(IReadOnlyList<string> values)
     {
         return values.Count == 0 ? "(none)" : string.Join(", ", values);
+    }
+
+    private static string FormatGraphNodes(IReadOnlyList<LoopGraphNodeDefinition> nodes)
+    {
+        if (nodes.Count == 0)
+        {
+            return "(none)";
+        }
+
+        return string.Join(", ", nodes.Select(node => $"{node.Id}:{node.Kind}:{node.EditMode}"));
     }
 }

@@ -130,7 +130,7 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
         var values = new JsonArray();
         foreach (var command in AvailableCommands)
         {
-            values.Add(FormatCommand(command));
+            values.Add(ToolCommandFormatter.Format(command));
         }
 
         return values;
@@ -192,8 +192,4 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
         return false;
     }
 
-    private static string FormatCommand(ToolCommand command)
-    {
-        return command.ToString().ToLowerInvariant();
-    }
 }

@@ -1,4 +1,5 @@
 using System.Text;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 
@@ -33,7 +34,7 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
         else
         {
             builder.AppendLine();
-            builder.AppendLine($"The active EmbodySense loop assigned these workspace command capabilities to this turn: {string.Join(", ", _availableToolCommands.Select(FormatCommand))}.");
+            builder.AppendLine($"The active EmbodySense loop assigned these workspace command capabilities to this turn: {string.Join(", ", _availableToolCommands.Select(ToolCommandFormatter.Format))}.");
             builder.AppendLine("For assigned workspace actions, use only the `embodysense.command` dynamic tool. It enforces loop capability filtering, `.agent/permissions.json`, approval routing, and audit logging. Do not request unassigned workspace commands, and do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.");
         }
 
@@ -125,11 +126,6 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
     private static string FormatRestoredMessage(LlmMessage message)
     {
         return $"[restored {message.Role.ToString().ToLowerInvariant()} message]{Environment.NewLine}{message.Content.Trim()}{Environment.NewLine}[/restored {message.Role.ToString().ToLowerInvariant()} message]";
-    }
-
-    private static string FormatCommand(ToolCommand command)
-    {
-        return command.ToString().ToLowerInvariant();
     }
 
     private static int FindLatestUserMessageIndex(IReadOnlyList<LlmMessage> messages)

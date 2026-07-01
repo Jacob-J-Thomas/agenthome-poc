@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Common.Loops.Models;
@@ -14,7 +15,7 @@ public static class LoopCapabilityIds
 
     public static string WorkspaceCommandFor(ToolCommand command)
     {
-        return WorkspaceCommand + "." + command.ToString().ToLowerInvariant();
+        return WorkspaceCommand + "." + ToolCommandFormatter.Format(command);
     }
 
     public static bool AllowsWorkspaceCommand(IReadOnlyCollection<string> capabilityIds, ToolCommand command)

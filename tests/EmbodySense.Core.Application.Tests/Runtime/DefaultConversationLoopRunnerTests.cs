@@ -63,6 +63,9 @@ public sealed class DefaultConversationLoopRunnerTests
         Assert.Contains("loop_id: default-conversation", diagnostic.Content, StringComparison.Ordinal);
         Assert.Contains("role_id: default-assistant", diagnostic.Content, StringComparison.Ordinal);
         Assert.Contains("surface: web", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("edit_mode: SystemLocked", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("graph_entry_node: accept-user-message", diagnostic.Content, StringComparison.Ordinal);
+        Assert.Contains("graph_nodes:", diagnostic.Content, StringComparison.Ordinal);
         Assert.Contains("capability_ids:", diagnostic.Content, StringComparison.Ordinal);
         Assert.Contains("workspace_commands_allowed_by_loop:", diagnostic.Content, StringComparison.Ordinal);
         Assert.Contains("compaction:", diagnostic.Content, StringComparison.Ordinal);
@@ -81,6 +84,9 @@ public sealed class DefaultConversationLoopRunnerTests
             Assert.Equal("default-conversation", run.LoopId);
             Assert.Equal("default-assistant", run.RoleId);
             Assert.Equal("web", run.Surface);
+            Assert.Equal("SystemLocked", run.Metadata["loopEditMode"]);
+            Assert.Equal(DefaultConversationLoopGraphIds.AcceptUserMessage, run.Metadata["graphEntryNodeId"]);
+            Assert.Equal("5", run.Metadata["graphNodeCount"]);
         });
     }
 
@@ -171,6 +177,46 @@ public sealed class DefaultConversationLoopRunnerTests
         Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
         Assert.False(result.UserMessageAccepted);
         Assert.Equal("Loop `default-conversation` is not enabled.", result.FailureDetail);
+        Assert.Empty(client.Requests);
+        Assert.Empty(state.Messages);
+        Assert.Empty(memory.Messages);
+        Assert.Collection(
+            runs.Saved,
+            run => Assert.Equal(LoopRunStatus.Started, run.Status),
+            run => Assert.Equal(LoopRunStatus.Failed, run.Status));
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_rejects_graph_shapes_the_default_runner_does_not_execute()
+    {
+        var client = new RecordingInferenceClient("unused");
+        var memory = new RecordingConversationMemoryStore();
+        var runs = new RecordingLoopRunStore();
+        var state = new ConversationRuntimeState();
+        var graph = LoopGraphDefinition.CreateDefaultConversation();
+        var extendedLoop = LoopDefinition.CreateDefaultConversation() with
+        {
+            Graph = graph with
+            {
+                Nodes = graph.Nodes.Concat(
+                [
+                    new LoopGraphNodeDefinition(
+                        "future-hook",
+                        "Future hook",
+                        "A future hook node that the current default conversation runner must not silently ignore.",
+                        LoopGraphNodeKind.ToolActuation,
+                        LoopGraphNodeEditMode.UserEditable,
+                        [])
+                ]).ToArray()
+            }
+        };
+        var runner = new DefaultConversationLoopRunner(client, state, memory, extendedLoop, runs, RuntimeSurfaceId.Web);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.False(result.UserMessageAccepted);
+        Assert.Contains("does not execute yet", result.FailureDetail, StringComparison.Ordinal);
         Assert.Empty(client.Requests);
         Assert.Empty(state.Messages);
         Assert.Empty(memory.Messages);

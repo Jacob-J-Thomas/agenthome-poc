@@ -24,6 +24,9 @@ public sealed class LoopDefinitionStoreTests
         Assert.Contains("\"reviewPolicy\": \"review-at-authority-boundaries\"", json);
         Assert.Contains("\"failurePolicy\": \"record-failure-and-surface-to-user\"", json);
         Assert.Contains("\"state\": \"enabled\"", json);
+        Assert.Contains("\"editMode\": \"system-locked\"", json);
+        Assert.Contains("\"entryNodeId\": \"accept-user-message\"", json);
+        Assert.Contains("\"kind\": \"model-inference\"", json);
         var loaded = await store.LoadAsync("default-conversation");
         Assert.NotNull(loaded);
         Assert.Equal(definition.SchemaVersion, loaded.SchemaVersion);
@@ -37,6 +40,9 @@ public sealed class LoopDefinitionStoreTests
         Assert.Equal(definition.ReviewPolicy, loaded.ReviewPolicy);
         Assert.Equal(definition.FailurePolicy, loaded.FailurePolicy);
         Assert.Equal(definition.State, loaded.State);
+        Assert.Equal(LoopEditMode.SystemLocked, loaded.EditMode);
+        Assert.Equal(DefaultConversationLoopGraphIds.AcceptUserMessage, loaded.Graph.EntryNodeId);
+        Assert.Contains(loaded.Graph.Nodes, node => node.Id == DefaultConversationLoopGraphIds.DispatchInference && node.Kind == LoopGraphNodeKind.ModelInference);
     }
 
     [Fact]
@@ -73,6 +79,8 @@ public sealed class LoopDefinitionStoreTests
         Assert.Equal(LoopReviewPolicy.ReviewAtAuthorityBoundaries, definition.ReviewPolicy);
         Assert.Equal(LoopFailurePolicy.RecordFailureAndSurfaceToUser, definition.FailurePolicy);
         Assert.Equal(LoopState.Enabled, definition.State);
+        Assert.Equal(LoopEditMode.SystemLocked, definition.EditMode);
+        Assert.Equal(DefaultConversationLoopGraphIds.AcceptUserMessage, definition.Graph.EntryNodeId);
     }
 
     [Fact]
@@ -123,6 +131,21 @@ public sealed class LoopDefinitionStoreTests
         var definition = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [] };
 
         await Assert.ThrowsAsync<ArgumentException>(() => store.SaveAsync(definition));
+    }
+
+    [Fact]
+    public async Task SaveAsync_rejects_invalid_graph_definitions()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new LoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var definition = LoopDefinition.CreateDefaultConversation() with
+        {
+            Graph = LoopGraphDefinition.CreateDefaultConversation() with { EntryNodeId = "missing-node" }
+        };
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(definition));
+
+        Assert.Contains("entry node `missing-node` does not exist", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

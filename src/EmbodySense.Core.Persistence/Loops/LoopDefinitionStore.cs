@@ -95,9 +95,21 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         ValidateEnum(definition.ReviewPolicy, nameof(definition.ReviewPolicy));
         ValidateEnum(definition.FailurePolicy, nameof(definition.FailurePolicy));
         ValidateEnum(definition.State, nameof(definition.State));
+        ValidateEnum(definition.EditMode, nameof(definition.EditMode));
         if (definition.CapabilityIds is null || definition.CapabilityIds.Length == 0 || definition.CapabilityIds.Any(string.IsNullOrWhiteSpace))
         {
             throw new ArgumentException("Loop definitions must include at least one capability id.", nameof(definition));
+        }
+
+        if (definition.Graph is null)
+        {
+            throw new FormatException("Loop definitions must include a graph.");
+        }
+
+        var graphFailure = definition.Graph.GetValidationFailure();
+        if (graphFailure is not null)
+        {
+            throw new FormatException(graphFailure);
         }
     }
 

@@ -109,7 +109,7 @@ public sealed class AgentRuntimeConsoleHost
             return;
         }
 
-        WriteCommandResult(result);
+        WriteCommandResult(result, wroteResponseChunk, responseEndedWithNewLine);
         if (!result.AwaitingInput)
         {
             return;
@@ -134,7 +134,10 @@ public sealed class AgentRuntimeConsoleHost
         }
     }
 
-    private void WriteCommandResult(AgentRuntimeTurnResult result)
+    private void WriteCommandResult(
+        AgentRuntimeTurnResult result,
+        bool wroteResponseChunk = false,
+        bool responseEndedWithNewLine = true)
     {
         WriteTranscriptReplacement(result.Events.FirstOrDefault(turnEvent => turnEvent.Kind == AgentRuntimeTurnEventKind.TranscriptReplacement));
 
@@ -153,11 +156,28 @@ public sealed class AgentRuntimeConsoleHost
                     _console.Write(turnEvent.Text + " ");
                     break;
 
+                case AgentRuntimeTurnEventKind.AssistantMessage:
+                    WriteAcceptedAssistantMessage(turnEvent.Text, wroteResponseChunk, responseEndedWithNewLine);
+                    break;
+
                 case AgentRuntimeTurnEventKind.Failure:
                 case AgentRuntimeTurnEventKind.Cancellation:
                     _console.WriteLine(turnEvent.Text);
                     break;
             }
+        }
+    }
+
+    private void WriteAcceptedAssistantMessage(string text, bool wroteResponseChunk, bool responseEndedWithNewLine)
+    {
+        if (!wroteResponseChunk)
+        {
+            _console.WriteLine(FormatMessageHeader("assistant"));
+            _console.WriteLine(text);
+        }
+        else if (!responseEndedWithNewLine)
+        {
+            _console.WriteLine();
         }
     }
 

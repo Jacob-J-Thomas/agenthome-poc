@@ -14,9 +14,6 @@ namespace EmbodySense.Core.Application.Loops.Execution;
 
 public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunner
 {
-    // TODO(default-loop-execution-graph): This is still a linear system default loop runner, not the generic graph executor
-    // needed for editable/user-authored loops. Revisit when loop definitions gain nodes, edges, locked system steps,
-    // and agent-authored loop artifacts.
     private readonly ILlmInferenceClient _inferenceClient;
     private readonly IConversationMemoryStore? _conversationMemoryStore;
     private readonly ConversationRuntimeState _conversationState;
@@ -65,6 +62,9 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             new Dictionary<string, string>
             {
                 ["loopDisplayName"] = _loopDefinition.DisplayName,
+                ["loopEditMode"] = _loopDefinition.EditMode.ToString(),
+                ["graphEntryNodeId"] = _loopDefinition.Graph?.EntryNodeId ?? "",
+                ["graphNodeCount"] = (_loopDefinition.Graph?.Nodes?.Length ?? 0).ToString(CultureInfo.InvariantCulture),
                 ["reviewPolicy"] = _loopDefinition.ReviewPolicy.ToString(),
                 ["failurePolicy"] = _loopDefinition.FailurePolicy.ToString()
             });
@@ -83,6 +83,13 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 var detail = $"Loop `{_loopDefinition.Id}` is not enabled.";
                 var saveFailure = await TrySaveRunAsync(run.Fail(DateTimeOffset.UtcNow, detail), CancellationToken.None);
                 return DefaultConversationLoopTurnResult.Failed(IncludeRunPersistenceFailure(detail, saveFailure), runIdentity: runIdentity);
+            }
+
+            var graphExecutionBlocker = DefaultConversationLoopGraphContract.GetExecutionBlocker(_loopDefinition);
+            if (graphExecutionBlocker is not null)
+            {
+                var saveFailure = await TrySaveRunAsync(run.Fail(DateTimeOffset.UtcNow, graphExecutionBlocker), CancellationToken.None);
+                return DefaultConversationLoopTurnResult.Failed(IncludeRunPersistenceFailure(graphExecutionBlocker, saveFailure), runIdentity: runIdentity);
             }
 
             await EmitVisibleContextAsync(request, runIdentity, inferenceContextMessages);
