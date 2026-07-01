@@ -207,6 +207,21 @@ public sealed class DefaultConversationLoopRunnerTests
                         LoopGraphNodeKind.ToolActuation,
                         LoopGraphNodeEditMode.UserEditable,
                         [])
+                ]).ToArray(),
+                Edges = graph.Edges.Concat(
+                [
+                    new LoopGraphEdgeDefinition(
+                        "context-to-future-hook",
+                        DefaultConversationLoopGraphIds.AssembleContext,
+                        "future-hook",
+                        LoopGraphEdgeCondition.Success,
+                        "A future hook can be reached from context assembly in this unsupported graph shape."),
+                    new LoopGraphEdgeDefinition(
+                        "future-hook-to-complete-run",
+                        "future-hook",
+                        DefaultConversationLoopGraphIds.CompleteRun,
+                        LoopGraphEdgeCondition.Success,
+                        "A future hook can terminate in this unsupported graph shape.")
                 ]).ToArray()
             }
         };
@@ -217,6 +232,37 @@ public sealed class DefaultConversationLoopRunnerTests
         Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
         Assert.False(result.UserMessageAccepted);
         Assert.Contains("does not execute yet", result.FailureDetail, StringComparison.Ordinal);
+        Assert.Empty(client.Requests);
+        Assert.Empty(state.Messages);
+        Assert.Empty(memory.Messages);
+        Assert.Collection(
+            runs.Saved,
+            run => Assert.Equal(LoopRunStatus.Started, run.Status),
+            run => Assert.Equal(LoopRunStatus.Failed, run.Status));
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_rejects_changed_default_graph_edges()
+    {
+        var client = new RecordingInferenceClient("unused");
+        var memory = new RecordingConversationMemoryStore();
+        var runs = new RecordingLoopRunStore();
+        var state = new ConversationRuntimeState();
+        var graph = LoopGraphDefinition.CreateDefaultConversation();
+        var changedLoop = LoopDefinition.CreateDefaultConversation() with
+        {
+            Graph = graph with
+            {
+                Edges = graph.Edges.Select(edge => edge.Id == "context-to-inference" ? edge with { Condition = LoopGraphEdgeCondition.Always } : edge).ToArray()
+            }
+        };
+        var runner = new DefaultConversationLoopRunner(client, state, memory, changedLoop, runs, RuntimeSurfaceId.Web);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.False(result.UserMessageAccepted);
+        Assert.Contains("missing required default edge `context-to-inference`", result.FailureDetail, StringComparison.Ordinal);
         Assert.Empty(client.Requests);
         Assert.Empty(state.Messages);
         Assert.Empty(memory.Messages);
@@ -266,7 +312,7 @@ public sealed class DefaultConversationLoopRunnerTests
     }
 
     [Fact]
-    public async Task RunTurnAsync_still_returns_completed_when_completed_run_status_cannot_be_recorded()
+    public async Task RunTurnAsync_returns_failed_result_when_completed_run_status_cannot_be_recorded()
     {
         var client = new RecordingInferenceClient("completed response");
         var memory = new RecordingConversationMemoryStore();
@@ -276,9 +322,13 @@ public sealed class DefaultConversationLoopRunnerTests
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
-        Assert.Equal(DefaultConversationLoopTurnStatus.Completed, result.Status);
-        Assert.Equal("completed response", result.AssistantOutput);
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.Contains("completed loop run status could not be recorded", result.FailureDetail, StringComparison.Ordinal);
         Assert.True(result.UserMessageAccepted);
+        Assert.Collection(
+            result.TranscriptMessages,
+            message => Assert.Equal("hello", message.Content),
+            message => Assert.Equal("completed response", message.Content));
         Assert.Collection(
             state.Messages,
             message => Assert.Equal("hello", message.Content),
@@ -290,6 +340,36 @@ public sealed class DefaultConversationLoopRunnerTests
         Assert.Collection(
             runs.Saved,
             run => Assert.Equal(LoopRunStatus.Started, run.Status));
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_returns_accepted_assistant_transcript_when_assistant_memory_persistence_fails()
+    {
+        var client = new RecordingInferenceClient("completed response");
+        var memory = new RecordingConversationMemoryStore { FailureAtAppendNumber = 2 };
+        var runs = new RecordingLoopRunStore();
+        var state = new ConversationRuntimeState();
+        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.Contains("memory store failed", result.FailureDetail, StringComparison.Ordinal);
+        Assert.True(result.UserMessageAccepted);
+        Assert.Collection(
+            result.TranscriptMessages,
+            message => Assert.Equal("hello", message.Content),
+            message => Assert.Equal("completed response", message.Content));
+        Assert.Collection(
+            state.Messages,
+            message => Assert.Equal("hello", message.Content),
+            message => Assert.Equal("completed response", message.Content));
+        var persistedMessage = Assert.Single(memory.Messages);
+        Assert.Equal("hello", persistedMessage.Content);
+        Assert.Collection(
+            runs.Saved,
+            run => Assert.Equal(LoopRunStatus.Started, run.Status),
+            run => Assert.Equal(LoopRunStatus.Failed, run.Status));
     }
 
     private sealed class RecordingInferenceClient(string output) : ILlmInferenceClient
@@ -322,8 +402,15 @@ public sealed class DefaultConversationLoopRunnerTests
     {
         public List<LlmMessage> Messages { get; } = [];
 
+        public int? FailureAtAppendNumber { get; init; }
+
         public Task AppendMessageAsync(LlmMessage message, CancellationToken cancellationToken = default)
         {
+            if (FailureAtAppendNumber == Messages.Count + 1)
+            {
+                throw new IOException("memory store failed");
+            }
+
             Messages.Add(message);
             return Task.CompletedTask;
         }

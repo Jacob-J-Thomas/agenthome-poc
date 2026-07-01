@@ -5,6 +5,9 @@ namespace EmbodySense.Core.Common.Loops.Models;
 
 public static class LoopCapabilityIds
 {
+    // TODO(loop-capability-registry): Raw capability ids are enough for the default workspace-command loop gate, but skills,
+    // hooks, cron jobs, wake commands, subagents, and editable loops need a real registry with implemented/planned status,
+    // authority metadata, and validation before user-authored loop definitions can safely reference broader capabilities.
     public const string ConversationTurn = "conversation.turn";
     public const string ConversationHistory = "conversation.history";
     public const string AgentContext = "agent.context";

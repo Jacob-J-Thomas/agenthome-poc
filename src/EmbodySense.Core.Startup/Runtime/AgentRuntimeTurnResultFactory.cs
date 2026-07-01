@@ -26,9 +26,22 @@ internal static class AgentRuntimeTurnResultFactory
         {
             DefaultConversationLoopTurnStatus.Completed => AgentRuntimeTurnResult.MessageCompleted(result.AssistantOutput, runIdentity),
             DefaultConversationLoopTurnStatus.Cancelled => AgentRuntimeTurnResult.MessageCancelled(result.FailureDetail ?? "Turn was cancelled.", runIdentity),
-            DefaultConversationLoopTurnStatus.Failed => AgentRuntimeTurnResult.MessageFailed(result.FailureDetail ?? "Default conversation loop turn failed.", runIdentity),
+            DefaultConversationLoopTurnStatus.Failed => AgentRuntimeTurnResult.MessageFailed(
+                result.FailureDetail ?? "Default conversation loop turn failed.",
+                runIdentity,
+                BuildAcceptedAssistantEvents(result.TranscriptMessages, runIdentity)),
             _ => throw new InvalidOperationException($"Unsupported default conversation loop status: {result.Status}.")
         };
+    }
+
+    private static IReadOnlyList<AgentRuntimeTurnEvent> BuildAcceptedAssistantEvents(
+        IReadOnlyList<RuntimeTranscriptMessage> transcriptMessages,
+        AgentRuntimeRunIdentity? runIdentity)
+    {
+        return transcriptMessages
+            .Where(message => message.Role == LlmMessageRole.Assistant && !string.IsNullOrWhiteSpace(message.Content))
+            .Select(message => AgentRuntimeTurnEvent.AssistantMessage(message.Content, runIdentity))
+            .ToArray();
     }
 
     private static AgentRuntimeRunIdentity? ToRuntimeRunIdentity(LoopRunIdentity? runIdentity)

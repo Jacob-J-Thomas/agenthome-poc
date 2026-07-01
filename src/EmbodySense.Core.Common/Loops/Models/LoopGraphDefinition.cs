@@ -113,8 +113,14 @@ public sealed record LoopGraphDefinition(
             return $"Loop graph entry node `{EntryNodeId}` does not exist.";
         }
 
+        var terminalNodeIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var terminalNodeId in TerminalNodeIds)
         {
+            if (!terminalNodeIds.Add(terminalNodeId))
+            {
+                return $"Loop graph contains duplicate terminal node id `{terminalNodeId}`.";
+            }
+
             if (!nodeIds.Contains(terminalNodeId))
             {
                 return $"Loop graph terminal node `{terminalNodeId}` does not exist.";
@@ -127,6 +133,8 @@ public sealed record LoopGraphDefinition(
         }
 
         var edgeIds = new HashSet<string>(StringComparer.Ordinal);
+        var incomingEdges = nodeIds.ToDictionary(nodeId => nodeId, _ => new List<LoopGraphEdgeDefinition>(), StringComparer.Ordinal);
+        var outgoingEdges = nodeIds.ToDictionary(nodeId => nodeId, _ => new List<LoopGraphEdgeDefinition>(), StringComparer.Ordinal);
         foreach (var edge in Edges)
         {
             var failure = ValidateEdge(edge, nodeIds);
@@ -139,9 +147,12 @@ public sealed record LoopGraphDefinition(
             {
                 return $"Loop graph contains duplicate edge id `{edge.Id}`.";
             }
+
+            incomingEdges[edge.ToNodeId].Add(edge);
+            outgoingEdges[edge.FromNodeId].Add(edge);
         }
 
-        return null;
+        return ValidateTopology(EntryNodeId, terminalNodeIds, nodeIds, incomingEdges, outgoingEdges);
     }
 
     private static string? ValidateNode(LoopGraphNodeDefinition? node)
@@ -217,5 +228,70 @@ public sealed record LoopGraphDefinition(
         }
 
         return null;
+    }
+
+    private static string? ValidateTopology(
+        string entryNodeId,
+        IReadOnlySet<string> terminalNodeIds,
+        IReadOnlySet<string> nodeIds,
+        IReadOnlyDictionary<string, List<LoopGraphEdgeDefinition>> incomingEdges,
+        IReadOnlyDictionary<string, List<LoopGraphEdgeDefinition>> outgoingEdges)
+    {
+        foreach (var terminalNodeId in terminalNodeIds)
+        {
+            if (outgoingEdges[terminalNodeId].Count > 0)
+            {
+                return $"Loop graph terminal node `{terminalNodeId}` cannot have outgoing edges.";
+            }
+        }
+
+        foreach (var nodeId in nodeIds)
+        {
+            if (!terminalNodeIds.Contains(nodeId) && outgoingEdges[nodeId].Count == 0)
+            {
+                return $"Loop graph non-terminal node `{nodeId}` must have at least one outgoing edge.";
+            }
+        }
+
+        var reachableFromEntry = FindReachableNodes([entryNodeId], nodeId => outgoingEdges[nodeId].Select(edge => edge.ToNodeId));
+        foreach (var nodeId in nodeIds)
+        {
+            if (!reachableFromEntry.Contains(nodeId))
+            {
+                return $"Loop graph node `{nodeId}` is unreachable from entry node `{entryNodeId}`.";
+            }
+        }
+
+        var canReachTerminal = FindReachableNodes(terminalNodeIds, nodeId => incomingEdges[nodeId].Select(edge => edge.FromNodeId));
+        foreach (var nodeId in nodeIds)
+        {
+            if (!canReachTerminal.Contains(nodeId))
+            {
+                return $"Loop graph node `{nodeId}` cannot reach a terminal node.";
+            }
+        }
+
+        return null;
+    }
+
+    private static HashSet<string> FindReachableNodes(IEnumerable<string> startNodeIds, Func<string, IEnumerable<string>> getNextNodeIds)
+    {
+        var reachable = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Queue<string>(startNodeIds);
+        while (pending.Count > 0)
+        {
+            var nodeId = pending.Dequeue();
+            if (!reachable.Add(nodeId))
+            {
+                continue;
+            }
+
+            foreach (var nextNodeId in getNextNodeIds(nodeId))
+            {
+                pending.Enqueue(nextNodeId);
+            }
+        }
+
+        return reachable;
     }
 }

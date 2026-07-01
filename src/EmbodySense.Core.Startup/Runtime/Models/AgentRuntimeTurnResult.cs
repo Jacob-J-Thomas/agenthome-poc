@@ -76,15 +76,20 @@ public sealed record AgentRuntimeTurnResult
         };
     }
 
-    public static AgentRuntimeTurnResult MessageFailed(string failureDetail, AgentRuntimeRunIdentity? runIdentity = null)
+    public static AgentRuntimeTurnResult MessageFailed(
+        string failureDetail,
+        AgentRuntimeRunIdentity? runIdentity = null,
+        IReadOnlyList<AgentRuntimeTurnEvent>? priorEvents = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(failureDetail);
+        var events = new List<AgentRuntimeTurnEvent>(priorEvents ?? []);
+        events.Add(AgentRuntimeTurnEvent.Failure(failureDetail, runIdentity));
         return new AgentRuntimeTurnResult(AgentRuntimeTurnStatus.MessageFailed)
         {
             Output = failureDetail,
             RunIdentity = runIdentity,
             FailureDetail = failureDetail,
-            Events = [AgentRuntimeTurnEvent.Failure(failureDetail, runIdentity)]
+            Events = events
         };
     }
 

@@ -4,13 +4,13 @@
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="EmbodySense current implementation: CLI harness loop" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="1">
+        <mxCell id="title" value="EmbodySense current implementation: shared default conversation loop" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="1">
           <mxGeometry x="60" y="30" width="760" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="subtitle" value="Source of truth: src/EmbodySense.Cli and src/EmbodySense.Core. Update this draw.io file whenever run-loop, inference, workspace, permission, or audit behavior changes." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="1">
+        <mxCell id="subtitle" value="Source of truth: src/EmbodySense.Cli, src/EmbodySense.Web, and src/EmbodySense.Core. Update this draw.io file whenever run-loop, inference, workspace, permission, or audit behavior changes." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="1">
           <mxGeometry x="60" y="72" width="1020" height="34" as="geometry" />
         </mxCell>
-        <mxCell id="program" value="Program.RunAsync(args)&lt;br&gt;Parse first CLI command" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=13" vertex="1" parent="1">
+        <mxCell id="program" value="CLI Program.RunAsync(args)&lt;br&gt;Web WebAgentRuntimeHost&lt;br&gt;Surface host enters shared runtime facade" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=13" vertex="1" parent="1">
           <mxGeometry x="70" y="150" width="220" height="70" as="geometry" />
         </mxCell>
         <mxCell id="command" value="command?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=13" vertex="1" parent="1">
@@ -28,16 +28,16 @@
         <mxCell id="audit" value="audit [tail] [root] [--limit count]&lt;br&gt;AuditCommand reads .agent/audit/events.ndjson&lt;br&gt;Prints recent event metadata" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="350" y="525" width="270" height="95" as="geometry" />
         </mxCell>
-        <mxCell id="run" value="run&lt;br&gt;RunCommand parses options&lt;br&gt;Creates LlmInferenceClient + AgentHarnessSession" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E9D8FD;strokeColor=#6B46C1;fontSize=13;fontStyle=1" vertex="1" parent="1">
-          <mxGeometry x="350" y="670" width="270" height="70" as="geometry" />
+        <mxCell id="run" value="run&lt;br&gt;RunCommand parses options&lt;br&gt;AgentRuntimeFactory creates LlmInferenceClient + ConversationRuntimeState + DefaultConversationLoopRunner&lt;br&gt;Loads default loop definition + system-locked graph&lt;br&gt;Runtime surface = cli" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E9D8FD;strokeColor=#6B46C1;fontSize=13;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="350" y="670" width="270" height="100" as="geometry" />
         </mxCell>
-        <mxCell id="banner" value="AgentHarnessLoop.RunHarnessLoopAsync(session)&lt;br&gt;Print harness banner&lt;br&gt;Own console input/output only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
+        <mxCell id="banner" value="Cli.Command.AgentRuntimeConsoleHost.RunAsync(...)&lt;br&gt;Print banner&lt;br&gt;Own console input/output only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="700" y="645" width="230" height="75" as="geometry" />
         </mxCell>
-        <mxCell id="options" value="LlmInferenceClientOptions&lt;br&gt;Surface = OpenAiCodex&lt;br&gt;model from --model / -m / positional&lt;br&gt;workdir from --workdir or current dir&lt;br&gt;codex path, sandbox, approval policy&lt;br&gt;ephemeral unless --persist-session" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
+        <mxCell id="options" value="LlmInferenceClientOptions&lt;br&gt;Surface = OpenAiCodex&lt;br&gt;model from --model / -m / positional or Web options&lt;br&gt;workdir from --workdir or current dir&lt;br&gt;codex path and sandbox" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="995" y="620" width="275" height="135" as="geometry" />
         </mxCell>
-        <mxCell id="prompt" value="Loop until exit&lt;br&gt;Console.Write(&amp;quot;&amp;gt; &amp;quot;)&lt;br&gt;Console.ReadLine()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
+        <mxCell id="prompt" value="Loop until exit&lt;br&gt;Console writes User: prompt&lt;br&gt;Console.ReadLine() then AgentRuntime.RunTurnAsync(...)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="700" y="785" width="230" height="85" as="geometry" />
         </mxCell>
         <mxCell id="exitDecision" value="EOF or exit command?&lt;br&gt;/exit, /quit, exit, quit" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="1">
@@ -49,7 +49,7 @@
         <mxCell id="blankDecision" value="blank input?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="700" y="920" width="135" height="90" as="geometry" />
         </mxCell>
-        <mxCell id="addUser" value="AgentHarnessSession.SendUserMessageAsync(input)&lt;br&gt;Add user message to in-memory history&lt;br&gt;Build request from session messages" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
+        <mxCell id="addUser" value="DefaultConversationLoopRunner.RunTurnAsync(input)&lt;br&gt;Create loop run identity + started record&lt;br&gt;Validate current system-locked default graph + edge chain&lt;br&gt;Append user message to state + memory&lt;br&gt;Build request from ConversationRuntimeState" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="930" y="930" width="245" height="70" as="geometry" />
         </mxCell>
         <mxCell id="generate" value="LlmInferenceClient.GenerateAsync(request)&lt;br&gt;Delegates through audited provider pipeline&lt;br&gt;Append llm.inference.start if .agent exists" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
@@ -61,29 +61,29 @@
         <mxCell id="unsupported" value="Azure AI Foundry / other surfaces&lt;br&gt;NotSupportedInferenceClient&lt;br&gt;Currently placeholder only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#C53030;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1040" y="1070" width="205" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="codex" value="CodexCliInferenceClient&lt;br&gt;CodexCliPromptFormatter builds transcript&lt;br&gt;CodexCliProcessStartInfoFactory builds args" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
+        <mxCell id="codex" value="CodexAppServerInferenceClient&lt;br&gt;ContextBuilder builds turn input + assigned command guidance&lt;br&gt;ToolBridge exposes loop-assigned dynamic commands" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1240" y="1185" width="285" height="85" as="geometry" />
         </mxCell>
-        <mxCell id="process" value="Start Codex process&lt;br&gt;codex[.cmd] --ask-for-approval &amp;lt;policy&amp;gt; exec --sandbox &amp;lt;mode&amp;gt; [--ephemeral] [--skip-git-repo-check] [--model &amp;lt;model&amp;gt;] -&lt;br&gt;Write prompt to stdin; collect stdout/stderr" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
+        <mxCell id="process" value="Start Codex app-server process&lt;br&gt;codex[.cmd] app-server --stdio&lt;br&gt;Send JSON-RPC thread/start + turn/start&lt;br&gt;Read item/agentMessage/delta + turn/completed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1240" y="1310" width="285" height="125" as="geometry" />
         </mxCell>
-        <mxCell id="exitCode" value="Codex exit code 0?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="1">
+        <mxCell id="exitCode" value="turn/completed status?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1265" y="1475" width="170" height="95" as="geometry" />
         </mxCell>
-        <mxCell id="failure" value="Failure path&lt;br&gt;Throw InvalidOperationException&lt;br&gt;Append llm.inference.complete failed if audit log exists&lt;br&gt;Program catch prints error and returns 1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#C53030;fontSize=12" vertex="1" parent="1">
+        <mxCell id="failure" value="Failure path&lt;br&gt;Record failed/cancelled loop run&lt;br&gt;Return AgentRuntimeTurnResult failure/cancelled&lt;br&gt;Surface projects error/cancel event" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#C53030;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="960" y="1470" width="250" height="115" as="geometry" />
         </mxCell>
-        <mxCell id="success" value="Success path&lt;br&gt;Trim stdout into LlmInferenceResponse&lt;br&gt;Append llm.inference.complete succeeded if audit log exists" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
+        <mxCell id="success" value="Success path&lt;br&gt;Extract final agentMessage from turn/completed&lt;br&gt;Return LlmInferenceResponse&lt;br&gt;Append llm.inference.complete succeeded if audit log exists" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1240" y="1610" width="285" height="95" as="geometry" />
         </mxCell>
-        <mxCell id="print" value="AgentHarnessSession stores assistant output&lt;br&gt;Console.WriteLine(output)&lt;br&gt;Prompt again" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
+        <mxCell id="print" value="DefaultConversationLoopRunner stores assistant output&lt;br&gt;Record completed loop run or surface terminal persistence failure&lt;br&gt;Console/Web project streamed or final output&lt;br&gt;Prompt again" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="930" y="1630" width="240" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- No first-class action/tool execution broker in this harness loop.&lt;br&gt;- Directory permissions are scaffolded by init, displayed by status, and exposed through ToolPermissionService; run does not enforce them directly.&lt;br&gt;- Audit stores inference metadata and outcomes, not raw prompts or responses.&lt;br&gt;- Conversation history is process-memory only inside AgentHarnessSession for the current run." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
-          <mxGeometry x="70" y="870" width="520" height="130" as="geometry" />
+        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- Default conversation turns flow through DefaultConversationLoopRunner.&lt;br&gt;- Default loop definition is loaded from .agent/loops/definitions when present.&lt;br&gt;- Current definition shape requires an explicit system-locked graph and validated edge chain.&lt;br&gt;- Loop run records are written for started/completed/failed/cancelled turns.&lt;br&gt;- Terminal completed-run persistence failure surfaces as a failed turn.&lt;br&gt;- Loop CapabilityIds filter workspace commands before permissions.&lt;br&gt;- ToolPermissionService + ToolBroker enforce path policy, approval, execution, and audit.&lt;br&gt;- Verbose mode shows logical pre-provider context, graph summary, loop authority, memory status, limits, and compaction status.&lt;br&gt;- Web and CLI turns share AgentRuntime.RunTurnAsync." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
+          <mxGeometry x="70" y="870" width="520" height="185" as="geometry" />
         </mxCell>
         <mxCell id="maintenance" value="Documentation maintenance&lt;br&gt;Agents should update README.md and this draw.io source in the same change when real implementation behavior changes." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFAF0;strokeColor=#C05621;fontSize=12;dashed=1" vertex="1" parent="1">
-          <mxGeometry x="70" y="1040" width="520" height="85" as="geometry" />
+          <mxGeometry x="70" y="1070" width="520" height="85" as="geometry" />
         </mxCell>
         <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2D3748;endArrow=block;endFill=1" edge="1" parent="1" source="program" target="command">
           <mxGeometry relative="1" as="geometry" />

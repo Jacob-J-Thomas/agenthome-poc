@@ -24,7 +24,7 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
 
         Directory.CreateDirectory(_paths.LoopDefinitionsPath);
         var json = JsonSerializer.Serialize(definition, JsonOptions) + Environment.NewLine;
-        await File.WriteAllTextAsync(LoopArtifactPaths.GetDefinitionPath(_paths, definition.Id), json, cancellationToken);
+        await LoopArtifactFileWriter.WriteTextAsync(LoopArtifactPaths.GetDefinitionPath(_paths, definition.Id), json, cancellationToken);
     }
 
     public async Task<LoopDefinition?> LoadAsync(string loopId, CancellationToken cancellationToken = default)

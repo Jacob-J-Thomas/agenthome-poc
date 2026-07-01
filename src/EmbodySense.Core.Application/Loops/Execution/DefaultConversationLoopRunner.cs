@@ -69,6 +69,9 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 ["failurePolicy"] = _loopDefinition.FailurePolicy.ToString()
             });
         var userMessageAccepted = false;
+        // TODO(loop-turn-atomicity): Runtime state, conversation memory, and loop-run status are still separate writes.
+        // Before replay, resume, cron, hooks, or subagent loops depend on this path, introduce a transaction, outbox, or checkpoint model that can explain and repair partial turn acceptance.
+        var acceptedTranscriptMessages = new List<RuntimeTranscriptMessage>();
 
         try
         {
@@ -95,6 +98,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             await EmitVisibleContextAsync(request, runIdentity, inferenceContextMessages);
             _conversationState.AppendMessage(userMessage);
             userMessageAccepted = true;
+            acceptedTranscriptMessages.Add(new RuntimeTranscriptMessage(userMessage));
             if (_conversationMemoryStore is not null)
             {
                 await _conversationMemoryStore.AppendMessageAsync(userMessage, request.CancellationToken);
@@ -103,21 +107,24 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             var response = await _inferenceClient.GenerateAsync(inferenceRequest, request.ResponseChunkHandler, request.CancellationToken);
             var assistantMessage = LlmMessage.Assistant(response.OutputText);
             _conversationState.AppendMessage(assistantMessage);
+            acceptedTranscriptMessages.Add(new RuntimeTranscriptMessage(assistantMessage));
             if (_conversationMemoryStore is not null)
             {
                 await _conversationMemoryStore.AppendMessageAsync(assistantMessage, request.CancellationToken);
             }
 
-            // TODO(loop-run-status-durability): Completion status persistence is best-effort after the assistant response is already
-            // accepted into state and memory. Revisit with a transactional outbox or retry model before loop replay/resume relies on it.
-            _ = await TrySaveRunAsync(run.Complete(DateTimeOffset.UtcNow), CancellationToken.None);
-            return DefaultConversationLoopTurnResult.Completed(
-                response.OutputText,
-                [
-                    new RuntimeTranscriptMessage(userMessage),
-                    new RuntimeTranscriptMessage(assistantMessage)
-                ],
-                runIdentity);
+            var transcriptMessages = acceptedTranscriptMessages.ToArray();
+            var completionSaveFailure = await TrySaveRunAsync(run.Complete(DateTimeOffset.UtcNow), CancellationToken.None);
+            if (completionSaveFailure is not null)
+            {
+                return DefaultConversationLoopTurnResult.Failed(
+                    $"Assistant response was accepted, but completed loop run status could not be recorded: {completionSaveFailure}",
+                    transcriptMessages,
+                    runIdentity,
+                    userMessageAccepted: true);
+            }
+
+            return DefaultConversationLoopTurnResult.Completed(response.OutputText, transcriptMessages, runIdentity);
         }
         catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
         {
@@ -125,7 +132,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             var saveFailure = await TrySaveRunAsync(run.Cancel(DateTimeOffset.UtcNow, detail), CancellationToken.None);
             return DefaultConversationLoopTurnResult.Cancelled(
                 IncludeRunPersistenceFailure(detail, saveFailure),
-                userMessageAccepted ? [new RuntimeTranscriptMessage(userMessage)] : [],
+                acceptedTranscriptMessages.ToArray(),
                 runIdentity,
                 userMessageAccepted);
         }
@@ -134,7 +141,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             var saveFailure = await TrySaveRunAsync(run.Fail(DateTimeOffset.UtcNow, exception.Message), CancellationToken.None);
             return DefaultConversationLoopTurnResult.Failed(
                 IncludeRunPersistenceFailure(exception.Message, saveFailure),
-                userMessageAccepted ? [new RuntimeTranscriptMessage(userMessage)] : [],
+                acceptedTranscriptMessages.ToArray(),
                 runIdentity,
                 userMessageAccepted);
         }

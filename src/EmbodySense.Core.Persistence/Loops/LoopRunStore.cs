@@ -26,7 +26,7 @@ public sealed class LoopRunStore : ILoopRunStore
         var path = LoopArtifactPaths.GetRunPath(_paths, run.LoopId, run.RunId);
         Directory.CreateDirectory(Path.GetDirectoryName(path) ?? _paths.LoopRunsPath);
         var json = JsonSerializer.Serialize(run, JsonOptions) + Environment.NewLine;
-        await File.WriteAllTextAsync(path, json, cancellationToken);
+        await LoopArtifactFileWriter.WriteTextAsync(path, json, cancellationToken);
     }
 
     public async Task<LoopRunRecord?> LoadAsync(string loopId, string runId, CancellationToken cancellationToken = default)
@@ -104,6 +104,49 @@ public sealed class LoopRunStore : ILoopRunStore
         if (run.Metadata is null || run.Metadata.Keys.Any(string.IsNullOrWhiteSpace) || run.Metadata.Values.Any(value => value is null))
         {
             throw new ArgumentException("Loop run metadata must be present and contain non-empty keys.", nameof(run));
+        }
+
+        if (run.CompletedAtUtc is not null && run.CompletedAtUtc < run.StartedAtUtc)
+        {
+            throw new FormatException("Loop run completion timestamp cannot be earlier than the start timestamp.");
+        }
+
+        switch (run.Status)
+        {
+            case LoopRunStatus.Started:
+                if (run.CompletedAtUtc is not null || !string.IsNullOrWhiteSpace(run.FailureDetail))
+                {
+                    throw new FormatException("Started loop runs cannot include terminal timestamps or failure details.");
+                }
+
+                break;
+
+            case LoopRunStatus.Completed:
+                if (run.CompletedAtUtc is null)
+                {
+                    throw new FormatException("Completed loop runs must include a completion timestamp.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(run.FailureDetail))
+                {
+                    throw new FormatException("Completed loop runs cannot include failure details.");
+                }
+
+                break;
+
+            case LoopRunStatus.Failed:
+            case LoopRunStatus.Cancelled:
+                if (run.CompletedAtUtc is null)
+                {
+                    throw new FormatException("Failed and cancelled loop runs must include a terminal timestamp.");
+                }
+
+                if (string.IsNullOrWhiteSpace(run.FailureDetail))
+                {
+                    throw new FormatException("Failed and cancelled loop runs must include a failure detail.");
+                }
+
+                break;
         }
     }
 

@@ -27,6 +27,7 @@ public sealed class LoopDefinitionStoreTests
         Assert.Contains("\"editMode\": \"system-locked\"", json);
         Assert.Contains("\"entryNodeId\": \"accept-user-message\"", json);
         Assert.Contains("\"kind\": \"model-inference\"", json);
+        Assert.Empty(Directory.EnumerateFiles(paths.LoopDefinitionsPath, "*.tmp", SearchOption.TopDirectoryOnly));
         var loaded = await store.LoadAsync("default-conversation");
         Assert.NotNull(loaded);
         Assert.Equal(definition.SchemaVersion, loaded.SchemaVersion);
@@ -46,7 +47,7 @@ public sealed class LoopDefinitionStoreTests
     }
 
     [Fact]
-    public async Task LoadAsync_reads_current_draft_loop_json()
+    public async Task LoadAsync_rejects_current_definition_without_required_edit_mode()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -71,16 +72,41 @@ public sealed class LoopDefinitionStoreTests
             """);
         var store = new LoopDefinitionStore(paths);
 
-        var definition = await store.LoadAsync("default-conversation");
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.LoadAsync("default-conversation"));
 
-        Assert.NotNull(definition);
-        Assert.Equal(LoopTrigger.HumanMessage, definition.Trigger);
-        Assert.Equal(LoopMemoryScope.WorkspaceStartupContext, definition.MemoryScope);
-        Assert.Equal(LoopReviewPolicy.ReviewAtAuthorityBoundaries, definition.ReviewPolicy);
-        Assert.Equal(LoopFailurePolicy.RecordFailureAndSurfaceToUser, definition.FailurePolicy);
-        Assert.Equal(LoopState.Enabled, definition.State);
-        Assert.Equal(LoopEditMode.SystemLocked, definition.EditMode);
-        Assert.Equal(DefaultConversationLoopGraphIds.AcceptUserMessage, definition.Graph.EntryNodeId);
+        Assert.Contains("unsupported EditMode value `Unknown`", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task LoadAsync_rejects_current_schema_without_graph()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.LoopDefinitionsPath);
+        await File.WriteAllTextAsync(paths.DefaultConversationLoopDefinitionPath, """
+            {
+              "schemaVersion": 1,
+              "id": "default-conversation",
+              "displayName": "Default conversation loop",
+              "description": "The governed loop behind ordinary chat turns in this workspace.",
+              "roleId": "default-assistant",
+              "trigger": "human-message",
+              "memoryScope": "workspace-startup-context",
+              "capabilityIds": [
+                "conversation.turn",
+                "conversation.history"
+              ],
+              "reviewPolicy": "review-at-authority-boundaries",
+              "failurePolicy": "record-failure-and-surface-to-user",
+              "state": "enabled",
+              "editMode": "system-locked"
+            }
+            """);
+        var store = new LoopDefinitionStore(paths);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.LoadAsync("default-conversation"));
+
+        Assert.Contains("must include a graph", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

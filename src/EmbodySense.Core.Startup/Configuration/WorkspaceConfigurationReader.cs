@@ -31,6 +31,8 @@ public sealed class WorkspaceConfigurationReader
         var documents = await ReadDocumentsAsync(paths, cancellationToken);
         var audit = await ReadAuditAsync(paths, cancellationToken);
         var conversationHistory = await ReadConversationHistoryAsync(paths, cancellationToken);
+        // TODO(loop-configuration-visibility): Before Web loop panels or loop-builder work rely on this snapshot, include
+        // default loop definition state, latest run summaries, active loop identity, and loop read problems here.
 
         return new WorkspaceConfigurationSnapshot(
             DateTimeOffset.UtcNow,

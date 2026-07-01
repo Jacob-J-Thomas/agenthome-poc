@@ -15,9 +15,9 @@ public sealed record LoopDefinition(
 {
     public const int CurrentSchemaVersion = 1;
 
-    public LoopEditMode EditMode { get; init; } = LoopEditMode.SystemLocked;
+    public LoopEditMode EditMode { get; init; }
 
-    public LoopGraphDefinition Graph { get; init; } = LoopGraphDefinition.CreateDefaultConversation();
+    public LoopGraphDefinition Graph { get; init; } = null!;
 
     public static LoopDefinition CreateDefaultConversation()
     {

@@ -22,6 +22,7 @@ public sealed class LoopRunStoreTests
         var json = await File.ReadAllTextAsync(Path.Combine(paths.LoopRunsPath, "default-conversation", "run-1.json"));
         Assert.Contains("\"status\": \"started\"", json);
         Assert.Contains("\"trigger\": \"human-message\"", json);
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(paths.LoopRunsPath, "default-conversation"), "*.tmp", SearchOption.TopDirectoryOnly));
         var loaded = await store.LoadAsync("default-conversation", "run-1");
         Assert.NotNull(loaded);
         Assert.Equal(run.SchemaVersion, loaded.SchemaVersion);
@@ -128,6 +129,18 @@ public sealed class LoopRunStoreTests
         var run = CreateRun("run-1", DateTimeOffset.Parse("2026-06-28T12:00:00+00:00")) with { Status = (LoopRunStatus)999 };
 
         await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(run));
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidLifecycleRecords))]
+    public async Task SaveAsync_rejects_invalid_lifecycle_records(LoopRunRecord run, string expectedMessage)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new LoopRunStore(new WorkspacePaths(workspace.RootPath));
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(run));
+
+        Assert.Contains(expectedMessage, exception.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -247,5 +260,20 @@ public sealed class LoopRunStoreTests
             LoopTrigger.HumanMessage,
             startedAtUtc,
             new Dictionary<string, string> { ["connection"] = "test" });
+    }
+
+    public static IEnumerable<object[]> InvalidLifecycleRecords()
+    {
+        var startedAt = DateTimeOffset.Parse("2026-06-28T12:00:00+00:00");
+        var completedAt = DateTimeOffset.Parse("2026-06-28T12:05:00+00:00");
+        var run = CreateRun("run-1", startedAt);
+
+        yield return [run with { CompletedAtUtc = completedAt }, "Started loop runs cannot include terminal timestamps"];
+        yield return [run.Complete(completedAt) with { CompletedAtUtc = null }, "Completed loop runs must include a completion timestamp"];
+        yield return [run.Complete(completedAt) with { FailureDetail = "unexpected failure" }, "Completed loop runs cannot include failure details"];
+        yield return [run.Fail(completedAt, "provider failed") with { CompletedAtUtc = null }, "Failed and cancelled loop runs must include a terminal timestamp"];
+        yield return [run.Fail(completedAt, "provider failed") with { FailureDetail = "" }, "Failed and cancelled loop runs must include a failure detail"];
+        yield return [run.Cancel(completedAt, "cancelled") with { CompletedAtUtc = null }, "Failed and cancelled loop runs must include a terminal timestamp"];
+        yield return [run.Complete(startedAt.AddMinutes(-1)), "completion timestamp cannot be earlier"];
     }
 }

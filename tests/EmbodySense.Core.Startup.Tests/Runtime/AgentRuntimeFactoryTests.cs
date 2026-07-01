@@ -109,6 +109,33 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public void MessageFailed_preserves_prior_assistant_events_before_failure()
+    {
+        var runIdentity = new AgentRuntimeRunIdentity("default-conversation", "run-1", "default-assistant");
+
+        var result = AgentRuntimeTurnResult.MessageFailed(
+            "terminal persistence failed",
+            runIdentity,
+            [AgentRuntimeTurnEvent.AssistantMessage("accepted response", runIdentity)]);
+
+        Assert.Equal(AgentRuntimeTurnStatus.MessageFailed, result.Status);
+        Assert.Collection(
+            result.Events,
+            turnEvent =>
+            {
+                Assert.Equal(AgentRuntimeTurnEventKind.AssistantMessage, turnEvent.Kind);
+                Assert.Equal("accepted response", turnEvent.Text);
+                Assert.Equal(runIdentity, turnEvent.RunIdentity);
+            },
+            turnEvent =>
+            {
+                Assert.Equal(AgentRuntimeTurnEventKind.Failure, turnEvent.Kind);
+                Assert.Equal("terminal persistence failed", turnEvent.Text);
+                Assert.Equal(runIdentity, turnEvent.RunIdentity);
+            });
+    }
+
+    [Fact]
     public async Task RunTurnAsync_returns_failed_runtime_result_when_default_loop_is_disabled()
     {
         using var workspace = new TestWorkspace();
