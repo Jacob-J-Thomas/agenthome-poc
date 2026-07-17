@@ -17,5 +17,11 @@ public interface IConversationMemoryStore
 
     Task AppendMessageAsync(LlmMessage message, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Atomically appends <paramref name="message"/> only when the current persisted conversation exactly matches <paramref name="expectedPrefix"/>.
+    /// Implementations must not perform the comparison and append as separable writes.
+    /// </summary>
+    Task<bool> TryAppendMessageAsync(IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<ConversationMemorySearchResult>> SearchCurrentConversationAsync(string query, int limit = 20, CancellationToken cancellationToken = default);
 }

@@ -183,6 +183,11 @@ public sealed class RuntimeCommandServiceTests
             return Task.CompletedTask;
         }
 
+        public Task<bool> TryAppendMessageAsync(IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(false);
+        }
+
         public Task<IReadOnlyList<ConversationMemorySearchResult>> SearchCurrentConversationAsync(string query, int limit = 20, CancellationToken cancellationToken = default)
         {
             return Task.FromResult<IReadOnlyList<ConversationMemorySearchResult>>([]);

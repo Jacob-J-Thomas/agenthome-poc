@@ -118,12 +118,16 @@ public sealed class RuntimeCommandService
         RuntimeSessionState state,
         CancellationToken cancellationToken)
     {
-        if (_conversationMemoryStore is not null)
+        using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
         {
-            await _conversationMemoryStore.StartFreshConversationAsync(cancellationToken);
+            if (_conversationMemoryStore is not null)
+            {
+                await _conversationMemoryStore.StartFreshConversationAsync(cancellationToken);
+            }
+
+            conversationState.ReplaceMessages(_startupMessages, _startupMessages.Count);
         }
 
-        conversationState.ReplaceMessages(_startupMessages, _startupMessages.Count);
         state.ResetModelTurn();
         ClearPendingInput();
     }
@@ -174,13 +178,17 @@ public sealed class RuntimeCommandService
         var selectedConversation = conversations[selectedNumber - 1];
         try
         {
-            var conversationMessages = await _conversationMemoryStore!.LoadConversationAsync(selectedConversation.ConversationId, cancellationToken);
-            await _conversationMemoryStore.ResumeConversationAsync(selectedConversation.ConversationId, cancellationToken);
-            conversationState.ReplaceMessages(
-                _startupMessages.Concat(conversationMessages).ToArray(),
-                _startupMessages.Count,
-                RuntimeContextSource.RestoredConversationHistory,
-                $"Restored from conversation history `{selectedConversation.ConversationId}` at the user's request.");
+            IReadOnlyList<LlmMessage> conversationMessages;
+            using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
+            {
+                conversationMessages = await _conversationMemoryStore!.LoadConversationAsync(selectedConversation.ConversationId, cancellationToken);
+                await _conversationMemoryStore.ResumeConversationAsync(selectedConversation.ConversationId, cancellationToken);
+                conversationState.ReplaceMessages(
+                    _startupMessages.Concat(conversationMessages).ToArray(),
+                    _startupMessages.Count,
+                    RuntimeContextSource.RestoredConversationHistory,
+                    $"Restored from conversation history `{selectedConversation.ConversationId}` at the user's request.");
+            }
             return RuntimeCommandResult.HandledOutput($"Loaded conversation `{selectedConversation.ConversationId}` ({conversationMessages.Count} messages).", conversationMessages);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)

@@ -372,6 +372,36 @@ public sealed class DefaultConversationLoopRunnerTests
             run => Assert.Equal(LoopRunStatus.Failed, run.Status));
     }
 
+    [Fact]
+    public async Task RunTurnAsync_holds_the_conversation_commit_boundary_until_the_assistant_is_persisted()
+    {
+        var client = new BlockingInferenceClient("completed response");
+        var memory = new RecordingConversationMemoryStore();
+        var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
+        var runner = new DefaultConversationLoopRunner(client, state, memory);
+
+        var turn = runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+        await client.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var competingLease = state.AcquireExclusiveAccessAsync();
+
+        Assert.False(competingLease.IsCompleted);
+
+        client.Release.TrySetResult();
+        var result = await turn;
+        using (await competingLease)
+        {
+            state.AppendMessage(LlmMessage.Assistant("later custom-loop publication"));
+        }
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Completed, result.Status);
+        Assert.Collection(
+            state.Messages,
+            message => Assert.Equal("startup context", message.Content),
+            message => Assert.Equal("hello", message.Content),
+            message => Assert.Equal("completed response", message.Content),
+            message => Assert.Equal("later custom-loop publication", message.Content));
+    }
+
     private sealed class RecordingInferenceClient(string output) : ILlmInferenceClient
     {
         public List<IReadOnlyList<LlmMessage>> Requests { get; } = [];
@@ -398,6 +428,23 @@ public sealed class DefaultConversationLoopRunnerTests
         }
     }
 
+    private sealed class BlockingInferenceClient(string output) : ILlmInferenceClient
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler = null,
+            CancellationToken cancellationToken = default)
+        {
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex);
+        }
+    }
+
     private sealed class RecordingConversationMemoryStore : IConversationMemoryStore
     {
         public List<LlmMessage> Messages { get; } = [];
@@ -413,6 +460,18 @@ public sealed class DefaultConversationLoopRunnerTests
 
             Messages.Add(message);
             return Task.CompletedTask;
+        }
+
+        public Task<bool> TryAppendMessageAsync(IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
+        {
+            var matches = Messages.Count == expectedPrefix.Count
+                && Messages.Zip(expectedPrefix).All(pair => pair.First.Role == pair.Second.Role && string.Equals(pair.First.Content, pair.Second.Content, StringComparison.Ordinal));
+            if (matches)
+            {
+                Messages.Add(message);
+            }
+
+            return Task.FromResult(matches);
         }
 
         public Task<IReadOnlyList<LlmMessage>> LoadCurrentConversationAsync(CancellationToken cancellationToken = default)
