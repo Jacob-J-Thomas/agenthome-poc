@@ -106,7 +106,7 @@ public sealed class WebApiControllerTests
     }
 
     [Fact]
-    public async Task Approval_decision_defaults_to_reject_when_approved_is_missing()
+    public async Task Approval_rest_path_cannot_decide_a_connection_owned_request()
     {
         using var workspace = new TestWorkspace();
         await using var app = CreateApp(workspace.RootPath, out var options);
@@ -117,16 +117,20 @@ public sealed class WebApiControllerTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
             var coordinator = app.Services.GetRequiredService<WebApprovalCoordinator>();
+            coordinator.RegisterOwnerConnection("connection-1");
+            using var scope = coordinator.BeginApprovalScope("connection-1");
             var approvalTask = coordinator.RequestApprovalAsync(CreateRequest("req-default-reject"));
-            await WaitForPendingAsync(coordinator);
+            await WaitForPendingAsync(coordinator, "connection-1");
             var request = new HttpRequestMessage(HttpMethod.Post, "/api/approvals/req-default-reject");
             request.Headers.Add(WebSessionSecurity.HeaderName, token);
             request.Content = JsonContent.Create(new { }, options: JsonOptions);
 
             var response = await client.SendAsync(request);
+            var hubDecision = await coordinator.SubmitDecisionAsync("req-default-reject", approved: false, detail: null, decisionConnectionId: "connection-1");
             var approval = await approvalTask;
 
-            Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+            Assert.True(hubDecision.Accepted);
             Assert.False(approval.Approved);
             Assert.Equal("Rejected in the localhost web client.", approval.Detail);
         }
@@ -148,11 +152,11 @@ public sealed class WebApiControllerTests
             "Needs approval.");
     }
 
-    private static async Task WaitForPendingAsync(WebApprovalCoordinator coordinator)
+    private static async Task WaitForPendingAsync(WebApprovalCoordinator coordinator, string ownerConnectionId)
     {
         for (var i = 0; i < 20; i++)
         {
-            if (coordinator.GetPending().Count > 0)
+            if (coordinator.GetPending(ownerConnectionId).Count > 0)
             {
                 return;
             }

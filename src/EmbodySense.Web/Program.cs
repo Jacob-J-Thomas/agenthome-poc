@@ -1,4 +1,7 @@
 using Microsoft.AspNetCore.Authentication;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 
@@ -43,8 +46,15 @@ public static class Program
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
 
-        services.AddControllers().AddApplicationPart(typeof(Program).Assembly);
-        services.AddSignalR();
+        services.AddControllers().AddApplicationPart(typeof(Program).Assembly).AddJsonOptions(options =>
+        {
+            options.JsonSerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
+            options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+        });
+        services.AddSignalR().AddHubOptions<WebSessionHub>(options =>
+        {
+            options.MaximumParallelInvocationsPerClient = 2;
+        });
         services.AddAuthentication(WebSessionAuthenticationDefaults.Scheme).AddScheme<AuthenticationSchemeOptions, WebSessionAuthenticationHandler>(WebSessionAuthenticationDefaults.Scheme, _ => { });
         services.AddAuthorization(options =>
         {
@@ -59,6 +69,8 @@ public static class Program
         services.AddSingleton<IWebClientNotifier, SignalRWebClientNotifier>();
         services.AddSingleton<WebApprovalCoordinator>();
         services.AddSingleton<WebAgentRuntimeHost>();
+        services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
+        services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
     }
 
     public static void ConfigurePipeline(WebApplication app)
@@ -90,7 +102,7 @@ public static class Program
         ArgumentException.ThrowIfNullOrWhiteSpace(baseDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(fallbackDirectory);
 
-        if (Directory.Exists(Path.Combine(baseDirectory, "wwwroot")))
+        if (HasStaticWebEntryPoint(baseDirectory))
         {
             return baseDirectory;
         }
@@ -98,13 +110,13 @@ public static class Program
         var directory = new DirectoryInfo(baseDirectory);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "EmbodySense.Web.csproj")) && Directory.Exists(Path.Combine(directory.FullName, "wwwroot")))
+            if (File.Exists(Path.Combine(directory.FullName, "EmbodySense.Web.csproj")) && HasStaticWebEntryPoint(directory.FullName))
             {
                 return directory.FullName;
             }
 
             var sourceProjectPath = Path.Combine(directory.FullName, "src", "EmbodySense.Web");
-            if (File.Exists(Path.Combine(sourceProjectPath, "EmbodySense.Web.csproj")) && Directory.Exists(Path.Combine(sourceProjectPath, "wwwroot")))
+            if (File.Exists(Path.Combine(sourceProjectPath, "EmbodySense.Web.csproj")) && HasStaticWebEntryPoint(sourceProjectPath))
             {
                 return sourceProjectPath;
             }
@@ -113,12 +125,17 @@ public static class Program
         }
 
         var fallbackSourceProjectPath = Path.Combine(fallbackDirectory, "src", "EmbodySense.Web");
-        if (File.Exists(Path.Combine(fallbackSourceProjectPath, "EmbodySense.Web.csproj")) && Directory.Exists(Path.Combine(fallbackSourceProjectPath, "wwwroot")))
+        if (File.Exists(Path.Combine(fallbackSourceProjectPath, "EmbodySense.Web.csproj")) && HasStaticWebEntryPoint(fallbackSourceProjectPath))
         {
             return fallbackSourceProjectPath;
         }
 
         return fallbackDirectory;
+    }
+
+    private static bool HasStaticWebEntryPoint(string directory)
+    {
+        return Directory.Exists(Path.Combine(directory, "wwwroot")) && File.Exists(Path.Combine(directory, "wwwroot", "index.html"));
     }
 
     public static void PrintHelp(TextWriter writer)

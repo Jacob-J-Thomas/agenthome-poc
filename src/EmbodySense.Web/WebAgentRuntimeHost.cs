@@ -1,4 +1,5 @@
 using EmbodySense.Core.Startup.Configuration;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
@@ -7,18 +8,21 @@ using EmbodySense.Web.Services;
 
 namespace EmbodySense.Web;
 
-public sealed class WebAgentRuntimeHost : IAsyncDisposable
+public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker
 {
     private readonly WebRunOptions _options;
     private readonly WebApprovalCoordinator _approvalCoordinator;
     private readonly IWorkspaceInitializer _workspaceInitializer;
     private readonly WorkspaceStatusReader _statusReader;
     private readonly WorkspaceConfigurationReader _configurationReader;
+    private readonly LoopRunInspectionFacade _loopRuns;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly object _turnCancellationGate = new();
+    private readonly CancellationTokenSource _hostLifetimeCancellation = new();
     private CancellationTokenSource? _turnCancellation;
     private AgentRuntime? _runtime;
+    private int _disposed;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
         : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb())
@@ -36,11 +40,17 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         _workspaceInitializer = workspaceInitializer;
         _statusReader = new WorkspaceStatusReader();
         _configurationReader = new WorkspaceConfigurationReader();
+        _loopRuns = new LoopRunInspectionFacade(options.WorkingDirectory, WorkspaceActors.Web, AgentRuntimeSurface.Web.Id);
     }
 
     public WebStatus GetStatus()
     {
         return WebStatusFactory.Create(_options, _statusReader.Read(_options.WorkingDirectory));
+    }
+
+    public LoopRunModelSnapshot GetCustomLoopModel()
+    {
+        return new LoopRunModelSnapshot("OpenAiCodex", string.IsNullOrWhiteSpace(_options.Model) ? null : _options.Model);
     }
 
     public async Task<WebStatus> InitializeWorkspaceAsync(CancellationToken cancellationToken = default)
@@ -57,6 +67,72 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
     public async Task<WorkspaceConfigurationSnapshot> GetConfigurationAsync(CancellationToken cancellationToken = default)
     {
         return await _configurationReader.ReadAsync(_options.WorkingDirectory, CreateRuntimeConfiguration(), cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<LoopRunSummarySnapshot>> GetLoopRunsAsync(int maximumCount = 50, CancellationToken cancellationToken = default)
+    {
+        EnsureWorkspaceInitialized("reading custom-loop run evidence");
+        return await _loopRuns.ListRecentAsync(maximumCount, cancellationToken);
+    }
+
+    public async Task<LoopRunSnapshot?> GetLoopRunAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        EnsureWorkspaceInitialized("reading custom-loop run evidence");
+        return await _loopRuns.GetAsync(runId, cancellationToken);
+    }
+
+    public async Task<LoopTraceInspectionSnapshot?> GetLoopTraceAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        EnsureWorkspaceInitialized("reading custom-loop trace evidence");
+        return await _loopRuns.GetTraceAsync(runId, cancellationToken);
+    }
+
+    public async Task<LoopTraceQuotaSnapshot> GetLoopTraceQuotaAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureWorkspaceInitialized("reading custom-loop trace quota");
+        return await _loopRuns.GetTraceQuotaAsync(cancellationToken);
+    }
+
+    public async Task<LoopTraceDeletionResponse> DeleteLoopTraceAsync(string runId, string expectedTraceHash, string operationId, CancellationToken cancellationToken = default)
+    {
+        EnsureWorkspaceInitialized("deleting custom-loop trace content");
+        return await _loopRuns.DeleteTraceAsync(runId, expectedTraceHash, operationId, cancellationToken);
+    }
+
+    public async Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
+
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
+        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
+        var runtime = await GetRuntimeAsync(executionCancellation.Token);
+        return await runtime.InvokeCustomLoopAsync(input, executionCancellation.Token);
+    }
+
+    public async Task<LoopRunControlResponse> PauseLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await GetRuntimeAsync(cancellationToken);
+        return await runtime.PauseCustomLoopAsync(input, cancellationToken);
+    }
+
+    public async Task<LoopRunControlResponse> CancelLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await GetRuntimeAsync(cancellationToken);
+        return await runtime.CancelCustomLoopAsync(input, cancellationToken);
+    }
+
+    public async Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
+
+        using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
+        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
+        var runtime = await GetRuntimeAsync(executionCancellation.Token);
+        return await runtime.ResumeCustomLoopAsync(input, executionCancellation.Token);
     }
 
     public async Task SendMessageAsync(
@@ -141,18 +217,22 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        _hostLifetimeCancellation.Cancel();
         await DiscardRuntimeAsync();
 
         _runtimeGate.Dispose();
         _turnGate.Dispose();
+        _hostLifetimeCancellation.Dispose();
     }
 
     private async Task<AgentRuntime> GetRuntimeAsync(CancellationToken cancellationToken)
     {
-        if (!_statusReader.Read(_options.WorkingDirectory).IsInitialized)
-        {
-            throw new InvalidOperationException("Workspace is not initialized. Initialize it from the web client before starting a session.");
-        }
+        EnsureWorkspaceInitialized("starting a runtime session");
 
         if (_runtime is not null)
         {
@@ -174,6 +254,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable
         finally
         {
             _runtimeGate.Release();
+        }
+    }
+
+    private void EnsureWorkspaceInitialized(string operation)
+    {
+        if (!_statusReader.Read(_options.WorkingDirectory).IsInitialized)
+        {
+            throw new InvalidOperationException($"Workspace is not initialized. Initialize it from the web client before {operation}.");
         }
     }
 
