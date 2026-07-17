@@ -1,3 +1,4 @@
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -10,21 +11,31 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
 {
     private readonly WebAgentRuntimeHost _host;
     private readonly WebApprovalCoordinator _approvals;
+    private readonly IWebLoopRuntimeInvoker _loopRuntime;
 
-    public WebSessionHub(WebAgentRuntimeHost host, WebApprovalCoordinator approvals)
+    public WebSessionHub(WebAgentRuntimeHost host, WebApprovalCoordinator approvals, IWebLoopRuntimeInvoker loopRuntime)
     {
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(approvals);
+        ArgumentNullException.ThrowIfNull(loopRuntime);
 
         _host = host;
         _approvals = approvals;
+        _loopRuntime = loopRuntime;
     }
 
     public override async Task OnConnectedAsync()
     {
+        _approvals.RegisterOwnerConnection(Context.ConnectionId);
         await Clients.Caller.StatusChanged(_host.GetStatus());
         await Clients.Caller.ApprovalsChanged(_approvals.GetPending(Context.ConnectionId));
         await base.OnConnectedAsync();
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        await _approvals.DisconnectOwnerAsync(Context.ConnectionId);
+        await base.OnDisconnectedAsync(exception);
     }
 
     public async Task<WebStatus> InitializeWorkspace()
@@ -81,5 +92,37 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     public Task<bool> CancelCurrentTurn()
     {
         return Task.FromResult(_host.CancelCurrentTurn());
+    }
+
+    public async Task<LoopRunInvocationResponse> InvokeLoop(LoopRunInvocationInput input)
+    {
+        try
+        {
+            return await _loopRuntime.InvokeLoopAsync(input, Context.ConnectionId, CancellationToken.None);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new HubException("The custom-loop invocation was cancelled.");
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or IOException)
+        {
+            throw new HubException("The custom-loop invocation could not be processed safely. Check durable run evidence and the local audit log.");
+        }
+    }
+
+    public async Task<LoopRunControlResponse> ResumeLoop(LoopRunControlInput input)
+    {
+        try
+        {
+            return await _loopRuntime.ResumeLoopAsync(input, Context.ConnectionId, CancellationToken.None);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new HubException("The custom-loop Resume operation was cancelled.");
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or IOException)
+        {
+            throw new HubException("The custom-loop Resume operation could not be processed safely. Check durable run evidence and the local audit log.");
+        }
     }
 }

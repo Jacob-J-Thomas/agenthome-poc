@@ -1,9 +1,11 @@
 using EmbodySense.Tests.Support;
+using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace EmbodySense.Web.Tests;
 
@@ -46,6 +48,8 @@ public sealed class ProgramTests
         Assert.Equal(workspace.RootPath, provider.GetRequiredService<WebAgentRuntimeHost>().GetStatus().WorkspaceRoot);
         Assert.NotNull(provider.GetRequiredService<IWebClientNotifier>());
         Assert.NotNull(provider.GetRequiredService<IHubContext<WebSessionHub, IWebSessionClient>>());
+        Assert.Equal(2, provider.GetRequiredService<IOptions<HubOptions<WebSessionHub>>>().Value.MaximumParallelInvocationsPerClient);
+        Assert.NotNull(provider.GetRequiredService<LoopAuthoringFacade>());
     }
 
     [Fact]
@@ -62,6 +66,7 @@ public sealed class ProgramTests
     {
         using var workspace = new TestWorkspace();
         Directory.CreateDirectory(workspace.File("wwwroot"));
+        File.WriteAllText(workspace.File("wwwroot", "index.html"), "<!doctype html>");
 
         var contentRoot = Program.ResolveContentRoot(workspace.RootPath, "fallback");
 
@@ -75,6 +80,7 @@ public sealed class ProgramTests
         var nestedProject = workspace.File("src", "EmbodySense.Web");
         Directory.CreateDirectory(Path.Combine(nestedProject, "wwwroot"));
         File.WriteAllText(Path.Combine(nestedProject, "EmbodySense.Web.csproj"), "<Project />");
+        File.WriteAllText(Path.Combine(nestedProject, "wwwroot", "index.html"), "<!doctype html>");
 
         var contentRoot = Program.ResolveContentRoot(workspace.RootPath, "fallback");
 
@@ -91,6 +97,7 @@ public sealed class ProgramTests
         Directory.CreateDirectory(outputDirectory);
         Directory.CreateDirectory(Path.Combine(nestedProject, "wwwroot"));
         File.WriteAllText(Path.Combine(nestedProject, "EmbodySense.Web.csproj"), "<Project />");
+        File.WriteAllText(Path.Combine(nestedProject, "wwwroot", "index.html"), "<!doctype html>");
 
         var contentRoot = Program.ResolveContentRoot(outputDirectory, repoRoot);
 
@@ -104,6 +111,7 @@ public sealed class ProgramTests
         Directory.CreateDirectory(workspace.File("wwwroot"));
         Directory.CreateDirectory(workspace.File("bin", "Debug"));
         File.WriteAllText(workspace.File("EmbodySense.Web.csproj"), "<Project />");
+        File.WriteAllText(workspace.File("wwwroot", "index.html"), "<!doctype html>");
 
         var contentRoot = Program.ResolveContentRoot(workspace.File("bin", "Debug"), "fallback");
 

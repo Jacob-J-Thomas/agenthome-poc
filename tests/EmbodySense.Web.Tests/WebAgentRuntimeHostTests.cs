@@ -1,3 +1,5 @@
+using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
@@ -299,6 +301,80 @@ public sealed class WebAgentRuntimeHostTests
         });
     }
 
+    [Fact]
+    public async Task ResumeLoopAsync_requires_an_initialized_workspace()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        approvals.RegisterOwnerConnection("connection-1");
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath]);
+        await using var host = new WebAgentRuntimeHost(options, approvals);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => host.ResumeLoopAsync(new LoopRunControlInput("run-one", 1, "resume-uninitialized"), "connection-1"));
+
+        Assert.Contains("Workspace is not initialized", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_cancels_an_active_custom_loop_through_the_host_lifetime()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: 30_000);
+        var approvals = new WebApprovalCoordinator();
+        approvals.RegisterOwnerConnection("connection-1");
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        var host = new WebAgentRuntimeHost(options, approvals);
+        await host.InitializeWorkspaceAsync();
+        var definition = await CreateInvocationLoopAsync(workspace);
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-host-dispose", "host-dispose-custom-loop");
+
+        var invocation = host.InvokeLoopAsync(input, "connection-1");
+        await WaitForMarkerAsync(workspace.File("host-dispose-custom-loop.marker"));
+        var dispose = host.DisposeAsync().AsTask();
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+        var invocationException = await Record.ExceptionAsync(async () => await invocation);
+
+        Assert.True(invocationException is null or OperationCanceledException, invocationException?.ToString());
+        if (invocationException is null)
+        {
+            var response = await invocation;
+            Assert.Contains(response.ExecutionStatus, new[] { "Cancelled", "NeedsReview", "Failed" });
+        }
+    }
+
+    [Fact]
+    public async Task Owner_disconnect_returns_a_zero_execution_tool_rejection_and_the_custom_run_continues()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: -1);
+        var approvals = new WebApprovalCoordinator();
+        approvals.RegisterOwnerConnection("connection-1");
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        await using var host = new WebAgentRuntimeHost(options, approvals);
+        await host.InitializeWorkspaceAsync();
+        await File.WriteAllTextAsync(workspace.File("approval-only-note.txt"), "content-that-must-not-be-returned");
+        var definition = await CreateInvocationLoopAsync(workspace, [LoopToolAssignment.Read]);
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-owner-disconnect-tool", "request-the-governed-read");
+
+        var invocation = host.InvokeLoopAsync(input, "connection-1");
+        await WaitForPendingApprovalAsync(approvals, "connection-1");
+        await approvals.DisconnectOwnerAsync("connection-1");
+        var response = await invocation;
+        var toolResponse = await File.ReadAllTextAsync(workspace.File("owner-disconnected-tool-response.json"));
+        var audit = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson"));
+
+        Assert.Equal("Completed", response.ExecutionStatus);
+        Assert.Contains("continued after governed tool denial", response.Run!.FinalOutput, StringComparison.Ordinal);
+        Assert.Contains("owner_disconnected", toolResponse, StringComparison.Ordinal);
+        Assert.Contains("\"success\":false", toolResponse, StringComparison.Ordinal);
+        Assert.DoesNotContain("content-that-must-not-be-returned", toolResponse, StringComparison.Ordinal);
+        Assert.Contains("\"action\":\"tool.approval.decision\"", audit, StringComparison.Ordinal);
+        Assert.Contains("\"outcome\":\"approval_rejected\"", audit, StringComparison.Ordinal);
+        var toolExecution = Assert.Single(audit.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries), line => line.Contains("\"action\":\"tool.execute\"", StringComparison.Ordinal));
+        Assert.Contains("\"outcome\":\"approval_rejected\"", toolExecution, StringComparison.Ordinal);
+        Assert.Contains("\"approved_by_human\":false", toolExecution, StringComparison.Ordinal);
+    }
+
     private static WebAgentRuntimeHost CreateHost(string rootPath, string? codexPath = null)
     {
         var options = codexPath is null
@@ -315,6 +391,41 @@ public sealed class WebAgentRuntimeHostTests
             {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","role":"user","content":"{{prompt}}"}
             {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","role":"assistant","content":"{{answer}}"}
             """);
+    }
+
+    private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace, IReadOnlyList<LoopToolAssignment>? toolAssignments = null)
+    {
+        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-host-dispose-loop")).Definition);
+        var input = new LoopDefinitionInput(
+            "Host disposal loop",
+            "Verifies host-lifetime cancellation.",
+            new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, false),
+            [new LoopInferenceStep(created.InferenceSteps.Single().Id, "Wait", "Wait for the admitted prompt.", new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null))],
+            toolAssignments ?? [],
+            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)));
+        var updated = await facade.UpdateAsync(created.Id, created.DefinitionVersion, "update-host-dispose-loop", input);
+        return Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
+    }
+
+    private static async Task WaitForMarkerAsync(string markerPath)
+    {
+        for (var attempt = 0; attempt < 100 && !File.Exists(markerPath); attempt++)
+        {
+            await Task.Delay(50);
+        }
+
+        Assert.True(File.Exists(markerPath), "The custom-loop provider attempt did not start within five seconds.");
+    }
+
+    private static async Task WaitForPendingApprovalAsync(WebApprovalCoordinator approvals, string ownerConnectionId)
+    {
+        for (var attempt = 0; attempt < 100 && approvals.GetPending(ownerConnectionId).Count == 0; attempt++)
+        {
+            await Task.Delay(50);
+        }
+
+        Assert.Single(approvals.GetPending(ownerConnectionId));
     }
 
     private static string CurrentTranscriptPath(TestWorkspace workspace)
@@ -345,6 +456,15 @@ public sealed class WebAgentRuntimeHostTests
             while (($line = [Console]::In.ReadLine()) -ne $null) {
                 $message = $line | ConvertFrom-Json
 
+                if ($message.id -eq 99) {
+                    $toolResponse = $message | ConvertTo-Json -Compress -Depth 20
+                    [IO.File]::WriteAllText((Join-Path $PSScriptRoot "owner-disconnected-tool-response.json"), $toolResponse)
+                    $text = "continued after governed tool denial"
+                    Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = "turn-test"; delta = $text } }
+                    Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = "turn-test"; turn = @{ id = "turn-test"; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
+                    continue
+                }
+
                 switch ($message.method) {
                     "initialize" {
                         Write-ProtocolJson @{ id = $message.id; result = @{} }
@@ -369,7 +489,15 @@ public sealed class WebAgentRuntimeHostTests
 
                         $text = "web response: $userText"
                         Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
-                        if ($turnDelayMilliseconds -gt 0 -and $userText.Contains("hello from web")) {
+                        if ($turnDelayMilliseconds -eq -1) {
+                            Write-ProtocolJson @{ id = 99; method = "item/tool/call"; params = @{ threadId = $threadId; turnId = $turnId; callId = "call-owner-disconnect"; namespace = "embodysense"; tool = "command"; arguments = @{ command = "read"; path = "approval-only-note.txt" } } }
+                            break
+                        }
+                        if ($turnDelayMilliseconds -ge 30000) {
+                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "host-dispose-custom-loop.marker"), "started")
+                            Start-Sleep -Milliseconds $turnDelayMilliseconds
+                        }
+                        elseif ($turnDelayMilliseconds -gt 0 -and $userText.Contains("hello from web")) {
                             Start-Sleep -Milliseconds $turnDelayMilliseconds
                         }
 

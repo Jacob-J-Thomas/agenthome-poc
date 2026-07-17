@@ -6,39 +6,117 @@ namespace EmbodySense.Web.Services;
 
 public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
 {
+    private static readonly (bool Approved, string DecisionBy, string Detail) OwnerDisconnected = (false, "system.web", "owner_disconnected");
+    private static readonly (bool Approved, string DecisionBy, string Detail) OwnerUnavailable = (false, "system.web", "approval_owner_unavailable");
+    private static readonly (bool Approved, string DecisionBy, string Detail) TimedOut = (false, "system.web", "approval_timeout");
     private readonly ConcurrentDictionary<string, PendingApproval> _pending = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _liveOwnerConnections = new(StringComparer.Ordinal);
+    private readonly object _ownerGate = new();
     private readonly AsyncLocal<string?> _currentOwnerConnectionId = new();
     private readonly IWebClientNotifier _notifier;
+    private readonly TimeProvider _timeProvider;
     private long _lastSequence;
 
     public WebApprovalCoordinator(IWebClientNotifier? notifier = null)
+        : this(notifier, TimeProvider.System)
     {
-        _notifier = notifier ?? WebClientNotifier.None;
     }
+
+    public WebApprovalCoordinator(IWebClientNotifier? notifier, TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+
+        _notifier = notifier ?? WebClientNotifier.None;
+        _timeProvider = timeProvider;
+    }
+
+    public static TimeSpan ApprovalTimeout => TimeSpan.FromMinutes(5);
 
     public async Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
 
         var ownerConnectionId = _currentOwnerConnectionId.Value;
-        var pending = new PendingApproval(request, Interlocked.Increment(ref _lastSequence), DateTimeOffset.UtcNow, ownerConnectionId);
-        if (!_pending.TryAdd(request.RequestId, pending))
+        PendingApproval pending;
+        lock (_ownerGate)
         {
-            throw new InvalidOperationException($"Approval request `{request.RequestId}` is already pending.");
+            if (string.IsNullOrWhiteSpace(ownerConnectionId) || !_liveOwnerConnections.Contains(ownerConnectionId))
+            {
+                return OwnerUnavailable;
+            }
+
+            pending = new PendingApproval(request, Interlocked.Increment(ref _lastSequence), _timeProvider.GetUtcNow(), ownerConnectionId);
+            if (!_pending.TryAdd(request.RequestId, pending))
+            {
+                throw new InvalidOperationException($"Approval request `{request.RequestId}` is already pending.");
+            }
         }
 
+        using var timeoutCancellation = new CancellationTokenSource();
+        var timeoutTask = EnforceTimeoutAsync(pending, timeoutCancellation.Token);
         try
         {
             await PublishPendingAsync(ownerConnectionId, CancellationToken.None);
-            using var registration = cancellationToken.Register(() => pending.TryCancel(cancellationToken));
-            return await pending.WaitAsync(cancellationToken);
+            try
+            {
+                return await pending.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                lock (_ownerGate)
+                {
+                    if (IsCurrentPending(pending))
+                    {
+                        pending.TryCancel(cancellationToken);
+                    }
+                }
+
+                throw;
+            }
         }
         finally
         {
-            if (_pending.TryRemove(request.RequestId, out _))
+            timeoutCancellation.Cancel();
+            await timeoutTask;
+            if (TryRemoveExact(pending))
             {
                 await PublishPendingAsync(ownerConnectionId, CancellationToken.None);
             }
+        }
+    }
+
+    public void RegisterOwnerConnection(string ownerConnectionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
+        lock (_ownerGate)
+        {
+            _liveOwnerConnections.Add(ownerConnectionId);
+        }
+    }
+
+    public async Task DisconnectOwnerAsync(string ownerConnectionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
+
+        var removedAny = false;
+        lock (_ownerGate)
+        {
+            _liveOwnerConnections.Remove(ownerConnectionId);
+            foreach (var pending in _pending.Values.Where(item => string.Equals(item.OwnerConnectionId, ownerConnectionId, StringComparison.Ordinal)))
+            {
+                if (!TryRemoveExactCore(pending))
+                {
+                    continue;
+                }
+
+                pending.TrySetResult(OwnerDisconnected);
+                removedAny = true;
+            }
+        }
+
+        if (removedAny)
+        {
+            await PublishPendingAsync(ownerConnectionId, CancellationToken.None);
         }
     }
 
@@ -62,31 +140,44 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
 
-        if (!_pending.TryGetValue(requestId, out var pending))
+        WebApprovalDecisionResult result;
+        string? notificationOwnerConnectionId = null;
+        lock (_ownerGate)
         {
-            return WebApprovalDecisionResult.NotFound(requestId);
+            if (string.IsNullOrWhiteSpace(decisionConnectionId) || !_liveOwnerConnections.Contains(decisionConnectionId))
+            {
+                return WebApprovalDecisionResult.NotAuthorized(requestId);
+            }
+
+            if (!_pending.TryGetValue(requestId, out var pending))
+            {
+                return WebApprovalDecisionResult.NotFound(requestId);
+            }
+
+            if (!string.Equals(pending.OwnerConnectionId, decisionConnectionId, StringComparison.Ordinal))
+            {
+                return WebApprovalDecisionResult.NotAuthorized(requestId);
+            }
+
+            var responseDetail = string.IsNullOrWhiteSpace(detail)
+                ? (approved ? "Approved in the localhost web client." : "Rejected in the localhost web client.")
+                : detail.Trim();
+            var decisionBy = $"human.web:{decisionConnectionId}";
+            var response = (Approved: approved, DecisionBy: decisionBy, Detail: responseDetail);
+            result = pending.TrySetResult(response)
+                ? WebApprovalDecisionResult.Completed(requestId)
+                : WebApprovalDecisionResult.AlreadyCompleted(requestId);
+            if (result.Accepted && TryRemoveExactCore(pending))
+            {
+                notificationOwnerConnectionId = pending.OwnerConnectionId;
+            }
         }
 
-        if (!IsVisibleTo(pending, decisionConnectionId))
+        if (notificationOwnerConnectionId is not null)
         {
-            return WebApprovalDecisionResult.NotAuthorized(requestId);
+            await PublishPendingAsync(notificationOwnerConnectionId, CancellationToken.None);
         }
 
-        if (!_pending.TryRemove(requestId, out pending))
-        {
-            return WebApprovalDecisionResult.AlreadyCompleted(requestId);
-        }
-
-        var responseDetail = string.IsNullOrWhiteSpace(detail)
-            ? (approved ? "Approved in the localhost web client." : "Rejected in the localhost web client.")
-            : detail.Trim();
-        var decisionBy = string.IsNullOrWhiteSpace(decisionConnectionId) ? "human.web" : $"human.web:{decisionConnectionId}";
-        var response = (Approved: approved, DecisionBy: decisionBy, Detail: responseDetail);
-
-        var result = pending.TrySetResult(response)
-            ? WebApprovalDecisionResult.Completed(requestId)
-            : WebApprovalDecisionResult.AlreadyCompleted(requestId);
-        await PublishPendingAsync(pending.OwnerConnectionId, CancellationToken.None);
         return result;
     }
 
@@ -95,10 +186,49 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         return _notifier.ApprovalsChangedAsync(ownerConnectionId, GetPending(ownerConnectionId), cancellationToken);
     }
 
+    private async Task EnforceTimeoutAsync(PendingApproval pending, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(ApprovalTimeout, _timeProvider, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        lock (_ownerGate)
+        {
+            if (IsCurrentPending(pending))
+            {
+                pending.TrySetResult(TimedOut);
+            }
+        }
+    }
+
     private static bool IsVisibleTo(PendingApproval pending, string? ownerConnectionId)
     {
-        return string.IsNullOrWhiteSpace(pending.OwnerConnectionId)
-            || string.Equals(pending.OwnerConnectionId, ownerConnectionId, StringComparison.Ordinal);
+        return !string.IsNullOrWhiteSpace(ownerConnectionId)
+            && string.Equals(pending.OwnerConnectionId, ownerConnectionId, StringComparison.Ordinal);
+    }
+
+    private bool TryRemoveExact(PendingApproval pending)
+    {
+        lock (_ownerGate)
+        {
+            return TryRemoveExactCore(pending);
+        }
+    }
+
+    private bool TryRemoveExactCore(PendingApproval pending)
+    {
+        var collection = (ICollection<KeyValuePair<string, PendingApproval>>)_pending;
+        return collection.Remove(new KeyValuePair<string, PendingApproval>(pending.Request.RequestId, pending));
+    }
+
+    private bool IsCurrentPending(PendingApproval pending)
+    {
+        return _pending.TryGetValue(pending.Request.RequestId, out var current) && ReferenceEquals(current, pending);
     }
 
     private sealed class ApprovalScope : IDisposable
