@@ -4,7 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const builderSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url), "utf8");
-const loopsHtml = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loops.html", import.meta.url), "utf8");
+const loopsHtml = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url), "utf8");
 
 test("catalog loading is authenticated and projects the system loop as read-only", async () => {
   const app = await loadLoopBuilder();
@@ -24,6 +24,15 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("loop tabs relinquish selection when another primary app view is active", async () => {
+  const app = await loadLoopBuilder();
+  app.elements.loopsView.hidden = true;
+  app.context.renderAll();
+
+  assert.equal(app.elements.builderTab.attributes.get("aria-selected"), "false");
+  assert.equal(app.elements.runsTab.attributes.get("aria-selected"), "false");
 });
 
 test("server-controlled loop text is rendered as text and cannot create executable markup", async () => {
@@ -122,7 +131,7 @@ test("loop settings expose inherited provider, model, tools, and context default
   assert.equal(app.elements.inspectorTitle.textContent, "Loop settings");
   assert.match(app.elements.inspectorContent.textContent, /OpenAiCodex · gpt-5-test/);
   assert.match(app.elements.inspectorContent.textContent, /Provider and model cannot be overridden per loop/);
-  assert.match(app.elements.inspectorContent.textContent, /Workspace tools/);
+  assert.match(app.elements.inspectorContent.textContent, /Loop authority/);
   assert.match(app.elements.inspectorContent.textContent, /Inference: 4 context-in sources/);
 });
 
@@ -543,7 +552,7 @@ async function loadLoopBuilder(options = {}) {
   const window = {
     confirmations: [],
     delayedHandlers: [],
-    location: { href: "http://127.0.0.1:4378/loops.html" },
+    location: { href: "http://127.0.0.1:4378/?view=loops" },
     addEventListener() { },
     confirm(message) { this.confirmations.push(message); return true; },
     setTimeout(handler, delay) {
@@ -572,6 +581,9 @@ async function loadLoopBuilder(options = {}) {
   context.globalThis = context;
   vm.runInNewContext(builderSource, context, { filename: "loop-builder.js" });
   await flushAsyncWork();
+  document.elementsObject.approvalPanel = document.elementsObject.loopApprovalPanel;
+  document.elementsObject.approvalCount = document.elementsObject.loopApprovalCount;
+  document.elementsObject.approvals = document.elementsObject.loopApprovals;
   return { context, document, elements: document.elementsObject, server, window };
 }
 

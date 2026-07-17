@@ -5,7 +5,17 @@ import vm from "node:vm";
 
 const appSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/app.js", import.meta.url), "utf8");
 const indexSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url), "utf8");
+const loopsRedirectSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loops.html", import.meta.url), "utf8");
 const recordSeparator = "\u001e";
+
+test("the primary app shell owns every view switch in its left rail", () => {
+  assert.match(indexSource, /class="app-rail"/);
+  assert.match(indexSource, /data-app-view="chat"/);
+  assert.match(indexSource, /data-app-view="loops" data-loop-view="builder"/);
+  assert.match(indexSource, /data-app-view="configuration" data-config-tab="permissions"/);
+  assert.doesNotMatch(indexSource, /class="config-tabs"|class="workspace-tabs"/);
+  assert.match(loopsRedirectSource, /\?view=loops/);
+});
 
 test("history_loaded replaces the transcript using role labels and text content", async () => {
   const app = await loadApp();
@@ -252,11 +262,17 @@ class FakeDocument {
   constructor(html) {
     this.elements = new Map();
     this.elementsObject = {};
-    this.configTabs = [...html.matchAll(/<([a-z0-9]+)[^>]*\sdata-config-tab="([^"]+)"/gi)].map(match => {
+    this.appTabs = [...html.matchAll(/<button\b([^>]*)>/gi)].filter(match => /\bdata-app-view="[^"]+"/i.test(match[1])).map(match => {
       const element = new FakeElement("button");
-      element.dataset.configTab = match[2];
+      const appView = match[1].match(/\bdata-app-view="([^"]+)"/i);
+      const configTab = match[1].match(/\bdata-config-tab="([^"]+)"/i);
+      const loopView = match[1].match(/\bdata-loop-view="([^"]+)"/i);
+      element.dataset.appView = appView?.[1];
+      if (configTab) element.dataset.configTab = configTab[1];
+      if (loopView) element.dataset.loopView = loopView[1];
       return element;
     });
+    this.configTabs = this.appTabs.filter(element => element.dataset.configTab);
 
     for (const match of html.matchAll(/<([a-z0-9]+)[^>]*\sid="([^"]+)"/gi)) {
       const element = new FakeElement(match[1]);
@@ -270,7 +286,9 @@ class FakeDocument {
   }
 
   querySelectorAll(selector) {
-    return selector === "[data-config-tab]" ? this.configTabs : [];
+    if (selector === "[data-config-tab]") return this.configTabs;
+    if (selector === "[data-app-view]") return this.appTabs;
+    return [];
   }
 
   createElement(tagName) {
@@ -292,6 +310,7 @@ class FakeElement {
     this.className = "";
     this.disabled = false;
     this.checked = false;
+    this.hidden = false;
     this.open = false;
     this.scrollHeight = 0;
     this.scrollTop = 0;

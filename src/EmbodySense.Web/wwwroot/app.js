@@ -2,6 +2,7 @@ let sessionToken = "";
 let status = null;
 let configuration = null;
 let activeConfigTab = "overview";
+let activeAppView = "chat";
 let activeAgentMessage = null;
 let hub = null;
 
@@ -14,11 +15,18 @@ const elements = {
   clientStatus: document.getElementById("clientStatus"),
   configContent: document.getElementById("configContent"),
   configTabs: Array.from(document.querySelectorAll("[data-config-tab]")),
+  configurationSubtitle: document.getElementById("configurationSubtitle"),
+  configurationTitle: document.getElementById("configurationTitle"),
+  configurationView: document.getElementById("configurationView"),
+  appTabs: Array.from(document.querySelectorAll("[data-app-view]")),
+  chatView: document.getElementById("chatView"),
   initButton: document.getElementById("initButton"),
+  loopsView: document.getElementById("loopsView"),
   messageForm: document.getElementById("messageForm"),
   messageInput: document.getElementById("messageInput"),
   refreshConfigButton: document.getElementById("refreshConfigButton"),
   sendButton: document.getElementById("sendButton"),
+  surfaceTitle: document.getElementById("surfaceTitle"),
   transcript: document.getElementById("transcript"),
   verboseToggle: document.getElementById("verboseToggle"),
   workspaceRoot: document.getElementById("workspaceRoot"),
@@ -26,6 +34,41 @@ const elements = {
 };
 
 const recordSeparator = "\u001e";
+
+const configurationViewCopy = {
+  overview: ["Overview", "Runtime posture, paths, and implemented concepts."],
+  permissions: ["Permissions", "The current workspace permission policy and governed reach."],
+  agent: ["Agent", "Role, identity, personality, context, memory, and model documents."],
+  audit: ["Audit", "Recent attributable actions and governance outcomes."],
+  history: ["History", "Current and archived logical conversation transcripts."]
+};
+
+function selectAppView(view, sourceTab = null) {
+  activeAppView = ["chat", "loops", "configuration"].includes(view) ? view : "chat";
+  elements.chatView.hidden = activeAppView !== "chat";
+  elements.loopsView.hidden = activeAppView !== "loops";
+  elements.configurationView.hidden = activeAppView !== "configuration";
+
+  for (const tab of elements.appTabs) {
+    const selected = sourceTab
+      ? tab === sourceTab
+      : activeAppView === "configuration"
+        ? tab.dataset.configTab === activeConfigTab
+        : tab.dataset.appView === activeAppView && !tab.dataset.loopView;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+  }
+
+  if (activeAppView === "configuration") {
+    const [title, subtitle] = configurationViewCopy[activeConfigTab] ?? configurationViewCopy.overview;
+    elements.configurationTitle.textContent = title;
+    elements.configurationSubtitle.textContent = subtitle;
+    elements.surfaceTitle.textContent = title;
+    renderConfiguration();
+  } else {
+    elements.surfaceTitle.textContent = activeAppView === "loops" ? "Loops" : "Chat";
+  }
+}
 
 async function boot() {
   const session = await fetchJson("/api/session");
@@ -135,7 +178,7 @@ function renderConfiguration() {
   }
 
   for (const tab of elements.configTabs) {
-    const selected = tab.dataset.configTab === activeConfigTab;
+    const selected = activeAppView === "configuration" && tab.dataset.configTab === activeConfigTab;
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", selected ? "true" : "false");
   }
@@ -644,10 +687,10 @@ elements.verboseToggle.addEventListener("change", async () => {
   }
 });
 
-for (const tab of elements.configTabs) {
+for (const tab of elements.appTabs) {
   tab.addEventListener("click", () => {
-    activeConfigTab = tab.dataset.configTab ?? "overview";
-    renderConfiguration();
+    if (tab.dataset.configTab) activeConfigTab = tab.dataset.configTab;
+    selectAppView(tab.dataset.appView ?? "chat", tab);
   });
 }
 
@@ -834,4 +877,8 @@ class JsonSignalRConnection {
 elements.cancelButton.disabled = true;
 elements.refreshConfigButton.disabled = true;
 renderConfigLoading();
+const requestedView = new URL(window.location.href).searchParams.get("view");
+const requestedConfigTab = configurationViewCopy[requestedView] ? requestedView : "overview";
+activeConfigTab = requestedConfigTab;
+selectAppView(requestedView === "loops" ? "loops" : configurationViewCopy[requestedView] ? "configuration" : "chat", requestedView === "loops" ? document.getElementById("builderTab") : null);
 boot().catch(error => appendMessage("error", error.message));

@@ -5,91 +5,114 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>EmbodySense</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/loop-builder.css">
 </head>
 <body>
-  <div class="shell">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
-          <span></span>
-          <span></span>
-          <span></span>
-        </div>
-        <div>
-          <h1>EmbodySense</h1>
-          <p id="workspaceRoot">Workspace loading</p>
-        </div>
-      </div>
-      <div class="status-strip">
-        <nav class="primary-nav" aria-label="Primary">
-          <a class="active" href="/">Chat</a>
-          <a href="/loops.html">Loops</a>
-        </nav>
-        <span id="clientStatus">Web primary</span>
-        <span id="workspaceStatus">Checking workspace</span>
-      </div>
-    </header>
+  <div class="app-shell">
+    <aside class="app-rail" aria-label="Application navigation">
+      <a class="rail-brand" href="/?view=chat" aria-label="EmbodySense"><span>ES</span></a>
+      <nav class="rail-nav" role="tablist" aria-label="EmbodySense views">
+        <button id="chatNav" class="rail-button active" type="button" role="tab" aria-selected="true" data-app-view="chat">
+          <span class="rail-glyph" aria-hidden="true">◌</span><span>Chat</span>
+        </button>
+        <button id="builderTab" class="rail-button" type="button" role="tab" aria-selected="false" data-app-view="loops" data-loop-view="builder">
+          <span class="rail-glyph" aria-hidden="true">⟳</span><span>Loops</span>
+        </button>
+        <button id="runsTab" class="rail-button" type="button" role="tab" aria-selected="false" data-app-view="loops" data-loop-view="runs">
+          <span class="rail-glyph" aria-hidden="true">≋</span><span>Runs <b id="runCount" class="rail-count">0</b></span>
+        </button>
+        <span class="rail-divider" aria-hidden="true"></span>
+        <button class="rail-button rail-button-small" type="button" role="tab" aria-selected="false" data-app-view="configuration" data-config-tab="overview"><span class="rail-glyph" aria-hidden="true">◇</span><span>Overview</span></button>
+        <button class="rail-button rail-button-small" type="button" role="tab" aria-selected="false" data-app-view="configuration" data-config-tab="permissions"><span class="rail-glyph" aria-hidden="true">⌁</span><span>Permissions</span></button>
+        <button class="rail-button rail-button-small" type="button" role="tab" aria-selected="false" data-app-view="configuration" data-config-tab="agent"><span class="rail-glyph" aria-hidden="true">◎</span><span>Agent</span></button>
+        <button class="rail-button rail-button-small" type="button" role="tab" aria-selected="false" data-app-view="configuration" data-config-tab="audit"><span class="rail-glyph" aria-hidden="true">✓</span><span>Audit</span></button>
+        <button class="rail-button rail-button-small" type="button" role="tab" aria-selected="false" data-app-view="configuration" data-config-tab="history"><span class="rail-glyph" aria-hidden="true">▤</span><span>History</span></button>
+      </nav>
+      <div class="rail-status" title="Workspace connection"><span id="connectionDot" class="status-dot"></span><span id="workspaceStatus">Checking</span></div>
+      <div class="rail-avatar" title="Durable agent identity">ES</div>
+    </aside>
 
-    <main class="workspace">
-      <section class="session-panel" aria-label="Session">
-        <div id="transcript" class="transcript" aria-live="polite"></div>
-        <form id="messageForm" class="composer">
-          <textarea id="messageInput" name="message" rows="3" placeholder="Send a message to the agent"></textarea>
-          <div class="composer-actions">
-            <button id="sendButton" type="submit">Send</button>
-            <button id="cancelButton" type="button">Cancel</button>
-          </div>
-        </form>
-      </section>
+    <div class="app-stage">
+      <header class="app-statusbar">
+        <div class="statusbar-identity"><strong id="surfaceTitle">Chat</strong><span id="workspaceRoot">Workspace loading</span></div>
+        <div class="statusbar-badges"><span id="clientStatus">Web connecting</span><span>Local agent body</span></div>
+      </header>
 
-      <aside class="side-panel" aria-label="Control panel">
-        <section class="panel-section">
-          <div class="section-title">
-            <h2>Workspace</h2>
-            <button id="initButton" type="button">Initialize</button>
-          </div>
-          <dl class="meta-list">
-            <div>
-              <dt>Client</dt>
-              <dd id="clientRole">Web</dd>
-            </div>
-            <div>
-              <dt>CLI</dt>
-              <dd id="cliRole">Verification</dd>
-            </div>
-          </dl>
-          <label class="toggle-row" for="verboseToggle">
-            <input id="verboseToggle" type="checkbox">
-            <span>Verbose</span>
-          </label>
+      <main class="app-main">
+        <section id="chatView" class="app-view chat-view" aria-label="Chat">
+          <section class="session-panel" aria-label="Session">
+            <div class="session-heading"><div><p class="eyebrow">Default conversation loop</p><h1>Chat</h1></div><label class="toggle-row" for="verboseToggle"><input id="verboseToggle" type="checkbox"><span>Verbose context</span></label></div>
+            <div id="transcript" class="transcript" aria-live="polite"></div>
+            <form id="messageForm" class="composer">
+              <textarea id="messageInput" name="message" rows="3" placeholder="Send a message to the agent"></textarea>
+              <div class="composer-actions"><button id="cancelButton" class="secondary-button" type="button">Cancel</button><button id="sendButton" class="primary-button" type="submit">Send</button></div>
+            </form>
+          </section>
+
+          <aside class="chat-sidebar" aria-label="Session controls">
+            <section class="panel-section">
+              <div class="section-title"><div><p class="eyebrow">Runtime posture</p><h2>Workspace</h2></div><button id="initButton" type="button">Initialize</button></div>
+              <dl class="meta-list"><div><dt>Client</dt><dd id="clientRole">Web</dd></div><div><dt>CLI</dt><dd id="cliRole">Verification</dd></div></dl>
+              <p class="panel-note">Configuration, permissions, agent documents, audit, and history now live in the left navigation.</p>
+            </section>
+            <section class="panel-section approvals-section">
+              <div class="section-title"><div><p class="eyebrow">Human authority</p><h2>Approvals</h2></div><span id="approvalCount">0 pending</span></div>
+              <div id="approvals" class="approvals"></div>
+            </section>
+          </aside>
         </section>
 
-        <section class="panel-section configuration-section" aria-label="Configuration">
-          <div class="section-title">
-            <h2>Configuration</h2>
-            <button id="refreshConfigButton" type="button">Refresh</button>
+        <section id="loopsView" class="app-view loops-view" aria-label="Loops" hidden>
+          <div class="loop-workspace">
+            <aside class="loop-sidebar" aria-label="Loop definitions">
+              <div class="sidebar-heading"><div><p class="eyebrow">Role-bound routines</p><h1>Loops</h1></div><button id="createLoopButton" class="icon-button" type="button" aria-label="Create loop">+</button></div>
+              <label class="loop-search"><span class="sr-only">Search loops</span><input id="loopSearch" type="search" placeholder="Search loops" autocomplete="off"></label>
+              <div id="loopList" class="loop-list" role="listbox" aria-label="Saved loops"></div>
+              <div class="sidebar-footer"><span>Current directory role</span><strong id="roleId">Loading</strong><small id="rolePath">Workspace loading</small></div>
+            </aside>
+
+            <section class="builder-panel" aria-label="Loop workspace">
+              <div id="builderView" class="builder-view" role="tabpanel" aria-labelledby="builderTab">
+                <header class="editor-header">
+                  <div class="editor-identity"><input id="loopName" class="loop-title-input" maxlength="120" autocomplete="off" aria-label="Loop name"><input id="loopDescription" class="loop-description-input" maxlength="2000" autocomplete="off" aria-label="Description"><div id="loopHeaderMeta" class="header-meta">Loading loop</div></div>
+                  <div class="toolbar-actions"><span id="saveState" class="save-state">Loading</span><button id="invokeButton" class="run-button" type="button">▶ Run</button><button id="reloadButton" class="secondary-button" type="button">Reload</button><button id="saveButton" class="primary-button" type="button">Save</button><button id="deleteButton" class="danger-button" type="button">Delete</button></div>
+                </header>
+                <div id="validationBanner" class="validation-banner" role="status" aria-live="polite"></div>
+                <div class="canvas-toolbar"><span class="toolbar-title">Execution sequence</span><span class="quiet-chip">Linear auto-layout</span><span id="canvasStepCount" class="quiet-chip">0 inference steps</span></div>
+                <div class="canvas-scroll"><div id="loopCanvas" class="loop-canvas" aria-label="Ordered loop graph"></div></div>
+                <div class="canvas-footer"><button id="addStepButton" class="secondary-button" type="button">+ Add inference step</button><p id="canvasAuthority"><strong>Authority:</strong> loading current role</p></div>
+              </div>
+
+              <div id="runsView" class="runs-view" role="tabpanel" aria-labelledby="runsTab" hidden>
+                <aside class="run-list-pane" aria-label="Recent runs"><div class="run-list-header"><strong>Recent runs</strong><span>Durable evidence, newest first</span><span id="traceQuota" class="trace-quota">Loading trace quota</span></div><div id="runList" class="run-list"></div></aside>
+                <section class="timeline-pane" aria-label="Run timeline"><div class="timeline-header"><div><h2 id="runTitle">No run selected</h2><p id="runSubtitle">Start a saved loop to inspect its durable evidence.</p></div><div id="runActions" class="run-actions"></div></div><div id="runNotice" class="run-notice" role="status" aria-live="polite"></div><div id="runTimeline" class="timeline-scroll"></div></section>
+              </div>
+            </section>
+
+            <aside class="inspector" aria-label="Selected loop item">
+              <div class="inspector-heading"><div><p class="eyebrow">Inspector</p><h2 id="inspectorTitle">Loop settings</h2></div><button id="loopSettingsButton" class="secondary-button compact-button" type="button">Loop settings</button></div>
+              <div id="inspectorAuthority" class="inspector-authority" aria-live="polite"></div>
+              <div id="inspectorContent" class="inspector-content"></div>
+            </aside>
           </div>
-          <div class="config-tabs" role="tablist" aria-label="Configuration sections">
-            <button type="button" role="tab" aria-selected="true" data-config-tab="overview">Overview</button>
-            <button type="button" role="tab" aria-selected="false" data-config-tab="permissions">Permissions</button>
-            <button type="button" role="tab" aria-selected="false" data-config-tab="agent">Agent</button>
-            <button type="button" role="tab" aria-selected="false" data-config-tab="audit">Audit</button>
-            <button type="button" role="tab" aria-selected="false" data-config-tab="history">History</button>
-          </div>
+        </section>
+
+        <section id="configurationView" class="app-view configuration-view" aria-label="Configuration" hidden>
+          <header class="configuration-header"><div><p class="eyebrow">Inspectable body state</p><h1 id="configurationTitle">Overview</h1><p id="configurationSubtitle">Runtime posture, paths, and implemented concepts.</p></div><button id="refreshConfigButton" type="button">Refresh</button></header>
           <div id="configContent" class="config-content" aria-live="polite"></div>
         </section>
-
-        <section class="panel-section approvals-section">
-          <div class="section-title">
-            <h2>Approvals</h2>
-            <span id="approvalCount">0 pending</span>
-          </div>
-          <div id="approvals" class="approvals"></div>
-        </section>
-      </aside>
-    </main>
+      </main>
+    </div>
   </div>
 
-  <script src="/app.js" defer></script>
+  <div id="invokeModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="invokeModalTitle" aria-hidden="true">
+    <div class="modal-card"><div class="modal-header"><div><p class="eyebrow">Real governed execution</p><h2 id="invokeModalTitle">Start a manual run</h2></div><button id="closeInvokeButton" class="icon-button" type="button" aria-label="Close invocation">×</button></div><div class="modal-body"><p id="invokeSummary" class="modal-copy"></p><label id="invocationPromptField"><span>Initial user prompt</span><textarea id="invocationPrompt" maxlength="24000" placeholder="What should this loop work on?"></textarea></label><div id="invokeLimits" class="run-warning"></div><div class="run-warning warning"><strong>This is a real run.</strong> Assigned read tools may expose workspace content to the configured model. Current permission and approval rules still apply.</div></div><div class="modal-footer"><button id="cancelInvokeButton" class="secondary-button" type="button">Cancel</button><button id="startRunButton" class="primary-button" type="button">Start run</button></div></div>
+  </div>
+
+  <aside id="loopApprovalPanel" class="approval-panel" aria-labelledby="loopApprovalPanelTitle" aria-live="polite" hidden><div class="approval-panel-header"><div><p class="eyebrow">Governed workspace access</p><h2 id="loopApprovalPanelTitle">Run approval required</h2></div><span id="loopApprovalCount" class="version-chip">0 pending</span></div><p class="approval-panel-copy">This run is waiting for your decision. Review the resolved target before allowing the request.</p><div id="loopApprovals" class="approval-list"></div></aside>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="/app.js" type="module"></script>
+  <script src="/loop-builder.js" type="module"></script>
 </body>
 </html>

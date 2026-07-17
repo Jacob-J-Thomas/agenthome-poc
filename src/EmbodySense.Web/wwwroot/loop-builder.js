@@ -3,6 +3,8 @@ let catalog = null;
 let currentDefinition = null;
 let draft = null;
 let selectedNodeId = "trigger";
+let lastSelectedNodeId = "trigger";
+let loopSearchQuery = "";
 let dirty = false;
 let currentView = "builder";
 let recentRuns = [];
@@ -20,19 +22,22 @@ const signalRRecordSeparator = "\u001e";
 
 const elements = {
   addStepButton: document.getElementById("addStepButton"),
-  approvalCount: document.getElementById("approvalCount"),
-  approvalPanel: document.getElementById("approvalPanel"),
-  approvals: document.getElementById("approvals"),
+  approvalCount: document.getElementById("loopApprovalCount"),
+  approvalPanel: document.getElementById("loopApprovalPanel"),
+  approvals: document.getElementById("loopApprovals"),
   builderTab: document.getElementById("builderTab"),
   builderView: document.getElementById("builderView"),
   cancelInvokeButton: document.getElementById("cancelInvokeButton"),
   canvas: document.getElementById("loopCanvas"),
+  canvasAuthority: document.getElementById("canvasAuthority"),
+  canvasStepCount: document.getElementById("canvasStepCount"),
   closeInvokeButton: document.getElementById("closeInvokeButton"),
   connectionDot: document.getElementById("connectionDot"),
   createLoopButton: document.getElementById("createLoopButton"),
   deleteButton: document.getElementById("deleteButton"),
   description: document.getElementById("loopDescription"),
   inspectorContent: document.getElementById("inspectorContent"),
+  inspectorAuthority: document.getElementById("inspectorAuthority"),
   inspectorTitle: document.getElementById("inspectorTitle"),
   invocationPrompt: document.getElementById("invocationPrompt"),
   invocationPromptField: document.getElementById("invocationPromptField"),
@@ -41,10 +46,14 @@ const elements = {
   invokeModal: document.getElementById("invokeModal"),
   invokeSummary: document.getElementById("invokeSummary"),
   list: document.getElementById("loopList"),
+  loopHeaderMeta: document.getElementById("loopHeaderMeta"),
+  loopSearch: document.getElementById("loopSearch"),
   loopSettingsButton: document.getElementById("loopSettingsButton"),
+  loopsView: document.getElementById("loopsView"),
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
   roleId: document.getElementById("roleId"),
+  rolePath: document.getElementById("rolePath"),
   runActions: document.getElementById("runActions"),
   runCount: document.getElementById("runCount"),
   runList: document.getElementById("runList"),
@@ -71,6 +80,7 @@ async function boot() {
     sessionToken = session.token;
     const status = await requestJson("/api/status");
     elements.workspaceRoot.textContent = status.workspaceRoot;
+    elements.rolePath.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
     elements.connectionDot.classList.toggle("ready", status.initialized);
     if (!status.initialized) {
@@ -101,9 +111,13 @@ function bindStaticEvents() {
   elements.addStepButton.addEventListener("click", addInferenceStep);
   elements.loopSettingsButton.addEventListener("click", () => {
     if (!draft) return;
-    selectedNodeId = "loop-settings";
+    selectedNodeId = selectedNodeId === "loop-settings" ? lastSelectedNodeId : "loop-settings";
     renderCanvas();
     renderInspector();
+  });
+  elements.loopSearch.addEventListener("input", event => {
+    loopSearchQuery = event.target.value.trim().toLocaleLowerCase();
+    renderList();
   });
   elements.name.addEventListener("input", event => updateDraftValue("displayName", event.target.value));
   elements.description.addEventListener("input", event => updateDraftValue("description", event.target.value));
@@ -158,6 +172,7 @@ function applyDefinition(definition) {
   currentDefinition = definition;
   draft = definition ? clone(definition) : null;
   selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
   dirty = false;
   elements.name.value = draft?.displayName ?? "";
   elements.description.value = draft?.description ?? "";
@@ -181,11 +196,12 @@ function renderAll() {
 
 function renderTabs() {
   const builderActive = currentView === "builder" && !historicalLoopId;
+  const loopsSurfaceActive = !elements.loopsView?.hidden;
   elements.builderTab.disabled = Boolean(historicalLoopId);
-  elements.builderTab.classList.toggle("active", builderActive);
-  elements.runsTab.classList.toggle("active", !builderActive);
-  elements.builderTab.setAttribute("aria-selected", String(builderActive));
-  elements.runsTab.setAttribute("aria-selected", String(!builderActive));
+  elements.builderTab.classList.toggle("active", loopsSurfaceActive && builderActive);
+  elements.runsTab.classList.toggle("active", loopsSurfaceActive && !builderActive);
+  elements.builderTab.setAttribute("aria-selected", String(loopsSurfaceActive && builderActive));
+  elements.runsTab.setAttribute("aria-selected", String(loopsSurfaceActive && !builderActive));
   elements.builderView.hidden = !builderActive;
   elements.runsView.hidden = builderActive;
   elements.runCount.textContent = String(runsForCurrentLoop().length);
@@ -429,6 +445,7 @@ function toolAuthorityLines(authority) {
 function renderRunEvidence() {
   elements.inspectorContent.replaceChildren();
   elements.inspectorTitle.textContent = "Run evidence";
+  renderInspectorAuthority(selectedRun?.admittedDefinition ?? draft);
   appendQuotaEvidence();
   if (!selectedRun && selectedTrace?.isDeleted && selectedTrace.loopId === selectedLoopId()) {
     elements.inspectorContent.append(node("h3", "evidence-title", "Audited trace tombstone"), node("p", "evidence-subtitle", "Sensitive run content is gone; bounded identity and deletion-integrity metadata remain."));
@@ -574,17 +591,28 @@ function evidenceSection(label) {
 function renderList() {
   elements.list.replaceChildren();
   if (!catalog) return;
-  for (const definition of allDefinitions()) {
+  const matchesSearch = definition => !loopSearchQuery || [definition.displayName, definition.description, definition.id].some(value => String(value ?? "").toLocaleLowerCase().includes(loopSearchQuery));
+  const visibleDefinitions = [...catalog.customDefinitions, catalog.systemDefault].filter(matchesSearch);
+  let visibleGroup = null;
+  for (const definition of visibleDefinitions) {
+    const group = definition.id === "default-conversation" ? "System" : "Custom loops";
+    if (group !== visibleGroup) {
+      elements.list.append(node("div", "loop-list-group", group));
+      visibleGroup = group;
+    }
     const button = node("button", "loop-list-item");
     button.type = "button";
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", definition.id === currentDefinition?.id ? "true" : "false");
     button.classList.toggle("selected", definition.id === currentDefinition?.id);
-    button.append(node("span", "loop-list-name", definition.displayName));
+    button.append(node("span", `loop-icon ${definition.id === "default-conversation" ? "system" : "custom"}`, definition.id === "default-conversation" ? "S" : "L"));
+    const copy = node("span", "loop-list-copy");
+    copy.append(node("span", "loop-list-name", definition.displayName));
     const meta = node("span", "loop-list-meta");
     meta.append(node("span", definition.id === "default-conversation" ? "system-chip" : "version-chip", definition.id === "default-conversation" ? "System" : `v${definition.definitionVersion}`));
     meta.append(node("span", "", definition.inferenceSteps.length === 1 ? "1 step" : `${definition.inferenceSteps.length} steps`));
-    button.append(meta);
+    copy.append(meta);
+    button.append(copy);
     button.addEventListener("click", () => selectDefinition(definition));
     elements.list.append(button);
   }
@@ -593,7 +621,9 @@ function renderList() {
   for (const run of recentRuns) {
     if (!knownLoopIds.has(run.loopId)) archivedGroups.set(run.loopId, (archivedGroups.get(run.loopId) ?? 0) + 1);
   }
-  for (const [loopId, runCount] of archivedGroups) {
+  const visibleArchivedGroups = [...archivedGroups].filter(([loopId]) => !loopSearchQuery || loopId.toLocaleLowerCase().includes(loopSearchQuery));
+  if (visibleArchivedGroups.length > 0) elements.list.append(node("div", "loop-list-group", "Archived evidence"));
+  for (const [loopId, runCount] of visibleArchivedGroups) {
     const button = node("button", "loop-list-item");
     button.type = "button";
     button.setAttribute("role", "option");
@@ -606,6 +636,7 @@ function renderList() {
     button.addEventListener("click", () => selectHistoricalLoop(loopId));
     elements.list.append(button);
   }
+  if (elements.list.children.length === 0) elements.list.append(node("p", "empty-state", "No loops match this search."));
 }
 
 function selectDefinition(definition) {
@@ -619,6 +650,8 @@ async function selectHistoricalLoop(loopId) {
   historicalLoopId = loopId;
   currentDefinition = null;
   draft = null;
+  selectedNodeId = "loop-settings";
+  lastSelectedNodeId = "trigger";
   dirty = false;
   currentView = "runs";
   selectedRunId = recentRuns.find(run => run.loopId === loopId)?.id ?? null;
@@ -663,6 +696,7 @@ function createNodeCard(id, kind, name, summary, icon, className, policyMode) {
   button.append(copy);
   button.append(node("span", "node-policy", policyMode === "custom" ? "custom context" : kind === "Trigger" ? "admission" : "inherits context"));
   button.addEventListener("click", () => {
+    lastSelectedNodeId = id;
     selectedNodeId = id;
     renderCanvas();
     renderInspector();
@@ -684,9 +718,11 @@ function renderInspector() {
   elements.inspectorContent.replaceChildren();
   if (!draft) {
     elements.inspectorTitle.textContent = "Loop settings";
+    elements.inspectorAuthority.replaceChildren();
     elements.inspectorContent.append(node("p", "empty-state", "No loop selected."));
     return;
   }
+  renderInspectorAuthority(draft);
 
   if (selectedNodeId === "trigger") {
     renderTriggerInspector();
@@ -703,10 +739,12 @@ function renderInspector() {
 
 function renderLoopInspector() {
   elements.inspectorTitle.textContent = "Loop settings";
+  const role = section("Directory role");
+  role.append(node("div", "inheritance-row", draft.roleId), node("p", "field-hint", "This loop belongs to the current directory role. Wave one does not allow a loop to invent or switch durable identity."));
   const model = section("Inherited provider and model");
   model.append(node("div", "context-note", `${catalog.runtimeModel?.provider ?? "Provider unavailable"} · ${catalog.runtimeModel?.model || "provider default model"}. Provider and model cannot be overridden per loop in wave one.`));
-  const authority = section("Workspace tools");
-  authority.append(node("p", "field-hint", "No tools are assigned by default. Exit decisions are always tool-less."));
+  const authority = section("Loop authority");
+  authority.append(node("p", "field-hint", "Assignments allow inference nodes to request governed capabilities. Permission, approval, and audit policy still decide whether a request may execute. Exit decisions are always tool-less."));
   for (const assignment of ["list", "read", "search"]) {
     authority.append(checkboxRow(capitalize(assignment), `Allow inference nodes to request the governed ${assignment} command.`, draft.toolAssignments.includes(assignment), checked => {
       draft.toolAssignments = checked ? [...draft.toolAssignments, assignment] : draft.toolAssignments.filter(value => value !== assignment);
@@ -717,7 +755,7 @@ function renderLoopInspector() {
   defaults.append(node("p", "field-hint", "Versioned server defaults are inspectable here. Context is customized at each Inference or Exit node."));
   defaults.append(contextSummary("Inference", draft.contextDefaults.inference), contextSummary("Exit", draft.contextDefaults.exit));
   defaults.append(evidenceNote());
-  elements.inspectorContent.append(model, authority, defaults);
+  elements.inspectorContent.append(role, model, authority, defaults);
 }
 
 function renderTriggerInspector() {
@@ -765,7 +803,10 @@ function renderInferenceInspector(step) {
   const actions = node("div", "inline-actions");
   actions.append(actionButton("↑ Move earlier", () => moveStep(index, -1), index === 0 || isSystemLoop()), actionButton("↓ Move later", () => moveStep(index, 1), index === draft.inferenceSteps.length - 1 || isSystemLoop()), actionButton("Remove", () => removeStep(index), draft.inferenceSteps.length === 1 || isSystemLoop(), "danger-button"));
   instruction.append(actions);
-  elements.inspectorContent.append(instruction, contextEditor(step, "inference"));
+  const effective = section("Effective role, model, and tools");
+  effective.append(inheritanceRow("Role", draft.roleId), inheritanceRow("Provider", catalog.runtimeModel?.provider ?? "Unavailable"), inheritanceRow("Model", catalog.runtimeModel?.model || "Provider default"), inheritanceRow("Tools", draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "None assigned"));
+  effective.append(node("p", "field-hint", "Inherited from loop settings. Tool requests remain subject to current role ceiling, permission rules, approvals, and audit."));
+  elements.inspectorContent.append(instruction, effective, contextEditor(step, "inference"));
 }
 
 function renderExitInspector() {
@@ -839,6 +880,23 @@ function evidenceNote() {
   return note;
 }
 
+function renderInspectorAuthority(definition) {
+  elements.inspectorAuthority.replaceChildren();
+  if (!definition) return;
+  const model = catalog?.runtimeModel;
+  elements.inspectorAuthority.append(node("span", "authority-kicker", "Effective authority"));
+  elements.inspectorAuthority.append(inheritanceRow("Role", definition.roleId));
+  elements.inspectorAuthority.append(inheritanceRow("Model", `${model?.provider ?? "Unavailable"} / ${model?.model || "provider default"}`));
+  elements.inspectorAuthority.append(inheritanceRow("Tools", definition.toolAssignments?.length ? definition.toolAssignments.join(", ") : "None assigned"));
+  elements.inspectorAuthority.append(node("p", "authority-note", "Assignment grants authority to request. Role ceiling, permission rules, approvals, and audit still govern execution."));
+}
+
+function inheritanceRow(label, value) {
+  const row = node("div", "inheritance-row");
+  row.append(node("span", "", label), node("strong", "", value));
+  return row;
+}
+
 function renderToolbar() {
   const editable = Boolean(draft) && !isSystemLoop();
   elements.name.disabled = !editable;
@@ -847,9 +905,18 @@ function renderToolbar() {
   elements.reloadButton.disabled = !draft || !dirty;
   elements.deleteButton.disabled = !editable;
   elements.invokeButton.disabled = !editable || dirty;
-  elements.addStepButton.disabled = !editable || draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps;
+  elements.addStepButton.disabled = !editable || (draft?.inferenceSteps.length ?? 0) >= catalog.limits.maxInferenceSteps;
   elements.loopSettingsButton.disabled = !draft;
+  elements.loopSettingsButton.hidden = currentView !== "builder";
+  elements.loopSettingsButton.textContent = selectedNodeId === "loop-settings" ? "Selected node" : "Loop settings";
   elements.createLoopButton.disabled = !catalog || catalog.customDefinitions.length >= catalog.limits.maxDefinitionsPerWorkspace;
+  const stepCount = draft?.inferenceSteps.length ?? 0;
+  elements.canvasStepCount.textContent = `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+  elements.loopHeaderMeta.textContent = !draft ? "No loop selected" : `${isSystemLoop() ? "System loop" : "Custom loop"} \u00b7 v${draft.definitionVersion} \u00b7 ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+  elements.canvasAuthority.replaceChildren();
+  if (draft) {
+    elements.canvasAuthority.append(node("strong", "", `Authority: ${draft.roleId}`), document.createTextNode(` \u00b7 ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "no model-facing tools assigned"} \u00b7 permissions and approvals still apply`));
+  }
   elements.saveState.textContent = historicalLoopId ? "Archived evidence" : !draft ? "No loop" : isSystemLoop() ? "System managed" : dirty ? "Unsaved changes" : `Saved · v${draft.definitionVersion}`;
 }
 
@@ -1179,6 +1246,7 @@ function addInferenceStep() {
   if (!draft || isSystemLoop() || draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps) return;
   const id = `local-${newOperationId()}`;
   draft.inferenceSteps.push({ id, name: `Step ${draft.inferenceSteps.length + 1}`, instruction: "", contextPolicy: { mode: "inherit", customPolicy: null } });
+  lastSelectedNodeId = id;
   selectedNodeId = id;
   markDirty();
   renderCanvas(); renderInspector(); renderToolbar();
@@ -1196,6 +1264,7 @@ function removeStep(index) {
   if (draft.inferenceSteps.length <= 1) return;
   draft.inferenceSteps.splice(index, 1);
   selectedNodeId = draft.inferenceSteps[Math.min(index, draft.inferenceSteps.length - 1)].id;
+  lastSelectedNodeId = selectedNodeId;
   markDirty(); renderCanvas(); renderInspector();
 }
 
