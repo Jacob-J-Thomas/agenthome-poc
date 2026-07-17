@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "scripts": {
+    "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify.ps1",
+    "test": "npm run test:frontend",
+    "test:frontend": "node --test tests/frontend/*.test.mjs"
+  }
+}

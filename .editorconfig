@@ -4,4 +4,5 @@ root = true
 csharp_preserve_single_line_blocks = true
 csharp_preserve_single_line_statements = true
 
-
+# Project preference: keep method calls and argument lists on one line when readable.
+# Standard .editorconfig cannot fully express the "wrap only after more than 3 arguments" rule.
