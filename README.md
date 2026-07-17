@@ -1,6 +1,19 @@
 # EmbodySense
 
-EmbodySense is a C# agent harness project. The repository is still small, but the project scope is not defined by the current command surface.
+EmbodySense is a C#/.NET agent harness project, evolved from the original AgentHome proof of concept. It explores how a local AI agent runtime can move beyond a plain chat loop into a governed product surface: localhost Web UI, persisted workspace state, graph-authored custom loops, model-accessible tools, permissions, approvals, audit trails, and repeatable verification.
+
+## Project Framing
+
+This repository is both an implementation and an architecture lab for applied agent systems. The practical question behind the project is: what does it take to let an LLM operate inside a real local workspace while keeping the human in control of scope, authority, evidence, and recovery?
+
+The current implementation is not packaged as an end-user product. It is a working prototype and design record for:
+
+- a localhost browser client as the primary interaction surface;
+- a reusable C# runtime layer that keeps Web and CLI clients behind the same startup facade;
+- graph-authored custom loops with persisted definitions, validation, invocation, run records, and timeline/audit evidence;
+- governed model-accessible workspace tools with explicit loop authority, permission checks, human approvals, and auditable outcomes;
+- durable workspace context and memory files under `.agent/`;
+- public-boundary tests for Core, Web, integration, and frontend behavior.
 
 ## Scope Vs Status
 
