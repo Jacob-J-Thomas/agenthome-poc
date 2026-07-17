@@ -1,13 +1,13 @@
 <mxfile host="app.diagrams.net" modified="2026-07-18T21:00:00.000Z" agent="Codex" version="26.0.0" type="device">
   <diagram id="embodysense-agent-loop" name="Current Agent Loop">
-    <mxGraphModel dx="1896" dy="1214" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+    <mxGraphModel dx="1896" dy="1214" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1800" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="EmbodySense current implementation: shared default conversation loop" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="1">
+        <mxCell id="title" value="EmbodySense current implementation: default conversation loop" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="1">
           <mxGeometry x="60" y="30" width="760" height="40" as="geometry" />
         </mxCell>
-        <mxCell id="subtitle" value="Source of truth: src/EmbodySense.Cli, src/EmbodySense.Web, and src/EmbodySense.Core. Update this draw.io file whenever run-loop, inference, workspace, permission, or audit behavior changes." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="1">
+        <mxCell id="subtitle" value="This page documents ordinary chat. The separate Custom Loop MVP page documents Web authoring and custom execution. Source of truth: src/EmbodySense.Cli, src/EmbodySense.Web, and src/EmbodySense.Core." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="1">
           <mxGeometry x="60" y="72" width="1020" height="34" as="geometry" />
         </mxCell>
         <mxCell id="program" value="CLI Program.RunAsync(args)&lt;br&gt;Web WebAgentRuntimeHost&lt;br&gt;Surface host enters shared runtime facade" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=13" vertex="1" parent="1">
@@ -79,11 +79,11 @@
         <mxCell id="print" value="DefaultConversationLoopRunner stores assistant output while lease remains held&lt;br&gt;Record completed loop run or surface terminal persistence failure&lt;br&gt;Release workspace conversation lease&lt;br&gt;Console/Web projects output; prompt again" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="930" y="1630" width="240" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- Default conversation turns flow through DefaultConversationLoopRunner.&lt;br&gt;- One file-backed workspace conversation lease serializes default turns across runtime instances and processes from durable transcript synchronization through inference and assistant state + memory persistence.&lt;br&gt;- Default loop definition is loaded from .agent/loops/definitions when present.&lt;br&gt;- Current definition shape requires an explicit system-locked graph and validated edge chain.&lt;br&gt;- Loop run records are written for started/completed/failed/cancelled turns.&lt;br&gt;- Terminal completed-run persistence failure surfaces as a failed turn.&lt;br&gt;- Loop CapabilityIds filter workspace commands before permissions.&lt;br&gt;- ToolPermissionService + ToolBroker enforce path policy, approval, execution, and audit.&lt;br&gt;- Verbose mode shows logical pre-provider context, graph summary, loop authority, memory status, limits, and compaction status.&lt;br&gt;- Web and CLI turns share AgentRuntime.RunTurnAsync." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
-          <mxGeometry x="70" y="870" width="520" height="205" as="geometry" />
+        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- Default conversation turns flow through DefaultConversationLoopRunner and AgentRuntime.RunTurnAsync.&lt;br&gt;- One file-backed workspace conversation lease serializes default turns across runtime instances and processes from durable transcript synchronization through inference and assistant state + memory persistence.&lt;br&gt;- The default definition remains a system-locked graph loaded from .agent/loops/definitions when present.&lt;br&gt;- Default-turn run records cover started/completed/failed/cancelled outcomes; terminal persistence failure surfaces as a failed turn.&lt;br&gt;- Loop CapabilityIds filter workspace commands before ToolPermissionService + ToolBroker enforce path policy, approval, execution, and audit.&lt;br&gt;- Web and CLI project the same default-conversation semantics.&lt;br&gt;- Custom authoring/execution uses a separate Startup facade and ordered runtime shown on the Custom Loop MVP page.&lt;br&gt;- Both paths share AgentRuntime and logical ConversationRuntimeState only for explicitly captured or published product context.&lt;br&gt;- Each custom attempt owns a fresh provider transport and run-scoped ToolBroker; the custom execution gate does not globally serialize ordinary chat." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
+          <mxGeometry x="70" y="870" width="520" height="270" as="geometry" />
         </mxCell>
         <mxCell id="maintenance" value="Documentation maintenance&lt;br&gt;Agents should update README.md and this draw.io source in the same change when real implementation behavior changes." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFAF0;strokeColor=#C05621;fontSize=12;dashed=1" vertex="1" parent="1">
-          <mxGeometry x="70" y="1090" width="520" height="85" as="geometry" />
+          <mxGeometry x="70" y="1155" width="520" height="85" as="geometry" />
         </mxCell>
         <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2D3748;endArrow=block;endFill=1" edge="1" parent="1" source="program" target="command">
           <mxGeometry relative="1" as="geometry" />
@@ -167,6 +167,165 @@
             </Array>
           </mxGeometry>
         </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="embodysense-custom-loop-mvp" name="Custom Loop MVP">
+    <mxGraphModel dx="2200" dy="1900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1900" math="0" shadow="0">
+      <root>
+        <mxCell id="c0" />
+        <mxCell id="c1" parent="c0" />
+        <mxCell id="c-title" value="EmbodySense current implementation: first-wave custom loop MVP" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="c1">
+          <mxGeometry x="50" y="25" width="1100" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="c-subtitle" value="Web-only manual authoring and invocation of role-bound ordered loops. This is not a general graph engine, scheduler, background worker, or alternate durable identity." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=13;fontColor=#4A5568" vertex="1" parent="c1">
+          <mxGeometry x="50" y="70" width="1500" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c-authoring-label" value="AUTHORING" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontSize=13;fontStyle=1;fontColor=#6B46C1" vertex="1" parent="c1">
+          <mxGeometry x="50" y="115" width="160" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="c-web" value="Web /loops.html&lt;br&gt;Builder + Runs tabs&lt;br&gt;Default conversation shown read-only&lt;br&gt;Custom Trigger -&gt; 1-5 Inference steps -&gt; Exit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E9D8FD;strokeColor=#6B46C1;fontSize=12;fontStyle=1" vertex="1" parent="c1">
+          <mxGeometry x="50" y="145" width="270" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="c-api" value="Token-guarded /api/loops&lt;br&gt;List / Get / Create / Update / Delete&lt;br&gt;Strict closed JSON contract&lt;br&gt;System loop cannot be mutated" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="370" y="145" width="270" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="c-validate" value="Server validation + role binding&lt;br&gt;Optimistic definition version/hash&lt;br&gt;Typed Trigger and node context policies&lt;br&gt;Only current server-advertised list/read/search assignments&lt;br&gt;No Additional fixed context" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="690" y="135" width="315" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="c-persist-definition" value="Durable custom definition&lt;br&gt;.agent/loops/definitions/custom&lt;br&gt;Definition tombstones + idempotent mutation receipts&lt;br&gt;Update/Delete rejected while that loop has a nonterminal run" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="1060" y="145" width="330" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="c-projection" value="Visual contract&lt;br&gt;Trigger, Exit, connectors, and layout are system projections&lt;br&gt;Persisted contract is ordered, not arbitrary topology" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="1450" y="145" width="320" height="105" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c-invocation-label" value="INVOCATION + ADMISSION" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontSize=13;fontStyle=1;fontColor=#2B6CB0" vertex="1" parent="c1">
+          <mxGeometry x="50" y="305" width="260" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="c-invoke" value="SignalR InvokeLoop&lt;br&gt;Saved loop id + expected version/hash&lt;br&gt;Idempotent operation id&lt;br&gt;Typed prompt source: invocation, preset, or none&lt;br&gt;Optional bounded logical conversation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=12;fontStyle=1" vertex="1" parent="c1">
+          <mxGeometry x="50" y="345" width="300" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="c-gate" value="Workspace custom-execution gate acquired?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="420" y="350" width="190" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="c-busy" value="workspace_execution_busy&lt;br&gt;Durable idempotent rejection&lt;br&gt;No queue, run, deadline, context capture, approval rebinding, or provider dispatch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#C53030;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="395" y="500" width="250" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="c-capture" value="Server captures immutable admission snapshot&lt;br&gt;Exact source path/content/hash/order&lt;br&gt;Provenance + trust + truncation/omission&lt;br&gt;Role files and bounded logical conversation&lt;br&gt;Provider-thread history is never product context" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="700" y="340" width="340" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="c-admit" value="Admission binds exact definition, role, model, surface, trigger, context, and immutable tool maximum&lt;br&gt;Current role/catalog narrowing must not reject or widen silently&lt;br&gt;Persist run + admission audit + completion marker + invocation receipt before dispatch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="1100" y="340" width="360" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="c-running" value="Admitted -&gt; Running&lt;br&gt;Start audit succeeds before ordered dispatch&lt;br&gt;30-minute accumulated-running deadline" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E9D8FD;strokeColor=#6B46C1;fontSize=12;fontStyle=1" vertex="1" parent="c1">
+          <mxGeometry x="1530" y="365" width="270" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c-execution-label" value="ORDERED EXECUTION" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;fontSize=13;fontStyle=1;fontColor=#2C7A7B" vertex="1" parent="c1">
+          <mxGeometry x="50" y="630" width="220" height="25" as="geometry" />
+        </mxCell>
+        <mxCell id="c-next-step" value="Another persisted Inference step?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="70" y="680" width="200" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="c-context" value="Resolve this node's context policy&lt;br&gt;Harness governance is always retained&lt;br&gt;Effective tools = admitted maximum ∩ current role ceiling ∩ implemented catalog&lt;br&gt;Selected context-in sources remain typed and inspectable" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="350" y="670" width="340" height="135" as="geometry" />
+        </mxCell>
+        <mxCell id="c-started" value="Persist Started event before dispatch&lt;br&gt;Exact resolved context-block references into canonical trace tables&lt;br&gt;Current authority snapshot + hashes&lt;br&gt;Attempt-start audit must succeed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="760" y="680" width="300" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="c-provider" value="Fresh app-server transport for this attempt&lt;br&gt;Run-scoped ToolBroker; Exit never uses it&lt;br&gt;Each tool request re-resolves current authority + current permissions&lt;br&gt;Owner-scoped approval when required&lt;br&gt;Reserve exact request/evidence capacity before governance or actuation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="1130" y="660" width="370" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="c-outcome" value="Before a tool result reaches the model, retain exact authority / permission / approval / actuator outcome + canonical result&lt;br&gt;Retain bounded model output as evidence&lt;br&gt;Context-out may retain for loop reasoning and/or idempotently publish to the bound conversation transcript&lt;br&gt;No automatic .agent/MEMORY.md or durable agent-memory writeback" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="1570" y="650" width="390" height="175" as="geometry" />
+        </mxCell>
+        <mxCell id="c-checkpoint" value="Append CheckpointCommitted event and update current checkpoint projection&lt;br&gt;Advance persisted step index&lt;br&gt;Record retained outputs, tool-request usage, and last committed sequence" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6FFFA;strokeColor=#2C7A7B;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="1585" y="865" width="360" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c-exit-gate" value="Continuation enabled and repeat ceiling remains?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="65" y="895" width="220" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="c-deterministic-exit" value="Deterministic Exit Complete&lt;br&gt;No Exit model call when continuation is off or ceiling is exhausted&lt;br&gt;Apply Exit context-out to the final iteration result" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="50" y="1080" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="c-exit-call" value="Tool-less Exit model attempt&lt;br&gt;Resolve Exit's own inherited/custom context&lt;br&gt;Persist exact Started/context/authority evidence&lt;br&gt;Return only Complete or Repeat" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="420" y="900" width="320" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="c-exit-decision" value="Recognized trimmed Exit token?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="820" y="895" width="210" height="135" as="geometry" />
+        </mxCell>
+        <mxCell id="c-exit-complete" value="Complete&lt;br&gt;Publish/retain the iteration result according to Exit context-out&lt;br&gt;Commit Exit checkpoint" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="1110" y="865" width="300" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="c-repeat" value="Repeat&lt;br&gt;Ceiling permits exactly this accepted request&lt;br&gt;Increment iteration, return to first step&lt;br&gt;Previous result is selectable only when Exit retained it" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="1090" y="1030" width="330" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="c-needs-review" value="Invalid or uncertain Exit outcome&lt;br&gt;NeedsReview&lt;br&gt;No repeat starts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#C53030;fontSize=12" vertex="1" parent="c1">
+          <mxGeometry x="805" y="1080" width="240" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="c-terminal" value="Terminal durable run&lt;br&gt;Completed / Failed / Cancelled / NeedsReview&lt;br&gt;Final output and failure state remain inspectable" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12;fontStyle=1" vertex="1" parent="c1">
+          <mxGeometry x="1550" y="1040" width="310" height="105" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c-lifecycle" value="Lifecycle controls&lt;br&gt;REST Pause/Cancel; SignalR Resume binds an approval owner&lt;br&gt;PauseRequested lets the open attempt finish, then enters Paused only at a proved checkpoint&lt;br&gt;Cancel forbids later dispatch and cancels an open attempt&lt;br&gt;Explicit Resume is allowed only from Paused&lt;br&gt;One nonterminal run per loop; one actively executing custom loop per workspace; no hidden queue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAF5FF;strokeColor=#6B46C1;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="50" y="1270" width="600" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="c-recovery" value="Restart recovery under exclusive custom-loop gate&lt;br&gt;Never dispatches automatically&lt;br&gt;Admitted or clean interrupted work -&gt; Paused&lt;br&gt;Open attempt or incomplete admission integrity -&gt; NeedsReview&lt;br&gt;Safe CancelRequested -&gt; Cancelled&lt;br&gt;Explicit Resume is required after a safe park" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFAF0;strokeColor=#C05621;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="710" y="1270" width="520" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="c-approvals" value="Web approval ownership&lt;br&gt;Invocation/Resume connection owns its requests&lt;br&gt;Five-minute server timeout&lt;br&gt;Owner disconnect or unavailable owner denies fail-closed&lt;br&gt;Another connection cannot decide or revive the request" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="1290" y="1270" width="430" height="170" as="geometry" />
+        </mxCell>
+
+        <mxCell id="c-inspection" value="Runs + evidence inspection&lt;br&gt;Live refresh survives reload/reconnect; deleted definitions remain archived history and trace tombstones remain selectable&lt;br&gt;Canonical compact envelope stores exact UTF-8 content once and references context/authority/tool-request tables&lt;br&gt;Maximum bounded proof includes visible 31st over-limit denial: 15,225,475 bytes; 503,165 below 15 MiB target and 1,551,741 below 16 MiB cap; terminal warning slot remains reserved&lt;br&gt;Per-attempt provider/model, context policy/sources, authority/tool evidence, outputs, checkpoints, lifecycle/failure, artifact hash/size, and quota&lt;br&gt;Provider-private reasoning is not exposed; usage/cost is unavailable because the response contract carries neither" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F2FF;strokeColor=#2B6CB0;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="50" y="1530" width="540" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="c-deletion" value="Explicit sensitive-trace deletion&lt;br&gt;Terminal runs only + expected current trace hash + idempotent operation id&lt;br&gt;Intent audit before mutation&lt;br&gt;Replace content with bounded audited tombstone; deletion is irreversible&lt;br&gt;No automatic pruning; live-trace/workspace/tombstone quotas remain visible" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#C53030;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="650" y="1530" width="520" height="165" as="geometry" />
+        </mxCell>
+        <mxCell id="c-coexistence" value="Default-conversation coexistence&lt;br&gt;Ordinary chat remains DefaultConversationLoopRunner + AgentRuntime.RunTurnAsync&lt;br&gt;Custom loops use a separate ordered facade, run store, gate, fresh attempt transports, and run-scoped governance&lt;br&gt;Shared logical conversation state participates only when Trigger admits it or context-out publishes to it&lt;br&gt;No CLI/chat custom-loop command, scheduler, cron, background worker, or automatic continuation is implemented" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="1230" y="1510" width="710" height="185" as="geometry" />
+        </mxCell>
+        <mxCell id="c-maintenance" value="Status artifact only. Product scope remains anchored in docs/OPINIONATED_PROJECT_AXIOMS.md and the user's latest direction." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFAF0;strokeColor=#C05621;fontSize=12;dashed=1" vertex="1" parent="c1">
+          <mxGeometry x="50" y="1745" width="1890" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ce1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="c1" source="c-web" target="c-api"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2B6CB0;endArrow=block;endFill=1" edge="1" parent="c1" source="c-api" target="c-validate"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2C7A7B;endArrow=block;endFill=1" edge="1" parent="c1" source="c-validate" target="c-persist-definition"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#718096;endArrow=block;endFill=1" edge="1" parent="c1" source="c-projection" target="c-validate"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce5" value="manual run" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2B6CB0;endArrow=block;endFill=1" edge="1" parent="c1" source="c-web" target="c-invoke"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2B6CB0;endArrow=block;endFill=1" edge="1" parent="c1" source="c-invoke" target="c-gate"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce7" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#C53030;endArrow=block;endFill=1" edge="1" parent="c1" source="c-gate" target="c-busy"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce8" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2C7A7B;endArrow=block;endFill=1" edge="1" parent="c1" source="c-gate" target="c-capture"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2C7A7B;endArrow=block;endFill=1" edge="1" parent="c1" source="c-capture" target="c-admit"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="c1" source="c-admit" target="c-running"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="c1" source="c-running" target="c-next-step"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1665" y="620" /><mxPoint x="170" y="620" /></Array></mxGeometry></mxCell>
+        <mxCell id="ce12" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3182CE;endArrow=block;endFill=1" edge="1" parent="c1" source="c-next-step" target="c-context"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3182CE;endArrow=block;endFill=1" edge="1" parent="c1" source="c-context" target="c-started"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3182CE;endArrow=block;endFill=1" edge="1" parent="c1" source="c-started" target="c-provider"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2F855A;endArrow=block;endFill=1" edge="1" parent="c1" source="c-provider" target="c-outcome"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2F855A;endArrow=block;endFill=1" edge="1" parent="c1" source="c-outcome" target="c-checkpoint"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce17" value="next boundary" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2C7A7B;endArrow=block;endFill=1" edge="1" parent="c1" source="c-checkpoint" target="c-next-step"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1530" y="915" /><mxPoint x="1530" y="840" /><mxPoint x="170" y="840" /></Array></mxGeometry></mxCell>
+        <mxCell id="ce18" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#B7791F;endArrow=block;endFill=1" edge="1" parent="c1" source="c-next-step" target="c-exit-gate"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce19" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2F855A;endArrow=block;endFill=1" edge="1" parent="c1" source="c-exit-gate" target="c-deterministic-exit"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce20" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3182CE;endArrow=block;endFill=1" edge="1" parent="c1" source="c-exit-gate" target="c-exit-call"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce21" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3182CE;endArrow=block;endFill=1" edge="1" parent="c1" source="c-exit-call" target="c-exit-decision"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce22" value="Complete" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2F855A;endArrow=block;endFill=1" edge="1" parent="c1" source="c-exit-decision" target="c-exit-complete"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce23" value="Repeat" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#B7791F;endArrow=block;endFill=1" edge="1" parent="c1" source="c-exit-decision" target="c-repeat"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce24" value="invalid / uncertain" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#C53030;endArrow=block;endFill=1" edge="1" parent="c1" source="c-exit-decision" target="c-needs-review"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce25" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2F855A;endArrow=block;endFill=1" edge="1" parent="c1" source="c-deterministic-exit" target="c-terminal"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="200" y="1210" /><mxPoint x="1705" y="1210" /></Array></mxGeometry></mxCell>
+        <mxCell id="ce26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2F855A;endArrow=block;endFill=1" edge="1" parent="c1" source="c-exit-complete" target="c-terminal"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce27" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#C53030;endArrow=block;endFill=1" edge="1" parent="c1" source="c-needs-review" target="c-terminal"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce28" value="restart at Step 1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#B7791F;endArrow=block;endFill=1" edge="1" parent="c1" source="c-repeat" target="c-next-step"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1255" y="1195" /><mxPoint x="380" y="1195" /><mxPoint x="380" y="740" /></Array></mxGeometry></mxCell>
+        <mxCell id="ce29" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#6B46C1;endArrow=block;endFill=1" edge="1" parent="c1" source="c-running" target="c-lifecycle"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce30" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#B7791F;endArrow=block;endFill=1" edge="1" parent="c1" source="c-provider" target="c-approvals"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce31" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#C05621;endArrow=block;endFill=1" edge="1" parent="c1" source="c-recovery" target="c-lifecycle"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce32" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#2B6CB0;endArrow=block;endFill=1" edge="1" parent="c1" source="c-terminal" target="c-inspection"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ce33" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#C53030;endArrow=block;endFill=1" edge="1" parent="c1" source="c-inspection" target="c-deletion"><mxGeometry relative="1" as="geometry" /></mxCell>
       </root>
     </mxGraphModel>
   </diagram>
