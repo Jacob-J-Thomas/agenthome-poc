@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Clients.CodexAppServer;
@@ -113,9 +114,7 @@ public sealed class CodexAppServerInferenceTests
         var toolSpec = Assert.Single(parameters.GetProperty("dynamicTools").EnumerateArray());
         var commandEnum = toolSpec.GetProperty("inputSchema").GetProperty("properties").GetProperty("command").GetProperty("enum").EnumerateArray().Select(item => item.GetString() ?? "").ToArray();
         Assert.Equal(["read"], commandEnum);
-        Assert.Contains("assigned these workspace command capabilities", developerInstructions);
-        Assert.Contains("read", developerInstructions);
-        Assert.DoesNotContain("write", developerInstructions);
+        Assert.Equal(EmbodySenseDeveloperInstructions.Create([ToolCommand.Read]), developerInstructions);
     }
 
     [Fact]
@@ -138,7 +137,7 @@ public sealed class CodexAppServerInferenceTests
         using var threadStartDocument = JsonDocument.Parse(transport.Writes.Single(IsThreadStart));
         var parameters = threadStartDocument.RootElement.GetProperty("params");
         Assert.False(parameters.TryGetProperty("dynamicTools", out _));
-        Assert.Contains("has not assigned any workspace command capabilities", parameters.GetProperty("developerInstructions").GetString());
+        Assert.Equal(EmbodySenseDeveloperInstructions.Create(), parameters.GetProperty("developerInstructions").GetString());
         var toolResponse = Assert.Single(transport.Writes, line => line.Contains("\"id\":99", StringComparison.Ordinal));
         Assert.Contains("\"success\":false", toolResponse, StringComparison.Ordinal);
         Assert.Contains("does not grant", toolResponse, StringComparison.Ordinal);
@@ -289,6 +288,57 @@ public sealed class CodexAppServerInferenceTests
         Assert.Contains("old answer", turnInput);
         Assert.Contains("Current user message:", turnInput);
         Assert.Contains("new question", turnInput);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_uses_the_exact_versioned_governance_and_trusted_instruction_channel_for_custom_requests()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"done","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport);
+        var governance = EmbodySenseDeveloperInstructions.Capture();
+        var trusted = new[]
+        {
+            new EmbodySenseTrustedInstruction("nearest-agents", "role instruction content"),
+            new EmbodySenseTrustedInstruction("step-one", "authored node instruction")
+        };
+        var exactLowerAuthorityContext = "context-head-" + new string('x', 25_000) + "-context-tail";
+        var request = new LlmInferenceRequest(
+            [LlmMessage.User(exactLowerAuthorityContext), LlmMessage.User("explicit current custom-loop turn input")],
+            instructionContext: new LlmInferenceInstructionContext(governance, trusted, preserveExactLogicalContext: true));
+
+        await client.GenerateAsync(request, (_, _) => Task.CompletedTask);
+
+        using var threadStartDocument = JsonDocument.Parse(transport.Writes.Single(IsThreadStart));
+        var developerInstructions = threadStartDocument.RootElement.GetProperty("params").GetProperty("developerInstructions").GetString();
+        Assert.Equal(EmbodySenseDeveloperInstructions.Compose(governance, trusted), developerInstructions);
+        Assert.Equal(EmbodySenseDeveloperInstructions.CurrentVersion, governance.Version);
+        Assert.DoesNotContain("context-head", developerInstructions, StringComparison.Ordinal);
+        using var turnStartDocument = JsonDocument.Parse(transport.Writes.Single(IsTurnStart));
+        var turnInput = turnStartDocument.RootElement.GetProperty("params").GetProperty("input")[0].GetProperty("text").GetString();
+        Assert.Contains("context-head", turnInput, StringComparison.Ordinal);
+        Assert.Contains("context-tail", turnInput, StringComparison.Ordinal);
+        Assert.Contains("explicit current custom-loop turn input", turnInput, StringComparison.Ordinal);
+        Assert.DoesNotContain("omitted", turnInput, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_rejects_a_tampered_custom_governance_snapshot_before_provider_thread_creation()
+    {
+        var transport = new ScriptedAppServerTransport(Response(1, """{"serverInfo":{}}"""));
+        var client = CreateClient(transport);
+        var governance = EmbodySenseDeveloperInstructions.Capture() with { Content = "forged governance" };
+        var request = new LlmInferenceRequest(
+            [LlmMessage.User("explicit current custom-loop turn input")],
+            instructionContext: new LlmInferenceInstructionContext(governance, []));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(request));
+
+        Assert.Contains("does not match", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(transport.Writes, IsThreadStart);
     }
 
     [Fact]
