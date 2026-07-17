@@ -1,6 +1,19 @@
 # EmbodySense
 
-EmbodySense is a C# agent harness project. The repository is still small, but the project scope is not defined by the current command surface.
+EmbodySense is a C#/.NET agent harness project, evolved from the original AgentHome proof of concept. It explores how a local AI agent runtime can move beyond a plain chat loop into a governed product surface: localhost Web UI, persisted workspace state, graph-authored custom loops, model-accessible tools, permissions, approvals, audit trails, and repeatable verification.
+
+## Project Framing
+
+This repository is both an implementation and an architecture lab for applied agent systems. The practical question behind the project is: what does it take to let an LLM operate inside a real local workspace while keeping the human in control of scope, authority, evidence, and recovery?
+
+The current implementation is not packaged as an end-user product. It is a working prototype and design record for:
+
+- a localhost browser client as the primary interaction surface;
+- a reusable C# runtime layer that keeps Web and CLI clients behind the same startup facade;
+- graph-authored custom loops with persisted definitions, validation, invocation, run records, and timeline/audit evidence;
+- governed model-accessible workspace tools with explicit loop authority, permission checks, human approvals, and auditable outcomes;
+- durable workspace context and memory files under `.agent/`;
+- public-boundary tests for Core, Web, integration, and frontend behavior.
 
 ## Scope Vs Status
 
@@ -34,7 +47,7 @@ Dependency height is enforced by explicit project references and architecture gu
 
 Project and namespace separation are ownership and compile-time dependency boundaries, not security boundaries by themselves. Security-sensitive behavior must be enforced by runtime policy checks, explicit approvals, and auditable actions.
 
-The primary implemented client is now the localhost Web UI in `src/EmbodySense.Web`. It hosts a browser client on `127.0.0.1` by default, serves static files from `wwwroot`, requires a same-origin session token for protected REST and SignalR calls, lets the user explicitly initialize an uninitialized workspace, handles supported harness slash commands, exposes a Verbose toggle for visible-context debug output, streams assistant output through the `/hubs/session` SignalR hub, supports browser turn cancellation, and pushes governed tool approval requests to connected browsers. The `/api/approvals/*` endpoints remain as a token-guarded fallback for approval inspection and decisions.
+The primary implemented client is now the localhost Web UI in `src/EmbodySense.Web`. It hosts a browser client on `127.0.0.1` by default, serves static files from `wwwroot`, requires a same-origin session token for protected REST and SignalR calls, lets the user explicitly initialize an uninitialized workspace, handles supported harness slash commands, exposes a Verbose toggle for visible-context debug output, streams assistant output through the `/hubs/session` SignalR hub, supports browser turn cancellation, and pushes governed tool approval requests to connected browsers. The Web Loops surface can create, graph-edit, save, reload, archive/delete, and synchronously invoke supported editable custom loops with server-side validation and run/audit/timeline recording. The `/api/approvals/*` endpoints remain as a token-guarded fallback for approval inspection and decisions.
 
 The CLI `run` path remains supported as a verification and conformance client. It prompts before initializing an uninitialized workspace, loads workspace instructions and seeded agent documents as runtime context, exposes governed file commands to the model through Codex app-server dynamic tools, streams app-server events into the console, and can run with explicit visible-context debug output:
 
