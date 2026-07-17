@@ -6,4 +6,5 @@ public sealed record ToolPermissionCheck(
     string ResolvedPath,
     string PermissionTargetPath,
     FileSystemOperation Operation,
-    PermissionEvaluation Evaluation);
+    PermissionEvaluation Evaluation,
+    string PolicyHash);

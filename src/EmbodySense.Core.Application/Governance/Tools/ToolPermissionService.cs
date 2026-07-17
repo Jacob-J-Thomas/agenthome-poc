@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using EmbodySense.Core.Common;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
@@ -12,6 +14,7 @@ public sealed class ToolPermissionService : IToolPermissionService
 {
     private readonly IDirectoryPermissionPolicy _policy;
     private readonly string _workspaceRootPath;
+    private readonly string _policyHash;
 
     public ToolPermissionService(WorkspacePaths paths, IDirectoryPermissionPolicy policy)
     {
@@ -20,6 +23,7 @@ public sealed class ToolPermissionService : IToolPermissionService
 
         _policy = policy;
         _workspaceRootPath = Path.GetFullPath(paths.RootPath);
+        _policyHash = ComputePolicyHash(policy);
     }
 
     public ToolPermissionCheck Evaluate(ToolRequest request)
@@ -35,7 +39,8 @@ public sealed class ToolPermissionService : IToolPermissionService
                 resolvedPath,
                 resolvedPath,
                 MapOperation(request, resolvedPath),
-                PermissionEvaluation.Denied(_workspaceRootPath, ToolPermissionDetails.OutsideWorkspaceRoot));
+                PermissionEvaluation.Denied(_workspaceRootPath, ToolPermissionDetails.OutsideWorkspaceRoot),
+                _policyHash);
         }
 
         if (PathUsesReparsePoint(resolvedPath))
@@ -44,13 +49,35 @@ public sealed class ToolPermissionService : IToolPermissionService
                 resolvedPath,
                 resolvedPath,
                 MapOperation(request, resolvedPath),
-                PermissionEvaluation.Denied(_workspaceRootPath, ToolPermissionDetails.ReparsePointPath));
+                PermissionEvaluation.Denied(_workspaceRootPath, ToolPermissionDetails.ReparsePointPath),
+                _policyHash);
         }
 
         var operation = MapOperation(request, resolvedPath);
         var permissionTargetPath = GetPermissionTargetPath(request.Command, resolvedPath);
         var evaluation = _policy.EvaluateDirectory(permissionTargetPath, operation);
-        return new ToolPermissionCheck(resolvedPath, permissionTargetPath, operation, evaluation);
+        return new ToolPermissionCheck(resolvedPath, permissionTargetPath, operation, evaluation, _policyHash);
+    }
+
+    private static string ComputePolicyHash(IDirectoryPermissionPolicy policy)
+    {
+        var canonical = new StringBuilder();
+        canonical.Append("document=").Append(policy.HasDocument ? '1' : '0').Append('\n');
+        foreach (var entry in policy.Approved.OrderBy(item => item.Path, StringComparer.Ordinal).ThenBy(item => item.RequiresApproval))
+        {
+            canonical.Append("allow\t").Append(entry.Path).Append('\t').Append(entry.RequiresApproval ? '1' : '0').Append('\t');
+            canonical.AppendJoin(',', entry.Operations.OrderBy(operation => operation).Select(operation => ((int)operation).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            canonical.Append('\n');
+        }
+
+        foreach (var entry in policy.Denied.OrderBy(item => item.Path, StringComparer.Ordinal))
+        {
+            canonical.Append("deny\t").Append(entry.Path).Append("\t0\t");
+            canonical.AppendJoin(',', entry.Operations.OrderBy(operation => operation).Select(operation => ((int)operation).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            canonical.Append('\n');
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString()))).ToLowerInvariant();
     }
 
     private string ResolveTargetPath(string targetPath)

@@ -16,7 +16,12 @@ public sealed class WorkspacePathsTests
         Assert.Equal(paths.RootPath, paths.WorkspacePath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops"), paths.LoopsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions"), paths.LoopDefinitionsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom"), paths.CustomLoopDefinitionsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-tombstones"), paths.CustomLoopDefinitionTombstonesPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-create-operations"), paths.CustomLoopDefinitionOperationsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs"), paths.LoopRunsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom"), paths.CustomLoopRunsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom-trace-deletion-operations"), paths.CustomLoopTraceDeletionOperationsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "default-conversation.json"), paths.DefaultConversationLoopDefinitionPath);
         Assert.Equal(Path.Combine(paths.RootPath, "shared"), paths.WorkspaceSharedPath);
         Assert.Equal(Path.Combine(paths.RootPath, "private"), paths.WorkspacePrivatePath);
