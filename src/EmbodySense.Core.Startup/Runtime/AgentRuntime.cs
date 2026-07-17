@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime.Models;
 
 namespace EmbodySense.Core.Startup.Runtime;
@@ -17,6 +18,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly RuntimeSessionState _state = new();
     private readonly RuntimeCommandService _commandService;
     private readonly ConversationRuntimeState _conversationState;
+    private readonly CustomLoopRuntimeFacade _customLoops;
 
     internal AgentRuntime(
         WorkspacePaths paths,
@@ -25,7 +27,8 @@ public sealed class AgentRuntime : IAsyncDisposable
         IReadOnlyList<LlmMessage> startupContext,
         ConversationRuntimeState conversationState,
         IAsyncDisposable inferenceClient,
-        IDefaultConversationLoopRunner loopRunner)
+        IDefaultConversationLoopRunner loopRunner,
+        CustomLoopRuntimeFacade customLoops)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(surface);
@@ -34,6 +37,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(conversationState);
         ArgumentNullException.ThrowIfNull(inferenceClient);
         ArgumentNullException.ThrowIfNull(loopRunner);
+        ArgumentNullException.ThrowIfNull(customLoops);
 
         Paths = paths;
         Surface = surface;
@@ -42,6 +46,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _conversationState = conversationState;
         _inferenceClient = inferenceClient;
         _loopRunner = loopRunner;
+        _customLoops = customLoops;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
     }
 
@@ -77,6 +82,37 @@ public sealed class AgentRuntime : IAsyncDisposable
         return AgentRuntimeTurnResult.CommandOutput(enabled ? RuntimeCommandOutput.VerboseEnabledText : "Verbose mode disabled.");
     }
 
+    public Task<LoopRunInvocationResponse> InvokeCustomLoopAsync(LoopRunInvocationInput input, CancellationToken cancellationToken = default)
+    {
+        return _customLoops.InvokeAsync(input, cancellationToken);
+    }
+
+    public Task<LoopRunSnapshot?> GetCustomLoopRunAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runId);
+        return _customLoops.GetAsync(runId, cancellationToken);
+    }
+
+    public Task<IReadOnlyList<LoopRunSummarySnapshot>> ListCustomLoopRunsAsync(int maximumCount = 50, CancellationToken cancellationToken = default)
+    {
+        return _customLoops.ListRecentAsync(maximumCount, cancellationToken);
+    }
+
+    public Task<LoopRunControlResponse> PauseCustomLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
+    {
+        return _customLoops.PauseAsync(input, cancellationToken);
+    }
+
+    public Task<LoopRunControlResponse> CancelCustomLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
+    {
+        return _customLoops.CancelAsync(input, cancellationToken);
+    }
+
+    public Task<LoopRunControlResponse> ResumeCustomLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
+    {
+        return _customLoops.ResumeAsync(input, cancellationToken);
+    }
+
     public static bool TryHandleStaticRuntimeCommand(string input, out AgentRuntimeTurnResult result)
     {
         var handled = RuntimeCommandService.TryHandleStaticCommand(input, out var commandResult);
@@ -86,6 +122,7 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        await _customLoops.DisposeAsync();
         await _inferenceClient.DisposeAsync();
     }
 
