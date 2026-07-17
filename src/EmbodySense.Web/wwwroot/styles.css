@@ -138,6 +138,26 @@ h2 {
   gap: 8px;
 }
 
+.primary-nav {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.primary-nav a {
+  padding: 0.45rem 0.7rem;
+  border-radius: 999px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.primary-nav a:hover,
+.primary-nav a:focus-visible,
+.primary-nav a.active {
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+}
+
 .status-strip span,
 #approvalCount {
   min-height: 28px;

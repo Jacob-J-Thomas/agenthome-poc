@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loops · EmbodySense</title>
+  <link rel="stylesheet" href="/loop-builder.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <a class="brand" href="/" aria-label="EmbodySense chat">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>EmbodySense</strong><small id="workspaceRoot">Workspace loading</small></span>
+      </a>
+      <nav class="primary-nav" aria-label="Primary">
+        <a href="/">Chat</a>
+        <a class="active" href="/loops.html" aria-current="page">Loops</a>
+      </nav>
+      <div class="header-status"><span id="connectionDot" class="status-dot"></span><span id="workspaceStatus">Checking workspace</span></div>
+    </header>
+
+    <main class="loop-workspace">
+      <aside class="loop-sidebar" aria-label="Loop definitions">
+        <div class="sidebar-heading">
+          <div><p class="eyebrow">Role-bound routines</p><h1>Loops</h1></div>
+          <button id="createLoopButton" class="icon-button" type="button" aria-label="Create loop">+</button>
+        </div>
+        <div id="loopList" class="loop-list" role="listbox" aria-label="Saved loops"></div>
+        <div class="sidebar-footer"><span>Contextual role</span><strong id="roleId">Loading</strong></div>
+      </aside>
+
+      <section class="builder-panel" aria-label="Loop workspace">
+        <nav class="workspace-tabs" role="tablist" aria-label="Loop workspace">
+          <button id="builderTab" class="workspace-tab active" role="tab" aria-selected="true" aria-controls="builderView" type="button">Builder</button>
+          <button id="runsTab" class="workspace-tab" role="tab" aria-selected="false" aria-controls="runsView" type="button">Runs <span id="runCount" class="tab-count">0</span></button>
+        </nav>
+
+        <div id="builderView" class="builder-view" role="tabpanel" aria-labelledby="builderTab">
+          <div class="builder-toolbar">
+            <div class="title-fields">
+              <label><span>Loop name</span><input id="loopName" maxlength="120" autocomplete="off"></label>
+              <label><span>Description</span><input id="loopDescription" maxlength="2000" autocomplete="off"></label>
+            </div>
+            <div class="toolbar-actions">
+              <span id="saveState" class="save-state">Loading</span>
+              <button id="invokeButton" class="run-button" type="button">Run</button>
+              <button id="reloadButton" class="secondary-button" type="button">Reload</button>
+              <button id="saveButton" class="primary-button" type="button">Save</button>
+              <button id="deleteButton" class="danger-button" type="button">Delete</button>
+            </div>
+          </div>
+
+          <div id="validationBanner" class="validation-banner" role="status" aria-live="polite"></div>
+          <div class="canvas-scroll">
+            <div id="loopCanvas" class="loop-canvas" aria-label="Ordered loop graph"></div>
+          </div>
+          <div class="canvas-footer">
+            <button id="loopSettingsButton" class="secondary-button" type="button">Loop settings</button>
+            <button id="addStepButton" class="secondary-button" type="button">+ Add inference step</button>
+            <p>Trigger, Exit, connectors, and layout are system projections. Save accepts only structurally runnable definitions; invocation still checks current authority, concurrency, and trace capacity.</p>
+          </div>
+        </div>
+
+        <div id="runsView" class="runs-view" role="tabpanel" aria-labelledby="runsTab" hidden>
+          <aside class="run-list-pane" aria-label="Recent runs">
+            <div class="run-list-header"><strong>Recent runs</strong><span>Durable evidence, newest first</span><span id="traceQuota" class="trace-quota">Loading trace quota</span></div>
+            <div id="runList" class="run-list"></div>
+          </aside>
+          <section class="timeline-pane" aria-label="Run timeline">
+            <div class="timeline-header">
+              <div><h2 id="runTitle">No run selected</h2><p id="runSubtitle">Start a saved loop to inspect its durable evidence.</p></div>
+              <div id="runActions" class="run-actions"></div>
+            </div>
+            <div id="runNotice" class="run-notice" role="status" aria-live="polite"></div>
+            <div id="runTimeline" class="timeline-scroll"></div>
+          </section>
+        </div>
+      </section>
+
+      <aside class="inspector" aria-label="Selected loop item">
+        <div class="inspector-heading"><p class="eyebrow">Inspector</p><h2 id="inspectorTitle">Loop settings</h2></div>
+        <div id="inspectorContent" class="inspector-content"></div>
+      </aside>
+    </main>
+  </div>
+
+  <div id="invokeModal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="invokeModalTitle" aria-hidden="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div><p class="eyebrow">Real governed execution</p><h2 id="invokeModalTitle">Start a manual run</h2></div>
+        <button id="closeInvokeButton" class="icon-button" type="button" aria-label="Close invocation">×</button>
+      </div>
+      <div class="modal-body">
+        <p id="invokeSummary" class="modal-copy"></p>
+        <label id="invocationPromptField"><span>Initial user prompt</span><textarea id="invocationPrompt" maxlength="24000" placeholder="What should this loop work on?"></textarea></label>
+        <div id="invokeLimits" class="run-warning"></div>
+        <div class="run-warning warning"><strong>This is a real run.</strong> Assigned read tools may expose workspace content to the configured model. Current permission and approval rules still apply.</div>
+      </div>
+      <div class="modal-footer">
+        <button id="cancelInvokeButton" class="secondary-button" type="button">Cancel</button>
+        <button id="startRunButton" class="primary-button" type="button">Start run</button>
+      </div>
+    </div>
+  </div>
+
+  <aside id="approvalPanel" class="approval-panel" aria-labelledby="approvalPanelTitle" aria-live="polite" hidden>
+    <div class="approval-panel-header">
+      <div><p class="eyebrow">Governed workspace access</p><h2 id="approvalPanelTitle">Run approval required</h2></div>
+      <span id="approvalCount" class="version-chip">0 pending</span>
+    </div>
+    <p class="approval-panel-copy">This run is waiting for your decision. Review the resolved target before allowing the request.</p>
+    <div id="approvals" class="approval-list"></div>
+  </aside>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/loop-builder.js" defer></script>
+</body>
+</html>
