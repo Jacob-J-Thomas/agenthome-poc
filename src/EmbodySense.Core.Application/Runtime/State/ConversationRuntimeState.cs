@@ -8,6 +8,8 @@ public sealed class ConversationRuntimeState
 {
     private readonly IResettableInferenceClient? _resettableInferenceClient;
     private readonly List<RuntimeContextMessage> _messages;
+    private readonly object _messagesSync = new();
+    private readonly SemaphoreSlim _exclusiveAccess = new(1, 1);
 
     public ConversationRuntimeState(
         IReadOnlyList<LlmMessage>? initialMessages = null,
@@ -17,15 +19,42 @@ public sealed class ConversationRuntimeState
         _messages = initialMessages?.Select(message => CreateContextMessage(message, RuntimeContextSource.StartupContext)).ToList() ?? [];
     }
 
-    public IReadOnlyList<LlmMessage> Messages => _messages.Select(message => message.Message).ToArray();
+    public IReadOnlyList<LlmMessage> Messages
+    {
+        get
+        {
+            lock (_messagesSync)
+            {
+                return _messages.Select(message => message.Message).ToArray();
+            }
+        }
+    }
 
-    public IReadOnlyList<RuntimeContextMessage> ContextMessages => _messages;
+    public IReadOnlyList<RuntimeContextMessage> ContextMessages
+    {
+        get
+        {
+            lock (_messagesSync)
+            {
+                return _messages.ToArray();
+            }
+        }
+    }
+
+    public async Task<IDisposable> AcquireExclusiveAccessAsync(CancellationToken cancellationToken = default)
+    {
+        await _exclusiveAccess.WaitAsync(cancellationToken);
+        return new ExclusiveAccessLease(_exclusiveAccess);
+    }
 
     public void AppendMessage(LlmMessage message, RuntimeContextSource source = RuntimeContextSource.SessionTranscript)
     {
         ArgumentNullException.ThrowIfNull(message);
 
-        _messages.Add(CreateContextMessage(message, source));
+        lock (_messagesSync)
+        {
+            _messages.Add(CreateContextMessage(message, source));
+        }
     }
 
     public void ReplaceMessages(
@@ -40,12 +69,15 @@ public sealed class ConversationRuntimeState
             throw new ArgumentOutOfRangeException(nameof(startupContextCount), startupContextCount, "Startup context count must fit the replacement message list.");
         }
 
-        _messages.Clear();
-        for (var i = 0; i < messages.Count; i++)
+        lock (_messagesSync)
         {
-            var source = i < startupContextCount ? RuntimeContextSource.StartupContext : remainingSource;
-            var detail = i < startupContextCount ? null : remainingDetail;
-            _messages.Add(CreateContextMessage(messages[i], source, detail));
+            _messages.Clear();
+            for (var i = 0; i < messages.Count; i++)
+            {
+                var source = i < startupContextCount ? RuntimeContextSource.StartupContext : remainingSource;
+                var detail = i < startupContextCount ? null : remainingDetail;
+                _messages.Add(CreateContextMessage(messages[i], source, detail));
+            }
         }
 
         _resettableInferenceClient?.ResetConversation();
@@ -66,5 +98,20 @@ public sealed class ConversationRuntimeState
             RuntimeContextSource.CurrentTurnInput => "Current user input being evaluated by the active loop before provider dispatch.",
             _ => "Context source is not classified."
         };
+    }
+
+    private sealed class ExclusiveAccessLease : IDisposable
+    {
+        private SemaphoreSlim? gate;
+
+        public ExclusiveAccessLease(SemaphoreSlim gate)
+        {
+            this.gate = gate;
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref gate, null)?.Release();
+        }
     }
 }
