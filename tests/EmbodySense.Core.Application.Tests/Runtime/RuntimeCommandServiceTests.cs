@@ -201,6 +201,11 @@ public sealed class RuntimeCommandServiceTests
             return Task.FromResult<IReadOnlyList<LlmMessage>>([]);
         }
 
+        public Task<ConversationMemorySnapshot> LoadCurrentConversationSnapshotAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ConversationMemorySnapshot("current", "runtime-command-version", []));
+        }
+
         public Task<IReadOnlyList<ConversationTranscriptListItem>> ListConversationsAsync(CancellationToken cancellationToken = default)
         {
             ListConversationCallCount++;
@@ -230,7 +235,7 @@ public sealed class RuntimeCommandServiceTests
             return Task.CompletedTask;
         }
 
-        public Task<bool> TryAppendMessageAsync(IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
+        public Task<bool> TryAppendMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
         {
             return Task.FromResult(false);
         }

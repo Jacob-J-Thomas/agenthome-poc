@@ -557,9 +557,11 @@ public sealed class DefaultConversationLoopRunnerTests
             return Task.CompletedTask;
         }
 
-        public Task<bool> TryAppendMessageAsync(IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
+        public Task<bool> TryAppendMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
         {
-            var matches = Messages.Count == expectedPrefix.Count
+            var matches = string.Equals(expectedConversationId, "current", StringComparison.Ordinal)
+                && string.Equals(expectedConversationVersion, "default-loop-version", StringComparison.Ordinal)
+                && Messages.Count == expectedPrefix.Count
                 && Messages.Zip(expectedPrefix).All(pair => pair.First.Role == pair.Second.Role && string.Equals(pair.First.Content, pair.Second.Content, StringComparison.Ordinal));
             if (matches)
             {
@@ -572,6 +574,11 @@ public sealed class DefaultConversationLoopRunnerTests
         public Task<IReadOnlyList<LlmMessage>> LoadCurrentConversationAsync(CancellationToken cancellationToken = default)
         {
             return Task.FromResult<IReadOnlyList<LlmMessage>>(Messages);
+        }
+
+        public Task<ConversationMemorySnapshot> LoadCurrentConversationSnapshotAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ConversationMemorySnapshot("current", "default-loop-version", Messages));
         }
 
         public Task<IReadOnlyList<ConversationTranscriptListItem>> ListConversationsAsync(CancellationToken cancellationToken = default)

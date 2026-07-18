@@ -80,11 +80,11 @@ public sealed class ConversationMemoryStoreTests
         var first = new ConversationMemoryStore(paths);
         var second = new ConversationMemoryStore(paths);
         await first.AppendMessageAsync(LlmMessage.User("seed"));
-        var expected = await first.LoadCurrentConversationAsync();
+        var expected = await first.LoadCurrentConversationSnapshotAsync();
 
         var results = await Task.WhenAll(
-            first.TryAppendMessageAsync(expected, LlmMessage.Assistant("winner-a")),
-            second.TryAppendMessageAsync(expected, LlmMessage.Assistant("winner-b")));
+            first.TryAppendMessageAsync(expected.ConversationId, expected.Version, expected.Messages, LlmMessage.Assistant("winner-a")),
+            second.TryAppendMessageAsync(expected.ConversationId, expected.Version, expected.Messages, LlmMessage.Assistant("winner-b")));
 
         Assert.Single(results, result => result);
         Assert.Single(results, result => !result);
@@ -100,12 +100,28 @@ public sealed class ConversationMemoryStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("seed"));
-        var expected = await store.LoadCurrentConversationAsync();
+        var expected = await store.LoadCurrentConversationSnapshotAsync();
         await using var externalWriter = new FileStream(paths.CurrentConversationPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
 
-        await Assert.ThrowsAsync<IOException>(() => store.TryAppendMessageAsync(expected, LlmMessage.Assistant("must not race")));
+        await Assert.ThrowsAsync<IOException>(() => store.TryAppendMessageAsync(expected.ConversationId, expected.Version, expected.Messages, LlmMessage.Assistant("must not race")));
 
         Assert.Single(await store.LoadCurrentConversationAsync());
+    }
+
+    [Fact]
+    public async Task Atomic_append_rejects_an_identical_empty_prefix_after_the_logical_conversation_is_reset()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        var captured = await store.LoadCurrentConversationSnapshotAsync();
+
+        await store.StartFreshConversationAsync();
+        var appended = await store.TryAppendMessageAsync(captured.ConversationId, captured.Version, captured.Messages, LlmMessage.Assistant("stale output"));
+        var current = await store.LoadCurrentConversationSnapshotAsync();
+
+        Assert.False(appended);
+        Assert.NotEqual(captured.Version, current.Version);
+        Assert.Empty(current.Messages);
     }
 
     [Fact]
