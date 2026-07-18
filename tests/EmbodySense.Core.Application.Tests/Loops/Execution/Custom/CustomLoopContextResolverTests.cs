@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
@@ -12,6 +13,22 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 public sealed class CustomLoopContextResolverTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 16, 18, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void Resolver_rejects_blank_node_instructions_and_tampered_admitted_context()
+    {
+        var blankDefinition = Definition(instruction: " ");
+        var blankRun = Run(blankDefinition);
+        var resolver = new CustomLoopContextResolver();
+
+        Assert.Throws<InvalidOperationException>(() => resolver.ResolveInference(blankRun, blankDefinition.InferenceSteps[0]));
+
+        var definition = Definition();
+        var run = Run(definition);
+        var tampered = run with { ContextSnapshot = run.ContextSnapshot with { ManifestHash = new string('0', CustomLoopLimits.Sha256HexCharacters) } };
+
+        Assert.Throws<InvalidOperationException>(() => resolver.ResolveInference(tampered, definition.InferenceSteps[0]));
+    }
 
     [Fact]
     public void Inference_assembles_the_complete_logical_request_in_contract_order_with_exact_manifest_hashes()
@@ -398,6 +415,7 @@ public sealed class CustomLoopContextResolverTests
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
             "op-admit",
+            AuditSchema.Actors.Web,
             Hash("admission"),
             definition,
             triggerPrompt,

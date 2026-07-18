@@ -701,7 +701,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var resumed = await resumedLifecycle.ResumeAsync(new CustomLoopResumeRequest(store.Current.Id, store.Current.LifecycleVersion, "resume-paused-run", AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Paused, paused.Status);
-        Assert.Equal(CustomLoopControlStatus.Replayed, replay.Status);
+        Assert.Equal(CustomLoopControlStatus.PauseRequested, replay.Status);
         Assert.Equal(CustomLoopControlStatus.Conflict, conflict.Status);
         Assert.Equal(CustomLoopControlStatus.Completed, resumed.Status);
         Assert.Equal(CustomLoopRunStatus.Completed, resumed.Run!.Status);
@@ -788,6 +788,7 @@ public sealed class CustomLoopOrderedRunnerTests
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
             "invoke-operation",
+            AuditSchema.Actors.Web,
             string.Empty,
             definition,
             "Initial user prompt",

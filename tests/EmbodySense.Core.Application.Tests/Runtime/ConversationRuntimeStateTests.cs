@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Application.Tests.Runtime;
@@ -38,5 +39,23 @@ public sealed class ConversationRuntimeStateTests
         first.Dispose();
         await second;
         Assert.True(secondAcquired.Task.IsCompletedSuccessfully);
+    }
+
+    [Fact]
+    public void Replace_messages_validates_the_startup_boundary_and_describes_each_remaining_context_source()
+    {
+        var state = new ConversationRuntimeState();
+        var message = LlmMessage.User("context");
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => state.ReplaceMessages([message], startupContextCount: -1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => state.ReplaceMessages([message], startupContextCount: 2));
+
+        state.ReplaceMessages([message], remainingSource: RuntimeContextSource.RestoredConversationHistory);
+        Assert.Equal("Restored from conversation history at the user's request.", Assert.Single(state.ContextMessages).Detail);
+
+        state.ReplaceMessages([message], remainingSource: RuntimeContextSource.CurrentTurnInput);
+        Assert.Equal("Current user input being evaluated by the active loop before provider dispatch.", Assert.Single(state.ContextMessages).Detail);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => state.ReplaceMessages([message], remainingSource: (RuntimeContextSource)int.MaxValue));
     }
 }

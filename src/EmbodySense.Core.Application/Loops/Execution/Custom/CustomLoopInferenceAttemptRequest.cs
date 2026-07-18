@@ -21,20 +21,3 @@ public sealed record CustomLoopInferenceAttemptRequest(
     int ToolRequestsUsedInRun,
     LlmInferenceRequest InferenceRequest,
     CustomLoopToolAuthoritySnapshot? AuthoritySnapshot = null);
-
-public sealed record CustomLoopInferenceAttemptResult(
-    string OutputText,
-    string Provider,
-    string? Model,
-    string? ProviderResponseId,
-    int ToolRequestsConsumed = 0);
-
-public interface ICustomLoopInferenceAttemptExecutor
-{
-    Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default);
-}
-
-public sealed record CustomLoopContextAssembly(
-    LlmInferenceRequest Request,
-    CustomLoopContextBlock[] Blocks,
-    CustomLoopContextOutputPolicy ResolvedOutputPolicy);
