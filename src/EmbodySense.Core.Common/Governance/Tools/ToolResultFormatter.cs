@@ -6,6 +6,7 @@ namespace EmbodySense.Core.Common.Governance.Tools;
 public static class ToolResultFormatter
 {
     public const int MaxFormattedCharacters = 64_000;
+    // TODO(#13): Persist or reference the complete governed tool response before applying this model-context limit once retention, sensitive-data, cleanup, and audit-correlation policy are defined. See https://github.com/Jacob-J-Thomas/agenthome-poc/issues/13.
     private static readonly string FinalTruncationMarker = $"[formatted tool results truncated to the {MaxFormattedCharacters}-character limit]";
 
     public static string FormatResults(IReadOnlyList<ToolResult> results)
