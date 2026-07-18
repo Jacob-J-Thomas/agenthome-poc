@@ -95,6 +95,25 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task UpdateAsync_rejects_creation_timestamp_changes_before_definition_or_operation_artifacts_are_persisted()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var created = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, created);
+        var changedCreation = CustomLoopDefinitionContentHash.Apply(Advance(created, "Changed creation", "lineage-change") with { CreatedAtUtc = created.CreatedAtUtc.AddSeconds(1) });
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Update, changedCreation.LastMutationOperationId, 'a', changedCreation.Id, changedCreation.RoleId, 1, changedCreation, created, changedCreation.UpdatedAtUtc);
+
+        var directException = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(changedCreation, expectedDefinitionVersion: 1));
+        var durableException = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(changedCreation, expectedDefinitionVersion: 1, mutation));
+
+        Assert.Contains("creation timestamp", directException.Message, StringComparison.Ordinal);
+        Assert.Contains("creation timestamp", durableException.Message, StringComparison.Ordinal);
+        AssertDefinition(created, await store.GetAsync(created.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(mutation.OperationId)).Status);
+    }
+
+    [Fact]
     public async Task Concurrent_updates_with_the_same_expected_version_allow_exactly_one_writer()
     {
         using var workspace = new TestWorkspace();
@@ -637,6 +656,39 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task Pending_Create_recovery_persists_and_replays_a_conflict_without_claiming_another_definition_lineage()
+    {
+        using var workspace = new TestWorkspace();
+        using var collisionWorkspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var original = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, original);
+        await RewriteOperationAsPendingAsync(paths, original.LastMutationOperationId);
+        File.Delete(Path.Combine(paths.CustomLoopDefinitionsPath, original.Id + ".json"));
+
+        var collisionPaths = new WorkspacePaths(collisionWorkspace.RootPath);
+        var collisionStore = new CustomLoopDefinitionStore(collisionPaths);
+        var collision = CustomLoopDefinition.CreateSeed(original.Id, original.RoleId, "collision-step", "collision-create", InitialTimestamp.AddHours(1));
+        await CreateCommittedAsync(collisionStore, collision);
+        File.Copy(Path.Combine(collisionPaths.CustomLoopDefinitionsPath, collision.Id + ".json"), Path.Combine(paths.CustomLoopDefinitionsPath, collision.Id + ".json"));
+        File.Copy(Path.Combine(collisionPaths.CustomLoopDefinitionOperationsPath, collision.LastMutationOperationId + ".json"), Path.Combine(paths.CustomLoopDefinitionOperationsPath, collision.LastMutationOperationId + ".json"));
+
+        var recovered = await store.CreateAsync(original);
+        var operation = await store.GetMutationOperationAsync(original.LastMutationOperationId);
+        await store.MarkOperationOutcomeAuditedAsync(original.LastMutationOperationId);
+        var replay = await store.CreateAsync(original);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Conflict, recovered.Status);
+        Assert.Equal(CustomLoopOperationIntegrity.PendingOutcomeAudit, recovered.OperationIntegrity);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, operation.Status);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Conflict, operation.Operation!.Outcome);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Conflict, replay.Status);
+        Assert.Equal(CustomLoopOperationIntegrity.Complete, replay.OperationIntegrity);
+        AssertDefinition(collision, await store.GetAsync(collision.Id));
+    }
+
+    [Fact]
     public async Task Durable_Update_rejects_a_prior_snapshot_that_does_not_match_the_stored_definition()
     {
         using var workspace = new TestWorkspace();
@@ -957,6 +1009,7 @@ public sealed class CustomLoopDefinitionStoreTests
         await restarted.MarkOperationOutcomeAuditedAsync(mutation.OperationId);
 
         Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, pending.Status);
+        Assert.True(pending.Operation!.HasAppliedMutationArtifact);
         Assert.Equal(CustomLoopDefinitionStoreStatus.Deleted, recovered.Status);
         AssertDefinition(definition, recovered.Definition);
         Assert.Null(await restarted.GetAsync(definition.Id));
@@ -976,6 +1029,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var updateMutation = Mutation(CustomLoopDefinitionMutationKind.Update, updated.LastMutationOperationId, 'a', updated.Id, updated.RoleId, 1, updated, original, updated.UpdatedAtUtc);
         await updateStore.UpdateAsync(updated, 1, updateMutation);
         await RewriteOperationAsPendingAsync(updatePaths, updateMutation.OperationId);
+        var appliedUpdate = await updateStore.GetMutationOperationAsync(updateMutation.OperationId);
         await File.WriteAllTextAsync(originalPath, originalJson);
 
         var restartedUpdateStore = new CustomLoopDefinitionStore(updatePaths);
@@ -983,7 +1037,10 @@ public sealed class CustomLoopDefinitionStoreTests
         var recoveredUpdate = await restartedUpdateStore.UpdateAsync(updated, 1, updateMutation);
         await restartedUpdateStore.MarkOperationOutcomeAuditedAsync(updateMutation.OperationId);
 
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, appliedUpdate.Status);
+        Assert.True(appliedUpdate.Operation!.HasAppliedMutationArtifact);
         Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, pendingUpdate.Status);
+        Assert.False(pendingUpdate.Operation!.HasAppliedMutationArtifact);
         Assert.Equal(CustomLoopDefinitionStoreStatus.Updated, recoveredUpdate.Status);
         AssertDefinition(updated, await restartedUpdateStore.GetAsync(updated.Id));
 

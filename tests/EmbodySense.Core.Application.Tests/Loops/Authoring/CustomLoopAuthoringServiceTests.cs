@@ -641,6 +641,41 @@ public sealed class CustomLoopAuthoringServiceTests
     }
 
     [Fact]
+    public async Task Applied_pending_Update_seals_before_active_run_and_role_ceiling_checks()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var input = Input(current) with { ToolAssignments = [CustomLoopToolAssignment.Read] };
+        var first = await Service(store).UpdateAsync(current.Id, 1, current.RoleId, "applied-pending-update", "actor-user", input, [CustomLoopToolAssignment.Read]);
+        store.MarkOperationPending("applied-pending-update");
+        var runStore = new FakeRunStore(current);
+
+        var recovered = await Service(store, runStore: runStore).UpdateAsync(current.Id, 1, current.RoleId, "applied-pending-update", "actor-user", input);
+
+        Assert.Equal(CustomLoopAuthoringStatus.Updated, first.Status);
+        Assert.Equal(CustomLoopAuthoringStatus.Replayed, recovered.Status);
+        Assert.Equal(2, store.UpdateCallCount);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, (await store.GetMutationOperationAsync("applied-pending-update")).Status);
+    }
+
+    [Fact]
+    public async Task Applied_pending_Delete_seals_before_the_active_run_check()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var first = await Service(store).DeleteAsync(current.Id, 1, current.RoleId, "applied-pending-delete", "actor-user");
+        store.MarkOperationPending("applied-pending-delete");
+        var runStore = new FakeRunStore(current);
+
+        var recovered = await Service(store, runStore: runStore).DeleteAsync(current.Id, 1, current.RoleId, "applied-pending-delete", "actor-user");
+
+        Assert.Equal(CustomLoopAuthoringStatus.Deleted, first.Status);
+        Assert.Equal(CustomLoopAuthoringStatus.Replayed, recovered.Status);
+        Assert.Equal(2, store.DeleteCallCount);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, (await store.GetMutationOperationAsync("applied-pending-delete")).Status);
+    }
+
+    [Fact]
     public async Task Mutation_audit_metadata_excludes_definition_prompt_instruction_and_context_content()
     {
         var current = Definition();
@@ -1076,9 +1111,12 @@ public sealed class CustomLoopAuthoringServiceTests
         public Task<CustomLoopDefinitionMutationLookupResult> GetMutationOperationAsync(string operationId, CancellationToken cancellationToken = default)
         {
             MutationOperationLookupCallCount++;
-            return Task.FromResult(_operations.TryGetValue(operationId, out var operation)
-                ? CustomLoopDefinitionMutationLookupResult.Found(operation)
-                : CustomLoopDefinitionMutationLookupResult.NotFound());
+            if (!_operations.TryGetValue(operationId, out var operation))
+            {
+                return Task.FromResult(CustomLoopDefinitionMutationLookupResult.NotFound());
+            }
+
+            return Task.FromResult(CustomLoopDefinitionMutationLookupResult.Found(operation with { HasAppliedMutationArtifact = HasAppliedMutationArtifact(operation) }));
         }
 
         public Task<CustomLoopDefinition?> GetAsync(string loopId, CancellationToken cancellationToken = default)
@@ -1157,7 +1195,7 @@ public sealed class CustomLoopAuthoringServiceTests
 
         private void PersistOperation(CustomLoopDefinitionMutationRequest mutation, CustomLoopDefinitionStoreResult result)
         {
-            _operations.TryAdd(mutation.OperationId, new CustomLoopDefinitionMutationOperation(
+            _operations[mutation.OperationId] = new CustomLoopDefinitionMutationOperation(
                 CustomLoopDefinitionMutationOperation.CurrentSchemaVersion,
                 mutation.Kind,
                 mutation.OperationId,
@@ -1174,7 +1212,23 @@ public sealed class CustomLoopAuthoringServiceTests
                 result.Definition,
                 result.Conflict,
                 result.Tombstone,
-                OutcomeAuditRecorded: false));
+                OutcomeAuditRecorded: false);
+        }
+
+        private bool HasAppliedMutationArtifact(CustomLoopDefinitionMutationOperation operation)
+        {
+            return operation.Kind switch
+            {
+                CustomLoopDefinitionMutationKind.Create or CustomLoopDefinitionMutationKind.Update => operation.PlannedDefinition is not null
+                    && _definitions.TryGetValue(operation.LoopId, out var current)
+                    && string.Equals(current.ContentHash, operation.PlannedDefinition.ContentHash, StringComparison.Ordinal),
+                CustomLoopDefinitionMutationKind.Delete => operation.PriorDefinition is not null
+                    && Tombstone is not null
+                    && string.Equals(Tombstone.LoopId, operation.LoopId, StringComparison.Ordinal)
+                    && string.Equals(Tombstone.LastContentHash, operation.PriorDefinition.ContentHash, StringComparison.Ordinal)
+                    && string.Equals(Tombstone.MutationOperationId, operation.OperationId, StringComparison.Ordinal),
+                _ => false
+            };
         }
     }
 }

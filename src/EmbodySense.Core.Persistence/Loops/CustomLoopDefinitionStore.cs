@@ -90,7 +90,10 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                     return CustomLoopDefinitionStoreResult.OperationConflict();
                 }
 
-                if (existingOperation.State == CustomLoopDefinitionMutationState.PendingMutation || !HasCommittedCreateArtifact(state, existingOperation))
+                if (existingOperation.State == CustomLoopDefinitionMutationState.PendingMutation
+                    || (existingOperation.State == CustomLoopDefinitionMutationState.OutcomeCommitted
+                        && existingOperation.Outcome == CustomLoopDefinitionStoreStatus.Created
+                        && !HasCommittedCreateArtifact(state, existingOperation)))
                 {
                     if (existingOperation.OutcomeAuditRecorded)
                     {
@@ -182,6 +185,11 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
             ValidateWorkspaceState(state, allowedPendingOperationId: safeOperationId);
             var original = operation.OriginalDefinition ?? operation.PlannedDefinition ?? throw new FormatException($"Create operation `{safeOperationId}` is missing its original definition snapshot.");
+            if (operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted && operation.Outcome != CustomLoopDefinitionStoreStatus.Created)
+            {
+                return CustomLoopCreateOperationLookupResult.NotFound();
+            }
+
             return operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted && HasCommittedCreateArtifact(state, operation)
                 ? CustomLoopCreateOperationLookupResult.Committed(original, operation.ToPublic().Integrity)
                 : CustomLoopCreateOperationLookupResult.PendingDefinitionCommit(original);
@@ -208,8 +216,11 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             }
 
             ValidateWorkspaceState(state, allowedPendingOperationId: safeOperationId);
-            var publicOperation = operation.ToPublic();
-            if (operation.Kind == CustomLoopDefinitionMutationKind.Create && !HasCommittedCreateArtifact(state, operation))
+            var publicOperation = operation.ToPublic() with { HasAppliedMutationArtifact = HasAppliedMutationArtifact(state, operation) };
+            if (operation.Kind == CustomLoopDefinitionMutationKind.Create
+                && operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted
+                && operation.Outcome == CustomLoopDefinitionStoreStatus.Created
+                && !HasCommittedCreateArtifact(state, operation))
             {
                 publicOperation = publicOperation with
                 {
@@ -294,7 +305,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             throw new ArgumentException("Updated custom loop definition version must be exactly one greater than the expected version.", nameof(definition));
         }
 
-        ValidateUpdateRoleBinding(mutation.PriorDefinition, definition);
+        ValidateUpdateImmutableLineage(mutation.PriorDefinition, definition);
         ValidateMutationRequest(mutation, CustomLoopDefinitionMutationKind.Update, definition.Id, definition.RoleId, expectedDefinitionVersion, definition, mutation.PriorDefinition);
         await _mutationGate.WaitAsync(cancellationToken);
         try
@@ -324,7 +335,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
             ValidateWorkspaceState(state);
             var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, definition.Id, StringComparison.Ordinal));
-            ValidateUpdateRoleBinding(current, definition);
+            ValidateUpdateImmutableLineage(current, definition);
             ValidateMutationPriorSnapshot(current, mutation);
             return await ExecuteNewOperationAsync(mutation, definition.UpdatedAtUtc, () => ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken), cancellationToken);
         }
@@ -468,7 +479,9 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 throw new InvalidOperationException($"Definition mutation operation `{safeOperationId}` cannot record an outcome audit before its mutation outcome is durable.");
             }
 
-            if (operation.Kind == CustomLoopDefinitionMutationKind.Create && !HasCommittedCreateArtifact(state, operation))
+            if (operation.Kind == CustomLoopDefinitionMutationKind.Create
+                && operation.Outcome == CustomLoopDefinitionStoreStatus.Created
+                && !HasCommittedCreateArtifact(state, operation))
             {
                 throw new InvalidOperationException($"Create operation `{safeOperationId}` cannot record an outcome audit before its definition commit is durable.");
             }
@@ -700,8 +713,37 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
     private static bool HasCommittedCreateArtifact(WorkspaceState state, CustomLoopDefinitionMutationOperationRecord operation)
     {
-        return state.Definitions.Any(definition => string.Equals(definition.Id, operation.LoopId, StringComparison.Ordinal))
-            || state.Tombstones.Any(tombstone => string.Equals(tombstone.LoopId, operation.LoopId, StringComparison.Ordinal));
+        var original = operation.OriginalDefinition ?? operation.PlannedDefinition;
+        if (original is null)
+        {
+            return false;
+        }
+
+        if (operation.State == CustomLoopDefinitionMutationState.PendingMutation)
+        {
+            return HasDefinitionSnapshot(state, original);
+        }
+
+        return operation.Outcome == CustomLoopDefinitionStoreStatus.Created
+            && (state.Definitions.Any(definition => string.Equals(definition.Id, operation.LoopId, StringComparison.Ordinal)
+                    && string.Equals(definition.RoleId, original.RoleId, StringComparison.Ordinal)
+                    && definition.CreatedAtUtc == original.CreatedAtUtc)
+                || state.Tombstones.Any(tombstone => string.Equals(tombstone.LoopId, operation.LoopId, StringComparison.Ordinal)));
+    }
+
+    private static bool HasAppliedMutationArtifact(WorkspaceState state, CustomLoopDefinitionMutationOperationRecord operation)
+    {
+        return operation.Kind switch
+        {
+            CustomLoopDefinitionMutationKind.Create => operation.PlannedDefinition is not null && HasDefinitionSnapshot(state, operation.PlannedDefinition),
+            CustomLoopDefinitionMutationKind.Update => operation.PlannedDefinition is not null && HasDefinitionSnapshot(state, operation.PlannedDefinition),
+            CustomLoopDefinitionMutationKind.Delete => operation.PriorDefinition is not null && state.Tombstones.Any(tombstone =>
+                string.Equals(tombstone.LoopId, operation.LoopId, StringComparison.Ordinal)
+                && tombstone.LastDefinitionVersion == operation.ExpectedDefinitionVersion
+                && string.Equals(tombstone.LastContentHash, operation.PriorDefinition.ContentHash, StringComparison.Ordinal)
+                && string.Equals(tombstone.MutationOperationId, operation.OperationId, StringComparison.Ordinal)),
+            _ => false
+        };
     }
 
     private static bool HasDefinitionSnapshot(WorkspaceState state, CustomLoopDefinition snapshot)
@@ -722,8 +764,8 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         var definitions = UniqueBy(state.Definitions, definition => definition.Id, "definition");
         var tombstones = UniqueBy(state.Tombstones, tombstone => tombstone.LoopId, "tombstone");
         var operations = UniqueBy(state.Operations, operation => operation.OperationId, "definition mutation operation");
-        var createOperations = state.Operations.Where(operation => operation.Kind == CustomLoopDefinitionMutationKind.Create).ToArray();
-        var createOperationsByLoop = UniqueBy(createOperations, operation => operation.LoopId, "Create operation loop identity");
+        var lineageCreateOperations = state.Operations.Where(operation => OwnsCreateLineage(state, operation)).ToArray();
+        var createOperationsByLoop = UniqueBy(lineageCreateOperations, operation => operation.LoopId, "Create operation loop identity");
 
         foreach (var definition in state.Definitions)
         {
@@ -752,19 +794,20 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             {
                 definitions.TryGetValue(operation.LoopId, out var current);
                 tombstones.TryGetValue(operation.LoopId, out var tombstone);
-                if (current is null && tombstone is null
+                var ownsLineage = OwnsCreateLineage(state, operation);
+                if (ownsLineage && current is null && tombstone is null
                     && (!string.Equals(operation.OperationId, allowedPendingOperationId, StringComparison.Ordinal) || operation.OutcomeAuditRecorded))
                 {
                     throw new FormatException($"Create operation `{operation.OperationId}` has no committed definition or deletion tombstone.");
                 }
 
                 var original = operation.OriginalDefinition ?? throw new FormatException($"Create operation `{operation.OperationId}` is missing its original definition snapshot.");
-                if (current is not null && (!string.Equals(current.RoleId, operation.RoleId, StringComparison.Ordinal) || current.CreatedAtUtc != original.CreatedAtUtc))
+                if (ownsLineage && current is not null && (!string.Equals(current.RoleId, operation.RoleId, StringComparison.Ordinal) || current.CreatedAtUtc != original.CreatedAtUtc))
                 {
                     throw new FormatException($"Create operation `{operation.OperationId}` does not match the current definition lineage.");
                 }
 
-                if (current?.DefinitionVersion == 1 && !string.Equals(current.ContentHash, original.ContentHash, StringComparison.Ordinal))
+                if (ownsLineage && current?.DefinitionVersion == 1 && !string.Equals(current.ContentHash, original.ContentHash, StringComparison.Ordinal))
                 {
                     throw new FormatException($"Create operation `{operation.OperationId}` original definition snapshot does not match the current version-one artifact.");
                 }
@@ -895,6 +938,13 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    private static bool OwnsCreateLineage(WorkspaceState state, CustomLoopDefinitionMutationOperationRecord operation)
+    {
+        return operation.Kind == CustomLoopDefinitionMutationKind.Create
+            && ((operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted && operation.Outcome == CustomLoopDefinitionStoreStatus.Created)
+                || (operation.State == CustomLoopDefinitionMutationState.PendingMutation && operation.OriginalDefinition is not null && HasDefinitionSnapshot(state, operation.OriginalDefinition)));
+    }
+
     private static void ValidateMutationOperation(CustomLoopDefinitionMutationOperationRecord operation)
     {
         if (operation.SchemaVersion != DefinitionMutationOperationSchemaVersion)
@@ -984,7 +1034,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
         var outcomeMatchesKind = operation.Kind switch
         {
-            CustomLoopDefinitionMutationKind.Create => operation.Outcome == CustomLoopDefinitionStoreStatus.Created,
+            CustomLoopDefinitionMutationKind.Create => operation.Outcome is CustomLoopDefinitionStoreStatus.Created or CustomLoopDefinitionStoreStatus.Conflict or CustomLoopDefinitionStoreStatus.LimitExceeded,
             CustomLoopDefinitionMutationKind.Update => operation.Outcome is CustomLoopDefinitionStoreStatus.Updated or CustomLoopDefinitionStoreStatus.Conflict or CustomLoopDefinitionStoreStatus.NotFound,
             CustomLoopDefinitionMutationKind.Delete => operation.Outcome is CustomLoopDefinitionStoreStatus.Deleted or CustomLoopDefinitionStoreStatus.Conflict or CustomLoopDefinitionStoreStatus.NotFound or CustomLoopDefinitionStoreStatus.AlreadyDeleted,
             _ => false
@@ -1055,7 +1105,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 : CustomLoopDefinitionStoreResult.TombstoneConflict(tombstone, expectedDefinitionVersion);
         }
 
-        ValidateUpdateRoleBinding(current, definition);
+        ValidateUpdateImmutableLineage(current, definition);
         if (current.DefinitionVersion != expectedDefinitionVersion)
         {
             return CustomLoopDefinitionStoreResult.VersionConflict(current, expectedDefinitionVersion);
@@ -1065,11 +1115,16 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         return CustomLoopDefinitionStoreResult.Updated(definition);
     }
 
-    private static void ValidateUpdateRoleBinding(CustomLoopDefinition? current, CustomLoopDefinition definition)
+    private static void ValidateUpdateImmutableLineage(CustomLoopDefinition? current, CustomLoopDefinition definition)
     {
         if (current is not null && !string.Equals(current.RoleId, definition.RoleId, StringComparison.Ordinal))
         {
             throw new ArgumentException("Updated custom loop definitions cannot change their directory-role binding.", nameof(definition));
+        }
+
+        if (current is not null && current.CreatedAtUtc != definition.CreatedAtUtc)
+        {
+            throw new ArgumentException("Updated custom loop definitions cannot change their creation timestamp.", nameof(definition));
         }
     }
 

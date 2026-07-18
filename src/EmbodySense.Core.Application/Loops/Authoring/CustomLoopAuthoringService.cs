@@ -169,7 +169,7 @@ public sealed class CustomLoopAuthoringService
                 return Result(CustomLoopAuthoringStatus.Conflict, scopedDefinition, "The mutation operation id was reused for a different authorized request.");
             }
 
-            if (existing.State == CustomLoopDefinitionMutationState.PendingMutation)
+            if (existing.State == CustomLoopDefinitionMutationState.PendingMutation && !existing.HasAppliedMutationArtifact)
             {
                 var planned = existing.PlannedDefinition ?? throw new InvalidOperationException("A pending Update operation is missing its planned definition.");
                 var outsideCurrentCeiling = ToolAssignmentsOutsideRoleCeiling(planned.ToolAssignments, currentRoleCeiling);
@@ -367,7 +367,9 @@ public sealed class CustomLoopAuthoringService
         }
         else
         {
-            if (operation.Kind is CustomLoopDefinitionMutationKind.Update or CustomLoopDefinitionMutationKind.Delete && await HasNonterminalRunAsync(operation.LoopId, cancellationToken))
+            if (operation.Kind is CustomLoopDefinitionMutationKind.Update or CustomLoopDefinitionMutationKind.Delete
+                && !operation.HasAppliedMutationArtifact
+                && await HasNonterminalRunAsync(operation.LoopId, cancellationToken))
             {
                 await TryAuditRejectionAsync(operationName, operation.LoopId, operation.PriorDefinition, actor, operation.OperationId, "active_run_exists", cancellationToken);
                 return CustomLoopAuthoringResult.ActiveRun(operation.PriorDefinition);

@@ -23,6 +23,8 @@ public sealed record CustomLoopDefinitionMutationOperation(
 {
     public const int CurrentSchemaVersion = 1;
 
+    public bool HasAppliedMutationArtifact { get; init; }
+
     public CustomLoopOperationIntegrity Integrity => State == CustomLoopDefinitionMutationState.PendingMutation
         ? CustomLoopOperationIntegrity.PendingMutation
         : OutcomeAuditRecorded ? CustomLoopOperationIntegrity.Complete : CustomLoopOperationIntegrity.PendingOutcomeAudit;
