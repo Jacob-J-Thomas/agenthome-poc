@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Common.Inference.Models;
@@ -6,17 +7,22 @@ namespace EmbodySense.Core.Application.Runtime.State;
 
 public sealed class ConversationRuntimeState
 {
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WorkspaceExclusiveAccess = new(StringComparer.OrdinalIgnoreCase);
     private readonly IResettableInferenceClient? _resettableInferenceClient;
     private readonly List<RuntimeContextMessage> _messages;
     private readonly object _messagesSync = new();
-    private readonly SemaphoreSlim _exclusiveAccess = new(1, 1);
+    private readonly SemaphoreSlim _exclusiveAccess;
 
     public ConversationRuntimeState(
         IReadOnlyList<LlmMessage>? initialMessages = null,
-        IResettableInferenceClient? resettableInferenceClient = null)
+        IResettableInferenceClient? resettableInferenceClient = null,
+        string? exclusiveAccessScope = null)
     {
         _resettableInferenceClient = resettableInferenceClient;
         _messages = initialMessages?.Select(message => CreateContextMessage(message, RuntimeContextSource.StartupContext)).ToList() ?? [];
+        _exclusiveAccess = string.IsNullOrWhiteSpace(exclusiveAccessScope)
+            ? new SemaphoreSlim(1, 1)
+            : WorkspaceExclusiveAccess.GetOrAdd(exclusiveAccessScope.Trim(), _ => new SemaphoreSlim(1, 1));
     }
 
     public IReadOnlyList<LlmMessage> Messages
@@ -81,6 +87,30 @@ public sealed class ConversationRuntimeState
         }
 
         _resettableInferenceClient?.ResetConversation();
+    }
+
+    public void SynchronizeConversationTranscript(IReadOnlyList<LlmMessage> transcript)
+    {
+        ArgumentNullException.ThrowIfNull(transcript);
+
+        var changed = false;
+        lock (_messagesSync)
+        {
+            var currentTranscript = _messages.Where(message => message.Source != RuntimeContextSource.StartupContext).Select(message => message.Message).ToArray();
+            if (currentTranscript.Length == transcript.Count && currentTranscript.Zip(transcript).All(pair => pair.First.Role == pair.Second.Role && string.Equals(pair.First.Content, pair.Second.Content, StringComparison.Ordinal)))
+            {
+                return;
+            }
+
+            _messages.RemoveAll(message => message.Source != RuntimeContextSource.StartupContext);
+            _messages.AddRange(transcript.Select(message => CreateContextMessage(message, RuntimeContextSource.RestoredConversationHistory, "Synchronized from the durable workspace conversation before turn context assembly.")));
+            changed = true;
+        }
+
+        if (changed)
+        {
+            _resettableInferenceClient?.ResetConversation();
+        }
     }
 
     private static RuntimeContextMessage CreateContextMessage(LlmMessage message, RuntimeContextSource source, string? detail = null)

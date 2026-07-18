@@ -159,6 +159,45 @@ public sealed class DefaultConversationLoopRunnerTests
     }
 
     [Fact]
+    public async Task RunTurnAsync_fails_before_context_assembly_when_durable_conversation_synchronization_fails()
+    {
+        var client = new RecordingInferenceClient("unused");
+        var memory = new RecordingConversationMemoryStore { LoadCurrentException = new IOException("conversation unavailable") };
+        var state = new ConversationRuntimeState([LlmMessage.System("startup")]);
+        var runner = new DefaultConversationLoopRunner(client, state, memory);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.Contains("conversation unavailable", result.FailureDetail, StringComparison.Ordinal);
+        Assert.Empty(client.Requests);
+        Assert.Equal(["startup"], state.Messages.Select(message => message.Content));
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_cancels_before_context_assembly_when_durable_conversation_synchronization_is_cancelled()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var client = new RecordingInferenceClient("unused");
+        var memory = new RecordingConversationMemoryStore
+        {
+            BeforeLoadCurrent = _ =>
+            {
+                cancellation.Cancel();
+                throw new OperationCanceledException(cancellation.Token);
+            }
+        };
+        var state = new ConversationRuntimeState();
+        var runner = new DefaultConversationLoopRunner(client, state, memory);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", cancellationToken: cancellation.Token));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Cancelled, result.Status);
+        Assert.Empty(client.Requests);
+        Assert.Empty(state.Messages);
+    }
+
+    [Fact]
     public async Task RunTurnAsync_rejects_disabled_loop_without_accepting_user_message()
     {
         var client = new RecordingInferenceClient("unused");
@@ -399,6 +438,42 @@ public sealed class DefaultConversationLoopRunnerTests
     }
 
     [Fact]
+    public async Task RunTurnAsync_serializes_workspace_runtime_instances_and_synchronizes_durable_history_before_inference()
+    {
+        var scope = "workspace-" + Guid.NewGuid().ToString("N");
+        var firstClient = new BlockingInferenceClient("first response");
+        var secondClient = new RecordingInferenceClient("second response");
+        var memory = new RecordingConversationMemoryStore();
+        var firstState = new ConversationRuntimeState([LlmMessage.System("startup context")], exclusiveAccessScope: scope);
+        var secondState = new ConversationRuntimeState([LlmMessage.System("startup context")], exclusiveAccessScope: scope);
+        var firstRunner = new DefaultConversationLoopRunner(firstClient, firstState, memory);
+        var secondRunner = new DefaultConversationLoopRunner(secondClient, secondState, memory);
+
+        var firstTurn = firstRunner.RunTurnAsync(new DefaultConversationLoopTurnRequest("first prompt"));
+        await firstClient.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var secondTurn = secondRunner.RunTurnAsync(new DefaultConversationLoopTurnRequest("second prompt"));
+
+        await Task.Delay(50);
+        Assert.Empty(secondClient.Requests);
+
+        firstClient.Release.TrySetResult();
+        Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await firstTurn).Status);
+        Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await secondTurn).Status);
+        Assert.Collection(
+            Assert.Single(secondClient.Requests),
+            message => Assert.Equal("startup context", message.Content),
+            message => Assert.Equal("first prompt", message.Content),
+            message => Assert.Equal("first response", message.Content),
+            message => Assert.Equal("second prompt", message.Content));
+        Assert.Collection(
+            memory.Messages,
+            message => Assert.Equal("first prompt", message.Content),
+            message => Assert.Equal("first response", message.Content),
+            message => Assert.Equal("second prompt", message.Content),
+            message => Assert.Equal("second response", message.Content));
+    }
+
+    [Fact]
     public async Task RunTurnAsync_cancels_a_queued_turn_without_accepting_its_prompt_or_creating_a_run()
     {
         var client = new BlockingInferenceClient("first response");
@@ -546,6 +621,10 @@ public sealed class DefaultConversationLoopRunnerTests
 
         public int? FailureAtAppendNumber { get; init; }
 
+        public Exception? LoadCurrentException { get; init; }
+
+        public Action<CancellationToken>? BeforeLoadCurrent { get; init; }
+
         public Task AppendMessageAsync(LlmMessage message, CancellationToken cancellationToken = default)
         {
             if (FailureAtAppendNumber == Messages.Count + 1)
@@ -573,6 +652,12 @@ public sealed class DefaultConversationLoopRunnerTests
 
         public Task<IReadOnlyList<LlmMessage>> LoadCurrentConversationAsync(CancellationToken cancellationToken = default)
         {
+            BeforeLoadCurrent?.Invoke(cancellationToken);
+            if (LoadCurrentException is not null)
+            {
+                throw LoadCurrentException;
+            }
+
             return Task.FromResult<IReadOnlyList<LlmMessage>>(Messages);
         }
 

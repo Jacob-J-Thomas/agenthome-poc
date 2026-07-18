@@ -42,6 +42,38 @@ public sealed class ConversationRuntimeStateTests
     }
 
     [Fact]
+    public async Task Exclusive_access_is_shared_by_runtime_states_in_the_same_workspace_scope()
+    {
+        var scope = "workspace-" + Guid.NewGuid().ToString("N");
+        var firstState = new ConversationRuntimeState(exclusiveAccessScope: scope);
+        var secondState = new ConversationRuntimeState(exclusiveAccessScope: scope);
+        var first = await firstState.AcquireExclusiveAccessAsync();
+        var second = secondState.AcquireExclusiveAccessAsync();
+
+        await Task.Delay(50);
+        Assert.False(second.IsCompleted);
+
+        first.Dispose();
+        using var acquired = await second;
+    }
+
+    [Fact]
+    public void Synchronize_conversation_transcript_preserves_startup_context_and_replaces_stale_session_messages()
+    {
+        var state = new ConversationRuntimeState([LlmMessage.System("startup")]);
+        state.AppendMessage(LlmMessage.User("stale"));
+
+        state.SynchronizeConversationTranscript([LlmMessage.User("durable user"), LlmMessage.Assistant("durable assistant")]);
+
+        Assert.Collection(
+            state.ContextMessages,
+            message => Assert.Equal(RuntimeContextSource.StartupContext, message.Source),
+            message => Assert.Equal(RuntimeContextSource.RestoredConversationHistory, message.Source),
+            message => Assert.Equal(RuntimeContextSource.RestoredConversationHistory, message.Source));
+        Assert.Equal(["startup", "durable user", "durable assistant"], state.Messages.Select(message => message.Content));
+    }
+
+    [Fact]
     public void Replace_messages_validates_the_startup_boundary_and_describes_each_remaining_context_source()
     {
         var state = new ConversationRuntimeState();

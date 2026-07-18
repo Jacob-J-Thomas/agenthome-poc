@@ -55,6 +55,23 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         }
 
         using var ownedConversationLease = conversationLease;
+        if (_conversationMemoryStore is not null)
+        {
+            try
+            {
+                var durableTranscript = await _conversationMemoryStore.LoadCurrentConversationAsync(request.CancellationToken);
+                _conversationState.SynchronizeConversationTranscript(durableTranscript);
+            }
+            catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
+            {
+                return DefaultConversationLoopTurnResult.Cancelled("Turn was cancelled while synchronizing the durable conversation.");
+            }
+            catch (Exception exception)
+            {
+                return DefaultConversationLoopTurnResult.Failed($"Could not synchronize the durable conversation before context assembly: {exception.Message}");
+            }
+        }
+
         var userMessage = request.ToUserMessage();
         var inferenceContextMessages = _conversationState.ContextMessages
             .Concat([new RuntimeContextMessage(userMessage, RuntimeContextSource.CurrentTurnInput, "Current user input being evaluated by the active loop before provider dispatch.")])
