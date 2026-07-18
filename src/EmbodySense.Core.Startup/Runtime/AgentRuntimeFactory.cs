@@ -71,7 +71,7 @@ public sealed class AgentRuntimeFactory
         var loopRunStore = new LoopRunStore(paths);
         var startupContext = await new AgentContextProvider(new WorkspaceContextStore()).LoadAsync(paths, cancellationToken);
         var inferenceClient = new LlmInferenceClient(effectiveOptions, toolBroker);
-        var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath));
+        var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
         using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
         {
             await conversationMemory.StartFreshConversationAsync(cancellationToken);

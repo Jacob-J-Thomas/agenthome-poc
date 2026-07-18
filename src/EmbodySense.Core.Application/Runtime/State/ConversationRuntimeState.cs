@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Common.Inference.Models;
 
@@ -12,13 +13,16 @@ public sealed class ConversationRuntimeState
     private readonly List<RuntimeContextMessage> _messages;
     private readonly object _messagesSync = new();
     private readonly SemaphoreSlim _exclusiveAccess;
+    private readonly IConversationWorkspaceLease? _workspaceLease;
 
     public ConversationRuntimeState(
         IReadOnlyList<LlmMessage>? initialMessages = null,
         IResettableInferenceClient? resettableInferenceClient = null,
-        string? exclusiveAccessScope = null)
+        string? exclusiveAccessScope = null,
+        IConversationWorkspaceLease? workspaceLease = null)
     {
         _resettableInferenceClient = resettableInferenceClient;
+        _workspaceLease = workspaceLease;
         _messages = initialMessages?.Select(message => CreateContextMessage(message, RuntimeContextSource.StartupContext)).ToList() ?? [];
         _exclusiveAccess = string.IsNullOrWhiteSpace(exclusiveAccessScope)
             ? new SemaphoreSlim(1, 1)
@@ -50,7 +54,16 @@ public sealed class ConversationRuntimeState
     public async Task<IDisposable> AcquireExclusiveAccessAsync(CancellationToken cancellationToken = default)
     {
         await _exclusiveAccess.WaitAsync(cancellationToken);
-        return new ExclusiveAccessLease(_exclusiveAccess);
+        try
+        {
+            var workspaceLease = _workspaceLease is null ? null : await _workspaceLease.AcquireAsync(cancellationToken);
+            return new ExclusiveAccessLease(_exclusiveAccess, workspaceLease);
+        }
+        catch
+        {
+            _exclusiveAccess.Release();
+            throw;
+        }
     }
 
     public void AppendMessage(LlmMessage message, RuntimeContextSource source = RuntimeContextSource.SessionTranscript)
@@ -132,16 +145,25 @@ public sealed class ConversationRuntimeState
 
     private sealed class ExclusiveAccessLease : IDisposable
     {
-        private SemaphoreSlim? gate;
+        private SemaphoreSlim? _gate;
+        private IDisposable? _workspaceLease;
 
-        public ExclusiveAccessLease(SemaphoreSlim gate)
+        public ExclusiveAccessLease(SemaphoreSlim gate, IDisposable? workspaceLease)
         {
-            this.gate = gate;
+            _gate = gate;
+            _workspaceLease = workspaceLease;
         }
 
         public void Dispose()
         {
-            Interlocked.Exchange(ref gate, null)?.Release();
+            try
+            {
+                Interlocked.Exchange(ref _workspaceLease, null)?.Dispose();
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _gate, null)?.Release();
+            }
         }
     }
 }

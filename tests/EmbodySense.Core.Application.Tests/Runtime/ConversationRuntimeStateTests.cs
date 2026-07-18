@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Common.Inference.Models;
@@ -58,6 +59,37 @@ public sealed class ConversationRuntimeStateTests
     }
 
     [Fact]
+    public async Task Exclusive_access_holds_and_releases_the_workspace_lease_with_the_process_gate()
+    {
+        var workspaceLease = new RecordingWorkspaceLease();
+        var state = new ConversationRuntimeState(workspaceLease: workspaceLease);
+
+        var lease = await state.AcquireExclusiveAccessAsync();
+
+        Assert.Equal(1, workspaceLease.AcquisitionCount);
+        Assert.False(workspaceLease.Released);
+
+        lease.Dispose();
+        lease.Dispose();
+
+        Assert.True(workspaceLease.Released);
+        using var reacquired = await state.AcquireExclusiveAccessAsync();
+        Assert.Equal(2, workspaceLease.AcquisitionCount);
+    }
+
+    [Fact]
+    public async Task Exclusive_access_releases_the_process_gate_when_workspace_lease_acquisition_fails()
+    {
+        var workspaceLease = new RecordingWorkspaceLease { NextException = new IOException("Lock unavailable.") };
+        var state = new ConversationRuntimeState(workspaceLease: workspaceLease);
+
+        await Assert.ThrowsAsync<IOException>(() => state.AcquireExclusiveAccessAsync());
+
+        using var acquired = await state.AcquireExclusiveAccessAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(2, workspaceLease.AcquisitionCount);
+    }
+
+    [Fact]
     public void Synchronize_conversation_transcript_preserves_startup_context_and_replaces_stale_session_messages()
     {
         var state = new ConversationRuntimeState([LlmMessage.System("startup")]);
@@ -89,5 +121,40 @@ public sealed class ConversationRuntimeStateTests
         Assert.Equal("Current user input being evaluated by the active loop before provider dispatch.", Assert.Single(state.ContextMessages).Detail);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => state.ReplaceMessages([message], remainingSource: (RuntimeContextSource)int.MaxValue));
+    }
+
+    private sealed class RecordingWorkspaceLease : IConversationWorkspaceLease
+    {
+        public int AcquisitionCount { get; private set; }
+
+        public bool Released { get; private set; }
+
+        public Exception? NextException { get; init; }
+
+        public Task<IDisposable> AcquireAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AcquisitionCount++;
+            if (AcquisitionCount == 1 && NextException is not null)
+            {
+                return Task.FromException<IDisposable>(NextException);
+            }
+
+            Released = false;
+            return Task.FromResult<IDisposable>(new ReleaseLease(this));
+        }
+
+        private sealed class ReleaseLease(RecordingWorkspaceLease owner) : IDisposable
+        {
+            private int _disposed;
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                {
+                    owner.Released = true;
+                }
+            }
+        }
     }
 }

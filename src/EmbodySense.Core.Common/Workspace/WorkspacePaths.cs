@@ -35,6 +35,8 @@ public sealed class WorkspacePaths
 
     public string CurrentConversationPath => Path.Combine(ConversationMemoryPath, "current.ndjson");
 
+    public string ConversationTurnLockPath => Path.Combine(ConversationMemoryPath, ".workspace-turn.lock");
+
     public string LoopsPath => Path.Combine(AgentPath, "loops");
 
     public string LoopDefinitionsPath => Path.Combine(LoopsPath, "definitions");
