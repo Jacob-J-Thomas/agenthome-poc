@@ -82,6 +82,29 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Control_lifecycle_ownership_is_lifecycle_only_unique_and_bound_to_the_update_source_version()
+    {
+        var seed = CreateRun();
+        var unexpected = seed with { Events = [seed.Events[0] with { ControlExpectedLifecycleVersion = 1 }] };
+        AssertCodes(CustomLoopRunValidator.Validate(unexpected), "unexpected_control_lifecycle_version");
+
+        var valid = Advance(seed, CustomLoopRunStatus.Running);
+        valid = valid with { Events = [.. valid.Events[..^1], valid.Events[^1] with { ControlExpectedLifecycleVersion = seed.LifecycleVersion }] };
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(seed, valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(seed, valid).Errors));
+        var invalidVersion = valid with { Events = [.. valid.Events[..^1], valid.Events[^1] with { ControlExpectedLifecycleVersion = valid.LifecycleVersion }] };
+        AssertCodes(CustomLoopRunValidator.Validate(invalidVersion), "invalid_control_lifecycle_version");
+
+        var duplicate = Advance(valid, CustomLoopRunStatus.Paused);
+        duplicate = duplicate with { Events = [.. duplicate.Events[..^1], duplicate.Events[^1] with { ControlExpectedLifecycleVersion = seed.LifecycleVersion }] };
+        AssertCodes(CustomLoopRunValidator.Validate(duplicate), "duplicate_control_lifecycle_version");
+
+        var audited = seed with { LifecycleVersion = 2, Events = [.. seed.Events, Event(2, "event-audit-complete", CustomLoopRunEventKind.AdmissionAuditCompleted)] };
+        var mismatched = Advance(audited, CustomLoopRunStatus.Running);
+        mismatched = mismatched with { Events = [.. mismatched.Events[..^1], mismatched.Events[^1] with { ControlExpectedLifecycleVersion = 1 }] };
+        AssertCodes(CustomLoopRunValidator.ValidateUpdate(audited, mismatched), "control_lifecycle_version_mismatch");
+    }
+
+    [Fact]
     public void Evidence_hashes_and_validation_preserve_exact_non_normalized_unicode()
     {
         const string decomposed = "e\u0301";

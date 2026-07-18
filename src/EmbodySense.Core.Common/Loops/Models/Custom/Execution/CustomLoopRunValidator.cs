@@ -78,6 +78,7 @@ public static class CustomLoopRunValidator
         ValidateImmutableAdmission(current, candidate, errors);
         ValidateLifecycleTransition(current, candidate, errors);
         ValidateAppendOnlyEvents(current, candidate, errors);
+        ValidateAppendedControlOwnership(current, candidate, errors);
         ValidateMonotonicCheckpoint(current, candidate, errors);
         ValidateMonotonicExecutionClock(current, candidate, errors);
         if (candidate.UpdatedAtUtc < current.UpdatedAtUtc)
@@ -532,6 +533,7 @@ public static class CustomLoopRunValidator
         }
 
         var eventIds = new HashSet<string>(StringComparer.Ordinal);
+        var controlExpectedLifecycleVersions = new HashSet<int>();
         DateTimeOffset? previousTimestamp = null;
         for (var index = 0; index < run.Events.Length; index++)
         {
@@ -564,6 +566,22 @@ public static class CustomLoopRunValidator
             if (!Enum.IsDefined(item.Kind) || item.Kind == CustomLoopRunEventKind.Unknown)
             {
                 Add(errors, "unsupported_event_kind", $"{field}.kind", "Run event kind must be a supported concrete value.");
+            }
+
+            if (item.ControlExpectedLifecycleVersion is { } expectedLifecycleVersion)
+            {
+                if (item.Kind != CustomLoopRunEventKind.LifecycleChanged)
+                {
+                    Add(errors, "unexpected_control_lifecycle_version", $"{field}.controlExpectedLifecycleVersion", "Only a lifecycle event owned by a control operation may carry its expected lifecycle version.");
+                }
+                else if (expectedLifecycleVersion < 1 || expectedLifecycleVersion >= run.LifecycleVersion)
+                {
+                    Add(errors, "invalid_control_lifecycle_version", $"{field}.controlExpectedLifecycleVersion", "A control-owned lifecycle event must identify an earlier positive lifecycle version.");
+                }
+                else if (!controlExpectedLifecycleVersions.Add(expectedLifecycleVersion))
+                {
+                    Add(errors, "duplicate_control_lifecycle_version", $"{field}.controlExpectedLifecycleVersion", "A lifecycle source version may be owned by only one durable control transition.");
+                }
             }
 
             ValidateEventCoordinates(item, field, errors);
@@ -1126,6 +1144,23 @@ public static class CustomLoopRunValidator
             if (!EventsEqual(current.Events[index], candidate.Events[index]))
             {
                 Add(errors, "event_history_changed", $"events[{index}]", "Previously persisted run events are immutable.");
+            }
+        }
+    }
+
+    private static void ValidateAppendedControlOwnership(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
+    {
+        if (current.Events is null || candidate.Events is null)
+        {
+            return;
+        }
+
+        foreach (var item in candidate.Events.Skip(current.Events.Length))
+        {
+            if (item?.ControlExpectedLifecycleVersion is { } expectedLifecycleVersion && expectedLifecycleVersion != current.LifecycleVersion)
+            {
+                var index = Array.IndexOf(candidate.Events, item);
+                Add(errors, "control_lifecycle_version_mismatch", $"events[{index}].controlExpectedLifecycleVersion", "A newly appended control-owned lifecycle event must identify the exact persisted lifecycle version used for compare-and-swap.");
             }
         }
     }
