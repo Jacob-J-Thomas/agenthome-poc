@@ -48,6 +48,31 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Empty(Directory.EnumerateFiles(paths.CustomLoopControlOperationsPath, "*.tmp", SearchOption.AllDirectories));
     }
 
+    [Fact]
+    public async Task Failed_receipt_without_a_run_snapshot_is_persisted_and_replayed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("load-failure", AuditSchema.Actors.Web);
+        var store = new CustomLoopControlOperationStore(paths);
+        await store.BeginAsync(pending);
+        var failed = pending with
+        {
+            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            State = CustomLoopControlOperationState.Complete,
+            Outcome = CustomLoopControlStatus.Failed,
+            Detail = "The run could not be loaded safely."
+        };
+
+        var completion = await store.CompleteAsync(failed);
+        var replay = await new CustomLoopControlOperationStore(paths).BeginAsync(pending);
+
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, completion.Status);
+        Assert.Equal(failed, completion.Operation);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Replayed, replay.Status);
+        Assert.Equal(failed, replay.Operation);
+    }
+
     private static CustomLoopControlOperation Pending(string operationId, string actor)
     {
         var kind = CustomLoopControlKind.Pause;

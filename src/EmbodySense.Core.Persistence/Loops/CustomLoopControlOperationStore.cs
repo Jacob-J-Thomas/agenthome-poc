@@ -203,7 +203,10 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             throw new FormatException("Pending custom-loop control operation contains completed outcome fields.");
         }
 
-        if (operation.State == CustomLoopControlOperationState.Complete && (operation.Outcome == CustomLoopControlStatus.Unknown || operation.Outcome != CustomLoopControlStatus.NotFound && (operation.ResultLifecycleVersion is null || operation.ResultRunStatus is null)))
+        var hasLifecycleVersion = operation.ResultLifecycleVersion is not null;
+        var hasRunStatus = operation.ResultRunStatus is not null;
+        var allowsMissingRun = operation.Outcome is CustomLoopControlStatus.NotFound or CustomLoopControlStatus.Failed;
+        if (operation.State == CustomLoopControlOperationState.Complete && (operation.Outcome == CustomLoopControlStatus.Unknown || hasLifecycleVersion != hasRunStatus || !hasLifecycleVersion && !allowsMissingRun))
         {
             throw new FormatException("Completed custom-loop control operation is missing its durable outcome.");
         }
