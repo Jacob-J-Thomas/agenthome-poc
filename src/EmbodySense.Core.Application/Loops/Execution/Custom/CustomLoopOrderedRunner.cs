@@ -28,17 +28,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         ICustomLoopInferenceAttemptExecutor inferenceExecutor,
         ICustomLoopConversationPublisher conversationPublisher,
         IAuditLog auditLog,
-        TimeProvider? timeProvider = null)
-        : this(runStore, contextResolver, inferenceExecutor, conversationPublisher, auditLog, new AdmittedMaximumAuthorityProvider(timeProvider), timeProvider)
-    {
-    }
-
-    public CustomLoopOrderedRunner(
-        ICustomLoopRunStore runStore,
-        CustomLoopContextResolver contextResolver,
-        ICustomLoopInferenceAttemptExecutor inferenceExecutor,
-        ICustomLoopConversationPublisher conversationPublisher,
-        IAuditLog auditLog,
         ICustomLoopToolAuthorityProvider authorityProvider,
         TimeProvider? timeProvider = null)
     {
@@ -210,6 +199,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 continue;
             }
 
+            if (HasCommittedExitCompletion(run))
+            {
+                return await TerminateAsync(run, actor, CustomLoopRunStatus.Completed, null, "The previously committed Exit decision completed the loop without another provider dispatch.", run.Checkpoint.CurrentIterationResult!.Content);
+            }
+
             var exit = run.AdmittedDefinition.ExitPolicy;
             if (exit.MaxAdditionalIterations == 0)
             {
@@ -243,7 +237,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             ExecutionClock = run.ExecutionClock with { ActiveSinceUtc = now },
             Events = [.. run.Events, lifecycle]
         };
-        var persisted = await PersistAsync(run, candidate, cancellationToken, outcomeMayExist: false);
+        RunAdvance persisted;
+        try
+        {
+            persisted = await PersistAsync(run, candidate, cancellationToken, outcomeMayExist: false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelAfterInterruptedPreDispatchPersistenceAsync(run, candidate, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
+
         if (persisted.Terminal is not null)
         {
             return persisted;
@@ -275,10 +279,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         try
         {
             authority = await _authorityProvider.ResolveAsync(run.AdmittedDefinition.RoleId, run.AdmittedDefinition.ToolAssignments, cancellationToken);
-            if (!authority.IsValid)
-            {
-                throw new InvalidOperationException(authority.Detail);
-            }
+            EnsureAuthorityBound(run, authority, run.AdmittedDefinition.ToolAssignments);
 
             assembly = _contextResolver.ResolveInference(run, step, authority.EffectiveAssignments);
             EnsureRequestBound(assembly);
@@ -307,7 +308,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var sequenceOwner = events.Count == 0 ? run : run with { Events = [.. run.Events, .. events] };
         events.Add(Event(sequenceOwner, now, CustomLoopRunEventKind.NodeAttemptStarted, "Inference attempt trace committed before provider dispatch.", iteration, step.Id, 1, assembly.Blocks, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes));
         var startedCandidate = Append(run, now, events);
-        var started = await PersistAsync(run, startedCandidate, cancellationToken, outcomeMayExist: false);
+        RunAdvance started;
+        try
+        {
+            started = await PersistAsync(run, startedCandidate, cancellationToken, outcomeMayExist: false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelAfterInterruptedPreDispatchPersistenceAsync(run, startedCandidate, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
+
         if (started.Terminal is not null)
         {
             return started;
@@ -364,6 +375,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             run = dispatchBoundary.Run!;
+            if (ExecutionDeadlineReached(run))
+            {
+                var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_deadline_exceeded", "The custom-loop execution deadline was reached before the provider request could start.");
+                return new RunAdvance(terminal.Run, terminal);
+            }
+
             providerToken.Token.ThrowIfCancellationRequested();
             result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
         }
@@ -458,10 +475,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         try
         {
             authority = await _authorityProvider.ResolveAsync(run.AdmittedDefinition.RoleId, [], cancellationToken);
-            if (!authority.IsValid)
-            {
-                throw new InvalidOperationException(authority.Detail);
-            }
+            EnsureAuthorityBound(run, authority, []);
 
             assembly = _contextResolver.ResolveExit(run);
             EnsureRequestBound(assembly);
@@ -482,7 +496,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var correlation = NewCorrelationId("exit");
         var now = Now(run);
         var startedEvent = Event(run, now, CustomLoopRunEventKind.ExitDecisionStarted, "Exit-decision trace committed before tool-less provider dispatch.", iteration, "exit", 1, assembly.Blocks, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
-        var started = await PersistAsync(run, Append(run, now, [startedEvent]), cancellationToken, outcomeMayExist: false);
+        var startedCandidate = Append(run, now, [startedEvent]);
+        RunAdvance started;
+        try
+        {
+            started = await PersistAsync(run, startedCandidate, cancellationToken, outcomeMayExist: false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelAfterInterruptedPreDispatchPersistenceAsync(run, startedCandidate, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
+
         if (started.Terminal is not null)
         {
             return started;
@@ -538,6 +563,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             run = dispatchBoundary.Run!;
+            if (ExecutionDeadlineReached(run))
+            {
+                var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_deadline_exceeded", "The custom-loop execution deadline was reached before the Exit provider request could start.");
+                return new RunAdvance(terminal.Run, terminal);
+            }
+
             providerToken.Token.ThrowIfCancellationRequested();
             result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
         }
@@ -786,15 +817,57 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = intentPersisted.Run!;
-        var request = new CustomLoopConversationPublicationRequest(operationId, run.Id, run.LoopId, run.Checkpoint.Iteration, stepId, conversation.ConversationId, conversation.CapturedVersion, output.Content, output.ContentHash, priorPublications);
         CustomLoopConversationPublicationResult publication;
+        var publicationDispatched = false;
+        using var publicationToken = new CancellationTokenSource(IntegrityWriteTimeout);
+        if (!_activeAttemptCancellations.TryAdd(run.Id, publicationToken))
+        {
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "publication_registration_failed", "Conversation publication could not be registered with the active cancellation protocol, so no append was attempted.");
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
         try
         {
-            publication = await _conversationPublisher.PublishAsync(request, IntegrityToken());
+            var publicationBoundary = await RefreshControlUpdateAsync(run);
+            if (publicationBoundary.Terminal is not null)
+            {
+                return publicationBoundary;
+            }
+
+            run = publicationBoundary.Run!;
+            if (run.Status == CustomLoopRunStatus.CancelRequested)
+            {
+                return new RunAdvance(run, null);
+            }
+
+            var request = new CustomLoopConversationPublicationRequest(operationId, run.Id, run.LoopId, run.Checkpoint.Iteration, stepId, conversation.ConversationId, conversation.CapturedVersion, output.Content, output.ContentHash, priorPublications);
+            publicationToken.Token.ThrowIfCancellationRequested();
+            publicationDispatched = true;
+            publication = await _conversationPublisher.PublishAsync(request, publicationToken.Token);
+        }
+        catch (OperationCanceledException) when (!publicationDispatched && publicationToken.IsCancellationRequested)
+        {
+            var cancellationBoundary = await RefreshControlUpdateAsync(run);
+            if (cancellationBoundary.Terminal is not null)
+            {
+                return cancellationBoundary;
+            }
+
+            if (cancellationBoundary.Run!.Status == CustomLoopRunStatus.CancelRequested)
+            {
+                return new RunAdvance(cancellationBoundary.Run, null);
+            }
+
+            var terminal = await TerminateAsync(cancellationBoundary.Run, actor, CustomLoopRunStatus.Failed, "publication_cancelled_before_dispatch", "Conversation publication was cancelled before the append began, but no durable cancellation request could be confirmed.");
+            return new RunAdvance(terminal.Run, terminal);
         }
         catch (Exception exception)
         {
             publication = new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Uncertain, null, $"Publisher threw {SafeExceptionClass(exception)} after publication may have occurred.");
+        }
+        finally
+        {
+            _activeAttemptCancellations.TryRemove(run.Id, out _);
         }
 
         publication ??= new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Uncertain, null, "Publisher returned no result after publication may have occurred.");
@@ -810,7 +883,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             _ => "Conversation publisher returned an unsupported outcome that requires review."
         };
         var publicationEvent = Event(run, Now(run), CustomLoopRunEventKind.ConversationPublished, eventDetail, run.Checkpoint.Iteration, stepId, output: isPublished ? output.Content : null, originalOutputCharacters: isPublished ? output.Content.Length : null, truncated: isPublished ? false : null, published: isPublished, publicationId: publicationId);
-        var persisted = await PersistAsync(run, Append(run, publicationEvent.TimestampUtc, [publicationEvent]), IntegrityToken(), outcomeMayExist: isPublished || publication.Outcome is CustomLoopConversationPublicationOutcome.Uncertain or CustomLoopConversationPublicationOutcome.Unknown);
+        var persisted = await PersistAsync(run, Append(run, publicationEvent.TimestampUtc, [publicationEvent]), IntegrityToken(), outcomeMayExist: publication.Outcome != CustomLoopConversationPublicationOutcome.DefinitelyFailed);
         if (persisted.Terminal is not null)
         {
             return persisted;
@@ -1154,6 +1227,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 _ => new RunAdvance(null, Result(outcomeMayExist ? CustomLoopOrderedRunStatus.NeedsReview : CustomLoopOrderedRunStatus.Failed, current, "The required run-trace update was rejected; no later attempt was started."))
             };
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             var status = outcomeMayExist ? CustomLoopOrderedRunStatus.NeedsReview : CustomLoopOrderedRunStatus.Failed;
@@ -1353,6 +1430,29 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
     }
 
+    private static void EnsureAuthorityBound(CustomLoopRunRecord run, CustomLoopToolAuthoritySnapshot authority, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum)
+    {
+        if (!authority.IsValid)
+        {
+            throw new InvalidOperationException(authority.Detail);
+        }
+
+        if (!string.Equals(authority.RoleId, run.AdmittedDefinition.RoleId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The resolved tool-authority snapshot belongs to a different role than the immutable admission snapshot.");
+        }
+
+        if (!AssignmentSetsEqual(authority.AdmittedMaximum, admittedMaximum) || !authority.EffectiveAssignments.All(admittedMaximum.Contains))
+        {
+            throw new InvalidOperationException("The resolved tool-authority snapshot is not bounded by the immutable admitted tool assignments.");
+        }
+    }
+
+    private static bool AssignmentSetsEqual(IReadOnlyList<CustomLoopToolAssignment> left, IReadOnlyList<CustomLoopToolAssignment> right)
+    {
+        return left.Count == right.Count && left.OrderBy(value => value).SequenceEqual(right.OrderBy(value => value));
+    }
+
     private static bool AttemptConsumesBudget(CustomLoopRunRecord run, CustomLoopRunEvent start)
     {
         if (start.Sequence > run.Checkpoint.LastCommittedSequence)
@@ -1369,6 +1469,20 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static bool CompletesAttempt(CustomLoopRunEvent start, CustomLoopRunEvent item) => item.Kind == CustomLoopRunEventKind.NodeAttemptFailed || start.Kind == CustomLoopRunEventKind.NodeAttemptStarted && item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted || start.Kind == CustomLoopRunEventKind.ExitDecisionStarted && item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted;
 
+    private static bool HasCommittedExitCompletion(CustomLoopRunRecord run)
+    {
+        return !run.Checkpoint.PendingExitDecision
+            && run.Checkpoint.NextStepIndex == run.AdmittedDefinition.InferenceSteps.Length
+            && run.Checkpoint.CurrentIterationResult is not null
+            && run.Events.Any(item => item.Sequence <= run.Checkpoint.LastCommittedSequence
+                && item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted
+                && item.Iteration == run.Checkpoint.Iteration
+                && string.Equals(item.StepId, "exit", StringComparison.Ordinal)
+                && item.ExitDecision == CustomLoopExitDecision.Complete);
+    }
+
+    private bool ExecutionDeadlineReached(CustomLoopRunRecord run) => GetAccumulatedRunningMilliseconds(run, Now(run)) >= CustomLoopLimits.MaxRunExecutionMilliseconds;
+
     private CancellationTokenSource CreateProviderToken(CustomLoopRunRecord run, CancellationToken callerToken)
     {
         var elapsed = GetAccumulatedRunningMilliseconds(run, Now(run));
@@ -1376,6 +1490,42 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var source = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
         source.CancelAfter(TimeSpan.FromMilliseconds(remainingMilliseconds));
         return source;
+    }
+
+    private async Task<CustomLoopOrderedRunResult> CancelAfterInterruptedPreDispatchPersistenceAsync(CustomLoopRunRecord current, CustomLoopRunRecord candidate, string actor)
+    {
+        CustomLoopRunRecord? latest;
+        try
+        {
+            latest = await _runStore.GetAsync(current.Id, IntegrityToken());
+        }
+        catch (Exception exception)
+        {
+            return Result(CustomLoopOrderedRunStatus.NeedsReview, current, $"Caller cancellation interrupted a pre-dispatch trace write, and its durable outcome could not be loaded safely: {SafeExceptionClass(exception)}.");
+        }
+
+        if (latest is null)
+        {
+            return Result(CustomLoopOrderedRunStatus.NotFound, null, "Caller cancellation interrupted a pre-dispatch trace write, and the run trace could not be found.");
+        }
+
+        var matchesCurrent = DurableTraceVersionMatches(current, latest);
+        var matchesCandidate = DurableTraceVersionMatches(candidate, latest);
+        var matchesCandidateControlSuccessor = IsAcceptedControlSuccessor(candidate, latest);
+        if (!CustomLoopRunValidator.Validate(latest).IsValid || !matchesCurrent && !matchesCandidate && !matchesCandidateControlSuccessor)
+        {
+            return Result(CustomLoopOrderedRunStatus.Conflict, latest, "Caller cancellation interrupted a pre-dispatch trace write, but the durable run changed outside the expected write or control transition; no provider request was dispatched.");
+        }
+
+        return await CancelBeforeDispatchAsync(latest, actor);
+    }
+
+    private static bool DurableTraceVersionMatches(CustomLoopRunRecord expected, CustomLoopRunRecord actual)
+    {
+        return expected.LifecycleVersion == actual.LifecycleVersion
+            && expected.Status == actual.Status
+            && CheckpointsEqual(expected.Checkpoint, actual.Checkpoint)
+            && expected.Events.Select(item => item.EventId).SequenceEqual(actual.Events.Select(item => item.EventId));
     }
 
     private static CustomLoopExecutionClock AdvanceClock(CustomLoopExecutionClock clock, DateTimeOffset now, bool terminal)
@@ -1510,22 +1660,4 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);
 
-    private sealed class AdmittedMaximumAuthorityProvider : ICustomLoopToolAuthorityProvider
-    {
-        private readonly TimeProvider _timeProvider;
-
-        public AdmittedMaximumAuthorityProvider(TimeProvider? timeProvider)
-        {
-            _timeProvider = timeProvider ?? TimeProvider.System;
-        }
-
-        public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
-        {
-            var assignments = admittedMaximum.ToArray();
-            var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
-            var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', assignments.OrderBy(value => value)));
-            var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
-            return Task.FromResult(new CustomLoopToolAuthoritySnapshot(roleId, assignments, assignments, catalog, assignments, roleHash, catalogHash, _timeProvider.GetUtcNow().ToUniversalTime(), true, "The application-test authority provider treats the admitted maximum as the current ceiling."));
-        }
-    }
 }

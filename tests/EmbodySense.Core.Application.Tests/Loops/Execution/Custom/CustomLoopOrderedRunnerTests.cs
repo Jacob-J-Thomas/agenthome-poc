@@ -23,12 +23,14 @@ public sealed class CustomLoopOrderedRunnerTests
         var executor = new QueueExecutor();
         var publisher = new RecordingPublisher();
         var audit = new RecordingAuditLog();
+        var authority = new TestAuthorityProvider();
 
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(null!, resolver, executor, publisher, audit));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, null!, executor, publisher, audit));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, resolver, null!, publisher, audit));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, resolver, executor, null!, audit));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, resolver, executor, publisher, null!));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(null!, resolver, executor, publisher, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, null!, executor, publisher, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, resolver, null!, publisher, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, resolver, executor, null!, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, resolver, executor, publisher, null!, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopOrderedRunner(store, resolver, executor, publisher, audit, null!));
     }
 
     [Fact]
@@ -434,6 +436,26 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Unsupported_publication_outcome_conflict_escalates_because_the_external_append_may_exist()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)))
+        {
+            ConflictOnPublicationWrite = true
+        };
+        var publisher = new RecordingPublisher { NextResult = new CustomLoopConversationPublicationResult((CustomLoopConversationPublicationOutcome)999, null, "Unsupported outcome.") };
+
+        var result = await Runner(store, new QueueExecutor(Result("evidence")), publisher).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("post_outcome_persistence_conflict", result.Run.FailureCode);
+        Assert.Single(publisher.Requests);
+    }
+
+    [Fact]
     public async Task Null_publication_result_is_recorded_as_uncertain_and_requires_review()
     {
         var definition = Definition(
@@ -681,6 +703,125 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Caller_cancellation_during_attempt_start_persistence_reloads_and_durably_cancels_the_running_run()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, token) =>
+            {
+                if (candidate.Events[^1].Kind == CustomLoopRunEventKind.NodeAttemptStarted)
+                {
+                    cancellation.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+            }
+        };
+        var executor = new QueueExecutor(Result("must not run"));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+        Assert.Null(result.Run.FailureCode);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_attempt_start_persistence_requires_review_when_the_durable_trace_cannot_be_reloaded()
+    {
+        using var cancellation = new CancellationTokenSource();
+        FakeRunStore? store = null;
+        store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, token) =>
+            {
+                if (candidate.Events[^1].Kind == CustomLoopRunEventKind.NodeAttemptStarted)
+                {
+                    store!.GetException = new IOException("Reload unavailable.");
+                    cancellation.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+            }
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("must not run"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Contains("could not be loaded", result.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Invalid_authority_snapshot_is_rejected_before_trace_or_dispatch()
+    {
+        var definition = Definition(tools: [CustomLoopToolAssignment.Read]);
+        var store = new FakeRunStore(Run(definition));
+        var executor = new QueueExecutor(Result("must not run"));
+        var authority = new FixedAuthorityProvider(Authority("role-workspace", [CustomLoopToolAssignment.Read], [CustomLoopToolAssignment.Read]) with { IsValid = false, Detail = "Authority unavailable." });
+
+        var result = await Runner(store, executor, authorityProvider: authority).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("invalid_inference_request", result.Run!.FailureCode);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Authority_snapshot_for_another_role_is_rejected_before_trace_or_dispatch()
+    {
+        var definition = Definition(tools: [CustomLoopToolAssignment.Read]);
+        var store = new FakeRunStore(Run(definition));
+        var executor = new QueueExecutor(Result("must not run"));
+        var authority = new FixedAuthorityProvider(Authority("role-other", [CustomLoopToolAssignment.Read], [CustomLoopToolAssignment.Read]));
+
+        var result = await Runner(store, executor, authorityProvider: authority).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("invalid_inference_request", result.Run!.FailureCode);
+        Assert.Empty(executor.Requests);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted);
+    }
+
+    [Fact]
+    public async Task Authority_snapshot_wider_than_the_admitted_tool_maximum_is_rejected_before_dispatch()
+    {
+        var definition = Definition(tools: [CustomLoopToolAssignment.Read]);
+        var store = new FakeRunStore(Run(definition));
+        var executor = new QueueExecutor(Result("must not run"));
+        var authority = new FixedAuthorityProvider(Authority("role-workspace", [CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search], [CustomLoopToolAssignment.Search]));
+
+        var result = await Runner(store, executor, authorityProvider: authority).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("invalid_inference_request", result.Run!.FailureCode);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Deadline_expiring_during_pre_dispatch_audit_prevents_the_provider_request()
+    {
+        var time = new MutableTimeProvider(Now);
+        var audit = new RecordingAuditLog
+        {
+            BeforeAppend = (auditEvent, _) =>
+            {
+                if (auditEvent.Action == AuditSchema.Actions.LoopNodeAttempt && auditEvent.Outcome == AuditSchema.Outcomes.Started)
+                {
+                    time.Advance(TimeSpan.FromMilliseconds(CustomLoopLimits.MaxRunExecutionMilliseconds));
+                }
+            }
+        };
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(Result("must not run"));
+
+        var result = await Runner(store, executor, audit: audit, timeProvider: time).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("run_deadline_exceeded", result.Run!.FailureCode);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_during_inference_assembly_cancels_without_provider_dispatch()
     {
         using var cancellation = new CancellationTokenSource();
@@ -803,7 +944,7 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
-    public async Task Durable_pause_after_Exit_outcome_audit_publishes_then_reaches_a_safe_pause_boundary()
+    public async Task Durable_pause_after_committed_Exit_completion_resumes_without_redispatching_Exit()
     {
         var definition = Definition(maxAdditionalIterations: 1, exitPolicy: Policy(Output(false, true)));
         var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
@@ -827,6 +968,47 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopOrderedRunStatus.Paused, result.Status);
         Assert.Equal(CustomLoopRunStatus.Paused, result.Run!.Status);
         Assert.Single(publisher.Requests);
+
+        audit.AfterAppend = null;
+        var resumed = await lifecycle.ResumeAsync(new CustomLoopResumeRequest(store.Current.Id, store.Current.LifecycleVersion, "resume-committed-exit", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.Completed, resumed.Status);
+        Assert.Equal(CustomLoopRunStatus.Completed, resumed.Run!.Status);
+        Assert.Equal(2, executor.Requests.Count);
+        Assert.Single(publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Durable_cancel_after_publication_intent_prevents_the_external_append()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            exitPolicy: Policy(Output(false, false)));
+        CustomLoopLifecycleService? lifecycle = null;
+        CustomLoopControlResult? cancel = null;
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)))
+        {
+            AfterUpdate = async updated =>
+            {
+                if (cancel is null && updated.Events[^1].Kind == CustomLoopRunEventKind.ConversationPublicationStarted)
+                {
+                    cancel = await lifecycle!.CancelAsync(new CustomLoopCancelRequest(updated.Id, updated.LifecycleVersion, "cancel-after-publication-intent", AuditSchema.Actors.Web));
+                }
+            }
+        };
+        var executor = new QueueExecutor(Result("observed outcome"));
+        var publisher = new RecordingPublisher();
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, publisher, audit);
+        lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, cancel!.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(publisher.Requests);
+        Assert.Contains(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublicationStarted);
     }
 
     [Fact]
@@ -1120,11 +1302,9 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Empty(executor.Requests);
     }
 
-    private static CustomLoopOrderedRunner Runner(FakeRunStore store, QueueExecutor executor, RecordingPublisher? publisher = null, RecordingAuditLog? audit = null, ICustomLoopToolAuthorityProvider? authorityProvider = null)
+    private static CustomLoopOrderedRunner Runner(FakeRunStore store, QueueExecutor executor, RecordingPublisher? publisher = null, RecordingAuditLog? audit = null, ICustomLoopToolAuthorityProvider? authorityProvider = null, TimeProvider? timeProvider = null)
     {
-        return authorityProvider is null
-            ? new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), new FixedTimeProvider(Now))
-            : new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), authorityProvider, new FixedTimeProvider(Now));
+        return new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), timeProvider ?? new FixedTimeProvider(Now));
     }
 
     private static CustomLoopDefinition Definition(
@@ -1200,6 +1380,14 @@ public sealed class CustomLoopOrderedRunnerTests
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
     }
 
+    private static CustomLoopToolAuthoritySnapshot Authority(string roleId, CustomLoopToolAssignment[] admitted, CustomLoopToolAssignment[] effective)
+    {
+        var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
+        var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', admitted.OrderBy(value => value)));
+        var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
+        return new CustomLoopToolAuthoritySnapshot(roleId, admitted, admitted, catalog, effective, roleHash, catalogHash, Now, true, "Test authority snapshot.");
+    }
+
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow()
@@ -1224,13 +1412,17 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public bool ReturnMissing { get; init; }
 
-        public Exception? GetException { get; init; }
+        public Exception? GetException { get; set; }
 
         public Exception? AppendTerminalWarningException { get; init; }
 
         public Func<CustomLoopRunRecord, Task>? AfterUpdate { get; init; }
 
+        public Action<CustomLoopRunRecord, CancellationToken>? BeforeUpdate { get; init; }
+
         public bool ConflictOnOutcomeWrite { get; init; }
+
+        public bool ConflictOnPublicationWrite { get; init; }
 
         public bool ConcurrentNeedsReviewOnOutcomeConflict { get; init; }
 
@@ -1243,6 +1435,8 @@ public sealed class CustomLoopOrderedRunnerTests
         public List<CustomLoopValidationError> ValidationFailures { get; } = [];
 
         private bool OutcomeConflictInjected { get; set; }
+
+        private bool PublicationConflictInjected { get; set; }
 
         public Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
         {
@@ -1318,6 +1512,7 @@ public sealed class CustomLoopOrderedRunnerTests
         public async Task<CustomLoopRunStoreResult> UpdateAsync(CustomLoopRunRecord run, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
         {
             Assert.False(cancellationToken.IsCancellationRequested);
+            BeforeUpdate?.Invoke(run, cancellationToken);
             if (ConflictOnOutcomeWrite && !OutcomeConflictInjected && run.Events.Skip(Current.Events.Length).Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved))
             {
                 OutcomeConflictInjected = true;
@@ -1348,6 +1543,12 @@ public sealed class CustomLoopOrderedRunnerTests
                 Assert.True(concurrentValidation.IsValid, string.Join(Environment.NewLine, concurrentValidation.Errors));
                 Current = concurrent;
                 Writes.Add(concurrent);
+                return CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion);
+            }
+
+            if (ConflictOnPublicationWrite && !PublicationConflictInjected && run.Events.Skip(Current.Events.Length).Any(item => item.Kind == CustomLoopRunEventKind.ConversationPublished))
+            {
+                PublicationConflictInjected = true;
                 return CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion);
             }
 
@@ -1483,6 +1684,29 @@ public sealed class CustomLoopOrderedRunnerTests
         }
     }
 
+    private sealed class FixedAuthorityProvider(CustomLoopToolAuthoritySnapshot snapshot) : ICustomLoopToolAuthorityProvider
+    {
+        public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default) => Task.FromResult(snapshot);
+    }
+
+    private sealed class TestAuthorityProvider : ICustomLoopToolAuthorityProvider
+    {
+        public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
+        {
+            var admitted = admittedMaximum.ToArray();
+            return Task.FromResult(Authority(roleId, admitted, admitted));
+        }
+    }
+
+    private sealed class MutableTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan duration) => _now += duration;
+    }
+
     private sealed class RecordingPublisher : ICustomLoopConversationPublisher
     {
         public List<CustomLoopConversationPublicationRequest> Requests { get; } = [];
@@ -1501,6 +1725,8 @@ public sealed class CustomLoopOrderedRunnerTests
             {
                 await BeforePublish(request);
             }
+
+            cancellationToken.ThrowIfCancellationRequested();
 
             return ReturnNull ? null! : NextResult;
         }
