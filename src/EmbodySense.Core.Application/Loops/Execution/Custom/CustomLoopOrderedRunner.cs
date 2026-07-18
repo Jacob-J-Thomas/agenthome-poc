@@ -284,6 +284,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             EnsureRequestBound(assembly);
             EnsureAttemptBound(run);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelBeforeDispatchAsync(run, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
         catch (Exception exception)
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "invalid_inference_request", $"The inference request could not be assembled safely: {SafeExceptionClass(exception)}.");
@@ -386,7 +391,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         var canonical = Canonicalize(result.OutputText);
         var retained = new CustomLoopRetainedOutput(step.Id, iteration, canonical.Text, CustomLoopTraceContentHash.Compute(canonical.Text));
-        var publicationId = assembly.ResolvedOutputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, iteration, step.Id) : null;
+        var publicationId = assembly.ResolvedOutputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, iteration, step.Id, isExit: false) : null;
         var observedNow = Now(run);
         var safeProviderResponseId = SafeReference(result.ProviderResponseId);
         var observed = Event(run, observedNow, CustomLoopRunEventKind.NodeOutcomeObserved, "Inference provider outcome was observed and retained as local evidence.", iteration, step.Id, 1, output: canonical.Text, originalOutputCharacters: canonical.OriginalCharacterCount, truncated: canonical.Truncated, retained: assembly.ResolvedOutputPolicy.RetainForLoopReasoning, published: assembly.ResolvedOutputPolicy.PublishToInvokingConversation, publicationId: publicationId, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: safeProviderResponseId);
@@ -426,7 +431,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         run = publicationBoundary.Run!;
         var published = run.Status == CustomLoopRunStatus.CancelRequested
             ? new RunAdvance(run, null)
-            : await PublishIfSelectedAsync(run, assembly.ResolvedOutputPolicy, retained, step.Id, actor);
+            : await PublishIfSelectedAsync(run, assembly.ResolvedOutputPolicy, retained, step.Id, isExit: false, actor);
         if (published.Terminal is not null)
         {
             return published;
@@ -461,6 +466,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             assembly = _contextResolver.ResolveExit(run);
             EnsureRequestBound(assembly);
             EnsureAttemptBound(run);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelBeforeDispatchAsync(run, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
         }
         catch (Exception exception)
         {
@@ -555,7 +565,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         var canonical = Canonicalize(result.OutputText);
         var decision = ParseExitDecision(canonical.Text);
-        var publicationId = assembly.ResolvedOutputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, iteration, "exit") : null;
+        var publicationId = assembly.ResolvedOutputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, iteration, "exit", isExit: true) : null;
         var observedNow = Now(run);
         var safeProviderResponseId = SafeReference(result.ProviderResponseId);
         var observed = Event(run, observedNow, CustomLoopRunEventKind.NodeOutcomeObserved, "Exit provider outcome was observed and retained as local evidence.", iteration, "exit", 1, output: canonical.Text, originalOutputCharacters: canonical.OriginalCharacterCount, truncated: canonical.Truncated, retained: assembly.ResolvedOutputPolicy.RetainForLoopReasoning, published: assembly.ResolvedOutputPolicy.PublishToInvokingConversation, publicationId: publicationId, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: safeProviderResponseId, exitDecision: decision);
@@ -610,9 +620,16 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(terminal.Run, terminal);
         }
 
+        var publicationBoundary = await RefreshControlUpdateAsync(run);
+        if (publicationBoundary.Terminal is not null)
+        {
+            return publicationBoundary;
+        }
+
+        run = publicationBoundary.Run!;
         var published = run.Status == CustomLoopRunStatus.CancelRequested
             ? new RunAdvance(run, null)
-            : await PublishIfSelectedAsync(run, assembly.ResolvedOutputPolicy, iterationResult, "exit", actor);
+            : await PublishIfSelectedAsync(run, assembly.ResolvedOutputPolicy, iterationResult, "exit", isExit: true, actor);
         if (published.Terminal is not null)
         {
             return published;
@@ -634,6 +651,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         if (decision == CustomLoopExitDecision.Complete)
         {
+            var completionBoundary = await ObserveControlBoundaryAsync(run, actor);
+            if (completionBoundary.Terminal is not null)
+            {
+                return completionBoundary;
+            }
+
+            run = completionBoundary.Run!;
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Completed, null, "Exit completed the loop.", iterationResult.Content);
             return new RunAdvance(terminal.Run, terminal);
         }
@@ -679,7 +703,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             1,
             retained: outputPolicy.RetainForLoopReasoning,
             published: outputPolicy.PublishToInvokingConversation,
-            publicationId: outputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, run.Checkpoint.Iteration, "exit") : null,
+            publicationId: outputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, run.Checkpoint.Iteration, "exit", isExit: true) : null,
             exitDecision: CustomLoopExitDecision.Complete);
         var exitPersisted = await PersistAsync(run, Append(run, exitEvent.TimestampUtc, [exitEvent]), IntegrityToken(), outcomeMayExist: false);
         if (exitPersisted.Terminal is not null)
@@ -701,7 +725,16 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "deterministic_exit_audit_failed", $"The deterministic Exit audit could not be recorded: {SafeExceptionClass(exception)}.");
         }
 
-        var published = await PublishIfSelectedAsync(run, outputPolicy, iterationResult, "exit", actor);
+        var publicationBoundary = await RefreshControlUpdateAsync(run);
+        if (publicationBoundary.Terminal is not null)
+        {
+            return publicationBoundary.Terminal;
+        }
+
+        run = publicationBoundary.Run!;
+        var published = run.Status == CustomLoopRunStatus.CancelRequested
+            ? new RunAdvance(run, null)
+            : await PublishIfSelectedAsync(run, outputPolicy, iterationResult, "exit", isExit: true, actor);
         if (published.Terminal is not null)
         {
             return published.Terminal;
@@ -715,17 +748,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return committed.Terminal;
         }
 
-        return await TerminateAsync(committed.Run!, actor, CustomLoopRunStatus.Completed, null, detail, iterationResult.Content);
+        var completionBoundary = await ObserveControlBoundaryAsync(committed.Run!, actor);
+        return completionBoundary.Terminal ?? await TerminateAsync(completionBoundary.Run!, actor, CustomLoopRunStatus.Completed, null, detail, iterationResult.Content);
     }
 
-    private async Task<RunAdvance> PublishIfSelectedAsync(CustomLoopRunRecord run, CustomLoopContextOutputPolicy policy, CustomLoopRetainedOutput output, string stepId, string actor)
+    private async Task<RunAdvance> PublishIfSelectedAsync(CustomLoopRunRecord run, CustomLoopContextOutputPolicy policy, CustomLoopRetainedOutput output, string stepId, bool isExit, string actor)
     {
         if (!policy.PublishToInvokingConversation)
         {
             return new RunAdvance(run, null);
         }
 
-        var operationId = PublicationOperationId(run.Id, run.Checkpoint.Iteration, stepId);
+        var operationId = PublicationOperationId(run.Id, run.Checkpoint.Iteration, stepId, isExit);
         var conversation = run.InvokingConversation;
         if (conversation is null)
         {
@@ -1311,13 +1345,29 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static void EnsureAttemptBound(CustomLoopRunRecord run)
     {
-        var startedAttempts = run.Events.Count(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted);
+        var startedAttempts = run.Events.Count(start => (start.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted) && AttemptConsumesBudget(run, start));
         var definitionMaximum = CustomLoopLimits.GetMaximumModelAttempts(run.AdmittedDefinition.InferenceSteps.Length, run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations);
         if (startedAttempts >= definitionMaximum || startedAttempts >= CustomLoopLimits.MaxModelAttemptsPerRun)
         {
             throw new InvalidOperationException("The custom-loop model-attempt limit has been reached.");
         }
     }
+
+    private static bool AttemptConsumesBudget(CustomLoopRunRecord run, CustomLoopRunEvent start)
+    {
+        if (start.Sequence > run.Checkpoint.LastCommittedSequence)
+        {
+            return true;
+        }
+
+        var nextMatchingStart = run.Events.FirstOrDefault(item => item.Sequence > start.Sequence && item.Kind == start.Kind && AttemptCoordinatesEqual(item, start));
+        var endSequence = nextMatchingStart?.Sequence ?? long.MaxValue;
+        return run.Events.Any(item => item.Sequence > start.Sequence && item.Sequence < endSequence && AttemptCoordinatesEqual(item, start) && CompletesAttempt(start, item));
+    }
+
+    private static bool AttemptCoordinatesEqual(CustomLoopRunEvent left, CustomLoopRunEvent right) => left.Iteration == right.Iteration && string.Equals(left.StepId, right.StepId, StringComparison.Ordinal) && left.Attempt == right.Attempt;
+
+    private static bool CompletesAttempt(CustomLoopRunEvent start, CustomLoopRunEvent item) => item.Kind == CustomLoopRunEventKind.NodeAttemptFailed || start.Kind == CustomLoopRunEventKind.NodeAttemptStarted && item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted || start.Kind == CustomLoopRunEventKind.ExitDecisionStarted && item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted;
 
     private CancellationTokenSource CreateProviderToken(CustomLoopRunRecord run, CancellationToken callerToken)
     {
@@ -1379,9 +1429,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return string.Equals(token, "Repeat", StringComparison.OrdinalIgnoreCase) ? CustomLoopExitDecision.Repeat : CustomLoopExitDecision.Invalid;
     }
 
-    private static string PublicationOperationId(string runId, int iteration, string stepId)
+    private static string PublicationOperationId(string runId, int iteration, string stepId, bool isExit)
     {
-        var material = Encoding.UTF8.GetBytes($"{runId}\n{iteration}\n{stepId}");
+        var material = Encoding.UTF8.GetBytes($"{runId}\n{iteration}\n{(isExit ? "exit" : "inference")}\n{stepId}");
         return $"publish-{Convert.ToHexString(SHA256.HashData(material)).ToLowerInvariant()}";
     }
 
@@ -1391,13 +1441,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             .Where(item => item is { Kind: CustomLoopRunEventKind.ConversationPublished, PublishedToInvokingConversation: true })
             .Select(item =>
             {
-                if (item.Iteration is not { } iteration || string.IsNullOrWhiteSpace(item.StepId) || item.CanonicalOutput is null)
+                var intent = run.Events.LastOrDefault(candidate => candidate.Sequence < item.Sequence && candidate.Kind == CustomLoopRunEventKind.ConversationPublicationStarted && candidate.Iteration == item.Iteration && string.Equals(candidate.StepId, item.StepId, StringComparison.Ordinal));
+                if (item.Iteration is null || string.IsNullOrWhiteSpace(item.StepId) || item.CanonicalOutput is null || !CustomLoopArtifactIdentifier.IsValid(intent?.ConversationPublicationId))
                 {
-                    throw new FormatException("A successful conversation-publication event is missing its durable coordinates or exact canonical output.");
+                    throw new FormatException("A successful conversation-publication event is missing its durable intent, coordinates, or exact canonical output.");
                 }
 
                 return new CustomLoopPriorConversationPublication(
-                    PublicationOperationId(run.Id, iteration, item.StepId),
+                    intent!.ConversationPublicationId!,
                     item.CanonicalOutput,
                     CustomLoopTraceContentHash.Compute(item.CanonicalOutput));
             })
