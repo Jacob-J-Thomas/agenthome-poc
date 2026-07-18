@@ -416,6 +416,36 @@ public sealed class CustomLoopAdmissionServiceTests
     }
 
     [Fact]
+    public async Task Admission_operation_replay_is_bound_to_the_original_authenticated_actor()
+    {
+        var definition = Definition();
+        var original = Request(definition);
+        var existing = ExistingRun(definition, original);
+        var audit = new RecordingAuditLog();
+
+        var result = await Service(new FakeDefinitionStore(), new FakeRunStore { OperationReplay = existing }, audit).AdmitAsync(original with { Actor = "actor-other" });
+
+        Assert.Equal(CustomLoopAdmissionStatus.Conflict, result.Status);
+        Assert.Same(existing, result.Run);
+        Assert.Equal("actor-other", AssertAdmissionAudit(audit, "conflict", AuditSchema.Outcomes.Conflict).Actor);
+    }
+
+    [Fact]
+    public async Task Malformed_context_manifest_is_rejected_and_audited_without_projection_failure()
+    {
+        var definition = Definition();
+        var request = Request(definition);
+        var malformed = CustomLoopContextSnapshotHash.Apply(request.ContextSnapshot with { SourceManifest = [null!, .. request.ContextSnapshot.SourceManifest.Skip(1)] });
+        var audit = new RecordingAuditLog();
+
+        var result = await Service(new FakeDefinitionStore(definition), new FakeRunStore(), audit).AdmitAsync(request with { ContextSnapshot = malformed });
+
+        Assert.Equal(CustomLoopAdmissionStatus.Invalid, result.Status);
+        Assert.Contains(result.ValidationErrors, error => error.Code == "context_manifest_source_required");
+        AssertAdmissionAudit(audit, "invalid", AuditSchema.Outcomes.Rejected);
+    }
+
+    [Fact]
     public async Task Replay_compares_exact_message_values_instead_of_array_identity()
     {
         var definition = Definition(includeInvokingConversation: true);
@@ -1005,6 +1035,7 @@ public sealed class CustomLoopAdmissionServiceTests
             request.Surface,
             request.ModelSnapshot,
             request.OperationId,
+            request.Actor,
             string.Empty,
             definition,
             triggerPrompt,

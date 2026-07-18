@@ -193,6 +193,7 @@ public static class CustomLoopRunValidator
             Add(errors, "invalid_admission_operation_id", "admissionOperationId", "Admission operation id must be a safe lowercase artifact identifier.");
         }
 
+        ValidateText(run.AdmissionActor, "admissionActor", CustomLoopLimits.MaxTraceReferenceCharacters, required: true, errors);
         ValidateHash(run.AdmissionRequestHash, "admissionRequestHash", errors);
     }
 
@@ -1083,7 +1084,7 @@ public static class CustomLoopRunValidator
 
     private static void ValidateImmutableAdmission(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
     {
-        if (current.SchemaVersion != candidate.SchemaVersion || !string.Equals(current.Id, candidate.Id, StringComparison.Ordinal) || !string.Equals(current.LoopId, candidate.LoopId, StringComparison.Ordinal) || current.CreatedAtUtc != candidate.CreatedAtUtc || !string.Equals(current.Surface, candidate.Surface, StringComparison.Ordinal) || !Equals(current.ModelSnapshot, candidate.ModelSnapshot) || !string.Equals(current.AdmissionOperationId, candidate.AdmissionOperationId, StringComparison.Ordinal) || !string.Equals(current.AdmissionRequestHash, candidate.AdmissionRequestHash, StringComparison.Ordinal) || !string.Equals(current.TriggerPrompt, candidate.TriggerPrompt, StringComparison.Ordinal))
+        if (current.SchemaVersion != candidate.SchemaVersion || !string.Equals(current.Id, candidate.Id, StringComparison.Ordinal) || !string.Equals(current.LoopId, candidate.LoopId, StringComparison.Ordinal) || current.CreatedAtUtc != candidate.CreatedAtUtc || !string.Equals(current.Surface, candidate.Surface, StringComparison.Ordinal) || !Equals(current.ModelSnapshot, candidate.ModelSnapshot) || !string.Equals(current.AdmissionOperationId, candidate.AdmissionOperationId, StringComparison.Ordinal) || !string.Equals(current.AdmissionActor, candidate.AdmissionActor, StringComparison.Ordinal) || !string.Equals(current.AdmissionRequestHash, candidate.AdmissionRequestHash, StringComparison.Ordinal) || !string.Equals(current.TriggerPrompt, candidate.TriggerPrompt, StringComparison.Ordinal))
         {
             Add(errors, "admission_identity_changed", "$", "Run identity and admission-owned scalar fields are immutable.");
         }

@@ -21,6 +21,7 @@ public sealed class CustomLoopRunValidatorTests
         Assert.False(CustomLoopTraceContentHash.Matches("other", CustomLoopTraceContentHash.Compute("hello")));
         Assert.True(CustomLoopAdmissionRequestHash.Matches(run));
         Assert.NotEqual(run.AdmissionRequestHash, CustomLoopAdmissionRequestHash.Compute(run with { ModelSnapshot = new CustomLoopModelSnapshot("local", "model") }));
+        Assert.NotEqual(run.AdmissionRequestHash, CustomLoopAdmissionRequestHash.Compute(run with { AdmissionActor = "embodysense.cli" }));
     }
 
     [Fact]
@@ -404,6 +405,7 @@ public sealed class CustomLoopRunValidatorTests
             "web",
             new CustomLoopModelSnapshot("openai", "gpt-5"),
             operationId,
+            "embodysense.web",
             string.Empty,
             definition,
             "Initial prompt",

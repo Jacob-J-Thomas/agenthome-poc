@@ -14,6 +14,7 @@ public sealed record CustomLoopRunRecord(
     string Surface,
     CustomLoopModelSnapshot ModelSnapshot,
     string AdmissionOperationId,
+    string AdmissionActor,
     string AdmissionRequestHash,
     CustomLoopDefinition AdmittedDefinition,
     string TriggerPrompt,

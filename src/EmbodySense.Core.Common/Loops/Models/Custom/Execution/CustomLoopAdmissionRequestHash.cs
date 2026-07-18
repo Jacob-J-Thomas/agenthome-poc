@@ -17,6 +17,7 @@ public static class CustomLoopAdmissionRequestHash
             writer.WriteStartObject();
             WriteString(writer, "loopId", run.LoopId);
             WriteString(writer, "surface", run.Surface);
+            WriteString(writer, "admissionActor", run.AdmissionActor);
             writer.WritePropertyName("modelSnapshot");
             WriteModel(writer, run.ModelSnapshot);
             writer.WritePropertyName("admittedDefinition");

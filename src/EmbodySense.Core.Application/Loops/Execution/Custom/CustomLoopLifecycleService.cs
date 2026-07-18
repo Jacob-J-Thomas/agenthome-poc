@@ -121,28 +121,34 @@ public sealed class CustomLoopLifecycleService
         }
         catch (Exception exception)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.Failed, null, false, $"The run could not be loaded safely: {SafeExceptionClass(exception)}.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Failed, null, $"The run could not be loaded safely: {SafeExceptionClass(exception)}.");
         }
 
         if (run is null)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.NotFound, null, true, "The custom-loop run does not exist.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.NotFound, null, "The custom-loop run does not exist.");
         }
 
         var validation = CustomLoopRunValidator.Validate(run);
         if (!validation.IsValid)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.InvalidState, run, true, "The persisted custom-loop run is invalid; no lifecycle mutation was attempted.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, "The persisted custom-loop run is invalid; no lifecycle mutation was attempted.");
         }
 
-        if (run.Events.Any(item => string.Equals(item.EventId, operationId, StringComparison.Ordinal)))
+        var matchingEvent = run.Events.FirstOrDefault(item => string.Equals(item.EventId, operationId, StringComparison.Ordinal));
+        if (matchingEvent is { Kind: CustomLoopRunEventKind.LifecycleChanged })
         {
             return await RecoverPendingReceiptAsync(operation, run);
         }
 
+        if (matchingEvent is not null)
+        {
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, "The operation id collides with a non-lifecycle run event and cannot be used for lifecycle control.");
+        }
+
         if (run.LifecycleVersion != expectedLifecycleVersion)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.Conflict, run, true, $"Expected lifecycle version {expectedLifecycleVersion}, but the durable run is version {run.LifecycleVersion}.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, $"Expected lifecycle version {expectedLifecycleVersion}, but the durable run is version {run.LifecycleVersion}.");
         }
 
         return kind switch
@@ -150,7 +156,7 @@ public sealed class CustomLoopLifecycleService
             CustomLoopControlKind.Pause => await PauseCoreAsync(operation, run),
             CustomLoopControlKind.Cancel => await CancelCoreAsync(operation, run),
             CustomLoopControlKind.Resume => await ResumeCoreAsync(operation, run, cancellationToken),
-            _ => await CompleteAsync(operation, CustomLoopControlStatus.InvalidState, run, true, "The control kind is unsupported.")
+            _ => await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, "The control kind is unsupported.")
         };
     }
 
@@ -158,23 +164,23 @@ public sealed class CustomLoopLifecycleService
     {
         if (run.Status == CustomLoopRunStatus.Paused)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.Paused, run, true, "The run is already safely Paused at a committed boundary; no mutation was repeated.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Paused, run, "The run is already safely Paused at a committed boundary; no mutation was repeated.");
         }
 
         if (run.Status == CustomLoopRunStatus.PauseRequested)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.PauseRequested, run, true, "A pause is already requested; the runner will stop only after a proved checkpoint boundary.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.PauseRequested, run, "A pause is already requested; the runner will stop only after a proved checkpoint boundary.");
         }
 
         if (run.Status != CustomLoopRunStatus.Running)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.InvalidState, run, true, $"Pause is allowed only from Running or as an idempotent request against PauseRequested or Paused, not {run.Status}.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Pause is allowed only from Running or as an idempotent request against PauseRequested or Paused, not {run.Status}.");
         }
 
         var transition = await PersistTransitionAsync(run, CustomLoopRunStatus.PauseRequested, operation.Actor, operation.OperationId, "Pause was requested; an open attempt may finish, but no later attempt may start.");
         if (transition.Run is null)
         {
-            return await CompleteAsync(operation, transition.Status, transition.CurrentRun, true, transition.Detail);
+            return await CompleteAuditedOutcomeAsync(operation, transition.Status, transition.CurrentRun, transition.Detail);
         }
 
         var outcome = transition.AuditRecorded ? CustomLoopControlStatus.PauseRequested : CustomLoopControlStatus.AuditWarning;
@@ -197,7 +203,7 @@ public sealed class CustomLoopLifecycleService
                 return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, signalFailure);
             }
 
-            return await CompleteAsync(operation, CustomLoopControlStatus.CancelRequested, run, true, "Cancellation is already requested; no new provider dispatch is permitted.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.CancelRequested, run, "Cancellation is already requested; no new provider dispatch is permitted.");
         }
 
         if (run.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested)
@@ -205,7 +211,7 @@ public sealed class CustomLoopLifecycleService
             var requested = await PersistTransitionAsync(run, CustomLoopRunStatus.CancelRequested, operation.Actor, operation.OperationId, "Cancellation was requested; any open provider attempt is being cancelled and no later attempt may start.");
             if (requested.Run is null)
             {
-                return await CompleteAsync(operation, requested.Status, requested.CurrentRun, true, requested.Detail);
+                return await CompleteAuditedOutcomeAsync(operation, requested.Status, requested.CurrentRun, requested.Detail);
             }
 
             if (!TryCancelActiveAttempt(run.Id, out var signalFailure))
@@ -231,14 +237,14 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
         }
 
-        return await CompleteAsync(operation, CustomLoopControlStatus.InvalidState, run, true, $"Cancel cannot mutate terminal state {run.Status}.");
+        return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Cancel cannot mutate terminal state {run.Status}.");
     }
 
     private async Task<CustomLoopControlResult> ResumeCoreAsync(CustomLoopControlOperation operation, CustomLoopRunRecord run, CancellationToken cancellationToken)
     {
         if (run.Status != CustomLoopRunStatus.Paused)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.InvalidState, run, true, $"Explicit Resume is allowed only from Paused, not {run.Status}.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Explicit Resume is allowed only from Paused, not {run.Status}.");
         }
 
         bool modelAvailable;
@@ -252,12 +258,12 @@ public sealed class CustomLoopLifecycleService
         }
         catch (Exception exception)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.Failed, run, false, $"Resume could not verify that the admitted provider/model remains available: {SafeExceptionClass(exception)}. The run remains Paused and no provider request was dispatched.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Failed, run, $"Resume could not verify that the admitted provider/model remains available: {SafeExceptionClass(exception)}. The run remains Paused and no provider request was dispatched.");
         }
 
         if (!modelAvailable)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.InvalidState, run, true, "Resume rejected because the admitted provider/model is not available in the current runtime configuration. The run remains Paused and no provider request was dispatched; no fallback or model switch was attempted.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, "Resume rejected because the admitted provider/model is not available in the current runtime configuration. The run remains Paused and no provider request was dispatched; no fallback or model switch was attempted.");
         }
 
         if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))
@@ -272,7 +278,7 @@ public sealed class CustomLoopLifecycleService
         var gate = _executionGate.TryAcquire(operation.OperationId, operation.RequestHash);
         if (gate.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
         {
-            return await CompleteAsync(operation, CustomLoopControlStatus.WorkspaceExecutionBusy, run, false, "workspace_execution_busy: another custom-loop run is actively executing; the Paused run and its deadline, checkpoint, and approval binding were not changed.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.WorkspaceExecutionBusy, run, "workspace_execution_busy: another custom-loop run is actively executing; the Paused run and its deadline, checkpoint, and approval binding were not changed.");
         }
 
         if (gate.Status == CustomLoopExecutionLeaseStatus.OperationInProgress)
@@ -290,7 +296,7 @@ public sealed class CustomLoopLifecycleService
             var resumed = await PersistTransitionAsync(run, CustomLoopRunStatus.Running, operation.Actor, operation.OperationId, "Explicit Resume admitted the persisted checkpoint for ordered execution.");
             if (resumed.Run is null)
             {
-                return await CompleteAsync(operation, resumed.Status, resumed.CurrentRun, true, resumed.Detail);
+                return await CompleteAuditedOutcomeAsync(operation, resumed.Status, resumed.CurrentRun, resumed.Detail);
             }
 
             var receiptStatus = resumed.AuditRecorded ? CustomLoopControlStatus.Resumed : CustomLoopControlStatus.AuditWarning;
@@ -356,6 +362,17 @@ public sealed class CustomLoopLifecycleService
     {
         var detail = $"The ordered resume executor failed after the durable Running transition: {SafeExceptionClass(exception)}. Execution is stopped for review instead of remaining silently Running.";
         var current = await TryLoadAsync(resumedRun.Id, IntegrityToken()) ?? resumedRun;
+        if (exception is OperationCanceledException && current.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            const string cancellationDetail = "The ordered resume executor observed the durable cancellation request and stopped its active attempt; cancellation was completed without another provider dispatch.";
+            var cancelled = await PersistTransitionAsync(current, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("resume-cancelled"), cancellationDetail);
+            var cancelledRun = cancelled.Run ?? cancelled.CurrentRun ?? current;
+            var cancelledStatus = cancelled.Run is not null
+                ? cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning
+                : cancelledRun.Status == CustomLoopRunStatus.Cancelled ? CustomLoopControlStatus.Cancelled : cancelled.Status;
+            return Result(cancelledStatus, cancelledRun, operation.OperationId, cancelled.Detail);
+        }
+
         if (current.Status == CustomLoopRunStatus.Paused)
         {
             return Result(CustomLoopControlStatus.Paused, current, operation.OperationId, detail);
@@ -441,6 +458,40 @@ public sealed class CustomLoopLifecycleService
         {
             return false;
         }
+    }
+
+    private async Task<CustomLoopControlResult> CompleteAuditedOutcomeAsync(CustomLoopControlOperation operation, CustomLoopControlStatus status, CustomLoopRunRecord? run, string detail)
+    {
+        var metadata = new Dictionary<string, object?>
+        {
+            ["runId"] = operation.RunId,
+            ["controlKind"] = operation.Kind.ToString().ToLowerInvariant(),
+            ["controlStatus"] = status.ToString().ToLowerInvariant(),
+            ["expectedLifecycleVersion"] = operation.ExpectedLifecycleVersion,
+            ["lifecycleVersion"] = run?.LifecycleVersion,
+            ["runStatus"] = run?.Status.ToString().ToLowerInvariant(),
+            ["lifecycleMutated"] = false
+        };
+        var outcome = status switch
+        {
+            CustomLoopControlStatus.NotFound => AuditSchema.Outcomes.NotFound,
+            CustomLoopControlStatus.Conflict or CustomLoopControlStatus.WorkspaceExecutionBusy => AuditSchema.Outcomes.Conflict,
+            CustomLoopControlStatus.InvalidState => AuditSchema.Outcomes.Denied,
+            CustomLoopControlStatus.Failed or CustomLoopControlStatus.NeedsReview => AuditSchema.Outcomes.Failed,
+            CustomLoopControlStatus.PauseRequested or CustomLoopControlStatus.CancelRequested => AuditSchema.Outcomes.Requested,
+            _ => AuditSchema.Outcomes.Succeeded
+        };
+        var auditRecorded = false;
+        try
+        {
+            await _auditLog.AppendAsync(AuditEvent.Create(operation.Actor, AuditSchema.Actions.LoopRunLifecycle, operation.RunId, outcome, detail, metadata), IntegrityToken());
+            auditRecorded = true;
+        }
+        catch
+        {
+        }
+
+        return await CompleteAsync(operation, status, run, auditRecorded, detail);
     }
 
     private async Task<CustomLoopControlResult> CompleteAsync(CustomLoopControlOperation operation, CustomLoopControlStatus status, CustomLoopRunRecord? run, bool auditRecorded, string detail)

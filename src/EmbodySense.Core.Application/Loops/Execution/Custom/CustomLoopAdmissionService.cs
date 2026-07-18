@@ -123,6 +123,7 @@ public sealed class CustomLoopAdmissionService
             request.Surface,
             request.ModelSnapshot,
             request.OperationId,
+            request.Actor,
             new string('0', CustomLoopLimits.Sha256HexCharacters),
             definition,
             triggerPrompt,
@@ -345,6 +346,7 @@ public sealed class CustomLoopAdmissionService
             && string.Equals(run.LoopId, request.LoopId, StringComparison.Ordinal)
             && run.AdmittedDefinition.DefinitionVersion == request.ExpectedDefinitionVersion
             && string.Equals(run.AdmittedDefinition.ContentHash, request.ExpectedDefinitionHash, StringComparison.Ordinal)
+            && string.Equals(run.AdmissionActor, request.Actor, StringComparison.Ordinal)
             && string.Equals(run.AdmittedDefinition.RoleId, request.CurrentRoleId, StringComparison.Ordinal)
             && string.Equals(run.Surface, request.Surface, StringComparison.Ordinal)
             && string.Equals(run.TriggerPrompt, resolvedPrompt, StringComparison.Ordinal)

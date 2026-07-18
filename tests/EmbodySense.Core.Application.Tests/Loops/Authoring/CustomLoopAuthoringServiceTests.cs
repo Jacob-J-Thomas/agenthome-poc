@@ -989,6 +989,7 @@ public sealed class CustomLoopAuthoringServiceTests
             "test",
             new CustomLoopModelSnapshot("test", null),
             "admit-run",
+            "embodysense.test",
             new string('a', CustomLoopLimits.Sha256HexCharacters),
             definition,
             string.Empty,

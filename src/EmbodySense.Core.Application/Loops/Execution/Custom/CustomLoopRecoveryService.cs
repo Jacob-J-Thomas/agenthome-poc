@@ -45,17 +45,18 @@ public sealed class CustomLoopRecoveryService
         }
 
         var admissionAuditComplete = CustomLoopRunValidator.HasCompleteAdmissionAudit(run);
-        if (run.Status == CustomLoopRunStatus.Paused && admissionAuditComplete)
+        var hasOpenAttempt = HasOpenAttemptSinceCheckpoint(run);
+        if (run.Status == CustomLoopRunStatus.Paused && admissionAuditComplete && !hasOpenAttempt)
         {
             return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run is already Paused; restart recovery never starts execution automatically.");
         }
 
-        var hasOpenAttempt = HasOpenAttemptSinceCheckpoint(run);
         var target = !admissionAuditComplete
             ? CustomLoopRunStatus.NeedsReview
             : run.Status switch
         {
             CustomLoopRunStatus.Admitted => CustomLoopRunStatus.Paused,
+            CustomLoopRunStatus.Paused when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
             CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
             CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested => CustomLoopRunStatus.Paused,
             CustomLoopRunStatus.CancelRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
