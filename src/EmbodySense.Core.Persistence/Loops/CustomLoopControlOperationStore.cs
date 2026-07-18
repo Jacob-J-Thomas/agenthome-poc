@@ -17,6 +17,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = true,
+        // TODO(#18): Re-evaluate this JSON nesting ceiling against real control-operation artifacts and make any limit failure clearly observable before deeper persisted shapes are introduced. See https://github.com/Jacob-J-Thomas/agenthome-poc/issues/18.
         MaxDepth = 32,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
