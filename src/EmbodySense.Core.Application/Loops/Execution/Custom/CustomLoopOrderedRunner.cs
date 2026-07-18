@@ -1462,9 +1462,27 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return "The provider result reported a governed tool-call count outside the admitted per-attempt budget.";
         }
 
+        var attemptStart = run.Events.LastOrDefault(item => (item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+            && item.Iteration == iteration
+            && string.Equals(item.StepId, stepId, StringComparison.Ordinal)
+            && item.Attempt == attempt);
+        if (attemptStart?.ToolAuthority is null)
+        {
+            return "The durable governed tool trace has no matching attempt-start authority snapshot.";
+        }
+
         var toolEvents = run.Events
-            .Where(item => item.Iteration == iteration && item.Attempt == attempt && string.Equals(item.StepId, stepId, StringComparison.Ordinal) && item.ToolEvidence is not null)
+            .Where(item => item.Sequence > attemptStart.Sequence && item.Iteration == iteration && item.Attempt == attempt && string.Equals(item.StepId, stepId, StringComparison.Ordinal) && item.ToolEvidence is not null)
             .ToArray();
+        if (toolEvents.Any(item => item.ToolAuthority is null
+            || item.ToolEvidence is null
+            || !attemptStart.ToolAuthority.Matches(item.ToolAuthority)
+            || !attemptStart.ToolAuthority.Matches(item.ToolEvidence.Authority)
+            || !attemptStart.ToolAuthority.AllowsCommand(item.ToolEvidence.Command)))
+        {
+            return "The durable governed tool trace is not bound to the exact attempt-start authority and allowed command set.";
+        }
+
         var reservations = toolEvents.Where(item => item.Kind == CustomLoopRunEventKind.ToolRequestReserved).ToArray();
         durableToolRequestsConsumed = reservations.Length;
         if (durableToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt || run.Checkpoint.ToolRequestsUsed + durableToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)

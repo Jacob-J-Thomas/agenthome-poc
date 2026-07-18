@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -234,6 +235,22 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Validate_binds_tool_authority_and_command_to_the_matching_attempt_start()
+    {
+        var seed = CreateRun();
+        var attemptAuthority = Authority([CustomLoopToolAssignment.Read]);
+        var widenedAuthority = Authority([CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search]);
+        var started = new CustomLoopRunEvent(2, "attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, attemptAuthority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        var widenedEvidence = ToolEvidence(widenedAuthority, ToolCommand.Search);
+        var widenedEvent = new CustomLoopRunEvent(3, "tool-widened", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, widenedAuthority, widenedEvidence);
+        var unauthorizedEvidence = ToolEvidence(attemptAuthority, ToolCommand.Search);
+        var unauthorizedEvent = new CustomLoopRunEvent(3, "tool-unauthorized", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, attemptAuthority, unauthorizedEvidence);
+
+        AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, widenedEvent] }), "tool_authority_not_attempt_bound", "tool_command_not_attempt_authorized");
+        AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, unauthorizedEvent] }), "tool_command_not_attempt_authorized");
+    }
+
+    [Fact]
     public void Validate_accepts_the_exact_nonterminal_control_limit_with_terminal_and_warning_slots_reserved()
     {
         var run = WithLifecycleControlEvents(CreateRun(), CustomLoopLimits.MaxNonterminalLifecycleControlEventsPerRun);
@@ -451,6 +468,17 @@ public sealed class CustomLoopRunValidatorTests
             null,
             null);
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopToolAuthoritySnapshot Authority(CustomLoopToolAssignment[] effectiveAssignments)
+    {
+        var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
+        return new CustomLoopToolAuthoritySnapshot("default-role", effectiveAssignments, effectiveAssignments, catalog, effectiveAssignments, new string('a', CustomLoopLimits.Sha256HexCharacters), new string('b', CustomLoopLimits.Sha256HexCharacters), Timestamp, true, "Test authority snapshot.");
+    }
+
+    private static CustomLoopToolTraceEvidence ToolEvidence(CustomLoopToolAuthoritySnapshot authority, ToolCommand command)
+    {
+        return new CustomLoopToolTraceEvidence(CustomLoopToolEvidencePhase.RequestReserved, 1, "tool-correlation", null, command, "shared/file.txt", null, null, null, authority, null, null, null, null, null, false, CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
     }
 
     private static CustomLoopRunRecord Advance(CustomLoopRunRecord run, CustomLoopRunStatus status)

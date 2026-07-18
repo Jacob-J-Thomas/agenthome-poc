@@ -614,6 +614,11 @@ public static class CustomLoopRunValidator
                 Add(errors, "tool_evidence_phase_mismatch", $"{field}.toolEvidence.phase", "Tool evidence phase must match its durable run-event kind.");
             }
 
+            if (isToolEvent)
+            {
+                ValidateToolAttemptBinding(run.Events, index, item, field, errors);
+            }
+
             if (item.ToolAuthority is not null && !isToolEvent && item.Kind is not CustomLoopRunEventKind.Admitted and not CustomLoopRunEventKind.NodeAttemptStarted and not CustomLoopRunEventKind.ExitDecisionStarted)
             {
                 Add(errors, "unexpected_tool_authority", $"{field}.toolAuthority", "Authority snapshots belong only to admission, attempt-start, or tool trace events.");
@@ -1148,6 +1153,30 @@ public static class CustomLoopRunValidator
         }
     }
 
+    private static void ValidateToolAttemptBinding(CustomLoopRunEvent[] events, int eventIndex, CustomLoopRunEvent item, string field, List<CustomLoopValidationError> errors)
+    {
+        var attemptStart = events.Take(eventIndex).LastOrDefault(candidate => candidate is not null
+            && (candidate.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+            && candidate.Iteration == item.Iteration
+            && string.Equals(candidate.StepId, item.StepId, StringComparison.Ordinal)
+            && candidate.Attempt == item.Attempt);
+        if (attemptStart?.ToolAuthority is null)
+        {
+            Add(errors, "tool_attempt_start_required", field, "Tool trace evidence must follow a matching provider-attempt start with an exact authority snapshot.");
+            return;
+        }
+
+        if (!attemptStart.ToolAuthority.Matches(item.ToolAuthority) || item.ToolEvidence is { } evidence && !attemptStart.ToolAuthority.Matches(evidence.Authority))
+        {
+            Add(errors, "tool_authority_not_attempt_bound", $"{field}.toolAuthority", "Every tool trace phase must retain the exact authority snapshot committed by its matching attempt start.");
+        }
+
+        if (item.ToolEvidence is { } toolEvidence && !attemptStart.ToolAuthority.AllowsCommand(toolEvidence.Command))
+        {
+            Add(errors, "tool_command_not_attempt_authorized", $"{field}.toolEvidence.command", "The governed tool command must be included in the matching attempt-start effective authority.");
+        }
+    }
+
     private static void ValidateAppendedControlOwnership(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
     {
         if (current.Events is null || candidate.Events is null)
@@ -1267,18 +1296,7 @@ public static class CustomLoopRunValidator
 
     private static bool ToolAuthoritiesEqual(CustomLoopToolAuthoritySnapshot? left, CustomLoopToolAuthoritySnapshot? right)
     {
-        return ReferenceEquals(left, right)
-            || left is not null && right is not null
-            && string.Equals(left.RoleId, right.RoleId, StringComparison.Ordinal)
-            && left.AdmittedMaximum.SequenceEqual(right.AdmittedMaximum)
-            && left.CurrentRoleCeiling.SequenceEqual(right.CurrentRoleCeiling)
-            && left.ImplementedCatalog.SequenceEqual(right.ImplementedCatalog)
-            && left.EffectiveAssignments.SequenceEqual(right.EffectiveAssignments)
-            && string.Equals(left.RoleCeilingHash, right.RoleCeilingHash, StringComparison.Ordinal)
-            && string.Equals(left.CatalogHash, right.CatalogHash, StringComparison.Ordinal)
-            && left.EvaluatedAtUtc == right.EvaluatedAtUtc
-            && left.IsValid == right.IsValid
-            && string.Equals(left.Detail, right.Detail, StringComparison.Ordinal);
+        return ReferenceEquals(left, right) || left?.Matches(right) == true;
     }
 
     private static bool ToolEvidenceEqual(CustomLoopToolTraceEvidence? left, CustomLoopToolTraceEvidence? right)
