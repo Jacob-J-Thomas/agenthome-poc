@@ -46,6 +46,8 @@ public sealed class CustomLoopRunValidatorTests
     public void Validate_requires_pinned_model_admission_hash_and_consistent_execution_clock()
     {
         var seed = CreateRun();
+        var legacy = seed with { SchemaVersion = 2, AdmissionActor = null! };
+        Assert.Contains(CustomLoopRunValidator.Validate(legacy).Errors, error => error.Code == "unsupported_run_schema");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ModelSnapshot = null! }), "model_snapshot_required", "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { AdmissionRequestHash = new string('0', 64) }), "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = null! }), "execution_clock_required");

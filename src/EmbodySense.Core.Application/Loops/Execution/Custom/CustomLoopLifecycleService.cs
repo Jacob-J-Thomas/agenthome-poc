@@ -99,6 +99,7 @@ public sealed class CustomLoopLifecycleService
         }
 
         var operation = begun.Operation ?? pending;
+        var isPendingReplay = begun.Status == CustomLoopControlOperationStoreStatus.Replayed && operation.State == CustomLoopControlOperationState.Pending;
         if (begun.Status == CustomLoopControlOperationStoreStatus.Replayed && operation.State == CustomLoopControlOperationState.Complete)
         {
             var replayRun = await TryLoadAsync(runId, cancellationToken);
@@ -126,24 +127,44 @@ public sealed class CustomLoopLifecycleService
 
         if (run is null)
         {
+            if (isPendingReplay)
+            {
+                return Result(CustomLoopControlStatus.OperationInProgress, null, operationId, "The same lifecycle operation is still pending and has not durably committed its transition event.");
+            }
+
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.NotFound, null, "The custom-loop run does not exist.");
         }
 
         var validation = CustomLoopRunValidator.Validate(run);
         if (!validation.IsValid)
         {
+            if (isPendingReplay)
+            {
+                return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation is still pending and has not durably committed a valid transition event.");
+            }
+
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, "The persisted custom-loop run is invalid; no lifecycle mutation was attempted.");
         }
 
         var matchingEvent = run.Events.FirstOrDefault(item => string.Equals(item.EventId, operationId, StringComparison.Ordinal));
         if (matchingEvent is { Kind: CustomLoopRunEventKind.LifecycleChanged })
         {
+            if (!isPendingReplay || matchingEvent.Sequence != (long)operation.ExpectedLifecycleVersion + 1)
+            {
+                return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, "The operation id collides with a lifecycle event that is not the expected successor for this pending control receipt.");
+            }
+
             return await RecoverPendingReceiptAsync(operation, run);
         }
 
         if (matchingEvent is not null)
         {
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, "The operation id collides with a non-lifecycle run event and cannot be used for lifecycle control.");
+        }
+
+        if (isPendingReplay)
+        {
+            return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation is still pending and has not durably committed its transition event.");
         }
 
         if (run.LifecycleVersion != expectedLifecycleVersion)

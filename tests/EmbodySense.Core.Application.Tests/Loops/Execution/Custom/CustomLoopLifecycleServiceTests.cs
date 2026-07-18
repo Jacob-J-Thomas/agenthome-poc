@@ -314,6 +314,65 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Duplicate_pending_control_without_a_durable_transition_reports_in_progress()
+    {
+        const string operationId = "pause-still-pending";
+        var run = Run("run-still-pending", CustomLoopRunStatus.Running);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var audit = new RecordingAuditLog();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
+
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.OperationInProgress, result.Status);
+        Assert.Equal(run, store[run.Id]);
+        Assert.Equal(0, store.UpdateCallCount);
+        Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(operationId))!.State);
+        Assert.Empty(audit.Events);
+    }
+
+    [Fact]
+    public async Task Fresh_control_rejects_a_stale_lifecycle_event_id_collision()
+    {
+        const string operationId = "pause-stale-lifecycle";
+        var seed = Run("run-stale-lifecycle", CustomLoopRunStatus.Running);
+        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate());
+
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.Conflict, result.Status);
+        Assert.Equal(run, store[run.Id]);
+        Assert.Equal(0, store.UpdateCallCount);
+        Assert.Equal(CustomLoopControlStatus.Conflict, (await operations.GetAsync(operationId))!.Outcome);
+    }
+
+    [Fact]
+    public async Task Pending_control_rejects_a_non_successor_lifecycle_event_id_collision()
+    {
+        const string operationId = "resume-non-successor";
+        var seed = Run("run-non-successor", CustomLoopRunStatus.Paused);
+        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var pending = Pending(CustomLoopControlKind.Resume, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate());
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.Conflict, result.Status);
+        Assert.Equal(run, store[run.Id]);
+        Assert.Equal(0, store.UpdateCallCount);
+        Assert.Equal(CustomLoopControlStatus.Conflict, (await operations.GetAsync(operationId))!.Outcome);
+    }
+
+    [Fact]
     public async Task Pending_resume_receipt_parks_the_undispatched_running_transition_before_replay()
     {
         const string operationId = "resume-receipt-recovery";
