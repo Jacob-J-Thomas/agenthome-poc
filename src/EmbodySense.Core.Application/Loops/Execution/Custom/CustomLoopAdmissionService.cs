@@ -17,11 +17,6 @@ public sealed class CustomLoopAdmissionService
     private readonly TimeProvider _timeProvider;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
 
-    public CustomLoopAdmissionService(ICustomLoopDefinitionStore definitionStore, ICustomLoopRunStore runStore, IAuditLog auditLog, ICustomLoopRunIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null)
-        : this(definitionStore, runStore, auditLog, new AdmissionMaximumAuthorityProvider(timeProvider), identityGenerator, timeProvider)
-    {
-    }
-
     public CustomLoopAdmissionService(ICustomLoopDefinitionStore definitionStore, ICustomLoopRunStore runStore, IAuditLog auditLog, ICustomLoopToolAuthorityProvider authorityProvider, ICustomLoopRunIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null)
     {
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
@@ -553,23 +548,4 @@ public sealed class CustomLoopAdmissionService
 
     private static CustomLoopAdmissionResult Result(CustomLoopAdmissionStatus status, CustomLoopRunRecord? run, string detail) => new(status, run, [], detail);
 
-    private sealed class AdmissionMaximumAuthorityProvider : ICustomLoopToolAuthorityProvider
-    {
-        private readonly TimeProvider _timeProvider;
-
-        public AdmissionMaximumAuthorityProvider(TimeProvider? timeProvider)
-        {
-            _timeProvider = timeProvider ?? TimeProvider.System;
-        }
-
-        public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
-        {
-            var assignments = admittedMaximum.ToArray();
-            var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
-            var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', assignments.OrderBy(value => value)));
-            var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
-            var snapshot = new CustomLoopToolAuthoritySnapshot(roleId, assignments, assignments, catalog, assignments, roleHash, catalogHash, _timeProvider.GetUtcNow().ToUniversalTime(), true, "The test/application boundary admitted maximum is the current ceiling.");
-            return Task.FromResult(snapshot);
-        }
-    }
 }

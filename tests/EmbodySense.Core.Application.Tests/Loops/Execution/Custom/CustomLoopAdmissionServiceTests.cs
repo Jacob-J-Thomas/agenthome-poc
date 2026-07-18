@@ -21,10 +21,12 @@ public sealed class CustomLoopAdmissionServiceTests
         var definitions = new FakeDefinitionStore();
         var runs = new FakeRunStore();
         var audit = new RecordingAuditLog();
+        var authority = new TestAuthorityProvider();
 
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(null!, runs, audit));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, null!, audit));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, null!));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(null!, runs, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, null!, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, null!, authority));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, audit, null!));
     }
 
     [Fact]
@@ -164,6 +166,36 @@ public sealed class CustomLoopAdmissionServiceTests
         Assert.Contains(result.ValidationErrors, error => error.Code == "server_context_defaults_changed");
         Assert.Contains(result.ValidationErrors, error => error.Code == "definition_conflict");
         Assert.Contains(result.ValidationErrors, error => error.Field == "displayName");
+        Assert.Equal(0, runs.CreateCallCount);
+    }
+
+    [Fact]
+    public async Task Admission_rejects_saved_assignments_outside_the_current_role_ceiling()
+    {
+        var definition = Rehash(Definition() with { ToolAssignments = [CustomLoopToolAssignment.Read] });
+        var runs = new FakeRunStore();
+        var authority = new TestAuthorityProvider([]);
+
+        var result = await Service(new FakeDefinitionStore(definition), runs, authorityProvider: authority).AdmitAsync(Request(definition));
+
+        Assert.Equal(CustomLoopAdmissionStatus.Invalid, result.Status);
+        Assert.Contains(result.ValidationErrors, error => error.Code == "tool_assignment_outside_role_ceiling");
+        Assert.Equal(1, authority.ResolveCallCount);
+        Assert.Equal(0, runs.CreateCallCount);
+    }
+
+    [Fact]
+    public async Task Authority_resolution_failure_is_fail_closed_before_run_persistence()
+    {
+        var definition = Definition();
+        var runs = new FakeRunStore();
+        var authority = new TestAuthorityProvider(exception: new IOException("Role authority unavailable."));
+
+        var result = await Service(new FakeDefinitionStore(definition), runs, authorityProvider: authority).AdmitAsync(Request(definition));
+
+        Assert.Equal(CustomLoopAdmissionStatus.Invalid, result.Status);
+        Assert.Contains(nameof(IOException), result.Detail, StringComparison.Ordinal);
+        Assert.Equal(1, authority.ResolveCallCount);
         Assert.Equal(0, runs.CreateCallCount);
     }
 
@@ -833,9 +865,9 @@ public sealed class CustomLoopAdmissionServiceTests
         Assert.True(CustomLoopArtifactIdentifier.IsValid(eventTwo));
     }
 
-    private static CustomLoopAdmissionService Service(FakeDefinitionStore definitions, FakeRunStore runs, RecordingAuditLog? audit = null, ICustomLoopRunIdentityGenerator? identity = null)
+    private static CustomLoopAdmissionService Service(FakeDefinitionStore definitions, FakeRunStore runs, RecordingAuditLog? audit = null, ICustomLoopRunIdentityGenerator? identity = null, ICustomLoopToolAuthorityProvider? authorityProvider = null)
     {
-        return new CustomLoopAdmissionService(definitions, runs, audit ?? new RecordingAuditLog(), identity ?? new QueueIdentityGenerator(["run-admitted"], ["event-admitted", "event-audit-complete", "event-integrity-failure"]), new FixedTimeProvider(Now));
+        return new CustomLoopAdmissionService(definitions, runs, audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), identity ?? new QueueIdentityGenerator(["run-admitted"], ["event-admitted", "event-audit-complete", "event-integrity-failure"]), new FixedTimeProvider(Now));
     }
 
     private static AuditEvent AssertAdmissionAudit(RecordingAuditLog audit, string status, string outcome)
@@ -1010,6 +1042,27 @@ public sealed class CustomLoopAdmissionServiceTests
         public override DateTimeOffset GetUtcNow()
         {
             return now;
+        }
+    }
+
+    private sealed class TestAuthorityProvider(CustomLoopToolAssignment[]? effectiveAssignments = null, Exception? exception = null) : ICustomLoopToolAuthorityProvider
+    {
+        public int ResolveCallCount { get; private set; }
+
+        public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
+        {
+            ResolveCallCount++;
+            if (exception is not null)
+            {
+                return Task.FromException<CustomLoopToolAuthoritySnapshot>(exception);
+            }
+
+            var admitted = admittedMaximum.ToArray();
+            var effective = effectiveAssignments ?? admitted;
+            var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
+            var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', effective.OrderBy(value => value)));
+            var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
+            return Task.FromResult(new CustomLoopToolAuthoritySnapshot(roleId, admitted, effective, catalog, effective, roleHash, catalogHash, Now, true, "Test authority snapshot."));
         }
     }
 
