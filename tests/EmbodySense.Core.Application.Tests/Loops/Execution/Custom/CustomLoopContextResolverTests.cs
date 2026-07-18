@@ -325,6 +325,21 @@ public sealed class CustomLoopContextResolverTests
     }
 
     [Fact]
+    public void Logical_request_character_count_includes_composed_governance_and_trusted_instructions()
+    {
+        var governance = EmbodySenseDeveloperInstructions.Capture();
+        var instructionContext = new LlmInferenceInstructionContext(
+            governance,
+            [new EmbodySenseTrustedInstruction("oversized-role", new string('t', CustomLoopLimits.MaxLogicalProviderRequestCharacters))]);
+        var request = new LlmInferenceRequest([LlmMessage.User("x")], instructionContext: instructionContext);
+        var assembly = new CustomLoopContextAssembly(request, [], new CustomLoopContextOutputPolicy(false, false));
+        var composedDeveloperInstructions = EmbodySenseDeveloperInstructions.Compose(governance, instructionContext.TrustedInstructions);
+
+        Assert.Equal(1L + composedDeveloperInstructions.Length, assembly.LogicalRequestCharacterCount);
+        Assert.True(assembly.LogicalRequestCharacterCount > CustomLoopLimits.MaxLogicalProviderRequestCharacters);
+    }
+
+    [Fact]
     public void Malformed_node_policy_shapes_are_rejected_before_request_assembly()
     {
         var valid = Policy();

@@ -339,13 +339,31 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             authority);
 
         CustomLoopInferenceAttemptResult result;
+        using var providerToken = CreateProviderToken(run, cancellationToken);
+        if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
+        {
+            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: false);
+        }
+
         try
         {
-            result = await ExecuteProviderAsync(run, attemptRequest, cancellationToken);
+            var dispatchBoundary = await ObserveControlBoundaryAsync(run, actor);
+            if (dispatchBoundary.Terminal is not null)
+            {
+                return dispatchBoundary;
+            }
+
+            run = dispatchBoundary.Run!;
+            providerToken.Token.ThrowIfCancellationRequested();
+            result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
         }
         catch (Exception exception)
         {
             return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, exception, isExit: false);
+        }
+        finally
+        {
+            _activeAttemptCancellations.TryRemove(run.Id, out _);
         }
 
         if (result is null)
@@ -376,9 +394,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = observedPersisted.Run!;
+        var integrityError = ValidateProviderResult(run, result);
         try
         {
-            await _auditLog.AppendAsync(AttemptAudit(actor, run, step.Id, iteration, correlation, assembly, AuditSchema.Actions.LoopNodeAttempt, AuditSchema.Outcomes.Succeeded, canonical, result), IntegrityToken());
+            var outcome = integrityError is null ? AuditSchema.Outcomes.Succeeded : AuditSchema.Outcomes.NeedsReview;
+            await _auditLog.AppendAsync(AttemptAudit(actor, run, step.Id, iteration, correlation, assembly, AuditSchema.Actions.LoopNodeAttempt, outcome, canonical, result), IntegrityToken());
         }
         catch (Exception exception)
         {
@@ -386,7 +406,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(terminal.Run, terminal);
         }
 
-        var integrityError = ValidateProviderResult(run, result);
         if (integrityError is not null)
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "provider_result_mismatch", integrityError);
@@ -477,13 +496,31 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             authority);
 
         CustomLoopInferenceAttemptResult result;
+        using var providerToken = CreateProviderToken(run, cancellationToken);
+        if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
+        {
+            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: true);
+        }
+
         try
         {
-            result = await ExecuteProviderAsync(run, attemptRequest, cancellationToken);
+            var dispatchBoundary = await ObserveControlBoundaryAsync(run, actor);
+            if (dispatchBoundary.Terminal is not null)
+            {
+                return dispatchBoundary;
+            }
+
+            run = dispatchBoundary.Run!;
+            providerToken.Token.ThrowIfCancellationRequested();
+            result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
         }
         catch (Exception exception)
         {
             return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, exception, isExit: true);
+        }
+        finally
+        {
+            _activeAttemptCancellations.TryRemove(run.Id, out _);
         }
 
         if (result is null)
@@ -513,9 +550,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = observedPersisted.Run!;
+        var integrityError = ValidateProviderResult(run, result);
+        if (integrityError is null && result.ToolRequestsConsumed != 0)
+        {
+            integrityError = "The tool-less Exit attempt reported a governed tool call and cannot be trusted.";
+        }
+
         try
         {
-            var outcome = decision == CustomLoopExitDecision.Invalid ? AuditSchema.Outcomes.NeedsReview : AuditSchema.Outcomes.Succeeded;
+            var outcome = integrityError is not null || decision == CustomLoopExitDecision.Invalid ? AuditSchema.Outcomes.NeedsReview : AuditSchema.Outcomes.Succeeded;
             await _auditLog.AppendAsync(AttemptAudit(actor, run, "exit", iteration, correlation, assembly, AuditSchema.Actions.LoopExitDecision, outcome, canonical, result, decision), IntegrityToken());
         }
         catch (Exception exception)
@@ -524,11 +567,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(terminal.Run, terminal);
         }
 
-        var integrityError = ValidateProviderResult(run, result);
-        if (integrityError is not null || result.ToolRequestsConsumed != 0)
+        if (integrityError is not null)
         {
-            var detail = integrityError ?? "The tool-less Exit attempt reported a governed tool call and cannot be trusted.";
-            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "exit_provider_result_mismatch", detail);
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "exit_provider_result_mismatch", integrityError);
             return new RunAdvance(terminal.Run, terminal);
         }
 
@@ -891,24 +932,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return new RunAdvance(latest, null);
     }
 
-    private async Task<CustomLoopInferenceAttemptResult> ExecuteProviderAsync(CustomLoopRunRecord run, CustomLoopInferenceAttemptRequest request, CancellationToken callerToken)
-    {
-        using var providerToken = CreateProviderToken(run, callerToken);
-        if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
-        {
-            throw new InvalidOperationException("A provider attempt is already registered for this run.");
-        }
-
-        try
-        {
-            return await _inferenceExecutor.ExecuteAsync(request, providerToken.Token);
-        }
-        finally
-        {
-            _activeAttemptCancellations.TryRemove(run.Id, out _);
-        }
-    }
-
     private static bool IsAcceptedControlSuccessor(CustomLoopRunRecord current, CustomLoopRunRecord latest)
     {
         var acceptedStatus = latest.Status == current.Status
@@ -1206,7 +1229,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         metadata["provider"] = run.ModelSnapshot.Provider;
         metadata["model"] = run.ModelSnapshot.Model;
         metadata["providerResponseId"] = SafeReference(result?.ProviderResponseId);
-        metadata["logicalRequestCharacters"] = assembly.Request.Messages.Sum(message => message.Content.Length);
+        metadata["logicalRequestCharacters"] = assembly.LogicalRequestCharacterCount;
         metadata["contextBlockCount"] = assembly.Blocks.Length;
         metadata["outputCharacters"] = canonical?.Text.Length;
         metadata["originalOutputCharacters"] = canonical?.OriginalCharacterCount;
@@ -1261,8 +1284,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static void EnsureRequestBound(CustomLoopContextAssembly assembly)
     {
-        var characterCount = assembly.Request.Messages.Sum(message => message.Content.Length);
-        if (characterCount > CustomLoopLimits.MaxLogicalProviderRequestCharacters)
+        if (assembly.LogicalRequestCharacterCount > CustomLoopLimits.MaxLogicalProviderRequestCharacters)
         {
             throw new InvalidOperationException("The assembled logical provider request exceeds the server-owned character limit.");
         }

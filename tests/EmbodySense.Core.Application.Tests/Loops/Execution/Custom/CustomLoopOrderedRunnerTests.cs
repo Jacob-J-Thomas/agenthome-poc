@@ -412,6 +412,25 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
     }
 
+    [Theory]
+    [InlineData("different-provider", "model", 0)]
+    [InlineData("provider", "different-model", 0)]
+    [InlineData("provider", "model", 7)]
+    public async Task Rejected_provider_results_are_audited_as_needs_review_and_never_as_succeeded(string provider, string model, int toolCalls)
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))));
+        var audit = new RecordingAuditLog();
+        var providerResult = new CustomLoopInferenceAttemptResult("untrusted outcome", provider, model, "response-invalid", toolCalls);
+
+        var result = await Runner(store, new QueueExecutor(providerResult), audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("provider_result_mismatch", result.Run!.FailureCode);
+        var outcomeAudit = Assert.Single(audit.Events, item => item.Action == AuditSchema.Actions.LoopNodeAttempt && item.Outcome != AuditSchema.Outcomes.Started);
+        Assert.Equal(AuditSchema.Outcomes.NeedsReview, outcomeAudit.Outcome);
+        Assert.DoesNotContain(audit.Events, item => item.Action == AuditSchema.Actions.LoopNodeAttempt && item.Outcome == AuditSchema.Outcomes.Succeeded);
+    }
+
     [Fact]
     public async Task Caller_cancellation_after_provider_return_cannot_cancel_outcome_or_checkpoint_integrity_writes()
     {
@@ -561,6 +580,31 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Null(result.Run.FailureCode);
         Assert.DoesNotContain("run_start_audit_failed", result.Detail, StringComparison.Ordinal);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Durable_cancel_between_attempt_audit_and_registration_prevents_provider_dispatch()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: audit);
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        CustomLoopControlResult? cancel = null;
+        audit.AfterAppend = async auditEvent =>
+        {
+            if (auditEvent.Action == AuditSchema.Actions.LoopNodeAttempt && auditEvent.Outcome == AuditSchema.Outcomes.Started)
+            {
+                cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-before-registration", AuditSchema.Actors.Web));
+            }
+        };
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, cancel!.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Empty(executor.Requests);
     }
 
@@ -1198,7 +1242,9 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Action<AuditEvent, CancellationToken>? BeforeAppend { get; init; }
 
-        public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+        public Func<AuditEvent, Task>? AfterAppend { get; set; }
+
+        public async Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
         {
             if (FailPredicate?.Invoke(auditEvent) == true)
             {
@@ -1208,7 +1254,10 @@ public sealed class CustomLoopOrderedRunnerTests
             BeforeAppend?.Invoke(auditEvent, cancellationToken);
             Assert.False(cancellationToken.IsCancellationRequested);
             Events.Add(auditEvent);
-            return Task.CompletedTask;
+            if (AfterAppend is not null)
+            {
+                await AfterAppend(auditEvent);
+            }
         }
 
         public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)

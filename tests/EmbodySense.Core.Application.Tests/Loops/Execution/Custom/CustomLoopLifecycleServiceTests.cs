@@ -269,11 +269,12 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
-    public async Task Pending_receipt_recovers_by_operation_event_id_without_repeating_the_transition()
+    public async Task Pending_receipt_recovers_by_operation_event_id_after_a_multi_event_version_write()
     {
         const string operationId = "pause-receipt-recovery";
         var seed = Run("run-receipt", CustomLoopRunStatus.PauseRequested);
-        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        var run = seed with { LifecycleVersion = seed.LifecycleVersion - 1, Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        Assert.True(CustomLoopRunValidator.Validate(run).IsValid);
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
         var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion - 1, operationId, AuditSchema.Actors.Web);
@@ -283,6 +284,7 @@ public sealed class CustomLoopLifecycleServiceTests
 
         var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
 
+        Assert.NotEqual((long)pending.ExpectedLifecycleVersion + 1, run.Events[^1].Sequence);
         Assert.Equal(CustomLoopControlStatus.PauseRequested, result.Status);
         Assert.Equal(run.LifecycleVersion, store[run.Id].LifecycleVersion);
         Assert.True((await operations.GetAsync(operationId))!.OutcomeAuditRecorded);
