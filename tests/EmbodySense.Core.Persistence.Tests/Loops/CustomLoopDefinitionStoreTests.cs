@@ -559,7 +559,7 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
-    public async Task Mutations_fail_closed_when_another_process_holds_the_workspace_lock()
+    public async Task Reads_and_mutations_fail_closed_when_another_process_holds_the_workspace_lock()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -568,10 +568,27 @@ public sealed class CustomLoopDefinitionStoreTests
         await using var externalLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var store = new CustomLoopDefinitionStore(paths);
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => store.CreateAsync(CreateDefinition("loop-alpha")));
+        var getException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.GetAsync("loop-alpha"));
+        var listException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.ListAsync());
+        var createException = await Assert.ThrowsAsync<InvalidOperationException>(() => store.CreateAsync(CreateDefinition("loop-alpha")));
 
-        Assert.Contains("locked by another process", exception.Message, StringComparison.Ordinal);
+        Assert.All(new[] { getException, listException, createException }, exception => Assert.Contains("locked by another process", exception.Message, StringComparison.Ordinal));
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopDefinitionsPath, "loop-alpha.json")));
+    }
+
+    [Fact]
+    public async Task Direct_Create_mutation_rejects_a_noncanonical_request_hash_without_persisting_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var definition = CreateDefinition("loop-alpha");
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Create, definition.LastMutationOperationId, 'f', definition.Id, definition.RoleId, null, definition, null, definition.CreatedAtUtc);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => store.CreateAsync(definition, mutation));
+
+        Assert.Contains("canonical role-bound request", exception.Message, StringComparison.Ordinal);
+        Assert.Null(await store.GetAsync(definition.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(mutation.OperationId)).Status);
     }
 
     [Fact]

@@ -136,6 +136,12 @@ public sealed class CustomLoopAuthoringService
             throw new ArgumentException("The server-owned current role ceiling must contain unique implemented assignments.", nameof(currentRoleCeiling));
         }
 
+        var invalidExpectedVersion = ValidateExpectedDefinitionVersion(expectedDefinitionVersion, requiresSuccessor: true);
+        if (invalidExpectedVersion is not null)
+        {
+            return invalidExpectedVersion;
+        }
+
         input = NormalizeInput(input);
 
         var invalidOperation = ValidateOperationId(operationId);
@@ -267,6 +273,12 @@ public sealed class CustomLoopAuthoringService
     public async Task<CustomLoopAuthoringResult> DeleteAsync(string loopId, int expectedDefinitionVersion, string roleId, string operationId, string actor, CancellationToken cancellationToken = default)
     {
         roleId = CustomLoopArtifactIdentifier.Require(roleId, nameof(roleId));
+        var invalidExpectedVersion = ValidateExpectedDefinitionVersion(expectedDefinitionVersion, requiresSuccessor: false);
+        if (invalidExpectedVersion is not null)
+        {
+            return invalidExpectedVersion;
+        }
+
         var invalidOperation = ValidateOperationId(operationId);
         if (invalidOperation is not null)
         {
@@ -527,9 +539,10 @@ public sealed class CustomLoopAuthoringService
         }
         catch (Exception)
         {
-            return result.IsCommitted
-                ? result with { Status = CustomLoopAuthoringStatus.CommittedWithAuditWarning, Detail = "The definition mutation committed, but its outcome audit could not be recorded." }
-                : result;
+            return WithAuditIntegrityWarning(
+                result,
+                "The definition mutation committed, but its outcome audit could not be recorded.",
+                "The definition mutation did not commit, and its outcome audit could not be recorded. Retry the same operation id to restore durable audit integrity.");
         }
 
         if (storeResult.OperationIntegrity != CustomLoopOperationIntegrity.PendingOutcomeAudit)
@@ -540,19 +553,43 @@ public sealed class CustomLoopAuthoringService
         try
         {
             var markStatus = await _store.MarkOperationOutcomeAuditedAsync(operationId, integrityWindow.Token);
-            if (markStatus is CustomLoopOperationAuditMarkStatus.Marked or CustomLoopOperationAuditMarkStatus.AlreadyMarked || !result.IsCommitted)
+            if (markStatus is CustomLoopOperationAuditMarkStatus.Marked or CustomLoopOperationAuditMarkStatus.AlreadyMarked)
             {
                 return result;
             }
 
-            return result with { Status = CustomLoopAuthoringStatus.CommittedWithAuditWarning, Detail = "The definition mutation committed and its outcome audit was recorded, but the durable audit-integrity marker is incomplete." };
+            return WithAuditIntegrityWarning(
+                result,
+                "The definition mutation committed and its outcome audit was recorded, but the durable audit-integrity marker is incomplete.",
+                "The definition mutation did not commit and its outcome audit was recorded, but the durable audit-integrity marker is incomplete. Retry the same operation id to restore durable audit integrity.");
         }
         catch (Exception)
         {
-            return result.IsCommitted
-                ? result with { Status = CustomLoopAuthoringStatus.CommittedWithAuditWarning, Detail = "The definition mutation committed and its outcome audit was recorded, but the durable audit-integrity marker could not be recorded." }
-                : result;
+            return WithAuditIntegrityWarning(
+                result,
+                "The definition mutation committed and its outcome audit was recorded, but the durable audit-integrity marker could not be recorded.",
+                "The definition mutation did not commit and its outcome audit was recorded, but the durable audit-integrity marker could not be recorded. Retry the same operation id to restore durable audit integrity.");
         }
+    }
+
+    private static CustomLoopAuthoringResult WithAuditIntegrityWarning(CustomLoopAuthoringResult result, string committedDetail, string uncommittedDetail)
+    {
+        return result.IsCommitted
+            ? result with { Status = CustomLoopAuthoringStatus.CommittedWithAuditWarning, Detail = committedDetail }
+            : result with { Detail = uncommittedDetail };
+    }
+
+    private static CustomLoopAuthoringResult? ValidateExpectedDefinitionVersion(int expectedDefinitionVersion, bool requiresSuccessor)
+    {
+        if (expectedDefinitionVersion >= 1 && (!requiresSuccessor || expectedDefinitionVersion < int.MaxValue))
+        {
+            return null;
+        }
+
+        var message = requiresSuccessor
+            ? "Expected definition version must be between 1 and 2147483646."
+            : "Expected definition version must be at least 1.";
+        return CustomLoopAuthoringResult.Invalid([new CustomLoopValidationError("invalid_expected_definition_version", "expectedDefinitionVersion", message)]);
     }
 
     private static CustomLoopAuthoringResult MapStoreResult(CustomLoopDefinitionStoreResult result, bool isReplay = false)

@@ -231,6 +231,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
+            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.SingleOrDefault(definition => string.Equals(definition.Id, safeLoopId, StringComparison.Ordinal));
@@ -246,6 +247,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         await _mutationGate.WaitAsync(cancellationToken);
         try
         {
+            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.OrderBy(definition => definition.Id, StringComparer.Ordinal).ToArray();
@@ -840,6 +842,11 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         CustomLoopArtifactIdentifier.Require(mutation.LoopId, nameof(mutation.LoopId));
         CustomLoopArtifactIdentifier.Require(mutation.RoleId, nameof(mutation.RoleId));
         ValidateSha256(mutation.RequestHash, "Definition mutation request hash");
+        if (expectedKind == CustomLoopDefinitionMutationKind.Create && !string.Equals(mutation.RequestHash, ComputeCreateRequestHash(roleId), StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Create mutation request hash does not match the canonical role-bound request.", nameof(mutation));
+        }
+
         if (!string.Equals(mutation.LoopId, loopId, StringComparison.Ordinal)
             || !string.Equals(mutation.RoleId, roleId, StringComparison.Ordinal)
             || mutation.ExpectedDefinitionVersion != expectedDefinitionVersion

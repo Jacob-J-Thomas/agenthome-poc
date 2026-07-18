@@ -230,6 +230,30 @@ public sealed class CustomLoopAuthoringServiceTests
     }
 
     [Fact]
+    public async Task Update_and_Delete_reject_invalid_expected_versions_before_audit_or_storage()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var audit = new RecordingAuditLog();
+        var service = Service(store, audit);
+
+        var zeroUpdate = await service.UpdateAsync(current.Id, 0, current.RoleId, "op-update-zero", "actor-user", Input(current));
+        var overflowUpdate = await service.UpdateAsync(current.Id, int.MaxValue, current.RoleId, "op-update-overflow", "actor-user", Input(current));
+        var zeroDelete = await service.DeleteAsync(current.Id, 0, current.RoleId, "op-delete-zero", "actor-user");
+
+        Assert.All(new[] { zeroUpdate, overflowUpdate, zeroDelete }, result =>
+        {
+            Assert.Equal(CustomLoopAuthoringStatus.Invalid, result.Status);
+            var error = Assert.Single(result.ValidationErrors);
+            Assert.Equal("invalid_expected_definition_version", error.Code);
+            Assert.Equal("expectedDefinitionVersion", error.Field);
+        });
+        Assert.Equal(0, store.MutationCallCount);
+        Assert.Equal(0, store.MutationOperationLookupCallCount);
+        Assert.Empty(audit.Events);
+    }
+
+    [Fact]
     public async Task Update_rejects_a_role_binding_mismatch_before_audit_or_storage()
     {
         var current = Definition();
@@ -637,6 +661,24 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.False(conflict.IsCommitted);
         Assert.Equal(1, conflict.Conflict?.ExpectedDefinitionVersion);
         Assert.Equal(2, conflict.Conflict?.ActualDefinitionVersion);
+        Assert.Contains("audit", conflict.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Retry the same operation id", conflict.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Delete_preserves_a_noncommitting_conflict_and_warns_when_the_outcome_audit_fails()
+    {
+        var current = Definition(version: 2);
+        var store = new FakeStore(current) { DeleteResult = CustomLoopDefinitionStoreResult.VersionConflict(current, expectedDefinitionVersion: 1) };
+        var audit = RecordingAuditLog.FailingOnAttempt(2);
+
+        var result = await Service(store, audit).DeleteAsync(current.Id, 1, current.RoleId, "op-delete", "actor-user");
+
+        Assert.Equal(CustomLoopAuthoringStatus.Conflict, result.Status);
+        Assert.False(result.IsCommitted);
+        Assert.Contains("outcome audit could not be recorded", result.Detail, StringComparison.Ordinal);
+        Assert.Contains("Retry the same operation id", result.Detail, StringComparison.Ordinal);
+        Assert.Equal(0, store.AuditMarkCallCount);
     }
 
     [Fact]
