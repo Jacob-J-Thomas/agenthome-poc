@@ -27,15 +27,24 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
                 return;
             }
 
-            Directory.CreateDirectory(paths.LoopRunsPath);
-            FileStream ownership;
+            var pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
+            pathGuard.PrepareRoot(paths.LoopRunsPath);
+            FileStream? ownership = null;
             try
             {
-                ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.WriteThrough);
+                var hostLockPath = pathGuard.GetFilePath(paths.LoopRunsPath, Path.GetFileName(paths.CustomLoopHostLockPath));
+                ownership = new FileStream(hostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.WriteThrough);
+                pathGuard.GetFilePath(paths.LoopRunsPath, Path.GetFileName(paths.CustomLoopHostLockPath));
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
+                ownership?.Dispose();
                 throw new InvalidOperationException("custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.", exception);
+            }
+            catch
+            {
+                ownership?.Dispose();
+                throw;
             }
 
             _host = new WorkspaceHost(ownership);

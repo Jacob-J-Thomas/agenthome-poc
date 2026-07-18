@@ -57,6 +57,14 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Validate_rejects_control_characters_in_the_persisted_admission_actor()
+    {
+        var unsafeActor = CustomLoopAdmissionRequestHash.Apply(CreateRun() with { AdmissionActor = "embodysense.web\ninjected" });
+
+        AssertCodes(CustomLoopRunValidator.Validate(unsafeActor), "unsafe_text");
+    }
+
+    [Fact]
     public void Validate_requires_exact_output_and_conversation_publication_metadata()
     {
         var seed = CreateRun();

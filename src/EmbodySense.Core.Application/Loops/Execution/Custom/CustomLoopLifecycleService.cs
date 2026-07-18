@@ -103,12 +103,7 @@ public sealed class CustomLoopLifecycleService
         if (begun.Status == CustomLoopControlOperationStoreStatus.Replayed && operation.State == CustomLoopControlOperationState.Complete)
         {
             var replayRun = await TryLoadAsync(runId, cancellationToken);
-            if (operation.Outcome == CustomLoopControlStatus.WorkspaceExecutionBusy)
-            {
-                return Result(CustomLoopControlStatus.WorkspaceExecutionBusy, replayRun, operationId, "The durable workspace_execution_busy outcome was replayed without lifecycle mutation or provider dispatch.");
-            }
-
-            return Result(CustomLoopControlStatus.Replayed, replayRun, operationId, $"The durable {operation.Outcome} control outcome was replayed without another mutation or dispatch.");
+            return Result(operation.Outcome, replayRun, operationId, $"The durable {operation.Outcome} control outcome was replayed without another mutation or dispatch.");
         }
 
         CustomLoopRunRecord? run;
@@ -162,14 +157,14 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, "The operation id collides with a non-lifecycle run event and cannot be used for lifecycle control.");
         }
 
-        if (isPendingReplay)
-        {
-            return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation is still pending and has not durably committed its transition event.");
-        }
-
         if (run.LifecycleVersion != expectedLifecycleVersion)
         {
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, $"Expected lifecycle version {expectedLifecycleVersion}, but the durable run is version {run.LifecycleVersion}.");
+        }
+
+        if (isPendingReplay)
+        {
+            return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation is still pending and has not durably committed its transition event.");
         }
 
         return kind switch
@@ -388,8 +383,7 @@ public sealed class CustomLoopLifecycleService
         var detail = "A previously committed lifecycle transition was found by operation event id; its pending receipt was recovered without another mutation or dispatch.";
         var auditRecorded = await TryAuditAsync(operation.Actor, run, operation.Kind, run.Status, detail, recoveredReceipt: true);
         var completionStatus = auditRecorded ? status : CustomLoopControlStatus.AuditWarning;
-        var completed = await CompleteAsync(operation, completionStatus, run, auditRecorded, detail);
-        return completed.Status == completionStatus && auditRecorded ? Result(CustomLoopControlStatus.Replayed, run, operation.OperationId, detail) : completed;
+        return await CompleteAsync(operation, completionStatus, run, auditRecorded, detail);
     }
 
     private async Task<CustomLoopControlResult> HandleResumeExecutorFailureAsync(CustomLoopControlOperation operation, CustomLoopRunRecord resumedRun, Exception exception)

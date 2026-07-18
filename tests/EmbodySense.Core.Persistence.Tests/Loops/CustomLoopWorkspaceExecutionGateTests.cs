@@ -57,4 +57,25 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         using var ownershipAfterRelease = new FileStream(paths.CustomLoopHostLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
         Assert.True(ownershipAfterRelease.CanWrite);
     }
+
+    [Fact]
+    public void Gate_rejects_a_reparse_point_run_root_when_the_platform_allows_links()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(paths.LoopRunsPath)!);
+        var target = workspace.File("reparse-run-target");
+        Directory.CreateDirectory(target);
+        try
+        {
+            Directory.CreateSymbolicLink(paths.LoopRunsPath, target);
+        }
+        catch (Exception linkException) when (linkException is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        var exception = Assert.Throws<InvalidOperationException>(() => new CustomLoopWorkspaceExecutionGate(paths));
+        Assert.Contains("reparse points or junctions", exception.Message, StringComparison.Ordinal);
+    }
 }

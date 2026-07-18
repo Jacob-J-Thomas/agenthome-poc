@@ -193,7 +193,7 @@ public static class CustomLoopRunValidator
             Add(errors, "invalid_admission_operation_id", "admissionOperationId", "Admission operation id must be a safe lowercase artifact identifier.");
         }
 
-        ValidateText(run.AdmissionActor, "admissionActor", CustomLoopLimits.MaxTraceReferenceCharacters, required: true, errors);
+        ValidateActorText(run.AdmissionActor, "admissionActor", CustomLoopLimits.MaxTraceReferenceCharacters, errors);
         ValidateHash(run.AdmissionRequestHash, "admissionRequestHash", errors);
     }
 

@@ -222,6 +222,10 @@ public sealed class CustomLoopAdmissionService
         {
             errors.Add(Error("actor_required", "actor", "The authenticated server actor is required."));
         }
+        else if (!IsSafeActor(request.Actor))
+        {
+            errors.Add(Error("invalid_actor", "actor", "The authenticated server actor must be bounded normalized Unicode without control characters."));
+        }
 
         if (!IsSurface(request.Surface))
         {
@@ -581,6 +585,8 @@ public sealed class CustomLoopAdmissionService
     }
 
     private static bool IsHash(string? value) => value is { Length: CustomLoopLimits.Sha256HexCharacters } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsSafeActor(string value) => value.Length <= CustomLoopLimits.MaxTraceReferenceCharacters && IsWellFormedUtf16(value) && !value.Any(char.IsControl) && value.IsNormalized(NormalizationForm.FormC);
 
     private static bool IsSurface(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= CustomLoopLimits.MaxArtifactIdCharacters && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
 

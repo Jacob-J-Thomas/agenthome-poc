@@ -103,6 +103,26 @@ public sealed class CustomLoopAdmissionServiceTests
         AssertAdmissionAudit(audit, "invalid", AuditSchema.Outcomes.Rejected);
     }
 
+    [Fact]
+    public async Task Actor_control_characters_are_rejected_and_audited_before_state_access()
+    {
+        var definition = Definition();
+        var definitions = new FakeDefinitionStore(definition);
+        var runs = new FakeRunStore();
+        var audit = new RecordingAuditLog();
+
+        var result = await Service(definitions, runs, audit).AdmitAsync(Request(definition) with { Actor = "embodysense.web\ninjected" });
+
+        Assert.Equal(CustomLoopAdmissionStatus.Invalid, result.Status);
+        Assert.Contains(result.ValidationErrors, error => error.Code == "invalid_actor");
+        Assert.Equal(0, definitions.GetCallCount);
+        Assert.Equal(0, runs.OperationLookupCallCount);
+        Assert.Equal(0, runs.CreateCallCount);
+        var auditEvent = AssertAdmissionAudit(audit, "invalid", AuditSchema.Outcomes.Rejected);
+        Assert.Equal("embodysense.unknown", auditEvent.Actor);
+        Assert.Contains("invalid_actor", Assert.IsType<string>(auditEvent.Metadata["validation_codes"]), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("-web")]

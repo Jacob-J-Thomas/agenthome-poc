@@ -260,7 +260,7 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Contains(nameof(IOException), first.Detail, StringComparison.Ordinal);
         Assert.Equal(CustomLoopRunStatus.CancelRequested, store[run.Id].Status);
         Assert.Equal(CustomLoopControlOperationState.Pending, pending!.State);
-        Assert.Equal(CustomLoopControlStatus.Replayed, replay.Status);
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, replay.Status);
         Assert.Equal(2, cancellation.AttemptCount);
         Assert.Equal([run.Id], cancellation.RunIds);
         var completed = await operations.GetAsync(request.OperationId);
@@ -283,7 +283,7 @@ public sealed class CustomLoopLifecycleServiceTests
 
         var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
 
-        Assert.Equal(CustomLoopControlStatus.Replayed, result.Status);
+        Assert.Equal(CustomLoopControlStatus.PauseRequested, result.Status);
         Assert.Equal(run.LifecycleVersion, store[run.Id].LifecycleVersion);
         Assert.True((await operations.GetAsync(operationId))!.OutcomeAuditRecorded);
         Assert.Contains(audit.Events, item => Equals(item.Metadata["recoveredReceipt"], true));
@@ -332,6 +332,47 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(0, store.UpdateCallCount);
         Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(operationId))!.State);
         Assert.Empty(audit.Events);
+    }
+
+    [Fact]
+    public async Task Pending_control_completes_as_conflict_after_an_unrelated_transition_advances_the_run()
+    {
+        const string operationId = "pause-overtaken";
+        var run = Run("run-overtaken", CustomLoopRunStatus.PauseRequested);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion - 1, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var audit = new RecordingAuditLog();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
+
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.Conflict, result.Status);
+        Assert.Equal(run, store[run.Id]);
+        Assert.Equal(0, store.UpdateCallCount);
+        var completed = await operations.GetAsync(operationId);
+        Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
+        Assert.Equal(CustomLoopControlStatus.Conflict, completed.Outcome);
+        Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.Conflict);
+    }
+
+    [Fact]
+    public async Task Completed_control_replay_returns_its_original_actionable_outcome()
+    {
+        var run = Run("run-replay-outcome", CustomLoopRunStatus.Admitted);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate());
+        var request = Pause(run, "pause-invalid-replay");
+
+        var original = await service.PauseAsync(request);
+        var replay = await service.PauseAsync(request);
+
+        Assert.Equal(CustomLoopControlStatus.InvalidState, original.Status);
+        Assert.Equal(CustomLoopControlStatus.InvalidState, replay.Status);
+        Assert.Contains("replayed", replay.Detail, StringComparison.Ordinal);
+        Assert.Equal(0, store.UpdateCallCount);
     }
 
     [Fact]

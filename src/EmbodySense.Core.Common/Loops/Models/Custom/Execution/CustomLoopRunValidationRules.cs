@@ -55,9 +55,28 @@ internal static class CustomLoopRunValidationRules
             Add(errors, "text_too_long", field, $"{field} cannot exceed {maxCharacters} characters.");
         }
 
-        if (requireNormalized && !value.IsNormalized(NormalizationForm.FormC) || ContainsUnsafeCharacters(value))
+        if (ContainsUnsafeCharacters(value) || requireNormalized && !value.IsNormalized(NormalizationForm.FormC))
         {
             Add(errors, "unsafe_text", field, $"{field} must use normalized valid Unicode without unsupported control characters.");
+        }
+    }
+
+    internal static void ValidateActorText(string? value, string field, int maxCharacters, List<CustomLoopValidationError> errors)
+    {
+        if (value is null || string.IsNullOrWhiteSpace(value))
+        {
+            Add(errors, "text_required", field, $"{field} is required.");
+            return;
+        }
+
+        if (value.Length > maxCharacters)
+        {
+            Add(errors, "text_too_long", field, $"{field} cannot exceed {maxCharacters} characters.");
+        }
+
+        if (ContainsUnsafeCharacters(value, allowFormattingControls: false) || !value.IsNormalized(NormalizationForm.FormC))
+        {
+            Add(errors, "unsafe_text", field, $"{field} must use normalized valid Unicode without control characters.");
         }
     }
 
@@ -76,7 +95,7 @@ internal static class CustomLoopRunValidationRules
         errors.Add(new CustomLoopValidationError(code, field, message));
     }
 
-    private static bool ContainsUnsafeCharacters(string value)
+    private static bool ContainsUnsafeCharacters(string value, bool allowFormattingControls = true)
     {
         for (var index = 0; index < value.Length; index++)
         {
@@ -92,7 +111,7 @@ internal static class CustomLoopRunValidationRules
                 continue;
             }
 
-            if (char.IsLowSurrogate(character) || char.IsControl(character) && character is not '\r' and not '\n' and not '\t')
+            if (char.IsLowSurrogate(character) || char.IsControl(character) && (!allowFormattingControls || character is not '\r' and not '\n' and not '\t'))
             {
                 return true;
             }
