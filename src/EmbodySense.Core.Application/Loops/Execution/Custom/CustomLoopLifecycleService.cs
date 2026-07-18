@@ -247,6 +247,15 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Explicit Resume is allowed only from Paused, not {run.Status}.");
         }
 
+        if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))
+        {
+            const string detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";
+            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, detail);
+            var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
+            var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
+            return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
+        }
+
         bool modelAvailable;
         try
         {
@@ -264,15 +273,6 @@ public sealed class CustomLoopLifecycleService
         if (!modelAvailable)
         {
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, "Resume rejected because the admitted provider/model is not available in the current runtime configuration. The run remains Paused and no provider request was dispatched; no fallback or model switch was attempted.");
-        }
-
-        if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))
-        {
-            const string detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";
-            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, detail);
-            var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
-            var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
-            return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
         }
 
         var gate = _executionGate.TryAcquire(operation.OperationId, operation.RequestHash);
@@ -335,6 +335,19 @@ public sealed class CustomLoopLifecycleService
 
     private async Task<CustomLoopControlResult> RecoverPendingReceiptAsync(CustomLoopControlOperation operation, CustomLoopRunRecord run)
     {
+        if (operation.Kind == CustomLoopControlKind.Resume && run.Status == CustomLoopRunStatus.Running)
+        {
+            const string resumeRecoveryDetail = "Pending Resume recovery found the durable Running transition before its control receipt completed; the undispatched run was parked at its proved checkpoint boundary.";
+            var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.Paused, operation.Actor, NewEventId("resume-recovery"), resumeRecoveryDetail);
+            if (parked.Run is null)
+            {
+                return await CompleteAuditedOutcomeAsync(operation, parked.Status, parked.CurrentRun, parked.Detail);
+            }
+
+            var outcome = parked.AuditRecorded ? CustomLoopControlStatus.Paused : CustomLoopControlStatus.AuditWarning;
+            return await CompleteAsync(operation, outcome, parked.Run, parked.AuditRecorded, parked.Detail);
+        }
+
         if (operation.Kind == CustomLoopControlKind.Cancel && run.Status == CustomLoopRunStatus.CancelRequested)
         {
             if (run.ExecutionClock.ActiveSinceUtc is null)

@@ -238,8 +238,11 @@ public sealed class CustomLoopAdmissionService
             errors.Add(Error("context_snapshot_required", "contextSnapshot", "The server-captured context snapshot is required."));
         }
 
-        var prompt = Normalize(request.InvocationPrompt);
-        if (prompt.Length > CustomLoopLimits.MaxPresetPromptCharacters)
+        if (!IsWellFormedUtf16(request.InvocationPrompt))
+        {
+            errors.Add(Error("invalid_invocation_prompt_unicode", "invocationPrompt", "Invocation prompt must contain well-formed Unicode text."));
+        }
+        else if (Normalize(request.InvocationPrompt).Length > CustomLoopLimits.MaxPresetPromptCharacters)
         {
             errors.Add(Error("invocation_prompt_too_long", "invocationPrompt", $"Invocation prompt cannot exceed {CustomLoopLimits.MaxPresetPromptCharacters} characters."));
         }
@@ -386,8 +389,16 @@ public sealed class CustomLoopAdmissionService
             || left is not null && right is not null
             && left.CapturedAtUtc == right.CapturedAtUtc
             && string.Equals(left.ManifestHash, right.ManifestHash, StringComparison.Ordinal)
+            && CustomLoopContextSnapshotHash.Matches(right)
+            && ManifestSourcesEqual(left.SourceManifest, right.SourceManifest)
             && MessageSnapshotsEqual(left.DirectoryRoleMessages, right.DirectoryRoleMessages)
             && MessageSnapshotsEqual(left.InvokingConversationMessages, right.InvokingConversationMessages);
+    }
+
+    private static bool ManifestSourcesEqual(CustomLoopContextManifestSource[]? left, CustomLoopContextManifestSource[]? right)
+    {
+        return ReferenceEquals(left, right)
+            || left is not null && right is not null && left.SequenceEqual(right);
     }
 
     private static bool MessageSnapshotsEqual(CustomLoopMessageSnapshot[]? left, CustomLoopMessageSnapshot[]? right)
@@ -541,6 +552,33 @@ public sealed class CustomLoopAdmissionService
     }
 
     private static string Normalize(string? value) => value?.Normalize(NormalizationForm.FormC) ?? string.Empty;
+
+    private static bool IsWellFormedUtf16(string? value)
+    {
+        if (value is null)
+        {
+            return true;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]))
+            {
+                if (index + 1 >= value.Length || !char.IsLowSurrogate(value[index + 1]))
+                {
+                    return false;
+                }
+
+                index++;
+            }
+            else if (char.IsLowSurrogate(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool IsHash(string? value) => value is { Length: CustomLoopLimits.Sha256HexCharacters } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 

@@ -86,6 +86,23 @@ public sealed class CustomLoopAdmissionServiceTests
         Assert.Contains("actor_required", Assert.IsType<string>(auditEvent.Metadata["validation_codes"]), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Malformed_utf16_prompt_is_rejected_and_audited_before_state_access()
+    {
+        var definition = Definition();
+        var definitions = new FakeDefinitionStore(definition);
+        var runs = new FakeRunStore();
+        var audit = new RecordingAuditLog();
+
+        var result = await Service(definitions, runs, audit).AdmitAsync(Request(definition) with { InvocationPrompt = "\ud800" });
+
+        Assert.Equal(CustomLoopAdmissionStatus.Invalid, result.Status);
+        Assert.Contains(result.ValidationErrors, error => error.Code == "invalid_invocation_prompt_unicode");
+        Assert.Equal(0, definitions.GetCallCount);
+        Assert.Equal(0, runs.OperationLookupCallCount);
+        AssertAdmissionAudit(audit, "invalid", AuditSchema.Outcomes.Rejected);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("-web")]
@@ -468,9 +485,15 @@ public sealed class CustomLoopAdmissionServiceTests
             SourceManifest = [clonedContext.SourceManifest[0] with { Content = "different role content" }, .. clonedContext.SourceManifest.Skip(1)]
         };
         var conflict = await Service(new FakeDefinitionStore(), new FakeRunStore { OperationReplay = existing }).AdmitAsync(original with { ContextSnapshot = alteredMessagesWithReusedManifest });
+        var alteredOmissionWithStaleHash = clonedContext with
+        {
+            SourceManifest = [clonedContext.SourceManifest[0], clonedContext.SourceManifest[1] with { OmissionReason = "Different omitted-source metadata." }, .. clonedContext.SourceManifest.Skip(2)]
+        };
+        var staleHashConflict = await Service(new FakeDefinitionStore(), new FakeRunStore { OperationReplay = existing }).AdmitAsync(original with { ContextSnapshot = alteredOmissionWithStaleHash });
 
         Assert.Equal(CustomLoopAdmissionStatus.Replayed, replay.Status);
         Assert.Equal(CustomLoopAdmissionStatus.Conflict, conflict.Status);
+        Assert.Equal(CustomLoopAdmissionStatus.Conflict, staleHashConflict.Status);
     }
 
     [Fact]

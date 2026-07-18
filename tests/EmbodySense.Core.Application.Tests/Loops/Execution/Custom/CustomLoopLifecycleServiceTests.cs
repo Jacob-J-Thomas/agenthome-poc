@@ -131,7 +131,7 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
-    public async Task Explicit_resume_quarantines_a_legacy_unmarked_paused_artifact_before_gate_or_dispatch()
+    public async Task Explicit_resume_quarantines_a_legacy_unmarked_paused_artifact_before_model_check_gate_or_dispatch()
     {
         var marked = Run("run-unmarked-paused", CustomLoopRunStatus.Paused);
         var priorLifecycle = marked.Events[2] with { Sequence = 2 };
@@ -139,13 +139,18 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.True(CustomLoopRunValidator.Validate(incomplete).IsValid);
         var store = new MultiRunStore([incomplete]);
         var executor = new NoopResumeExecutor(CustomLoopOrderedRunStatus.Completed);
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddMinutes(2)));
+        var availability = new RecordingModelAvailability(available: false);
+        var gate = new TestExecutionGate();
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddMinutes(2)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(incomplete.Id, incomplete.LifecycleVersion, "resume-unmarked", AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
         Assert.Equal(CustomLoopRunStatus.NeedsReview, store[incomplete.Id].Status);
         Assert.Contains("integrity-incomplete", store[incomplete.Id].FailureDetail, StringComparison.Ordinal);
+        Assert.Empty(availability.Requests);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(0, gate.AcquisitionCount);
     }
 
     [Fact]
@@ -306,6 +311,32 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(CustomLoopControlStatus.Conflict, receipt!.Outcome);
         Assert.True(receipt.OutcomeAuditRecorded);
         Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.Conflict);
+    }
+
+    [Fact]
+    public async Task Pending_resume_receipt_parks_the_undispatched_running_transition_before_replay()
+    {
+        const string operationId = "resume-receipt-recovery";
+        var seed = Run("run-resume-receipt", CustomLoopRunStatus.Running);
+        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var pending = Pending(CustomLoopControlKind.Resume, run.Id, run.LifecycleVersion - 1, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var executor = new NoopResumeExecutor();
+        var availability = new RecordingModelAvailability();
+        var service = new CustomLoopLifecycleService(store, operations, executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.Paused, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Paused, store[run.Id].Status);
+        Assert.Equal(run.LifecycleVersion + 1, store[run.Id].LifecycleVersion);
+        Assert.Empty(availability.Requests);
+        Assert.Empty(executor.Requests);
+        var receipt = await operations.GetAsync(operationId);
+        Assert.Equal(CustomLoopControlOperationState.Complete, receipt!.State);
+        Assert.Equal(CustomLoopControlStatus.Paused, receipt.Outcome);
     }
 
     [Theory]
