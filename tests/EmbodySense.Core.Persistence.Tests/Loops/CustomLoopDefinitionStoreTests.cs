@@ -611,6 +611,32 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task Durable_mutations_reject_invalid_planned_and_prior_snapshots_before_persisting_operations()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var created = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, created);
+        var oversizedDescription = new string('x', CustomLoopLimits.MaxDescriptionCharacters + 1);
+
+        var firstUpdate = Advance(created, "First update", "invalid-planned");
+        var invalidPlanned = firstUpdate with { Description = oversizedDescription };
+        var plannedMutation = Mutation(CustomLoopDefinitionMutationKind.Update, firstUpdate.LastMutationOperationId, 'a', firstUpdate.Id, firstUpdate.RoleId, 1, invalidPlanned, created, firstUpdate.UpdatedAtUtc);
+        var plannedException = await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(firstUpdate, 1, plannedMutation));
+
+        var secondUpdate = Advance(created, "Second update", "invalid-prior");
+        var invalidPrior = created with { Description = oversizedDescription };
+        var priorMutation = Mutation(CustomLoopDefinitionMutationKind.Update, secondUpdate.LastMutationOperationId, 'b', secondUpdate.Id, secondUpdate.RoleId, 1, secondUpdate, invalidPrior, secondUpdate.UpdatedAtUtc);
+        var priorException = await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(secondUpdate, 1, priorMutation));
+
+        Assert.Contains("description", plannedException.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("description", priorException.Message, StringComparison.OrdinalIgnoreCase);
+        AssertDefinition(created, await store.GetAsync(created.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(plannedMutation.OperationId)).Status);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(priorMutation.OperationId)).Status);
+    }
+
+    [Fact]
     public async Task Reparse_point_artifact_roots_are_rejected_when_the_platform_allows_links()
     {
         using var workspace = new TestWorkspace();
@@ -791,6 +817,32 @@ public sealed class CustomLoopDefinitionStoreTests
         Assert.Equal(CustomLoopDefinitionStoreStatus.OperationConflict, crossKindResult.Status);
         Assert.Equal(CustomLoopDefinitionStoreStatus.OperationConflict, crossLoopResult.Status);
         AssertDefinition(other, await restarted.GetAsync(other.Id));
+    }
+
+    [Fact]
+    public async Task Simple_Create_preserves_operation_conflicts_for_Update_and_Delete_operation_ids()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var updatedDefinition = CreateDefinition("loop-update");
+        await CreateCommittedAsync(store, updatedDefinition);
+        var updated = Advance(updatedDefinition, "Updated", "shared-update");
+        var updateMutation = Mutation(CustomLoopDefinitionMutationKind.Update, updated.LastMutationOperationId, 'a', updated.Id, updated.RoleId, 1, updated, updatedDefinition, updated.UpdatedAtUtc);
+        await store.UpdateAsync(updated, 1, updateMutation);
+        await store.MarkOperationOutcomeAuditedAsync(updateMutation.OperationId);
+
+        var deletedDefinition = CreateDefinition("loop-delete");
+        await CreateCommittedAsync(store, deletedDefinition);
+        var deletedAt = InitialTimestamp.AddMinutes(3);
+        var deleteMutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "shared-delete", 'b', deletedDefinition.Id, deletedDefinition.RoleId, 1, null, deletedDefinition, deletedAt);
+        await store.DeleteAsync(deletedDefinition.Id, 1, deleteMutation.OperationId, deletedAt, deleteMutation);
+        await store.MarkOperationOutcomeAuditedAsync(deleteMutation.OperationId);
+
+        var updateReuse = CustomLoopDefinitionContentHash.Apply(CreateDefinition("loop-update-reuse") with { LastMutationOperationId = updateMutation.OperationId });
+        var deleteReuse = CustomLoopDefinitionContentHash.Apply(CreateDefinition("loop-delete-reuse") with { LastMutationOperationId = deleteMutation.OperationId });
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.OperationConflict, (await store.CreateAsync(updateReuse)).Status);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.OperationConflict, (await store.CreateAsync(deleteReuse)).Status);
     }
 
     [Fact]

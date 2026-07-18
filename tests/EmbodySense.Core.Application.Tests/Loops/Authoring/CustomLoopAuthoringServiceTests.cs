@@ -255,6 +255,29 @@ public sealed class CustomLoopAuthoringServiceTests
     }
 
     [Fact]
+    public async Task Update_and_Delete_reject_unsafe_loop_ids_before_store_reads()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var audit = new RecordingAuditLog();
+        var service = Service(store, audit);
+
+        var update = await service.UpdateAsync("../escape", 1, current.RoleId, "op-update", "actor-user", Input(current));
+        var delete = await service.DeleteAsync("../escape", 1, current.RoleId, "op-delete", "actor-user");
+
+        Assert.All(new[] { update, delete }, result =>
+        {
+            Assert.Equal(CustomLoopAuthoringStatus.Invalid, result.Status);
+            var error = Assert.Single(result.ValidationErrors);
+            Assert.Equal("invalid_loop_id", error.Code);
+            Assert.Equal("loopId", error.Field);
+        });
+        Assert.Equal(0, store.MutationOperationLookupCallCount);
+        Assert.Equal(0, store.GetCallCount);
+        Assert.Empty(audit.Events);
+    }
+
+    [Fact]
     public async Task Update_rejects_a_role_binding_mismatch_before_audit_or_storage()
     {
         var current = Definition();
@@ -596,6 +619,25 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.Same(current, blocked.Definition);
         Assert.Equal(1, store.UpdateCallCount);
         Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, (await store.GetMutationOperationAsync("pending-update")).Status);
+    }
+
+    [Fact]
+    public async Task Pending_Update_recovery_rechecks_the_current_role_tool_ceiling()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var input = Input(current) with { ToolAssignments = [CustomLoopToolAssignment.Read] };
+        var first = await Service(store).UpdateAsync(current.Id, 1, current.RoleId, "pending-authority-update", "actor-user", input, [CustomLoopToolAssignment.Read]);
+        store.RestoreDefinition(current);
+        store.MarkOperationPending("pending-authority-update");
+
+        var blocked = await Service(store).UpdateAsync(current.Id, 1, current.RoleId, "pending-authority-update", "actor-user", input);
+
+        Assert.Equal(CustomLoopAuthoringStatus.Updated, first.Status);
+        var error = Assert.Single(blocked.ValidationErrors);
+        Assert.Equal("tool_assignment_outside_role_ceiling", error.Code);
+        Assert.Equal(1, store.UpdateCallCount);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, (await store.GetMutationOperationAsync("pending-authority-update")).Status);
     }
 
     [Fact]

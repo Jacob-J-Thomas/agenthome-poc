@@ -137,6 +137,12 @@ public sealed class CustomLoopAuthoringService
             throw new ArgumentException("The server-owned current role ceiling must contain unique implemented assignments.", nameof(currentRoleCeiling));
         }
 
+        var invalidLoop = ValidateLoopId(loopId);
+        if (invalidLoop is not null)
+        {
+            return invalidLoop;
+        }
+
         var invalidExpectedVersion = ValidateExpectedDefinitionVersion(expectedDefinitionVersion, requiresSuccessor: true);
         if (invalidExpectedVersion is not null)
         {
@@ -161,6 +167,17 @@ public sealed class CustomLoopAuthoringService
                 var scopedDefinition = RoleScopedOperationDefinition(existing, roleId);
                 await TryAuditRejectionAsync("update", loopId, scopedDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
                 return Result(CustomLoopAuthoringStatus.Conflict, scopedDefinition, "The mutation operation id was reused for a different authorized request.");
+            }
+
+            if (existing.State == CustomLoopDefinitionMutationState.PendingMutation)
+            {
+                var planned = existing.PlannedDefinition ?? throw new InvalidOperationException("A pending Update operation is missing its planned definition.");
+                var outsideCurrentCeiling = ToolAssignmentsOutsideRoleCeiling(planned.ToolAssignments, currentRoleCeiling);
+                if (outsideCurrentCeiling.Length > 0)
+                {
+                    await TryAuditRejectionAsync("update", loopId, planned, actor, operationId, "authority_ceiling_rejected", cancellationToken);
+                    return CustomLoopAuthoringResult.Invalid(outsideCurrentCeiling);
+                }
             }
 
             return await ReplayOrRecoverAsync(existing, actor, cancellationToken);
@@ -227,11 +244,7 @@ public sealed class CustomLoopAuthoringService
                 return CustomLoopAuthoringResult.Invalid(unsupportedAssignments);
             }
 
-            var outsideCurrentCeiling = input.ToolAssignments
-                .Select((assignment, index) => (assignment, index))
-                .Where(item => !currentRoleCeiling.Contains(item.assignment))
-                .Select(item => new CustomLoopValidationError("tool_assignment_outside_role_ceiling", $"toolAssignments[{item.index}]", "The assignment is outside the current server-owned directory-role command ceiling."))
-                .ToArray();
+            var outsideCurrentCeiling = ToolAssignmentsOutsideRoleCeiling(input.ToolAssignments, currentRoleCeiling);
             if (outsideCurrentCeiling.Length > 0)
             {
                 await TryAuditRejectionAsync("update", loopId, current, actor, operationId, "authority_ceiling_rejected", cancellationToken);
@@ -275,6 +288,12 @@ public sealed class CustomLoopAuthoringService
     public async Task<CustomLoopAuthoringResult> DeleteAsync(string loopId, int expectedDefinitionVersion, string roleId, string operationId, string actor, CancellationToken cancellationToken = default)
     {
         roleId = CustomLoopArtifactIdentifier.Require(roleId, nameof(roleId));
+        var invalidLoop = ValidateLoopId(loopId);
+        if (invalidLoop is not null)
+        {
+            return invalidLoop;
+        }
+
         var invalidExpectedVersion = ValidateExpectedDefinitionVersion(expectedDefinitionVersion, requiresSuccessor: false);
         if (invalidExpectedVersion is not null)
         {
@@ -397,6 +416,22 @@ public sealed class CustomLoopAuthoringService
         return CustomLoopArtifactIdentifier.IsValid(operationId, CustomLoopLimits.MaxMutationOperationIdCharacters)
             ? null
             : CustomLoopAuthoringResult.Invalid([new CustomLoopValidationError("invalid_mutation_operation_id", "operationId", "Mutation operation id must be a bounded safe identifier.")]);
+    }
+
+    private static CustomLoopAuthoringResult? ValidateLoopId(string loopId)
+    {
+        return CustomLoopArtifactIdentifier.IsValid(loopId)
+            ? null
+            : CustomLoopAuthoringResult.Invalid([new CustomLoopValidationError("invalid_loop_id", "loopId", "Loop id must be a bounded safe identifier.")]);
+    }
+
+    private static CustomLoopValidationError[] ToolAssignmentsOutsideRoleCeiling(IEnumerable<CustomLoopToolAssignment> assignments, IReadOnlyCollection<CustomLoopToolAssignment> currentRoleCeiling)
+    {
+        return assignments
+            .Select((assignment, index) => (assignment, index))
+            .Where(item => !currentRoleCeiling.Contains(item.assignment))
+            .Select(item => new CustomLoopValidationError("tool_assignment_outside_role_ceiling", $"toolAssignments[{item.index}]", "The assignment is outside the current server-owned directory-role command ceiling."))
+            .ToArray();
     }
 
     private static string ComputeCreateRequestHash(string roleId)

@@ -57,8 +57,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
 
         var existing = await GetMutationOperationAsync(definition.LastMutationOperationId, cancellationToken);
-        var original = existing.Operation?.PlannedDefinition ?? throw new FormatException($"Create operation `{definition.LastMutationOperationId}` is missing its original definition snapshot.");
-        return CustomLoopDefinitionStoreResult.VersionConflict(original, expectedDefinitionVersion: 0);
+        if (existing.Operation?.Kind != CustomLoopDefinitionMutationKind.Create || existing.Operation.PlannedDefinition is null)
+        {
+            return result;
+        }
+
+        return CustomLoopDefinitionStoreResult.VersionConflict(existing.Operation.PlannedDefinition, expectedDefinitionVersion: 0);
     }
 
     public async Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default)
@@ -819,6 +823,16 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         CustomLoopDefinition? priorDefinition)
     {
         ArgumentNullException.ThrowIfNull(mutation);
+        if (mutation.PlannedDefinition is not null)
+        {
+            ValidateCanonicalDefinition(mutation.PlannedDefinition);
+        }
+
+        if (mutation.PriorDefinition is not null)
+        {
+            ValidateCanonicalDefinition(mutation.PriorDefinition);
+        }
+
         if (mutation.Kind != expectedKind || mutation.Kind == CustomLoopDefinitionMutationKind.Unknown)
         {
             throw new ArgumentException("Definition mutation kind does not match the requested store operation.", nameof(mutation));
