@@ -209,6 +209,54 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Paused_cancel_commits_terminal_state_in_one_compare_and_swap()
+    {
+        var run = Run("run-paused-atomic-cancel", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var cancellation = new RecordingCancellationSignal();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+
+        var result = await service.CancelAsync(Cancel(run, "cancel-paused-atomic"));
+
+        Assert.Equal(CustomLoopControlStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, store[run.Id].Status);
+        Assert.Equal(run.LifecycleVersion + 1, store[run.Id].LifecycleVersion);
+        Assert.Equal(1, store.UpdateCallCount);
+        Assert.Equal("cancel-paused-atomic", store[run.Id].Events[^1].EventId);
+        Assert.Empty(cancellation.RunIds);
+        var receipt = await operations.GetAsync("cancel-paused-atomic");
+        Assert.Equal(CustomLoopControlOperationState.Complete, receipt!.State);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, receipt.Outcome);
+    }
+
+    [Fact]
+    public async Task Cancellation_signal_failure_leaves_pending_receipt_and_retry_signals_again()
+    {
+        var run = Run("run-cancel-signal-retry", CustomLoopRunStatus.Running);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var cancellation = new RecordingCancellationSignal(failuresBeforeSuccess: 1);
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var request = Cancel(run, "cancel-signal-retry");
+
+        var first = await service.CancelAsync(request);
+        var pending = await operations.GetAsync(request.OperationId);
+        var replay = await service.CancelAsync(request);
+
+        Assert.Equal(CustomLoopControlStatus.Failed, first.Status);
+        Assert.Contains(nameof(IOException), first.Detail, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, store[run.Id].Status);
+        Assert.Equal(CustomLoopControlOperationState.Pending, pending!.State);
+        Assert.Equal(CustomLoopControlStatus.Replayed, replay.Status);
+        Assert.Equal(2, cancellation.AttemptCount);
+        Assert.Equal([run.Id], cancellation.RunIds);
+        var completed = await operations.GetAsync(request.OperationId);
+        Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, completed.Outcome);
+    }
+
+    [Fact]
     public async Task Pending_receipt_recovers_by_operation_event_id_without_repeating_the_transition()
     {
         const string operationId = "pause-receipt-recovery";
@@ -247,6 +295,29 @@ public sealed class CustomLoopLifecycleServiceTests
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, $"resume-{orderedStatus.ToString().ToLowerInvariant()}", AuditSchema.Actors.Web));
 
         Assert.Equal(expected, result.Status);
+    }
+
+    [Fact]
+    public async Task Resume_executor_failure_quarantines_the_durable_running_run()
+    {
+        var run = Run("run-resume-executor-failure", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var executor = new NoopResumeExecutor(exception: new IOException("Ordered runner failed."));
+        var gate = new TestExecutionGate();
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-executor-failure", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store[run.Id].Status);
+        Assert.Equal("lifecycle_control_failed", store[run.Id].FailureCode);
+        Assert.Contains(nameof(IOException), result.Detail, StringComparison.Ordinal);
+        Assert.Single(executor.Requests);
+        Assert.Equal(1, gate.ReleasedLeaseCount);
+        var receipt = await operations.GetAsync("resume-executor-failure");
+        Assert.Equal(CustomLoopControlOperationState.Complete, receipt!.State);
+        Assert.Equal(CustomLoopControlStatus.Resumed, receipt.Outcome);
     }
 
     [Theory]
@@ -660,13 +731,18 @@ public sealed class CustomLoopLifecycleServiceTests
         }
     }
 
-    private sealed class NoopResumeExecutor(CustomLoopOrderedRunStatus status = CustomLoopOrderedRunStatus.Completed) : ICustomLoopResumeExecutor
+    private sealed class NoopResumeExecutor(CustomLoopOrderedRunStatus status = CustomLoopOrderedRunStatus.Completed, Exception? exception = null) : ICustomLoopResumeExecutor
     {
         public List<CustomLoopResumeExecutionRequest> Requests { get; } = [];
 
         public Task<CustomLoopOrderedRunResult> ResumeAsync(CustomLoopResumeExecutionRequest request, CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
+            if (exception is not null)
+            {
+                throw exception;
+            }
+
             return Task.FromResult(new CustomLoopOrderedRunResult(status, null, "Mapped ordered result."));
         }
     }
@@ -699,11 +775,25 @@ public sealed class CustomLoopLifecycleServiceTests
         }
     }
 
-    private sealed class RecordingCancellationSignal : ICustomLoopExecutionCancellationSignal
+    private sealed class RecordingCancellationSignal(int failuresBeforeSuccess = 0) : ICustomLoopExecutionCancellationSignal
     {
+        private int _remainingFailures = failuresBeforeSuccess;
+
         public List<string> RunIds { get; } = [];
 
-        public void CancelActiveAttempt(string runId) => RunIds.Add(runId);
+        public int AttemptCount { get; private set; }
+
+        public void CancelActiveAttempt(string runId)
+        {
+            AttemptCount++;
+            if (_remainingFailures > 0)
+            {
+                _remainingFailures--;
+                throw new IOException("Cancellation signal unavailable.");
+            }
+
+            RunIds.Add(runId);
+        }
     }
 
     private sealed class RecordingAuditLog : IAuditLog

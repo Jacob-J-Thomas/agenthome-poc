@@ -372,6 +372,7 @@ public sealed class CustomLoopRunValidatorTests
     [InlineData(CustomLoopRunStatus.PauseRequested, CustomLoopRunStatus.Paused, true)]
     [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.Running, true)]
     [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.CancelRequested, true)]
+    [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.Cancelled, true)]
     [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.NeedsReview, true)]
     [InlineData(CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.Cancelled, true)]
     [InlineData(CustomLoopRunStatus.Completed, CustomLoopRunStatus.Running, false)]

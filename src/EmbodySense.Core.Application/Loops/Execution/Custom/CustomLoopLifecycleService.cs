@@ -185,7 +185,18 @@ public sealed class CustomLoopLifecycleService
     {
         if (run.Status == CustomLoopRunStatus.CancelRequested)
         {
-            _cancellationSignal.CancelActiveAttempt(run.Id);
+            if (run.ExecutionClock.ActiveSinceUtc is null)
+            {
+                var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The safely stopped cancellation request was completed without provider dispatch.");
+                var cancelledOutcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
+                return await CompleteAsync(operation, cancelledOutcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
+            }
+
+            if (!TryCancelActiveAttempt(run.Id, out var signalFailure))
+            {
+                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, signalFailure);
+            }
+
             return await CompleteAsync(operation, CustomLoopControlStatus.CancelRequested, run, true, "Cancellation is already requested; no new provider dispatch is permitted.");
         }
 
@@ -197,7 +208,11 @@ public sealed class CustomLoopLifecycleService
                 return await CompleteAsync(operation, requested.Status, requested.CurrentRun, true, requested.Detail);
             }
 
-            _cancellationSignal.CancelActiveAttempt(run.Id);
+            if (!TryCancelActiveAttempt(run.Id, out var signalFailure))
+            {
+                return Result(CustomLoopControlStatus.Failed, requested.Run, operation.OperationId, signalFailure);
+            }
+
             var outcome = requested.AuditRecorded ? CustomLoopControlStatus.CancelRequested : CustomLoopControlStatus.AuditWarning;
             return await CompleteAsync(operation, outcome, requested.Run, requested.AuditRecorded, requested.Detail);
         }
@@ -211,16 +226,9 @@ public sealed class CustomLoopLifecycleService
 
         if (run.Status == CustomLoopRunStatus.Paused)
         {
-            var requested = await PersistTransitionAsync(run, CustomLoopRunStatus.CancelRequested, operation.Actor, operation.OperationId, "Cancellation was requested from a proved Paused checkpoint boundary.");
-            if (requested.Run is null)
-            {
-                return await CompleteAsync(operation, requested.Status, requested.CurrentRun, true, requested.Detail);
-            }
-
-            var cancelled = await PersistTransitionAsync(requested.Run, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("cancel"), "The safely paused run was cancelled without provider dispatch.");
-            var auditRecorded = requested.AuditRecorded && cancelled.AuditRecorded;
-            var outcome = cancelled.Run is null ? cancelled.Status : auditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
-            return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, auditRecorded, cancelled.Detail);
+            var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The safely paused run was cancelled atomically without provider dispatch.");
+            var outcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
+            return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
         }
 
         return await CompleteAsync(operation, CustomLoopControlStatus.InvalidState, run, true, $"Cancel cannot mutate terminal state {run.Status}.");
@@ -295,7 +303,16 @@ public sealed class CustomLoopLifecycleService
                 return Result(CustomLoopControlStatus.NeedsReview, parkedRun, operation.OperationId, parked.Run is null ? $"{receipt.Detail} The undispatched Running transition could not be parked automatically." : detail);
             }
 
-            var execution = await _resumeExecutor.ResumeAsync(new CustomLoopResumeExecutionRequest(resumed.Run.Id, resumed.Run.LifecycleVersion, operation.OperationId, operation.Actor), cancellationToken);
+            CustomLoopOrderedRunResult execution;
+            try
+            {
+                execution = await _resumeExecutor.ResumeAsync(new CustomLoopResumeExecutionRequest(resumed.Run.Id, resumed.Run.LifecycleVersion, operation.OperationId, operation.Actor), cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                return await HandleResumeExecutorFailureAsync(operation, resumed.Run, exception);
+            }
+
             return execution.Status switch
             {
                 CustomLoopOrderedRunStatus.Completed => Result(CustomLoopControlStatus.Completed, execution.Run, operation.OperationId, execution.Detail),
@@ -312,12 +329,61 @@ public sealed class CustomLoopLifecycleService
 
     private async Task<CustomLoopControlResult> RecoverPendingReceiptAsync(CustomLoopControlOperation operation, CustomLoopRunRecord run)
     {
+        if (operation.Kind == CustomLoopControlKind.Cancel && run.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            if (run.ExecutionClock.ActiveSinceUtc is null)
+            {
+                var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("cancel-recovery"), "Pending cancellation recovery proved that no provider attempt was active and completed cancellation without dispatch.");
+                var cancelledOutcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
+                return await CompleteAsync(operation, cancelledOutcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
+            }
+
+            if (!TryCancelActiveAttempt(run.Id, out var signalFailure))
+            {
+                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, signalFailure);
+            }
+        }
+
         var status = StatusFor(run.Status, operation.Kind);
         var detail = "A previously committed lifecycle transition was found by operation event id; its pending receipt was recovered without another mutation or dispatch.";
         var auditRecorded = await TryAuditAsync(operation.Actor, run, operation.Kind, run.Status, detail, recoveredReceipt: true);
         var completionStatus = auditRecorded ? status : CustomLoopControlStatus.AuditWarning;
         var completed = await CompleteAsync(operation, completionStatus, run, auditRecorded, detail);
         return completed.Status == completionStatus && auditRecorded ? Result(CustomLoopControlStatus.Replayed, run, operation.OperationId, detail) : completed;
+    }
+
+    private async Task<CustomLoopControlResult> HandleResumeExecutorFailureAsync(CustomLoopControlOperation operation, CustomLoopRunRecord resumedRun, Exception exception)
+    {
+        var detail = $"The ordered resume executor failed after the durable Running transition: {SafeExceptionClass(exception)}. Execution is stopped for review instead of remaining silently Running.";
+        var current = await TryLoadAsync(resumedRun.Id, IntegrityToken()) ?? resumedRun;
+        if (current.Status == CustomLoopRunStatus.Paused)
+        {
+            return Result(CustomLoopControlStatus.Paused, current, operation.OperationId, detail);
+        }
+
+        if (current.IsTerminal)
+        {
+            return Result(StatusFor(current.Status, CustomLoopControlKind.Resume), current, operation.OperationId, detail);
+        }
+
+        var quarantined = await PersistTransitionAsync(current, CustomLoopRunStatus.NeedsReview, operation.Actor, NewEventId("resume-failure"), detail);
+        var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? current;
+        return Result(CustomLoopControlStatus.NeedsReview, quarantinedRun, operation.OperationId, quarantined.Run is null ? $"{detail} {quarantined.Detail}" : quarantined.Detail);
+    }
+
+    private bool TryCancelActiveAttempt(string runId, out string failureDetail)
+    {
+        try
+        {
+            _cancellationSignal.CancelActiveAttempt(runId);
+            failureDetail = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            failureDetail = $"The cancellation request is durable, but signalling the active attempt failed: {SafeExceptionClass(exception)}. The control receipt remains pending so the same operation can retry the signal.";
+            return false;
+        }
     }
 
     private async Task<TransitionResult> PersistTransitionAsync(CustomLoopRunRecord current, CustomLoopRunStatus status, string actor, string eventId, string detail)
