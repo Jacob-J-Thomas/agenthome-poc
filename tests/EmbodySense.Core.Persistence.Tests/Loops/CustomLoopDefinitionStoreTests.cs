@@ -76,6 +76,25 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task UpdateAsync_rejects_role_changes_before_definition_or_operation_artifacts_are_persisted()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var created = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, created);
+        var changedRole = CustomLoopDefinitionContentHash.Apply(Advance(created, "Changed role", "role-change") with { RoleId = "other-role" });
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Update, changedRole.LastMutationOperationId, 'a', changedRole.Id, changedRole.RoleId, 1, changedRole, created, changedRole.UpdatedAtUtc);
+
+        var directException = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(changedRole, expectedDefinitionVersion: 1));
+        var durableException = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(changedRole, expectedDefinitionVersion: 1, mutation));
+
+        Assert.Contains("cannot change their directory-role binding", directException.Message, StringComparison.Ordinal);
+        Assert.Contains("cannot change their directory-role binding", durableException.Message, StringComparison.Ordinal);
+        AssertDefinition(created, await store.GetAsync(created.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(mutation.OperationId)).Status);
+    }
+
+    [Fact]
     public async Task Concurrent_updates_with_the_same_expected_version_allow_exactly_one_writer()
     {
         using var workspace = new TestWorkspace();

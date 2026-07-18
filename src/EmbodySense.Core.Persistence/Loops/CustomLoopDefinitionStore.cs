@@ -273,22 +273,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
-            var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, definition.Id, StringComparison.Ordinal));
-            if (current is null)
-            {
-                var tombstone = state.Tombstones.SingleOrDefault(candidate => string.Equals(candidate.LoopId, definition.Id, StringComparison.Ordinal));
-                return tombstone is null
-                    ? CustomLoopDefinitionStoreResult.NotFound()
-                    : CustomLoopDefinitionStoreResult.TombstoneConflict(tombstone, expectedDefinitionVersion);
-            }
-
-            if (current.DefinitionVersion != expectedDefinitionVersion)
-            {
-                return CustomLoopDefinitionStoreResult.VersionConflict(current, expectedDefinitionVersion);
-            }
-
-            await WriteJsonAsync(_paths.CustomLoopDefinitionsPath, GetDefinitionPath(definition.Id), definition, cancellationToken);
-            return CustomLoopDefinitionStoreResult.Updated(definition);
+            return await ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken);
         }
         finally
         {
@@ -333,6 +318,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             }
 
             ValidateWorkspaceState(state);
+            ValidateUpdateRoleBinding(state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, definition.Id, StringComparison.Ordinal)), definition);
             return await ExecuteNewOperationAsync(mutation, definition.UpdatedAtUtc, () => ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken), cancellationToken);
         }
         finally
@@ -1027,6 +1013,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 : CustomLoopDefinitionStoreResult.TombstoneConflict(tombstone, expectedDefinitionVersion);
         }
 
+        ValidateUpdateRoleBinding(current, definition);
         if (current.DefinitionVersion != expectedDefinitionVersion)
         {
             return CustomLoopDefinitionStoreResult.VersionConflict(current, expectedDefinitionVersion);
@@ -1034,6 +1021,14 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
         await WriteJsonAsync(_paths.CustomLoopDefinitionsPath, GetDefinitionPath(definition.Id), definition, cancellationToken);
         return CustomLoopDefinitionStoreResult.Updated(definition);
+    }
+
+    private static void ValidateUpdateRoleBinding(CustomLoopDefinition? current, CustomLoopDefinition definition)
+    {
+        if (current is not null && !string.Equals(current.RoleId, definition.RoleId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Updated custom loop definitions cannot change their directory-role binding.", nameof(definition));
+        }
     }
 
     private async Task<CustomLoopDefinitionStoreResult> ExecuteDeleteAsync(WorkspaceState state, string loopId, int expectedDefinitionVersion, string operationId, DateTimeOffset deletedAtUtc, CancellationToken cancellationToken)

@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Authoring;
 
@@ -280,7 +281,7 @@ public sealed class CustomLoopAuthoringServiceTests
         var service = Service(store, audit);
         var invalid = Input(current) with { DisplayName = "   ", ToolAssignments = [CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Read] };
 
-        var result = await service.UpdateAsync(current.Id, current.DefinitionVersion, current.RoleId, "op-update", "actor-user", invalid);
+        var result = await service.UpdateAsync(current.Id, current.DefinitionVersion, current.RoleId, "op-update", "actor-user", invalid, [CustomLoopToolAssignment.Read]);
 
         Assert.Equal(CustomLoopAuthoringStatus.Invalid, result.Status);
         Assert.Contains(result.ValidationErrors, error => error.Code == "display_name_required");
@@ -308,6 +309,20 @@ public sealed class CustomLoopAuthoringServiceTests
     }
 
     [Fact]
+    public async Task Update_simple_overload_grants_no_implicit_tool_authority()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var input = Input(current) with { ToolAssignments = [CustomLoopToolAssignment.Read] };
+
+        var result = await Service(store).UpdateAsync(current.Id, current.DefinitionVersion, current.RoleId, "op-update", "actor-user", input);
+
+        var error = Assert.Single(result.ValidationErrors);
+        Assert.Equal("tool_assignment_outside_role_ceiling", error.Code);
+        Assert.Equal(0, store.UpdateCallCount);
+    }
+
+    [Fact]
     public async Task Update_preserves_existing_step_ids_allocates_new_ids_and_cannot_replace_context_defaults()
     {
         var current = Definition();
@@ -325,7 +340,7 @@ public sealed class CustomLoopAuthoringServiceTests
             ToolAssignments = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read]
         };
 
-        var result = await service.UpdateAsync(current.Id, current.DefinitionVersion, current.RoleId, "op-update", "actor-user", input);
+        var result = await service.UpdateAsync(current.Id, current.DefinitionVersion, current.RoleId, "op-update", "actor-user", input, [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read]);
 
         Assert.Equal(CustomLoopAuthoringStatus.Updated, result.Status);
         var updated = Assert.IsType<CustomLoopDefinition>(result.Definition);
@@ -492,6 +507,23 @@ public sealed class CustomLoopAuthoringServiceTests
     }
 
     [Fact]
+    public async Task Update_operation_reuse_conflict_does_not_disclose_another_roles_definition()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var service = Service(store);
+        var input = Input(current) with { Description = "role-private content" };
+        var first = await service.UpdateAsync(current.Id, current.DefinitionVersion, current.RoleId, "shared-operation", "actor-user", input);
+
+        var conflict = await service.UpdateAsync(current.Id, current.DefinitionVersion, "role-other", "shared-operation", "actor-other", input);
+
+        Assert.Equal(CustomLoopAuthoringStatus.Updated, first.Status);
+        Assert.Equal(CustomLoopAuthoringStatus.Conflict, conflict.Status);
+        Assert.Null(conflict.Definition);
+        Assert.Equal(1, store.UpdateCallCount);
+    }
+
+    [Fact]
     public async Task Update_rejects_operation_id_reuse_when_only_step_content_changed()
     {
         var current = Definition(operationId: "op-update");
@@ -544,6 +576,26 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.Equal(2, store.UpdateCallCount);
         Assert.Equal(0, store.DeleteCallCount);
         Assert.Equal(versionThree.ContentHash, (await store.GetAsync(current.Id))!.ContentHash);
+    }
+
+    [Fact]
+    public async Task Pending_Update_recovery_rechecks_nonterminal_runs_before_mutating()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var input = Input(current) with { DisplayName = "Recovered update" };
+        var first = await Service(store).UpdateAsync(current.Id, 1, current.RoleId, "pending-update", "actor-user", input);
+        store.RestoreDefinition(current);
+        store.MarkOperationPending("pending-update");
+        var runStore = new FakeRunStore(current);
+
+        var blocked = await Service(store, runStore: runStore).UpdateAsync(current.Id, 1, current.RoleId, "pending-update", "actor-user", input);
+
+        Assert.Equal(CustomLoopAuthoringStatus.Updated, first.Status);
+        Assert.Equal(CustomLoopAuthoringStatus.ActiveRunExists, blocked.Status);
+        Assert.Same(current, blocked.Definition);
+        Assert.Equal(1, store.UpdateCallCount);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, (await store.GetMutationOperationAsync("pending-update")).Status);
     }
 
     [Fact]
@@ -645,7 +697,8 @@ public sealed class CustomLoopAuthoringServiceTests
     [Fact]
     public async Task Delete_maps_not_found_and_version_conflict_store_results()
     {
-        var missingStore = new FakeStore { DeleteResult = CustomLoopDefinitionStoreResult.NotFound() };
+        var deletedTombstone = new CustomLoopDefinitionTombstone(CustomLoopDefinitionTombstone.CurrentSchemaVersion, "loop-missing", 4, new string('a', CustomLoopLimits.Sha256HexCharacters), "other-role-delete", Now.AddMinutes(-5));
+        var missingStore = new FakeStore { DeleteResult = CustomLoopDefinitionStoreResult.TombstoneConflict(deletedTombstone, expectedDefinitionVersion: 1) };
         var missing = await Service(missingStore).DeleteAsync("loop-missing", 1, "role-workspace", "op-delete", "actor-user");
 
         var current = Definition(version: 2);
@@ -657,6 +710,7 @@ public sealed class CustomLoopAuthoringServiceTests
         var conflict = await Service(conflictStore).DeleteAsync(current.Id, 1, current.RoleId, "op-delete", "actor-user");
 
         Assert.Equal(CustomLoopAuthoringStatus.NotFound, missing.Status);
+        Assert.Equal(0, missingStore.DeleteCallCount);
         Assert.Equal(CustomLoopAuthoringStatus.Conflict, conflict.Status);
         Assert.False(conflict.IsCommitted);
         Assert.Equal(1, conflict.Conflict?.ExpectedDefinitionVersion);
@@ -719,9 +773,9 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.Contains("Unsupported", exception.Message, StringComparison.Ordinal);
     }
 
-    private static CustomLoopAuthoringService Service(FakeStore store, RecordingAuditLog? audit = null, ICustomLoopIdentityGenerator? identity = null)
+    private static CustomLoopAuthoringService Service(FakeStore store, RecordingAuditLog? audit = null, ICustomLoopIdentityGenerator? identity = null, ICustomLoopRunStore? runStore = null)
     {
-        return new CustomLoopAuthoringService(store, audit ?? new RecordingAuditLog(), identity ?? new QueueIdentityGenerator(["loop-created"], ["step-created", "step-new"]), new FixedTimeProvider(Now));
+        return new CustomLoopAuthoringService(store, audit ?? new RecordingAuditLog(), identity ?? new QueueIdentityGenerator(["loop-created"], ["step-created", "step-new"]), new FixedTimeProvider(Now), runStore);
     }
 
     private static CustomLoopDefinition Definition(string operationId = "op-existing", int version = 1)
@@ -844,6 +898,38 @@ public sealed class CustomLoopAuthoringServiceTests
         }
     }
 
+    private sealed class FakeRunStore(CustomLoopDefinition definition) : ICustomLoopRunStore
+    {
+        private readonly CustomLoopRunRecord _run = new(
+            CustomLoopRunRecord.CurrentSchemaVersion,
+            "run-active",
+            definition.Id,
+            1,
+            CustomLoopRunStatus.Running,
+            Now,
+            Now,
+            null,
+            "test",
+            new CustomLoopModelSnapshot("test", null),
+            "admit-run",
+            new string('a', CustomLoopLimits.Sha256HexCharacters),
+            definition,
+            string.Empty,
+            null,
+            CustomLoopContextSnapshot.CreateEmpty(Now),
+            new CustomLoopExecutionClock(0, Now),
+            CustomLoopRunCheckpoint.Start(),
+            [],
+            null,
+            null,
+            null);
+
+        public Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<CustomLoopRunRecord?>(string.Equals(loopId, _run.LoopId, StringComparison.Ordinal) ? _run : null);
+        }
+    }
+
     private sealed class FakeStore : ICustomLoopDefinitionStore
     {
         private readonly Dictionary<string, CustomLoopDefinition> _definitions = new(StringComparer.Ordinal);
@@ -892,6 +978,24 @@ public sealed class CustomLoopAuthoringServiceTests
         public int AuditMarkCallCount { get; private set; }
 
         public int MutationCallCount => CreateCallCount + UpdateCallCount + DeleteCallCount;
+
+        public void RestoreDefinition(CustomLoopDefinition definition)
+        {
+            _definitions[definition.Id] = definition;
+        }
+
+        public void MarkOperationPending(string operationId)
+        {
+            _operations[operationId] = _operations[operationId] with
+            {
+                State = CustomLoopDefinitionMutationState.PendingMutation,
+                Outcome = CustomLoopDefinitionStoreStatus.Unknown,
+                ResultDefinition = null,
+                ResultConflict = null,
+                ResultTombstone = null,
+                OutcomeAuditRecorded = false
+            };
+        }
 
         public Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CancellationToken cancellationToken = default)
         {

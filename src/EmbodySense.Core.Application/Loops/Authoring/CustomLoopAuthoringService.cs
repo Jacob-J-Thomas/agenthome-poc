@@ -57,8 +57,9 @@ public sealed class CustomLoopAuthoringService
             var existing = operation.Operation ?? throw new InvalidOperationException("A persisted definition mutation lookup did not contain its operation record.");
             if (!MutationRequestMatches(existing, CustomLoopDefinitionMutationKind.Create, requestHash, existing.LoopId, roleId, null))
             {
-                await TryAuditRejectionAsync("create", existing.LoopId, existing.PlannedDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
-                return Result(CustomLoopAuthoringStatus.Conflict, existing.ResultDefinition, "The mutation operation id was reused for a different authorized request.");
+                var scopedDefinition = RoleScopedOperationDefinition(existing, roleId);
+                await TryAuditRejectionAsync("create", existing.LoopId, scopedDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
+                return Result(CustomLoopAuthoringStatus.Conflict, scopedDefinition, "The mutation operation id was reused for a different authorized request.");
             }
 
             return await ReplayOrRecoverAsync(existing, actor, cancellationToken);
@@ -75,7 +76,7 @@ public sealed class CustomLoopAuthoringService
             var existing = legacyOperation.Definition ?? throw new InvalidOperationException("A persisted Create operation did not contain its canonical definition snapshot.");
             if (!string.Equals(existing.RoleId, roleId, StringComparison.Ordinal))
             {
-                await TryAuditRejectionAsync("create", existing.Id, existing, actor, operationId, "role_binding_mismatch", cancellationToken);
+                await TryAuditRejectionAsync("create", existing.Id, null, actor, operationId, "role_binding_mismatch", cancellationToken);
                 return CustomLoopAuthoringResult.Invalid([new CustomLoopValidationError("role_binding_mismatch", "roleId", "The idempotent Create operation belongs to a different directory role.")]);
             }
 
@@ -116,7 +117,7 @@ public sealed class CustomLoopAuthoringService
 
     public Task<CustomLoopAuthoringResult> UpdateAsync(string loopId, int expectedDefinitionVersion, string roleId, string operationId, string actor, CustomLoopDefinitionInput input, CancellationToken cancellationToken = default)
     {
-        return UpdateAsync(loopId, expectedDefinitionVersion, roleId, operationId, actor, input, [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search], cancellationToken);
+        return UpdateAsync(loopId, expectedDefinitionVersion, roleId, operationId, actor, input, [], cancellationToken);
     }
 
     public async Task<CustomLoopAuthoringResult> UpdateAsync(
@@ -157,8 +158,9 @@ public sealed class CustomLoopAuthoringService
             var existing = operation.Operation ?? throw new InvalidOperationException("A persisted definition mutation lookup did not contain its operation record.");
             if (!MutationRequestMatches(existing, CustomLoopDefinitionMutationKind.Update, requestHash, loopId, roleId, expectedDefinitionVersion))
             {
-                await TryAuditRejectionAsync("update", loopId, existing.ResultDefinition ?? existing.PlannedDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
-                return Result(CustomLoopAuthoringStatus.Conflict, existing.ResultDefinition, "The mutation operation id was reused for a different authorized request.");
+                var scopedDefinition = RoleScopedOperationDefinition(existing, roleId);
+                await TryAuditRejectionAsync("update", loopId, scopedDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
+                return Result(CustomLoopAuthoringStatus.Conflict, scopedDefinition, "The mutation operation id was reused for a different authorized request.");
             }
 
             return await ReplayOrRecoverAsync(existing, actor, cancellationToken);
@@ -292,8 +294,9 @@ public sealed class CustomLoopAuthoringService
             var existingRequestHash = ComputeRequestHash(CustomLoopDefinitionMutationKind.Delete, loopId, roleId, expectedDefinitionVersion, null);
             if (!MutationRequestMatches(existing, CustomLoopDefinitionMutationKind.Delete, existingRequestHash, loopId, roleId, expectedDefinitionVersion))
             {
-                await TryAuditRejectionAsync("delete", loopId, existing.ResultDefinition ?? existing.PriorDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
-                return Result(CustomLoopAuthoringStatus.Conflict, existing.ResultDefinition, "The mutation operation id was reused for a different authorized request.");
+                var scopedDefinition = RoleScopedOperationDefinition(existing, roleId);
+                await TryAuditRejectionAsync("delete", loopId, scopedDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
+                return Result(CustomLoopAuthoringStatus.Conflict, scopedDefinition, "The mutation operation id was reused for a different authorized request.");
             }
 
             return await ReplayOrRecoverAsync(existing, actor, cancellationToken);
@@ -305,7 +308,13 @@ public sealed class CustomLoopAuthoringService
         }
 
         var current = await _store.GetAsync(loopId, cancellationToken);
-        if (current is not null && !string.Equals(current.RoleId, roleId, StringComparison.Ordinal))
+        if (current is null)
+        {
+            await TryAuditRejectionAsync("delete", loopId, null, actor, operationId, "not_found", cancellationToken);
+            return Result(CustomLoopAuthoringStatus.NotFound, null, "The loop definition does not exist.");
+        }
+
+        if (!string.Equals(current.RoleId, roleId, StringComparison.Ordinal))
         {
             await TryAuditRejectionAsync("delete", loopId, current, actor, operationId, "role_binding_mismatch", cancellationToken);
             return CustomLoopAuthoringResult.Invalid([new CustomLoopValidationError("role_binding_mismatch", "roleId", "The loop belongs to a different directory role.")]);
@@ -323,12 +332,6 @@ public sealed class CustomLoopAuthoringService
         }
 
         var deletedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
-        if (current is null)
-        {
-            var missing = await _store.DeleteAsync(loopId, expectedDefinitionVersion, operationId, deletedAtUtc, cancellationToken);
-            return await CompleteMutationAsync("delete", loopId, actor, operationId, missing, null, null, isReplay: false);
-        }
-
         var requestHash = ComputeRequestHash(CustomLoopDefinitionMutationKind.Delete, loopId, current.RoleId, expectedDefinitionVersion, null);
         var mutation = new CustomLoopDefinitionMutationRequest(CustomLoopDefinitionMutationKind.Delete, operationId, requestHash, loopId, current.RoleId, expectedDefinitionVersion, null, current, deletedAtUtc);
         var storeResult = await _store.DeleteAsync(loopId, expectedDefinitionVersion, operationId, deletedAtUtc, mutation, cancellationToken);
@@ -345,6 +348,12 @@ public sealed class CustomLoopAuthoringService
         }
         else
         {
+            if (operation.Kind is CustomLoopDefinitionMutationKind.Update or CustomLoopDefinitionMutationKind.Delete && await HasNonterminalRunAsync(operation.LoopId, cancellationToken))
+            {
+                await TryAuditRejectionAsync(operationName, operation.LoopId, operation.PriorDefinition, actor, operation.OperationId, "active_run_exists", cancellationToken);
+                return CustomLoopAuthoringResult.ActiveRun(operation.PriorDefinition);
+            }
+
             var mutation = new CustomLoopDefinitionMutationRequest(
                 operation.Kind,
                 operation.OperationId,
@@ -374,6 +383,13 @@ public sealed class CustomLoopAuthoringService
             && string.Equals(operation.RoleId, roleId, StringComparison.Ordinal)
             && operation.ExpectedDefinitionVersion == expectedDefinitionVersion
             && (kind == CustomLoopDefinitionMutationKind.Create || string.Equals(operation.LoopId, loopId, StringComparison.Ordinal));
+    }
+
+    private static CustomLoopDefinition? RoleScopedOperationDefinition(CustomLoopDefinitionMutationOperation operation, string roleId)
+    {
+        return string.Equals(operation.RoleId, roleId, StringComparison.Ordinal)
+            ? operation.ResultDefinition ?? operation.PlannedDefinition ?? operation.PriorDefinition
+            : null;
     }
 
     private static CustomLoopAuthoringResult? ValidateOperationId(string operationId)
