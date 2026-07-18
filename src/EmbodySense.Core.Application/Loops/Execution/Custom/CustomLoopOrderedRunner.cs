@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
@@ -12,6 +14,11 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustomLoopExecutionCancellationSignal
 {
     private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly JsonSerializerOptions TraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
+    };
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly CustomLoopContextResolver _contextResolver;
@@ -240,7 +247,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         RunAdvance persisted;
         try
         {
-            persisted = await PersistAsync(run, candidate, cancellationToken, outcomeMayExist: false);
+            persisted = await PersistAsync(run, candidate, cancellationToken, outcomeMayExist: false, propagateCancellation: true);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -308,10 +315,16 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var sequenceOwner = events.Count == 0 ? run : run with { Events = [.. run.Events, .. events] };
         events.Add(Event(sequenceOwner, now, CustomLoopRunEventKind.NodeAttemptStarted, "Inference attempt trace committed before provider dispatch.", iteration, step.Id, 1, assembly.Blocks, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes));
         var startedCandidate = Append(run, now, events);
+        if (!HasTraceCapacityForDispatch(startedCandidate))
+        {
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_trace_capacity_exhausted", "The durable run trace cannot reserve enough bounded space for another provider attempt and its mandatory outcome evidence.");
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
         RunAdvance started;
         try
         {
-            started = await PersistAsync(run, startedCandidate, cancellationToken, outcomeMayExist: false);
+            started = await PersistAsync(run, startedCandidate, cancellationToken, outcomeMayExist: false, propagateCancellation: true);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -360,6 +373,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             authority);
 
         CustomLoopInferenceAttemptResult result;
+        var providerInvoked = false;
         using var providerToken = CreateProviderToken(run, cancellationToken);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
@@ -382,7 +396,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             providerToken.Token.ThrowIfCancellationRequested();
+            providerInvoked = true;
             result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
+        }
+        catch (OperationCanceledException) when (!providerInvoked)
+        {
+            return await HandlePreInvocationCancellationAsync(run, actor, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -497,10 +516,16 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var now = Now(run);
         var startedEvent = Event(run, now, CustomLoopRunEventKind.ExitDecisionStarted, "Exit-decision trace committed before tool-less provider dispatch.", iteration, "exit", 1, assembly.Blocks, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
         var startedCandidate = Append(run, now, [startedEvent]);
+        if (!HasTraceCapacityForDispatch(startedCandidate))
+        {
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_trace_capacity_exhausted", "The durable run trace cannot reserve enough bounded space for another Exit attempt and its mandatory outcome evidence.");
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
         RunAdvance started;
         try
         {
-            started = await PersistAsync(run, startedCandidate, cancellationToken, outcomeMayExist: false);
+            started = await PersistAsync(run, startedCandidate, cancellationToken, outcomeMayExist: false, propagateCancellation: true);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -548,6 +573,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             authority);
 
         CustomLoopInferenceAttemptResult result;
+        var providerInvoked = false;
         using var providerToken = CreateProviderToken(run, cancellationToken);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
@@ -570,7 +596,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             providerToken.Token.ThrowIfCancellationRequested();
+            providerInvoked = true;
             result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
+        }
+        catch (OperationCanceledException) when (!providerInvoked)
+        {
+            return await HandlePreInvocationCancellationAsync(run, actor, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -1204,7 +1235,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
     }
 
-    private async Task<RunAdvance> PersistAsync(CustomLoopRunRecord current, CustomLoopRunRecord candidate, CancellationToken cancellationToken, bool outcomeMayExist)
+    private async Task<RunAdvance> PersistAsync(CustomLoopRunRecord current, CustomLoopRunRecord candidate, CancellationToken cancellationToken, bool outcomeMayExist, bool propagateCancellation = false)
     {
         try
         {
@@ -1227,9 +1258,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 _ => new RunAdvance(null, Result(outcomeMayExist ? CustomLoopOrderedRunStatus.NeedsReview : CustomLoopOrderedRunStatus.Failed, current, "The required run-trace update was rejected; no later attempt was started."))
             };
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (propagateCancellation && cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return outcomeMayExist
+                ? await EscalatePostOutcomeConflictAsync(current)
+                : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, current, "The required pre-effect run-trace update timed out; no later attempt was started."));
         }
         catch (Exception exception)
         {
@@ -1481,6 +1518,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 && item.ExitDecision == CustomLoopExitDecision.Complete);
     }
 
+    private static bool HasTraceCapacityForDispatch(CustomLoopRunRecord candidate)
+    {
+        var candidateBytes = JsonSerializer.SerializeToUtf8Bytes(candidate, TraceSizingJsonOptions).LongLength;
+        var requiredReserve = CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + CustomLoopLimits.MaxTraceControlReserveUtf8Bytes + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes;
+        return candidateBytes + requiredReserve <= CustomLoopLimits.MaxRunTraceUtf8Bytes;
+    }
+
     private bool ExecutionDeadlineReached(CustomLoopRunRecord run) => GetAccumulatedRunningMilliseconds(run, Now(run)) >= CustomLoopLimits.MaxRunExecutionMilliseconds;
 
     private CancellationTokenSource CreateProviderToken(CustomLoopRunRecord run, CancellationToken callerToken)
@@ -1518,6 +1562,31 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         return await CancelBeforeDispatchAsync(latest, actor);
+    }
+
+    private async Task<RunAdvance> HandlePreInvocationCancellationAsync(CustomLoopRunRecord run, string actor, CancellationToken callerToken)
+    {
+        var boundary = await ObserveControlBoundaryAsync(run, actor);
+        if (boundary.Terminal is not null)
+        {
+            return boundary;
+        }
+
+        run = boundary.Run!;
+        if (callerToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelBeforeDispatchAsync(run, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
+
+        if (ExecutionDeadlineReached(run))
+        {
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_deadline_exceeded", "The custom-loop execution deadline was reached before the provider request could start.");
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
+        var failed = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "provider_cancelled_before_dispatch", "The provider request was cancelled before invocation without a matching caller, lifecycle, or deadline cancellation.");
+        return new RunAdvance(failed.Run, failed);
     }
 
     private static bool DurableTraceVersionMatches(CustomLoopRunRecord expected, CustomLoopRunRecord actual)
@@ -1571,12 +1640,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private static CustomLoopExitDecision ParseExitDecision(string output)
     {
         var token = output.Trim();
-        if (string.Equals(token, "Complete", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(token, "Complete", StringComparison.Ordinal))
         {
             return CustomLoopExitDecision.Complete;
         }
 
-        return string.Equals(token, "Repeat", StringComparison.OrdinalIgnoreCase) ? CustomLoopExitDecision.Repeat : CustomLoopExitDecision.Invalid;
+        return string.Equals(token, "Repeat", StringComparison.Ordinal) ? CustomLoopExitDecision.Repeat : CustomLoopExitDecision.Invalid;
     }
 
     private static string PublicationOperationId(string runId, int iteration, string stepId, bool isExit)
@@ -1643,12 +1712,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static string? SafeReference(string? value)
     {
-        if (string.IsNullOrWhiteSpace(value) || value.Length > CustomLoopLimits.MaxTraceReferenceCharacters || !value.IsNormalized(NormalizationForm.FormC))
+        if (string.IsNullOrWhiteSpace(value) || value.Length > CustomLoopLimits.MaxTraceReferenceCharacters || value.Any(character => char.IsControl(character) || char.IsSurrogate(character)))
         {
             return null;
         }
 
-        return value.Any(character => char.IsControl(character) || char.IsSurrogate(character)) ? null : value;
+        return value.IsNormalized(NormalizationForm.FormC) ? value : null;
     }
 
     private static CustomLoopOrderedRunResult Result(CustomLoopOrderedRunStatus status, CustomLoopRunRecord? run, string detail)

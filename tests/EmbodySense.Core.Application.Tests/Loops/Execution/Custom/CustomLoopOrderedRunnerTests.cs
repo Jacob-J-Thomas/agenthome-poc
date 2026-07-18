@@ -124,6 +124,21 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_output_truncation_never_splits_a_surrogate_pair()
+    {
+        var output = new string('x', CustomLoopLimits.MaxCanonicalModelOutputCharacters - 1) + "\U0001F600" + "tail";
+        var store = new FakeRunStore(Run(Definition()));
+
+        var result = await Runner(store, new QueueExecutor(Result(output))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
+        var observed = Assert.Single(result.Run!.Events, item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved);
+        Assert.Equal(CustomLoopLimits.MaxCanonicalModelOutputCharacters - 1, observed.CanonicalOutput!.Length);
+        Assert.False(char.IsSurrogate(observed.CanonicalOutput[^1]));
+        Assert.True(observed.CanonicalOutputTruncated);
+    }
+
+    [Fact]
     public async Task Exact_Repeat_restarts_step_zero_and_carries_the_previous_iteration_result_only_when_Exit_retains_it()
     {
         var exitPolicy = Policy(Output(retain: true, publish: false));
@@ -135,7 +150,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var store = new FakeRunStore(Run(definition));
         var executor = new QueueExecutor(
             Result("iteration one"),
-            Result("  rEpEaT\r\n"),
+            Result("  Repeat\r\n"),
             Result("iteration two"),
             Result("Complete"));
 
@@ -192,6 +207,9 @@ public sealed class CustomLoopOrderedRunnerTests
     [InlineData("Complete Repeat")]
     [InlineData("{\"decision\":\"Complete\"}")]
     [InlineData("~~~Complete~~~")]
+    [InlineData("complete")]
+    [InlineData("repeat")]
+    [InlineData("rEpEaT")]
     public async Task Invalid_Exit_output_never_repeats_and_becomes_NeedsReview(string decision)
     {
         var definition = Definition(
@@ -209,6 +227,20 @@ public sealed class CustomLoopOrderedRunnerTests
         var exit = Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted);
         Assert.Equal(CustomLoopExitDecision.Invalid, exit.ExitDecision);
         Assert.Equal(decision, exit.CanonicalOutput);
+    }
+
+    [Fact]
+    public async Task Malformed_provider_response_id_is_omitted_without_losing_the_observed_outcome()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(new CustomLoopInferenceAttemptResult("completed output", "provider", "model", "malformed\uD800id", 0));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
+        var observed = Assert.Single(result.Run!.Events, item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved);
+        Assert.Equal("completed output", observed.CanonicalOutput);
+        Assert.Null(observed.ProviderResponseId);
     }
 
     [Fact]
@@ -838,6 +870,59 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Caller_cancellation_at_the_final_dispatch_boundary_cancels_without_marking_the_attempt_uncertain()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(Result("must not run"));
+        var time = new FinalDispatchBoundaryCancellingTimeProvider(Now, store, cancellation);
+
+        var result = await Runner(store, executor, timeProvider: time).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Null(result.Run.FailureCode);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Theory]
+    [InlineData(true, "run_deadline_exceeded")]
+    [InlineData(false, "provider_cancelled_before_dispatch")]
+    public async Task Provider_deadline_expiry_before_invocation_returns_a_structured_pre_dispatch_failure(bool reportDeadlineReached, string expectedFailureCode)
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(Result("must not run"));
+        var time = new FinalDispatchDeadlineTimeProvider(Now, store, reportDeadlineReached);
+
+        var result = await Runner(store, executor, timeProvider: time).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Failed, result.Run!.Status);
+        Assert.Equal(expectedFailureCode, result.Run.FailureCode);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Durable_cancel_at_the_final_dispatch_boundary_wins_without_provider_invocation()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(Result("must not run"));
+        var time = new FinalDispatchActionTimeProvider(Now, store);
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, audit: audit, timeProvider: time);
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        CustomLoopControlResult? cancel = null;
+        time.AtFinalBoundary = () => cancel = lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-at-final-boundary", AuditSchema.Actors.Web)).GetAwaiter().GetResult();
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, cancel!.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_during_Exit_assembly_cancels_without_Exit_dispatch()
     {
         using var cancellation = new CancellationTokenSource();
@@ -1055,6 +1140,29 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
         Assert.Single(executor.Requests);
         Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Internal_outcome_trace_cancellation_is_converted_to_a_durable_needs_review_result()
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (candidate.Events[^1].Kind == CustomLoopRunEventKind.NodeAttemptCompleted)
+                {
+                    throw new OperationCanceledException("Integrity write timed out.");
+                }
+            }
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("provider outcome may exist"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("post_outcome_persistence_conflict", result.Run.FailureCode);
+        Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
     }
 
     [Fact]
@@ -1300,6 +1408,52 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopOrderedRunStatus.NotFound, missing.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, invalidState.Status);
         Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Trace_capacity_is_proved_before_each_dispatch_and_stops_before_mandatory_evidence_would_exceed_the_run_bound()
+    {
+        var steps = Enumerable.Range(1, CustomLoopLimits.MaxInferenceSteps)
+            .Select(index => Step($"step-{index}", $"Step {index}", "Do the work", Output(retain: false, publish: false)))
+            .ToArray();
+        var definition = Definition(steps, CustomLoopLimits.MaxAdditionalIterations, Policy(Output(retain: false, publish: false)));
+        var sourceContent = new string('漢', CustomLoopLimits.MaxInstructionCharacters);
+        var seed = Run(definition);
+        var context = CustomLoopContextSnapshotHash.Apply(seed.ContextSnapshot with
+        {
+            SourceManifest = seed.ContextSnapshot.SourceManifest
+                .Select(source => source with
+                {
+                    Content = sourceContent,
+                    ContentHash = CustomLoopTraceContentHash.Compute(sourceContent),
+                    OriginalCharacterCount = sourceContent.Length,
+                    UsedCharacterCount = sourceContent.Length,
+                    Truncated = false,
+                    TruncationReason = null,
+                    OmissionReason = null
+                })
+                .ToArray()
+        });
+        var run = CustomLoopAdmissionRequestHash.Apply(seed with { ContextSnapshot = context });
+        var outcomes = new List<object>();
+        for (var iteration = 0; iteration <= CustomLoopLimits.MaxAdditionalIterations; iteration++)
+        {
+            outcomes.AddRange(Enumerable.Range(0, CustomLoopLimits.MaxInferenceSteps).Select(_ => (object)Result("iteration output")));
+            if (iteration < CustomLoopLimits.MaxAdditionalIterations)
+            {
+                outcomes.Add(Result("Repeat"));
+            }
+        }
+
+        var store = new FakeRunStore(run);
+        var executor = new QueueExecutor(outcomes.ToArray());
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("run_trace_capacity_exhausted", result.Run!.FailureCode);
+        Assert.True(executor.Requests.Count < CustomLoopLimits.MaxModelAttemptsPerRun);
+        Assert.DoesNotContain(store.ValidationFailures, error => error.Code == "too_many_trace_events");
     }
 
     private static CustomLoopOrderedRunner Runner(FakeRunStore store, QueueExecutor executor, RecordingPublisher? publisher = null, RecordingAuditLog? audit = null, ICustomLoopToolAuthorityProvider? authorityProvider = null, TimeProvider? timeProvider = null)
@@ -1681,6 +1835,63 @@ public sealed class CustomLoopOrderedRunnerTests
             var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', admitted.OrderBy(value => value)));
             var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
             return Task.FromResult(new CustomLoopToolAuthoritySnapshot(roleId, admitted, admitted, catalog, admitted, roleHash, catalogHash, Now, true, "Test authority snapshot."));
+        }
+    }
+
+    private sealed class FinalDispatchBoundaryCancellingTimeProvider(DateTimeOffset now, FakeRunStore store, CancellationTokenSource cancellation) : TimeProvider
+    {
+        private int _callsAfterAttemptStart;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            if (store.Current.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted) && ++_callsAfterAttemptStart == 2)
+            {
+                cancellation.Cancel();
+            }
+
+            return now;
+        }
+    }
+
+    private sealed class FinalDispatchDeadlineTimeProvider(DateTimeOffset now, FakeRunStore store, bool reportDeadlineReached) : TimeProvider
+    {
+        private int _callsAfterAttemptStart;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            if (!store.Current.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted))
+            {
+                return now;
+            }
+
+            _callsAfterAttemptStart++;
+            if (_callsAfterAttemptStart == 2)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(20));
+            }
+
+            return reportDeadlineReached && _callsAfterAttemptStart >= 3
+                ? now.AddMilliseconds(CustomLoopLimits.MaxRunExecutionMilliseconds)
+                : now.AddMilliseconds(CustomLoopLimits.MaxRunExecutionMilliseconds - 1);
+        }
+    }
+
+    private sealed class FinalDispatchActionTimeProvider(DateTimeOffset now, FakeRunStore store) : TimeProvider
+    {
+        private int _callsAfterAttemptStart;
+
+        public Action? AtFinalBoundary { get; set; }
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            if (store.Current.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted) && ++_callsAfterAttemptStart == 2)
+            {
+                var action = AtFinalBoundary;
+                AtFinalBoundary = null;
+                action?.Invoke();
+            }
+
+            return now;
         }
     }
 
