@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -16,6 +18,24 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 public sealed class CustomLoopOrderedRunnerTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void Attempt_reservation_covers_two_maximally_escaped_outcome_events()
+    {
+        var output = new string('\uffff', CustomLoopLimits.MaxCanonicalModelOutputCharacters);
+        var reference = new string('\uffff', CustomLoopLimits.MaxTraceReferenceCharacters);
+        var observed = new CustomLoopRunEvent(1, "observed", Now, CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-1", 1, "Inference provider outcome was observed and retained as local evidence.", [], output, int.MaxValue, true, false, true, "publish", reference, reference, reference, null);
+        var completed = new CustomLoopRunEvent(2, "completed", Now, CustomLoopRunEventKind.NodeAttemptCompleted, 1, "step-1", 1, "Inference attempt completed without an automatic retry.", [], output, int.MaxValue, true, false, true, "publish", reference, reference, reference, null);
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true,
+            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
+        };
+
+        var serializedBytes = JsonSerializer.SerializeToUtf8Bytes(new[] { observed, completed }, options).Length;
+
+        Assert.True(serializedBytes <= CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes, $"Worst-case mandatory outcome evidence used {serializedBytes} bytes but only {CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes} are reserved.");
+    }
 
     [Fact]
     public void Constructor_rejects_missing_dependencies()
@@ -1513,6 +1533,7 @@ public sealed class CustomLoopOrderedRunnerTests
             .ToArray();
         var definition = Definition(steps, CustomLoopLimits.MaxAdditionalIterations, Policy(Output(retain: false, publish: false)));
         var sourceContent = new string('漢', CustomLoopLimits.MaxInstructionCharacters);
+        var worstCaseOutput = new string('\uffff', CustomLoopLimits.MaxCanonicalModelOutputCharacters);
         var seed = Run(definition);
         var context = CustomLoopContextSnapshotHash.Apply(seed.ContextSnapshot with
         {
@@ -1533,7 +1554,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var outcomes = new List<object>();
         for (var iteration = 0; iteration <= CustomLoopLimits.MaxAdditionalIterations; iteration++)
         {
-            outcomes.AddRange(Enumerable.Range(0, CustomLoopLimits.MaxInferenceSteps).Select(_ => (object)Result("iteration output")));
+            outcomes.AddRange(Enumerable.Range(0, CustomLoopLimits.MaxInferenceSteps).Select(_ => (object)Result(worstCaseOutput)));
             if (iteration < CustomLoopLimits.MaxAdditionalIterations)
             {
                 outcomes.Add(Result("Repeat"));
