@@ -44,7 +44,17 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        using var conversationLease = await _conversationState.AcquireExclusiveAccessAsync(CancellationToken.None);
+        IDisposable conversationLease;
+        try
+        {
+            conversationLease = await _conversationState.AcquireExclusiveAccessAsync(request.CancellationToken);
+        }
+        catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
+        {
+            return DefaultConversationLoopTurnResult.Cancelled("Turn was cancelled while waiting to enter the conversation.");
+        }
+
+        using var ownedConversationLease = conversationLease;
         var userMessage = request.ToUserMessage();
         var inferenceContextMessages = _conversationState.ContextMessages
             .Concat([new RuntimeContextMessage(userMessage, RuntimeContextSource.CurrentTurnInput, "Current user input being evaluated by the active loop before provider dispatch.")])
@@ -107,12 +117,11 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
 
             var response = await _inferenceClient.GenerateAsync(inferenceRequest, request.ResponseChunkHandler, request.CancellationToken);
             var assistantMessage = LlmMessage.Assistant(response.OutputText);
-            request.CancellationToken.ThrowIfCancellationRequested();
             _conversationState.AppendMessage(assistantMessage);
             acceptedTranscriptMessages.Add(new RuntimeTranscriptMessage(assistantMessage));
             if (_conversationMemoryStore is not null)
             {
-                await _conversationMemoryStore.AppendMessageAsync(assistantMessage, request.CancellationToken);
+                await _conversationMemoryStore.AppendMessageAsync(assistantMessage, CancellationToken.None);
             }
 
             var transcriptMessages = acceptedTranscriptMessages.ToArray();

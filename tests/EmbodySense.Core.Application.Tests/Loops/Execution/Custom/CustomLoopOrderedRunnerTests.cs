@@ -538,6 +538,100 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Caller_cancellation_during_the_run_start_audit_cancels_instead_of_reporting_an_audit_failure()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog
+        {
+            BeforeAppend = (auditEvent, token) =>
+            {
+                if (auditEvent.Action == AuditSchema.Actions.LoopRunLifecycle && auditEvent.Outcome == AuditSchema.Outcomes.Started)
+                {
+                    cancellation.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+            }
+        };
+
+        var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Null(result.Run.FailureCode);
+        Assert.DoesNotContain("run_start_audit_failed", result.Detail, StringComparison.Ordinal);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Conflict_after_a_provider_outcome_persists_a_needs_review_terminal_trace()
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            ConflictOnOutcomeWrite = true
+        };
+        var executor = new QueueExecutor(Result("provider outcome may exist"));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("post_outcome_persistence_conflict", result.Run.FailureCode);
+        Assert.Contains("external outcome may exist", result.Run.FailureDetail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
+        Assert.Single(executor.Requests);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Conflict_after_a_provider_outcome_preserves_a_concurrent_needs_review_trace()
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            ConflictOnOutcomeWrite = true,
+            ConcurrentNeedsReviewOnOutcomeConflict = true
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("provider outcome may exist"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("concurrent_review", result.Run.FailureCode);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
+    public async Task Conflict_after_a_provider_outcome_reports_when_the_latest_trace_disappears()
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            ConflictOnOutcomeWrite = true,
+            ReturnMissingAfterOutcomeConflict = true
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("provider outcome may exist"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Contains("latest run trace could not be found", result.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Conflict_after_a_provider_outcome_reports_uncertain_escalation_persistence()
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            ConflictOnOutcomeWrite = true,
+            GetExceptionAfterOutcomeConflict = new IOException("Unavailable.")
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("provider outcome may exist"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Contains("escalation persistence is uncertain", result.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Terminal_trace_is_durable_before_audit_and_audit_failure_preserves_Completed_output_with_a_visible_integrity_warning()
     {
         var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))));
@@ -843,9 +937,19 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Func<CustomLoopRunRecord, Task>? AfterUpdate { get; init; }
 
+        public bool ConflictOnOutcomeWrite { get; init; }
+
+        public bool ConcurrentNeedsReviewOnOutcomeConflict { get; init; }
+
+        public bool ReturnMissingAfterOutcomeConflict { get; init; }
+
+        public Exception? GetExceptionAfterOutcomeConflict { get; init; }
+
         public List<CustomLoopRunRecord> Writes { get; } = [];
 
         public List<CustomLoopValidationError> ValidationFailures { get; } = [];
+
+        private bool OutcomeConflictInjected { get; set; }
 
         public Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
         {
@@ -854,12 +958,17 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
         {
+            if (OutcomeConflictInjected && GetExceptionAfterOutcomeConflict is not null)
+            {
+                throw GetExceptionAfterOutcomeConflict;
+            }
+
             if (GetException is not null)
             {
                 throw GetException;
             }
 
-            return Task.FromResult<CustomLoopRunRecord?>(ReturnMissing ? null : Current);
+            return Task.FromResult<CustomLoopRunRecord?>(ReturnMissing || (OutcomeConflictInjected && ReturnMissingAfterOutcomeConflict) ? null : Current);
         }
 
         public Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default)
@@ -916,6 +1025,39 @@ public sealed class CustomLoopOrderedRunnerTests
         public async Task<CustomLoopRunStoreResult> UpdateAsync(CustomLoopRunRecord run, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
         {
             Assert.False(cancellationToken.IsCancellationRequested);
+            if (ConflictOnOutcomeWrite && !OutcomeConflictInjected && run.Events.Skip(Current.Events.Length).Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved))
+            {
+                OutcomeConflictInjected = true;
+                var concurrentDetail = ConcurrentNeedsReviewOnOutcomeConflict
+                    ? "A concurrent controller required review after provider dispatch."
+                    : "A concurrent controller requested pause after provider dispatch.";
+                var concurrentEvent = new CustomLoopRunEvent(Current.Events.Length + 1, "event-concurrent-control", Now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, concurrentDetail, [], null, null, null, null, null, null, null, null, null, null);
+                var concurrent = ConcurrentNeedsReviewOnOutcomeConflict
+                    ? Current with
+                    {
+                        LifecycleVersion = Current.LifecycleVersion + 1,
+                        Status = CustomLoopRunStatus.NeedsReview,
+                        UpdatedAtUtc = Now,
+                        CompletedAtUtc = Now,
+                        ExecutionClock = new CustomLoopExecutionClock(Current.ExecutionClock.AccumulatedRunningMilliseconds, null),
+                        Events = [.. Current.Events, concurrentEvent],
+                        FailureCode = "concurrent_review",
+                        FailureDetail = concurrentDetail
+                    }
+                    : Current with
+                    {
+                        LifecycleVersion = Current.LifecycleVersion + 1,
+                        Status = CustomLoopRunStatus.PauseRequested,
+                        UpdatedAtUtc = Now,
+                        Events = [.. Current.Events, concurrentEvent]
+                    };
+                var concurrentValidation = CustomLoopRunValidator.ValidateUpdate(Current, concurrent);
+                Assert.True(concurrentValidation.IsValid, string.Join(Environment.NewLine, concurrentValidation.Errors));
+                Current = concurrent;
+                Writes.Add(concurrent);
+                return CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion);
+            }
+
             if (Current.LifecycleVersion != expectedLifecycleVersion)
             {
                 return CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion);
@@ -1054,6 +1196,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Func<AuditEvent, bool>? FailPredicate { get; init; }
 
+        public Action<AuditEvent, CancellationToken>? BeforeAppend { get; init; }
+
         public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
         {
             if (FailPredicate?.Invoke(auditEvent) == true)
@@ -1061,6 +1205,7 @@ public sealed class CustomLoopOrderedRunnerTests
                 throw new IOException("Audit unavailable.");
             }
 
+            BeforeAppend?.Invoke(auditEvent, cancellationToken);
             Assert.False(cancellationToken.IsCancellationRequested);
             Events.Add(auditEvent);
             return Task.CompletedTask;

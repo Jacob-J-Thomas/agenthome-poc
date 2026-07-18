@@ -256,6 +256,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             await _auditLog.AppendAsync(audit, cancellationToken);
             return new RunAdvance(run, null);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelBeforeDispatchAsync(run, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
         catch (Exception exception)
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_start_audit_failed", $"The run-start audit could not be recorded before dispatch: {SafeExceptionClass(exception)}.");
@@ -1055,10 +1060,20 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         try
         {
             var result = await _runStore.UpdateAsync(candidate, current.LifecycleVersion, cancellationToken);
+            if (result.Status == CustomLoopRunStoreStatus.Updated && result.Run is not null)
+            {
+                return new RunAdvance(result.Run, null);
+            }
+
+            if (result.Status is CustomLoopRunStoreStatus.Conflict or CustomLoopRunStoreStatus.TerminalImmutable)
+            {
+                return outcomeMayExist
+                    ? await EscalatePostOutcomeConflictAsync(current)
+                    : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, null, "The run changed concurrently; no automatic replay was attempted."));
+            }
+
             return result.Status switch
             {
-                CustomLoopRunStoreStatus.Updated when result.Run is not null => new RunAdvance(result.Run, null),
-                CustomLoopRunStoreStatus.Conflict or CustomLoopRunStoreStatus.TerminalImmutable => new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, null, "The run changed concurrently; no automatic replay was attempted.")),
                 CustomLoopRunStoreStatus.NotFound => new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NotFound, null, "The run trace disappeared during execution.")),
                 _ => new RunAdvance(null, Result(outcomeMayExist ? CustomLoopOrderedRunStatus.NeedsReview : CustomLoopOrderedRunStatus.Failed, current, "The required run-trace update was rejected; no later attempt was started."))
             };
@@ -1068,6 +1083,70 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             var status = outcomeMayExist ? CustomLoopOrderedRunStatus.NeedsReview : CustomLoopOrderedRunStatus.Failed;
             return new RunAdvance(null, Result(status, current, $"The required run-trace update failed: {SafeExceptionClass(exception)}. No later attempt was started."));
         }
+    }
+
+    private async Task<RunAdvance> EscalatePostOutcomeConflictAsync(CustomLoopRunRecord current)
+    {
+        const string failureCode = "post_outcome_persistence_conflict";
+        const string detail = "An external outcome may exist, but its required trace update conflicted with concurrent lifecycle state. Human review is required before resume.";
+        try
+        {
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                var latest = await _runStore.GetAsync(current.Id, IntegrityToken());
+                if (latest is null)
+                {
+                    return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, current, $"{detail} The latest run trace could not be found."));
+                }
+
+                if (latest.Status == CustomLoopRunStatus.NeedsReview)
+                {
+                    return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, latest, detail));
+                }
+
+                if (latest.IsTerminal)
+                {
+                    var warning = Event(latest, Now(latest), CustomLoopRunEventKind.IntegrityWarning, detail);
+                    var warningPersisted = await _runStore.AppendTerminalIntegrityWarningAsync(latest.Id, latest.LifecycleVersion, warning, IntegrityToken());
+                    var durable = warningPersisted.Status == CustomLoopRunStoreStatus.Updated && warningPersisted.Run is not null ? warningPersisted.Run : latest;
+                    var warningDetail = warningPersisted.Status == CustomLoopRunStoreStatus.Updated
+                        ? detail
+                        : $"{detail} The concurrent terminal trace could not accept its integrity warning ({warningPersisted.Status}).";
+                    return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, durable, warningDetail));
+                }
+
+                var now = Now(latest);
+                var lifecycle = Event(latest, now, CustomLoopRunEventKind.LifecycleChanged, detail);
+                var needsReview = latest with
+                {
+                    LifecycleVersion = latest.LifecycleVersion + 1,
+                    Status = CustomLoopRunStatus.NeedsReview,
+                    UpdatedAtUtc = now,
+                    CompletedAtUtc = now,
+                    ExecutionClock = AdvanceClock(latest.ExecutionClock, now, terminal: true),
+                    Events = [.. latest.Events, lifecycle],
+                    FinalOutput = null,
+                    FailureCode = failureCode,
+                    FailureDetail = detail
+                };
+                var persisted = await _runStore.UpdateAsync(needsReview, latest.LifecycleVersion, IntegrityToken());
+                if (persisted.Status == CustomLoopRunStoreStatus.Updated && persisted.Run is not null)
+                {
+                    return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, persisted.Run, detail));
+                }
+
+                if (persisted.Status == CustomLoopRunStoreStatus.NotFound)
+                {
+                    return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, latest, $"{detail} The run trace disappeared during escalation."));
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, current, $"{detail} Escalation persistence is uncertain: {SafeExceptionClass(exception)}."));
+        }
+
+        return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, current, $"{detail} Concurrent updates prevented the bounded escalation write."));
     }
 
     private static CustomLoopRunRecord Append(CustomLoopRunRecord run, DateTimeOffset now, IReadOnlyList<CustomLoopRunEvent> events)
