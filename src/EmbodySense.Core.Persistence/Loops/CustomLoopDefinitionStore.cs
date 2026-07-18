@@ -294,6 +294,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             throw new ArgumentException("Updated custom loop definition version must be exactly one greater than the expected version.", nameof(definition));
         }
 
+        ValidateUpdateRoleBinding(mutation.PriorDefinition, definition);
         ValidateMutationRequest(mutation, CustomLoopDefinitionMutationKind.Update, definition.Id, definition.RoleId, expectedDefinitionVersion, definition, mutation.PriorDefinition);
         await _mutationGate.WaitAsync(cancellationToken);
         try
@@ -322,7 +323,9 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             }
 
             ValidateWorkspaceState(state);
-            ValidateUpdateRoleBinding(state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, definition.Id, StringComparison.Ordinal)), definition);
+            var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, definition.Id, StringComparison.Ordinal));
+            ValidateUpdateRoleBinding(current, definition);
+            ValidateMutationPriorSnapshot(current, mutation);
             return await ExecuteNewOperationAsync(mutation, definition.UpdatedAtUtc, () => ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken), cancellationToken);
         }
         finally
@@ -434,6 +437,8 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             }
 
             ValidateWorkspaceState(state);
+            var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, safeLoopId, StringComparison.Ordinal));
+            ValidateMutationPriorSnapshot(current, mutation);
             return await ExecuteNewOperationAsync(mutation, deletedAtUtc, () => ExecuteDeleteAsync(state, safeLoopId, expectedDefinitionVersion, safeOperationId, deletedAtUtc, cancellationToken), cancellationToken);
         }
         finally
@@ -856,6 +861,21 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             throw new ArgumentException("Definition mutation request metadata does not match the requested store operation.", nameof(mutation));
         }
 
+        if (mutation.PlannedDefinition is not null
+            && (!string.Equals(mutation.PlannedDefinition.Id, mutation.LoopId, StringComparison.Ordinal)
+                || !string.Equals(mutation.PlannedDefinition.RoleId, mutation.RoleId, StringComparison.Ordinal)
+                || !string.Equals(mutation.PlannedDefinition.LastMutationOperationId, mutation.OperationId, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException("A planned definition snapshot must match the mutation loop, role, and operation id.", nameof(mutation));
+        }
+
+        if (mutation.PriorDefinition is not null
+            && (!string.Equals(mutation.PriorDefinition.Id, mutation.LoopId, StringComparison.Ordinal)
+                || !string.Equals(mutation.PriorDefinition.RoleId, mutation.RoleId, StringComparison.Ordinal)))
+        {
+            throw new ArgumentException("A prior definition snapshot must match the mutation loop and role.", nameof(mutation));
+        }
+
         if (mutation.RequestedAtUtc == default || mutation.RequestedAtUtc.Offset != TimeSpan.Zero)
         {
             throw new ArgumentException("Definition mutation request timestamp must be a non-default UTC value.", nameof(mutation));
@@ -865,6 +885,14 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     private static bool OptionalDefinitionMatches(CustomLoopDefinition? left, CustomLoopDefinition? right)
     {
         return left is null && right is null || left is not null && right is not null && DefinitionSnapshotsEqual(left, right);
+    }
+
+    private static void ValidateMutationPriorSnapshot(CustomLoopDefinition? current, CustomLoopDefinitionMutationRequest mutation)
+    {
+        if (current is not null && (mutation.PriorDefinition is null || !DefinitionSnapshotsEqual(current, mutation.PriorDefinition)))
+        {
+            throw new ArgumentException("The mutation prior definition snapshot must match the currently stored definition.", nameof(mutation));
+        }
     }
 
     private static void ValidateMutationOperation(CustomLoopDefinitionMutationOperationRecord operation)

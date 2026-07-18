@@ -637,6 +637,73 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task Durable_Update_rejects_a_prior_snapshot_that_does_not_match_the_stored_definition()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var created = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, created);
+        var updated = Advance(created, "Updated", "update-mismatched-prior");
+        var unrelatedPrior = CustomLoopDefinitionContentHash.Apply(created with { DisplayName = "Unrelated prior" });
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Update, updated.LastMutationOperationId, 'a', updated.Id, updated.RoleId, 1, updated, unrelatedPrior, updated.UpdatedAtUtc);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(updated, 1, mutation));
+
+        Assert.Contains("prior definition snapshot", exception.Message, StringComparison.Ordinal);
+        AssertDefinition(created, await store.GetAsync(created.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(mutation.OperationId)).Status);
+    }
+
+    [Fact]
+    public async Task Durable_Delete_rejects_a_role_that_does_not_match_the_stored_definition()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var created = CreateDefinition("loop-alpha");
+        await CreateCommittedAsync(store, created);
+        var claimedPrior = CustomLoopDefinitionContentHash.Apply(created with { RoleId = "other-role" });
+        var deletedAtUtc = InitialTimestamp.AddMinutes(2);
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "delete-wrong-role", 'b', created.Id, claimedPrior.RoleId, 1, null, claimedPrior, deletedAtUtc);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync(created.Id, 1, mutation.OperationId, deletedAtUtc, mutation));
+
+        Assert.Contains("prior definition snapshot", exception.Message, StringComparison.Ordinal);
+        AssertDefinition(created, await store.GetAsync(created.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(mutation.OperationId)).Status);
+    }
+
+    [Fact]
+    public async Task Durable_Create_and_Update_reject_planned_snapshots_with_another_operation_id()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var created = CreateDefinition("loop-alpha");
+        var createMutation = new CustomLoopDefinitionMutationRequest(
+            CustomLoopDefinitionMutationKind.Create,
+            "different-create-operation",
+            ComputeCreateRequestHash(created.RoleId),
+            created.Id,
+            created.RoleId,
+            null,
+            created,
+            null,
+            created.CreatedAtUtc);
+
+        var createException = await Assert.ThrowsAsync<ArgumentException>(() => store.CreateAsync(created, createMutation));
+
+        await CreateCommittedAsync(store, created);
+        var updated = Advance(created, "Updated", "planned-update-operation");
+        var updateMutation = Mutation(CustomLoopDefinitionMutationKind.Update, "different-update-operation", 'c', updated.Id, updated.RoleId, 1, updated, created, updated.UpdatedAtUtc);
+        var updateException = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(updated, 1, updateMutation));
+
+        Assert.Contains("operation id", createException.Message, StringComparison.Ordinal);
+        Assert.Contains("operation id", updateException.Message, StringComparison.Ordinal);
+        AssertDefinition(created, await store.GetAsync(created.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(createMutation.OperationId)).Status);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(updateMutation.OperationId)).Status);
+    }
+
+    [Fact]
     public async Task Reparse_point_artifact_roots_are_rejected_when_the_platform_allows_links()
     {
         using var workspace = new TestWorkspace();
@@ -953,6 +1020,12 @@ public sealed class CustomLoopDefinitionStoreTests
     private static CustomLoopDefinitionMutationRequest Mutation(CustomLoopDefinitionMutationKind kind, string operationId, char hashCharacter, string loopId, string roleId, int? expectedVersion, CustomLoopDefinition? planned, CustomLoopDefinition? prior, DateTimeOffset requestedAt)
     {
         return new CustomLoopDefinitionMutationRequest(kind, operationId, new string(hashCharacter, CustomLoopLimits.Sha256HexCharacters), loopId, roleId, expectedVersion, planned, prior, requestedAt);
+    }
+
+    private static string ComputeCreateRequestHash(string roleId)
+    {
+        var canonicalRequest = "custom-loop-create\0" + roleId.Normalize();
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(canonicalRequest))).ToLowerInvariant();
     }
 
     private static async Task RewriteOperationAsPendingAsync(WorkspacePaths paths, string operationId)
