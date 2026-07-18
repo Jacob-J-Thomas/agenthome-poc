@@ -7,19 +7,3 @@ public interface ICustomLoopToolAuthorityProvider
 {
     Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default);
 }
-
-public interface ICustomLoopToolEvidenceSink
-{
-    Task RecordAsync(string runId, int iteration, string stepId, int attempt, CustomLoopToolTraceEvidence evidence, CancellationToken cancellationToken = default);
-}
-
-public sealed class CustomLoopToolEvidenceIntegrityException : Exception
-{
-    public CustomLoopToolEvidenceIntegrityException(string message) : base(message)
-    {
-    }
-
-    public CustomLoopToolEvidenceIntegrityException(string message, Exception innerException) : base(message, innerException)
-    {
-    }
-}
