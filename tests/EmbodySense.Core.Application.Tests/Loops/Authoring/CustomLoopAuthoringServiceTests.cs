@@ -36,21 +36,24 @@ public sealed class CustomLoopAuthoringServiceTests
     }
 
     [Fact]
-    public async Task List_and_get_project_the_store_without_mutation()
+    public async Task List_and_get_project_only_definitions_bound_to_the_callers_role()
     {
         var definition = Definition();
-        var store = new FakeStore(definition);
+        var otherRole = Rehash(definition with { Id = "loop-other", RoleId = "role-other" });
+        var store = new FakeStore(definition, otherRole);
         var service = Service(store);
 
-        var listed = await service.ListAsync();
-        var loaded = await service.GetAsync(definition.Id);
-        var missing = await service.GetAsync("loop-missing");
+        var listed = await service.ListAsync(definition.RoleId);
+        var loaded = await service.GetAsync(definition.Id, definition.RoleId);
+        var hidden = await service.GetAsync(otherRole.Id, definition.RoleId);
+        var missing = await service.GetAsync("loop-missing", definition.RoleId);
 
         Assert.Same(definition, Assert.Single(listed));
         Assert.Same(definition, loaded);
+        Assert.Null(hidden);
         Assert.Null(missing);
         Assert.Equal(1, store.ListCallCount);
-        Assert.Equal(2, store.GetCallCount);
+        Assert.Equal(3, store.GetCallCount);
         Assert.Equal(0, store.MutationCallCount);
     }
 
@@ -508,7 +511,7 @@ public sealed class CustomLoopAuthoringServiceTests
 
         var replay = await service.UpdateAsync(current.Id, 1, current.RoleId, "durable-update", "actor-user", versionTwoInput);
         var changed = await service.UpdateAsync(current.Id, 1, current.RoleId, "durable-update", "actor-user", versionTwoInput with { Description = "Changed request" });
-        var crossKind = await service.DeleteAsync(current.Id, versionThree.DefinitionVersion, "durable-update", "actor-user");
+        var crossKind = await service.DeleteAsync(current.Id, versionThree.DefinitionVersion, current.RoleId, "durable-update", "actor-user");
 
         Assert.Equal(CustomLoopAuthoringStatus.Replayed, replay.Status);
         Assert.Equal(versionTwo.ContentHash, replay.Definition!.ContentHash);
@@ -559,7 +562,7 @@ public sealed class CustomLoopAuthoringServiceTests
 
         var deleteCurrent = Definition();
         var deleteStore = new FakeStore(deleteCurrent);
-        var delete = await Service(deleteStore, RecordingAuditLog.FailingOnAttempt(1)).DeleteAsync(deleteCurrent.Id, deleteCurrent.DefinitionVersion, "op-delete", "actor-user");
+        var delete = await Service(deleteStore, RecordingAuditLog.FailingOnAttempt(1)).DeleteAsync(deleteCurrent.Id, deleteCurrent.DefinitionVersion, deleteCurrent.RoleId, "op-delete", "actor-user");
 
         Assert.Equal(CustomLoopAuthoringStatus.AuditUnavailable, create.Status);
         Assert.Equal(CustomLoopAuthoringStatus.AuditUnavailable, update.Status);
@@ -597,8 +600,8 @@ public sealed class CustomLoopAuthoringServiceTests
         var audit = new RecordingAuditLog();
         var service = Service(store, audit);
 
-        var deleted = await service.DeleteAsync(current.Id, current.DefinitionVersion, "op-delete", "actor-user");
-        var replayed = await service.DeleteAsync(current.Id, current.DefinitionVersion, "op-delete", "actor-user");
+        var deleted = await service.DeleteAsync(current.Id, current.DefinitionVersion, current.RoleId, "op-delete", "actor-user");
+        var replayed = await service.DeleteAsync(current.Id, current.DefinitionVersion, current.RoleId, "op-delete", "actor-user");
 
         Assert.Equal(CustomLoopAuthoringStatus.Deleted, deleted.Status);
         Assert.True(deleted.IsCommitted);
@@ -619,16 +622,38 @@ public sealed class CustomLoopAuthoringServiceTests
     public async Task Delete_maps_not_found_and_version_conflict_store_results()
     {
         var missingStore = new FakeStore { DeleteResult = CustomLoopDefinitionStoreResult.NotFound() };
-        var missing = await Service(missingStore).DeleteAsync("loop-missing", 1, "op-delete", "actor-user");
+        var missing = await Service(missingStore).DeleteAsync("loop-missing", 1, "role-workspace", "op-delete", "actor-user");
 
         var current = Definition(version: 2);
-        var conflictStore = new FakeStore(current) { DeleteResult = CustomLoopDefinitionStoreResult.VersionConflict(current, expectedDefinitionVersion: 1) };
-        var conflict = await Service(conflictStore).DeleteAsync(current.Id, 1, "op-delete", "actor-user");
+        var conflictStore = new FakeStore(current)
+        {
+            DeleteResult = CustomLoopDefinitionStoreResult.VersionConflict(current, expectedDefinitionVersion: 1),
+            AuditMarkResult = CustomLoopOperationAuditMarkStatus.NotFound
+        };
+        var conflict = await Service(conflictStore).DeleteAsync(current.Id, 1, current.RoleId, "op-delete", "actor-user");
 
         Assert.Equal(CustomLoopAuthoringStatus.NotFound, missing.Status);
         Assert.Equal(CustomLoopAuthoringStatus.Conflict, conflict.Status);
+        Assert.False(conflict.IsCommitted);
         Assert.Equal(1, conflict.Conflict?.ExpectedDefinitionVersion);
         Assert.Equal(2, conflict.Conflict?.ActualDefinitionVersion);
+    }
+
+    [Fact]
+    public async Task Delete_rejects_a_role_binding_mismatch_before_run_checks_audit_or_storage()
+    {
+        var current = Definition();
+        var store = new FakeStore(current);
+        var audit = new RecordingAuditLog();
+        var service = Service(store, audit);
+
+        var result = await service.DeleteAsync(current.Id, current.DefinitionVersion, "role-other", "op-delete", "actor-user");
+
+        Assert.Equal(CustomLoopAuthoringStatus.Invalid, result.Status);
+        Assert.Contains(result.ValidationErrors, error => error.Code == "role_binding_mismatch");
+        Assert.Equal(0, store.DeleteCallCount);
+        Assert.Single(audit.Events);
+        Assert.Equal(AuditSchema.Outcomes.Rejected, audit.Events[0].Outcome);
     }
 
     [Fact]

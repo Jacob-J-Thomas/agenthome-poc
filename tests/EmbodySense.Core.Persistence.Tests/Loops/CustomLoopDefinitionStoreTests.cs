@@ -781,6 +781,33 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task Pending_Delete_recovers_after_tombstone_write_before_live_definition_removal()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-interrupted-delete");
+        await CreateCommittedAsync(store, definition);
+        var definitionPath = Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json");
+        var definitionJson = await File.ReadAllTextAsync(definitionPath);
+        var deletedAt = InitialTimestamp.AddMinutes(2);
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "delete-interrupted", 'd', definition.Id, definition.RoleId, 1, null, definition, deletedAt);
+        await store.DeleteAsync(definition.Id, 1, mutation.OperationId, deletedAt, mutation);
+        await RewriteOperationAsPendingAsync(paths, mutation.OperationId);
+        await File.WriteAllTextAsync(definitionPath, definitionJson);
+
+        var restarted = new CustomLoopDefinitionStore(paths);
+        var pending = await restarted.GetMutationOperationAsync(mutation.OperationId);
+        var recovered = await restarted.DeleteAsync(definition.Id, 1, mutation.OperationId, deletedAt, mutation);
+        await restarted.MarkOperationOutcomeAuditedAsync(mutation.OperationId);
+
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, pending.Status);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Deleted, recovered.Status);
+        AssertDefinition(definition, recovered.Definition);
+        Assert.Null(await restarted.GetAsync(definition.Id));
+    }
+
+    [Fact]
     public async Task Pending_Update_and_Delete_receipts_recover_deterministically_after_a_simulated_restart()
     {
         using var updateWorkspace = new TestWorkspace();

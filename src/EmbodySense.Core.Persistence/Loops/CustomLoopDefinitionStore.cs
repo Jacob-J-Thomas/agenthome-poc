@@ -97,8 +97,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                     var recovered = HasDefinitionSnapshot(state, original)
                         ? CustomLoopDefinitionStoreResult.Created(original, CustomLoopOperationIntegrity.PendingOutcomeAudit)
                         : await ExecuteCreateAsync(state, original, cancellationToken);
-                    existingOperation = CompleteOperation(existingOperation, recovered, existingOperation.UpdatedAtUtc);
-                    await WriteOperationAsync(existingOperation, cancellationToken);
+                    existingOperation = await CompleteAndWriteOperationAsync(existingOperation, recovered, existingOperation.UpdatedAtUtc, cancellationToken);
                 }
 
                 var replay = existingOperation.ToPublic().ToStoreResult();
@@ -149,12 +148,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 return CustomLoopDefinitionStoreResult.LimitExceeded();
             }
 
-            var operation = CreatePendingOperation(mutation, originalDefinition: definition);
-            await WriteOperationAsync(operation, cancellationToken);
-            var storeResult = await ExecuteCreateAsync(state, definition, cancellationToken);
-            operation = CompleteOperation(operation, storeResult, definition.CreatedAtUtc);
-            await WriteOperationAsync(operation, cancellationToken);
-            return operation.ToPublic().ToStoreResult();
+            return await ExecuteNewOperationAsync(
+                mutation,
+                definition.CreatedAtUtc,
+                () => ExecuteCreateAsync(state, definition, cancellationToken),
+                cancellationToken,
+                originalDefinition: definition);
         }
         finally
         {
@@ -325,20 +324,14 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                     var recovered = HasDefinitionSnapshot(state, planned)
                         ? CustomLoopDefinitionStoreResult.Updated(planned)
                         : await ExecuteUpdateAsync(state, planned, existingOperation.ExpectedDefinitionVersion!.Value, cancellationToken);
-                    existingOperation = CompleteOperation(existingOperation, recovered, planned.UpdatedAtUtc);
-                    await WriteOperationAsync(existingOperation, cancellationToken);
+                    existingOperation = await CompleteAndWriteOperationAsync(existingOperation, recovered, planned.UpdatedAtUtc, cancellationToken);
                 }
 
                 return existingOperation.ToPublic().ToStoreResult();
             }
 
             ValidateWorkspaceState(state);
-            var operation = CreatePendingOperation(mutation);
-            await WriteOperationAsync(operation, cancellationToken);
-            var result = await ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken);
-            operation = CompleteOperation(operation, result, definition.UpdatedAtUtc);
-            await WriteOperationAsync(operation, cancellationToken);
-            return operation.ToPublic().ToStoreResult();
+            return await ExecuteNewOperationAsync(mutation, definition.UpdatedAtUtc, () => ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken), cancellationToken);
         }
         finally
         {
@@ -441,26 +434,15 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
                 if (existingOperation.State == CustomLoopDefinitionMutationState.PendingMutation)
                 {
-                    var matchingTombstone = state.Tombstones.SingleOrDefault(candidate => string.Equals(candidate.LoopId, safeLoopId, StringComparison.Ordinal)
-                        && candidate.LastDefinitionVersion == expectedDefinitionVersion
-                        && string.Equals(candidate.MutationOperationId, safeOperationId, StringComparison.Ordinal));
-                    var recovered = matchingTombstone is not null
-                        ? CustomLoopDefinitionStoreResult.Deleted(existingOperation.PriorDefinition!, matchingTombstone)
-                        : await ExecuteDeleteAsync(state, safeLoopId, expectedDefinitionVersion, safeOperationId, deletedAtUtc, cancellationToken);
-                    existingOperation = CompleteOperation(existingOperation, recovered, deletedAtUtc);
-                    await WriteOperationAsync(existingOperation, cancellationToken);
+                    var recovered = await RecoverPendingDeleteAsync(state, existingOperation, safeLoopId, expectedDefinitionVersion, safeOperationId, deletedAtUtc, cancellationToken);
+                    existingOperation = await CompleteAndWriteOperationAsync(existingOperation, recovered, deletedAtUtc, cancellationToken);
                 }
 
                 return existingOperation.ToPublic().ToStoreResult();
             }
 
             ValidateWorkspaceState(state);
-            var operation = CreatePendingOperation(mutation);
-            await WriteOperationAsync(operation, cancellationToken);
-            var result = await ExecuteDeleteAsync(state, safeLoopId, expectedDefinitionVersion, safeOperationId, deletedAtUtc, cancellationToken);
-            operation = CompleteOperation(operation, result, deletedAtUtc);
-            await WriteOperationAsync(operation, cancellationToken);
-            return operation.ToPublic().ToStoreResult();
+            return await ExecuteNewOperationAsync(mutation, deletedAtUtc, () => ExecuteDeleteAsync(state, safeLoopId, expectedDefinitionVersion, safeOperationId, deletedAtUtc, cancellationToken), cancellationToken);
         }
         finally
         {
@@ -641,6 +623,31 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         await WriteJsonAsync(_paths.CustomLoopDefinitionOperationsPath, GetOperationPath(operation.OperationId), operation, cancellationToken);
     }
 
+    private async Task<CustomLoopDefinitionStoreResult> ExecuteNewOperationAsync(
+        CustomLoopDefinitionMutationRequest mutation,
+        DateTimeOffset completedAtUtc,
+        Func<Task<CustomLoopDefinitionStoreResult>> executeAsync,
+        CancellationToken cancellationToken,
+        CustomLoopDefinition? originalDefinition = null)
+    {
+        var operation = CreatePendingOperation(mutation, originalDefinition);
+        await WriteOperationAsync(operation, cancellationToken);
+        var result = await executeAsync();
+        operation = await CompleteAndWriteOperationAsync(operation, result, completedAtUtc, cancellationToken);
+        return operation.ToPublic().ToStoreResult();
+    }
+
+    private async Task<CustomLoopDefinitionMutationOperationRecord> CompleteAndWriteOperationAsync(
+        CustomLoopDefinitionMutationOperationRecord operation,
+        CustomLoopDefinitionStoreResult result,
+        DateTimeOffset completedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var completed = CompleteOperation(operation, result, completedAtUtc);
+        await WriteOperationAsync(completed, cancellationToken);
+        return completed;
+    }
+
     private static CustomLoopDefinitionMutationOperationRecord CreatePendingOperation(CustomLoopDefinitionMutationRequest mutation, CustomLoopDefinition? originalDefinition = null)
     {
         return new CustomLoopDefinitionMutationOperationRecord(
@@ -723,7 +730,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
         foreach (var definition in state.Definitions)
         {
-            if (tombstones.ContainsKey(definition.Id))
+            if (tombstones.TryGetValue(definition.Id, out var tombstone) && !IsRecoverablePendingDeleteState(definition, tombstone, operations, allowedPendingOperationId))
             {
                 throw new FormatException($"Custom loop `{definition.Id}` has both a live definition and a deletion tombstone. The persisted state requires review.");
             }
@@ -787,6 +794,31 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
 
         return result;
+    }
+
+    private static bool IsRecoverablePendingDeleteState(
+        CustomLoopDefinition definition,
+        CustomLoopDefinitionTombstone tombstone,
+        IReadOnlyDictionary<string, CustomLoopDefinitionMutationOperationRecord> operations,
+        string? allowedPendingOperationId)
+    {
+        if (allowedPendingOperationId is null || !operations.TryGetValue(allowedPendingOperationId, out var operation))
+        {
+            return false;
+        }
+
+        return operation.Kind == CustomLoopDefinitionMutationKind.Delete
+            && operation.State == CustomLoopDefinitionMutationState.PendingMutation
+            && !operation.OutcomeAuditRecorded
+            && string.Equals(operation.LoopId, definition.Id, StringComparison.Ordinal)
+            && operation.ExpectedDefinitionVersion == definition.DefinitionVersion
+            && operation.PriorDefinition is not null
+            && DefinitionSnapshotsEqual(operation.PriorDefinition, definition)
+            && string.Equals(tombstone.LoopId, definition.Id, StringComparison.Ordinal)
+            && tombstone.LastDefinitionVersion == definition.DefinitionVersion
+            && string.Equals(tombstone.LastContentHash, definition.ContentHash, StringComparison.Ordinal)
+            && string.Equals(tombstone.MutationOperationId, operation.OperationId, StringComparison.Ordinal)
+            && tombstone.DeletedAtUtc == operation.UpdatedAtUtc;
     }
 
     private static void ValidateMutationRequest(
@@ -1028,6 +1060,40 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         await WriteJsonAsync(_paths.CustomLoopDefinitionTombstonesPath, GetTombstonePath(loopId), tombstone, cancellationToken);
         _pathGuard.DeleteFile(_paths.CustomLoopDefinitionsPath, GetDefinitionPath(loopId));
         return CustomLoopDefinitionStoreResult.Deleted(current, tombstone);
+    }
+
+    private async Task<CustomLoopDefinitionStoreResult> RecoverPendingDeleteAsync(
+        WorkspaceState state,
+        CustomLoopDefinitionMutationOperationRecord operation,
+        string loopId,
+        int expectedDefinitionVersion,
+        string operationId,
+        DateTimeOffset deletedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var prior = operation.PriorDefinition ?? throw new FormatException($"Delete operation `{operationId}` is missing its prior definition snapshot.");
+        var matchingTombstone = state.Tombstones.SingleOrDefault(candidate => string.Equals(candidate.LoopId, loopId, StringComparison.Ordinal)
+            && candidate.LastDefinitionVersion == expectedDefinitionVersion
+            && string.Equals(candidate.LastContentHash, prior.ContentHash, StringComparison.Ordinal)
+            && string.Equals(candidate.MutationOperationId, operationId, StringComparison.Ordinal)
+            && candidate.DeletedAtUtc == deletedAtUtc);
+        if (matchingTombstone is null)
+        {
+            return await ExecuteDeleteAsync(state, loopId, expectedDefinitionVersion, operationId, deletedAtUtc, cancellationToken);
+        }
+
+        var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, loopId, StringComparison.Ordinal));
+        if (current is not null)
+        {
+            if (!DefinitionSnapshotsEqual(current, prior))
+            {
+                throw new FormatException($"Delete operation `{operationId}` cannot recover because the live definition no longer matches its prior snapshot.");
+            }
+
+            _pathGuard.DeleteFile(_paths.CustomLoopDefinitionsPath, GetDefinitionPath(loopId));
+        }
+
+        return CustomLoopDefinitionStoreResult.Deleted(prior, matchingTombstone);
     }
 
     private static void ValidateCanonicalDefinition(CustomLoopDefinition? definition)
