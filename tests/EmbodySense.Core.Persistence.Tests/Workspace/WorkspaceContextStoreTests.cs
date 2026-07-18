@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Context;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Workspace;
 using EmbodySense.Tests.Support;
@@ -23,6 +24,12 @@ public sealed class WorkspaceContextStoreTests
         Assert.Contains(documents, document => document.DisplayPath == ".agent/SOUL.md" && document.Content == "stable purpose");
         Assert.Contains(documents, document => document.DisplayPath == ".agent/PERSONALITY.md" && document.Content == "interaction style");
         Assert.Contains(documents, document => document.DisplayPath == ".agent/MEMORY.md" && document.Content == "memory note");
+        Assert.Equal(7, documents.Count);
+        Assert.Equal(["nearest-agents", "agent", "soul", "personality", "context", "memory", "models"], documents.Select(document => document.SourceId));
+        Assert.All(documents.Take(4), document => Assert.Equal(WorkspaceContextDocumentKind.RoleInstruction, document.Kind));
+        Assert.All(documents.Skip(4), document => Assert.Equal(WorkspaceContextDocumentKind.ContextualState, document.Kind));
+        Assert.All(documents, document => Assert.True(Path.IsPathFullyQualified(document.ExactPath)));
+        Assert.All(documents.Where(document => document.Content.Length == 0), document => Assert.NotNull(document.OmissionReason));
     }
 
     [Fact]
@@ -34,9 +41,13 @@ public sealed class WorkspaceContextStoreTests
 
         var documents = await new WorkspaceContextStore().LoadDocumentsAsync(paths);
 
-        var document = Assert.Single(documents);
+        var document = documents[0];
         Assert.Equal("AGENTS.md", document.DisplayPath);
         Assert.Equal("repo guide", document.Content);
+        Assert.Equal("nearest-agents", document.SourceId);
+        Assert.Equal(WorkspaceContextDocumentKind.RoleInstruction, document.Kind);
+        Assert.Equal("repo guide".Length, document.OriginalCharacterCount);
+        Assert.Null(document.OmissionReason);
     }
 
     [Fact]
@@ -49,7 +60,7 @@ public sealed class WorkspaceContextStoreTests
 
         var documents = await new WorkspaceContextStore().LoadDocumentsAsync(paths);
 
-        var document = Assert.Single(documents);
+        var document = documents[0];
         Assert.Equal("../AGENTS.md", document.DisplayPath);
         Assert.Equal("parent guide", document.Content);
     }
@@ -65,7 +76,7 @@ public sealed class WorkspaceContextStoreTests
 
         var documents = await new WorkspaceContextStore().LoadDocumentsAsync(paths);
 
-        var document = Assert.Single(documents);
+        var document = documents[0];
         Assert.Equal("workspace guide", document.Content);
     }
 }

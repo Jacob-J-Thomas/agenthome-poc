@@ -39,7 +39,23 @@ public sealed class WorkspacePaths
 
     public string LoopDefinitionsPath => Path.Combine(LoopsPath, "definitions");
 
+    public string CustomLoopDefinitionsPath => Path.Combine(LoopDefinitionsPath, "custom");
+
+    public string CustomLoopDefinitionTombstonesPath => Path.Combine(LoopDefinitionsPath, "custom-tombstones");
+
+    public string CustomLoopDefinitionOperationsPath => Path.Combine(LoopDefinitionsPath, "custom-create-operations");
+
     public string LoopRunsPath => Path.Combine(LoopsPath, "runs");
+
+    public string CustomLoopRunsPath => Path.Combine(LoopRunsPath, "custom");
+
+    public string CustomLoopControlOperationsPath => Path.Combine(LoopRunsPath, "custom-control-operations");
+
+    public string CustomLoopInvocationOperationsPath => Path.Combine(LoopRunsPath, "custom-invocation-operations");
+
+    public string CustomLoopTraceDeletionOperationsPath => Path.Combine(LoopRunsPath, "custom-trace-deletion-operations");
+
+    public string CustomLoopHostLockPath => Path.Combine(LoopRunsPath, ".custom-workspace-host.lock");
 
     public string DefaultConversationLoopDefinitionPath => Path.Combine(LoopDefinitionsPath, "default-conversation.json");
 

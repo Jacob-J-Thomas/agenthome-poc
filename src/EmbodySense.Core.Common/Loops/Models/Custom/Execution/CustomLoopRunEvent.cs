@@ -1,0 +1,25 @@
+namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+
+public sealed record CustomLoopRunEvent(
+    long Sequence,
+    string EventId,
+    DateTimeOffset TimestampUtc,
+    CustomLoopRunEventKind Kind,
+    int? Iteration,
+    string? StepId,
+    int? Attempt,
+    string Detail,
+    CustomLoopContextBlock[] ContextBlocks,
+    string? CanonicalOutput,
+    int? OriginalOutputCharacterCount,
+    bool? CanonicalOutputTruncated,
+    bool? RetainedForLoopReasoning,
+    bool? PublishedToInvokingConversation,
+    string? ConversationPublicationId,
+    string? Provider,
+    string? Model,
+    string? ProviderResponseId,
+    CustomLoopExitDecision? ExitDecision,
+    CustomLoopToolAuthoritySnapshot? ToolAuthority = null,
+    CustomLoopToolTraceEvidence? ToolEvidence = null,
+    int? TraceReservationUtf8Bytes = null);

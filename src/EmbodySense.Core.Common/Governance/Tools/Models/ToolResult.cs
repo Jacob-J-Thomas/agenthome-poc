@@ -5,7 +5,8 @@ public sealed record ToolResult(
     string OutputText,
     string RequestId,
     string ResolvedPath,
-    ToolRequest Request)
+    ToolRequest Request,
+    ToolGovernanceEvidence? Governance = null)
 {
     public bool Succeeded => Outcome == ToolExecutionOutcome.Succeeded;
 }

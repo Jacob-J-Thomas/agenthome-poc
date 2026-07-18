@@ -18,27 +18,17 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
     public string CreateDeveloperInstructions(LlmInferenceRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-
-        var builder = new StringBuilder();
-        builder.AppendLine("""
-            You are running inside EmbodySense through the Codex app-server protocol.
-
-            EmbodySense governs the user workspace. Do not use Codex-native shell, filesystem, MCP, browser, web-search, subagent, or permission-escalation tools for workspace actions. The app-server working directory is an inert runtime directory, not the user workspace.
-            """);
-
-        if (_availableToolCommands.Count == 0)
+        if (request.InstructionContext is null)
         {
-            builder.AppendLine();
-            builder.AppendLine("The active EmbodySense loop has not assigned any workspace command capabilities to this turn. Do not perform workspace actions, and do not claim a workspace action succeeded.");
-        }
-        else
-        {
-            builder.AppendLine();
-            builder.AppendLine($"The active EmbodySense loop assigned these workspace command capabilities to this turn: {string.Join(", ", _availableToolCommands.Select(ToolCommandFormatter.Format))}.");
-            builder.AppendLine("For assigned workspace actions, use only the `embodysense.command` dynamic tool. It enforces loop capability filtering, `.agent/permissions.json`, approval routing, and audit logging. Do not request unassigned workspace commands, and do not claim a workspace action succeeded until the corresponding EmbodySense tool result says it succeeded.");
+            return EmbodySenseDeveloperInstructions.Create(_availableToolCommands);
         }
 
-        return builder.ToString().TrimEnd();
+        if (!EmbodySenseDeveloperInstructions.Matches(request.InstructionContext.Governance, _availableToolCommands))
+        {
+            throw new InvalidOperationException("The request's fixed EmbodySense developer-governance snapshot does not match the current provider tool exposure.");
+        }
+
+        return EmbodySenseDeveloperInstructions.Compose(request.InstructionContext.Governance, request.InstructionContext.TrustedInstructions);
     }
 
     public string CreateTurnInput(LlmInferenceRequest request)
@@ -52,7 +42,10 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
         }
 
         var latestUserMessage = request.Messages[latestUserIndex];
-        var restoredContext = FormatRestoredContext(request.Messages.Take(latestUserIndex).ToArray());
+        var restoredMessages = request.Messages.Take(latestUserIndex).ToArray();
+        var restoredContext = request.InstructionContext?.PreserveExactLogicalContext == true
+            ? FormatExactLogicalContext(restoredMessages)
+            : FormatRestoredContext(restoredMessages);
         if (string.IsNullOrWhiteSpace(restoredContext))
         {
             return latestUserMessage.Content;
@@ -65,6 +58,24 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
         builder.AppendLine();
         builder.AppendLine("Current user message:");
         builder.AppendLine(latestUserMessage.Content.Trim());
+        return builder.ToString().TrimEnd();
+    }
+
+    private static string FormatExactLogicalContext(IReadOnlyList<LlmMessage> messages)
+    {
+        if (messages.Count == 0)
+        {
+            return "";
+        }
+
+        var builder = new StringBuilder();
+        foreach (var message in messages)
+        {
+            builder.AppendLine($"[restored {message.Role.ToString().ToLowerInvariant()} message]");
+            builder.AppendLine(message.Content);
+            builder.AppendLine($"[/restored {message.Role.ToString().ToLowerInvariant()} message]");
+        }
+
         return builder.ToString().TrimEnd();
     }
 

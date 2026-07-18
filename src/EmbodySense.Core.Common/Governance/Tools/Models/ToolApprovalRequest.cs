@@ -7,4 +7,5 @@ public sealed record ToolApprovalRequest(
     ToolRequest ToolRequest,
     string ResolvedPath,
     FileSystemOperation Operation,
-    PermissionEvaluation PermissionEvaluation);
+    PermissionEvaluation PermissionEvaluation,
+    string? PermissionPolicyHash = null);

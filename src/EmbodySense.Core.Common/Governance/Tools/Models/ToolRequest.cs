@@ -5,4 +5,5 @@ public sealed record ToolRequest(
     string TargetPath,
     string? Content = null,
     string? Pattern = null,
-    string? CorrelationId = null);
+    string? CorrelationId = null,
+    ToolAuditCorrelation? AuditCorrelation = null);

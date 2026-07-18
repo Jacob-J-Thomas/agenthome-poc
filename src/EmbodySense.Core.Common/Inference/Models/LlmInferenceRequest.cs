@@ -2,7 +2,10 @@ namespace EmbodySense.Core.Common.Inference.Models;
 
 public sealed record LlmInferenceRequest
 {
-    public LlmInferenceRequest(IReadOnlyList<LlmMessage> messages, LlmInferenceOptions? options = null)
+    public LlmInferenceRequest(
+        IReadOnlyList<LlmMessage> messages,
+        LlmInferenceOptions? options = null,
+        LlmInferenceInstructionContext? instructionContext = null)
     {
         ArgumentNullException.ThrowIfNull(messages);
 
@@ -15,11 +18,14 @@ public sealed record LlmInferenceRequest
 
         Messages = messages.ToArray();
         Options = options ?? LlmInferenceOptions.Default;
+        InstructionContext = instructionContext;
     }
 
     public IReadOnlyList<LlmMessage> Messages { get; }
 
     public LlmInferenceOptions Options { get; }
+
+    public LlmInferenceInstructionContext? InstructionContext { get; }
 
     public static LlmInferenceRequest FromUserText(string text, LlmInferenceOptions? options = null)
     {
