@@ -412,6 +412,26 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
     }
 
+    [Fact]
+    public async Task Null_publication_result_is_recorded_as_uncertain_and_requires_review()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            maxAdditionalIterations: 0,
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var store = new FakeRunStore(run);
+        var publisher = new RecordingPublisher { ReturnNull = true };
+
+        var result = await Runner(store, new QueueExecutor(Result("evidence")), publisher).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("conversation_publication_uncertain", result.Run!.FailureCode);
+        var publication = Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+        Assert.False(publication.PublishedToInvokingConversation);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
+    }
+
     [Theory]
     [InlineData("different-provider", "model", 0)]
     [InlineData("provider", "different-model", 0)]
@@ -584,6 +604,62 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Caller_cancellation_during_the_attempt_start_audit_cancels_without_provider_dispatch()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(Result("must not run"));
+        var audit = new RecordingAuditLog
+        {
+            BeforeAppend = (auditEvent, token) =>
+            {
+                if (auditEvent.Action == AuditSchema.Actions.LoopNodeAttempt && auditEvent.Outcome == AuditSchema.Outcomes.Started)
+                {
+                    cancellation.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+            }
+        };
+
+        var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Null(result.Run.FailureCode);
+        Assert.DoesNotContain("attempt_start_audit_failed", result.Detail, StringComparison.Ordinal);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_the_Exit_start_audit_cancels_without_Exit_dispatch()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var definition = Definition(maxAdditionalIterations: 1, exitPolicy: Policy(Output(false, false)));
+        var store = new FakeRunStore(Run(definition));
+        var executor = new QueueExecutor(Result("iteration outcome"), Result("must not run"));
+        var audit = new RecordingAuditLog
+        {
+            BeforeAppend = (auditEvent, token) =>
+            {
+                if (auditEvent.Action == AuditSchema.Actions.LoopExitDecision && auditEvent.Outcome == AuditSchema.Outcomes.Started)
+                {
+                    cancellation.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+            }
+        };
+
+        var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Null(result.Run.FailureCode);
+        Assert.DoesNotContain("exit_start_audit_failed", result.Detail, StringComparison.Ordinal);
+        Assert.Single(executor.Requests);
+        Assert.False(executor.Requests[0].IsExit);
+    }
+
+    [Fact]
     public async Task Durable_cancel_between_attempt_audit_and_registration_prevents_provider_dispatch()
     {
         var store = new FakeRunStore(Run(Definition()));
@@ -606,6 +682,36 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Durable_cancel_after_outcome_audit_prevents_conversation_publication()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            exitPolicy: Policy(Output(false, false)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var executor = new QueueExecutor(Result("observed outcome"));
+        var publisher = new RecordingPublisher();
+        var audit = new RecordingAuditLog();
+        var runner = Runner(store, executor, publisher, audit);
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        CustomLoopControlResult? cancel = null;
+        audit.AfterAppend = async auditEvent =>
+        {
+            if (auditEvent.Action == AuditSchema.Actions.LoopNodeAttempt && auditEvent.Outcome == AuditSchema.Outcomes.Succeeded)
+            {
+                cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-before-publication", AuditSchema.Actors.Web));
+            }
+        };
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.CancelRequested, cancel!.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(publisher.Requests);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublicationStarted);
     }
 
     [Fact]
@@ -1221,6 +1327,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public CustomLoopConversationPublicationResult NextResult { get; set; } = new(CustomLoopConversationPublicationOutcome.Published, "publication-one", "Published.");
 
+        public bool ReturnNull { get; set; }
+
         public async Task<CustomLoopConversationPublicationResult> PublishAsync(CustomLoopConversationPublicationRequest request, CancellationToken cancellationToken = default)
         {
             Assert.False(cancellationToken.IsCancellationRequested);
@@ -1230,7 +1338,7 @@ public sealed class CustomLoopOrderedRunnerTests
                 await BeforePublish(request);
             }
 
-            return NextResult;
+            return ReturnNull ? null! : NextResult;
         }
     }
 

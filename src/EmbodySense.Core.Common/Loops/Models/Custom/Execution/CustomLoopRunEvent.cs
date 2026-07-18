@@ -22,4 +22,5 @@ public sealed record CustomLoopRunEvent(
     CustomLoopExitDecision? ExitDecision,
     CustomLoopToolAuthoritySnapshot? ToolAuthority = null,
     CustomLoopToolTraceEvidence? ToolEvidence = null,
-    int? TraceReservationUtf8Bytes = null);
+    int? TraceReservationUtf8Bytes = null,
+    int? ControlExpectedLifecycleVersion = null);

@@ -313,6 +313,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         {
             await _auditLog.AppendAsync(AttemptAudit(actor, run, step.Id, iteration, correlation, assembly, AuditSchema.Actions.LoopNodeAttempt, AuditSchema.Outcomes.Started, null, null), cancellationToken);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelBeforeDispatchAsync(run, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
         catch (Exception exception)
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "attempt_start_audit_failed", $"The attempt-start audit could not be recorded before dispatch: {SafeExceptionClass(exception)}.");
@@ -412,6 +417,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(terminal.Run, terminal);
         }
 
+        var publicationBoundary = await RefreshControlUpdateAsync(run);
+        if (publicationBoundary.Terminal is not null)
+        {
+            return publicationBoundary;
+        }
+
+        run = publicationBoundary.Run!;
         var published = run.Status == CustomLoopRunStatus.CancelRequested
             ? new RunAdvance(run, null)
             : await PublishIfSelectedAsync(run, assembly.ResolvedOutputPolicy, retained, step.Id, actor);
@@ -470,6 +482,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         try
         {
             await _auditLog.AppendAsync(AttemptAudit(actor, run, "exit", iteration, correlation, assembly, AuditSchema.Actions.LoopExitDecision, AuditSchema.Outcomes.Started, null, null), cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelBeforeDispatchAsync(run, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
         }
         catch (Exception exception)
         {
@@ -745,6 +762,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         {
             publication = new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Uncertain, null, $"Publisher threw {SafeExceptionClass(exception)} after publication may have occurred.");
         }
+
+        publication ??= new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Uncertain, null, "Publisher returned no result after publication may have occurred.");
 
         var isPublished = publication.Outcome is CustomLoopConversationPublicationOutcome.Published or CustomLoopConversationPublicationOutcome.AlreadyPublished;
         var publicationId = publication.PublicationId ?? operationId;

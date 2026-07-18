@@ -144,13 +144,9 @@ public sealed class CustomLoopLifecycleService
         var matchingEvent = run.Events.FirstOrDefault(item => string.Equals(item.EventId, operationId, StringComparison.Ordinal));
         if (matchingEvent is { Kind: CustomLoopRunEventKind.LifecycleChanged })
         {
-            // One persisted version can append multiple trace events, while a control transition advances both by one.
-            // The stable offset maps the requested successor version to its actual event sequence.
-            var traceVersionOffset = run.Events.LongLength - run.LifecycleVersion;
-            var expectedSuccessorSequence = (long)operation.ExpectedLifecycleVersion + 1 + traceVersionOffset;
-            if (!isPendingReplay || matchingEvent.Sequence != expectedSuccessorSequence)
+            if (!isPendingReplay || matchingEvent.ControlExpectedLifecycleVersion != operation.ExpectedLifecycleVersion)
             {
-                return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, "The operation id collides with a lifecycle event that is not the expected successor for this pending control receipt.");
+                return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, "The operation id collides with a lifecycle event that is not the transition owned by this pending control receipt.");
             }
 
             return await RecoverPendingReceiptAsync(operation, run);
@@ -565,7 +561,7 @@ public sealed class CustomLoopLifecycleService
             _ when isTerminal => StopClock(run.ExecutionClock, now),
             _ => run.ExecutionClock
         };
-        var lifecycle = new CustomLoopRunEvent(run.Events.Length + 1, eventId, now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, detail, [], null, null, null, null, null, null, null, null, null, null);
+        var lifecycle = new CustomLoopRunEvent(run.Events.Length + 1, eventId, now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, detail, [], null, null, null, null, null, null, null, null, null, null, ControlExpectedLifecycleVersion: run.LifecycleVersion);
         return run with
         {
             LifecycleVersion = run.LifecycleVersion + 1,
