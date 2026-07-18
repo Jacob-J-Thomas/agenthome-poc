@@ -440,7 +440,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = observedPersisted.Run!;
-        var integrityError = ValidateProviderResult(run, result);
+        var integrityError = ValidateProviderResult(run, result, iteration, step.Id, 1, out var durableToolRequestsConsumed);
         try
         {
             var outcome = integrityError is null ? AuditSchema.Outcomes.Succeeded : AuditSchema.Outcomes.NeedsReview;
@@ -482,7 +482,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             PendingExitDecision = nextStepIndex == run.AdmittedDefinition.InferenceSteps.Length && run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations > run.Checkpoint.AcceptedRepeatCount,
             EarlierRetainedOutputs = earlier,
             CurrentIterationResult = retained,
-            ToolRequestsUsed = checked(run.Checkpoint.ToolRequestsUsed + result.ToolRequestsConsumed)
+            ToolRequestsUsed = checked(run.Checkpoint.ToolRequestsUsed + durableToolRequestsConsumed)
         };
         return await CommitCheckpointAsync(run, checkpoint, $"Inference checkpoint committed after `{step.Id}`.");
     }
@@ -639,8 +639,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = observedPersisted.Run!;
-        var integrityError = ValidateProviderResult(run, result);
-        if (integrityError is null && result.ToolRequestsConsumed != 0)
+        var integrityError = ValidateProviderResult(run, result, iteration, "exit", 1, out var durableToolRequestsConsumed);
+        if (integrityError is null && durableToolRequestsConsumed != 0)
         {
             integrityError = "The tool-less Exit attempt reported a governed tool call and cannot be trusted.";
         }
@@ -1444,8 +1444,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         };
     }
 
-    private static string? ValidateProviderResult(CustomLoopRunRecord run, CustomLoopInferenceAttemptResult result)
+    private static string? ValidateProviderResult(CustomLoopRunRecord run, CustomLoopInferenceAttemptResult result, int iteration, string stepId, int attempt, out int durableToolRequestsConsumed)
     {
+        durableToolRequestsConsumed = 0;
         if (result is null)
         {
             return "The provider executor returned no result after dispatch.";
@@ -1456,9 +1457,54 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return "The provider/model result does not match the immutable admitted model snapshot.";
         }
 
-        if (result.ToolRequestsConsumed < 0 || result.ToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt || run.Checkpoint.ToolRequestsUsed + result.ToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)
+        if (result.ToolRequestsConsumed < 0 || result.ToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt)
         {
-            return "The provider result reported a governed tool-call count outside the admitted run budget.";
+            return "The provider result reported a governed tool-call count outside the admitted per-attempt budget.";
+        }
+
+        var toolEvents = run.Events
+            .Where(item => item.Iteration == iteration && item.Attempt == attempt && string.Equals(item.StepId, stepId, StringComparison.Ordinal) && item.ToolEvidence is not null)
+            .ToArray();
+        var reservations = toolEvents.Where(item => item.Kind == CustomLoopRunEventKind.ToolRequestReserved).ToArray();
+        durableToolRequestsConsumed = reservations.Length;
+        if (durableToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt || run.Checkpoint.ToolRequestsUsed + durableToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)
+        {
+            return "The durable governed tool-request trace exceeds the admitted run budget.";
+        }
+
+        var ordinals = reservations.Select(item => item.ToolEvidence!.RequestOrdinal).OrderBy(value => value).ToArray();
+        if (!ordinals.SequenceEqual(Enumerable.Range(1, durableToolRequestsConsumed)))
+        {
+            return "The durable governed tool-request reservations do not have unique contiguous ordinals.";
+        }
+
+        var groups = toolEvents.GroupBy(item => item.ToolEvidence!.RequestCorrelationId, StringComparer.Ordinal).ToArray();
+        if (groups.Length != durableToolRequestsConsumed)
+        {
+            return "The durable governed tool trace contains an unreserved or duplicate request correlation.";
+        }
+
+        foreach (var group in groups)
+        {
+            var ordered = group.OrderBy(item => item.Sequence).ToArray();
+            if (ordered.Count(item => item.Kind == CustomLoopRunEventKind.ToolIntegrityFailed) > 0)
+            {
+                return "A governed tool request recorded an integrity failure and cannot be counted as a completed request.";
+            }
+
+            if (ordered.Length != 3
+                || ordered[0].Kind != CustomLoopRunEventKind.ToolRequestReserved
+                || ordered[1].Kind != CustomLoopRunEventKind.ToolGovernanceDecided
+                || ordered[2].Kind != CustomLoopRunEventKind.ToolOutcomeObserved
+                || ordered.Select(item => item.ToolEvidence!.RequestOrdinal).Distinct().Count() != 1)
+            {
+                return "Each durable governed tool request must have one ordered reservation, governance decision, and observed outcome before attempt completion.";
+            }
+        }
+
+        if (result.ToolRequestsConsumed != durableToolRequestsConsumed)
+        {
+            return $"The provider result reported {result.ToolRequestsConsumed} governed tool requests, but the durable completed trace records {durableToolRequestsConsumed}.";
         }
 
         return null;

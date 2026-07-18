@@ -5,6 +5,8 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -55,6 +57,7 @@ public sealed class CustomLoopOrderedRunnerTests
             Assert.Contains(audit.Events, item => item.Action == AuditSchema.Actions.LoopNodeAttempt && item.Outcome == AuditSchema.Outcomes.Started);
             return Task.CompletedTask;
         };
+        executor.AfterExecute = request => AppendToolTraceAsync(store, request, request.StepId == "step-first" ? 2 : 1, includeOutcomes: true);
         var runner = Runner(store, executor, audit: audit);
 
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
@@ -830,6 +833,52 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Completed_durable_tool_requests_are_counted_in_the_checkpoint()
+    {
+        var store = new FakeRunStore(Run(Definition(tools: [CustomLoopToolAssignment.Read])));
+        var executor = new QueueExecutor(Result("completed", toolCalls: 2))
+        {
+            AfterExecute = request => AppendToolTraceAsync(store, request, requestCount: 2, includeOutcomes: true)
+        };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
+        Assert.Equal(2, result.Run!.Checkpoint.ToolRequestsUsed);
+    }
+
+    [Fact]
+    public async Task Underreported_tool_usage_is_rejected_against_the_durable_completed_trace()
+    {
+        var store = new FakeRunStore(Run(Definition(tools: [CustomLoopToolAssignment.Read])));
+        var executor = new QueueExecutor(Result("untrusted", toolCalls: 1))
+        {
+            AfterExecute = request => AppendToolTraceAsync(store, request, requestCount: 2, includeOutcomes: true)
+        };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Contains("durable completed trace records 2", result.Run!.FailureDetail, StringComparison.Ordinal);
+        Assert.Equal(0, result.Run.Checkpoint.ToolRequestsUsed);
+    }
+
+    [Fact]
+    public async Task Incomplete_durable_tool_phases_are_not_counted_as_completed_usage()
+    {
+        var store = new FakeRunStore(Run(Definition(tools: [CustomLoopToolAssignment.Read])));
+        var executor = new QueueExecutor(Result("untrusted", toolCalls: 1))
+        {
+            AfterExecute = request => AppendToolTraceAsync(store, request, requestCount: 1, includeOutcomes: false)
+        };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Contains("reservation, governance decision, and observed outcome", result.Run!.FailureDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Deadline_expiring_during_pre_dispatch_audit_prevents_the_provider_request()
     {
         var time = new MutableTimeProvider(Now);
@@ -1568,6 +1617,65 @@ public sealed class CustomLoopOrderedRunnerTests
             null,
             null);
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static async Task AppendToolTraceAsync(FakeRunStore store, CustomLoopInferenceAttemptRequest request, int requestCount, bool includeOutcomes)
+    {
+        var authority = Assert.IsType<CustomLoopToolAuthoritySnapshot>(request.AuthoritySnapshot);
+        var events = new List<CustomLoopRunEvent>();
+        for (var ordinal = 1; ordinal <= requestCount; ordinal++)
+        {
+            var correlation = $"tool-{request.Iteration}-{request.StepId}-{ordinal}";
+            var reservation = new CustomLoopToolTraceEvidence(
+                CustomLoopToolEvidencePhase.RequestReserved,
+                ordinal,
+                correlation,
+                null,
+                ToolCommand.Read,
+                "shared/file.txt",
+                null,
+                null,
+                null,
+                authority,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
+            var governance = new ToolGovernanceEvidence(ToolAuthorityDecision.Allowed, "Allowed by the test authority.", PermissionDecision.Allow, "shared/file.txt", "Allowed by test policy.", null, ToolApprovalDecision.NotRequired, null, null);
+            var governed = reservation with { Phase = CustomLoopToolEvidencePhase.GovernanceDecided, BrokerRequestId = $"broker-{ordinal}", Governance = governance };
+            var canonicalResult = $"tool result {ordinal}";
+            var outcome = governed with
+            {
+                Phase = CustomLoopToolEvidencePhase.OutcomeObserved,
+                Outcome = ToolExecutionOutcome.Succeeded,
+                CanonicalResultReturnedToModel = canonicalResult,
+                CanonicalResultHash = CustomLoopTraceContentHash.Compute(canonicalResult),
+                CanonicalResultCharacterCount = canonicalResult.Length,
+                ReturnedToModel = true
+            };
+            events.Add(ToolEvent(store.Current.Events.Length + events.Count + 1, CustomLoopRunEventKind.ToolRequestReserved, request, reservation));
+            events.Add(ToolEvent(store.Current.Events.Length + events.Count + 1, CustomLoopRunEventKind.ToolGovernanceDecided, request, governed));
+            if (includeOutcomes)
+            {
+                events.Add(ToolEvent(store.Current.Events.Length + events.Count + 1, CustomLoopRunEventKind.ToolOutcomeObserved, request, outcome));
+            }
+        }
+
+        var candidate = store.Current with
+        {
+            LifecycleVersion = store.Current.LifecycleVersion + 1,
+            Events = [.. store.Current.Events, .. events]
+        };
+        var stored = await store.UpdateAsync(candidate, store.Current.LifecycleVersion);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, stored.Status);
+    }
+
+    private static CustomLoopRunEvent ToolEvent(long sequence, CustomLoopRunEventKind kind, CustomLoopInferenceAttemptRequest request, CustomLoopToolTraceEvidence evidence)
+    {
+        return new CustomLoopRunEvent(sequence, $"event-{evidence.RequestCorrelationId}-{evidence.Phase.ToString().ToLowerInvariant()}", Now, kind, request.Iteration, request.StepId, request.Attempt, $"Durable {evidence.Phase} test evidence.", [], null, null, null, null, null, null, null, null, null, null, evidence.Authority, evidence);
     }
 
     private static CustomLoopInferenceAttemptResult Result(string output, int toolCalls = 0)
