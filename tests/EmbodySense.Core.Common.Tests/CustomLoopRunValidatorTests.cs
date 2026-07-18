@@ -21,6 +21,7 @@ public sealed class CustomLoopRunValidatorTests
         Assert.False(CustomLoopTraceContentHash.Matches("other", CustomLoopTraceContentHash.Compute("hello")));
         Assert.True(CustomLoopAdmissionRequestHash.Matches(run));
         Assert.NotEqual(run.AdmissionRequestHash, CustomLoopAdmissionRequestHash.Compute(run with { ModelSnapshot = new CustomLoopModelSnapshot("local", "model") }));
+        Assert.NotEqual(run.AdmissionRequestHash, CustomLoopAdmissionRequestHash.Compute(run with { AdmissionActor = "embodysense.cli" }));
     }
 
     [Fact]
@@ -45,12 +46,22 @@ public sealed class CustomLoopRunValidatorTests
     public void Validate_requires_pinned_model_admission_hash_and_consistent_execution_clock()
     {
         var seed = CreateRun();
+        var legacy = seed with { SchemaVersion = 2, AdmissionActor = null! };
+        Assert.Contains(CustomLoopRunValidator.Validate(legacy).Errors, error => error.Code == "unsupported_run_schema");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ModelSnapshot = null! }), "model_snapshot_required", "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { AdmissionRequestHash = new string('0', 64) }), "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = null! }), "execution_clock_required");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = new CustomLoopExecutionClock(-1, Timestamp) }), "execution_clock_out_of_range", "unexpected_active_execution_clock");
         var running = Advance(seed, CustomLoopRunStatus.Running) with { ExecutionClock = CustomLoopExecutionClock.NotStarted() };
         AssertCodes(CustomLoopRunValidator.Validate(running), "active_execution_clock_required");
+    }
+
+    [Fact]
+    public void Validate_rejects_control_characters_in_the_persisted_admission_actor()
+    {
+        var unsafeActor = CustomLoopAdmissionRequestHash.Apply(CreateRun() with { AdmissionActor = "embodysense.web\ninjected" });
+
+        AssertCodes(CustomLoopRunValidator.Validate(unsafeActor), "unsafe_text");
     }
 
     [Fact]
@@ -372,6 +383,7 @@ public sealed class CustomLoopRunValidatorTests
     [InlineData(CustomLoopRunStatus.PauseRequested, CustomLoopRunStatus.Paused, true)]
     [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.Running, true)]
     [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.CancelRequested, true)]
+    [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.Cancelled, true)]
     [InlineData(CustomLoopRunStatus.Paused, CustomLoopRunStatus.NeedsReview, true)]
     [InlineData(CustomLoopRunStatus.CancelRequested, CustomLoopRunStatus.Cancelled, true)]
     [InlineData(CustomLoopRunStatus.Completed, CustomLoopRunStatus.Running, false)]
@@ -403,6 +415,7 @@ public sealed class CustomLoopRunValidatorTests
             "web",
             new CustomLoopModelSnapshot("openai", "gpt-5"),
             operationId,
+            "embodysense.web",
             string.Empty,
             definition,
             "Initial prompt",

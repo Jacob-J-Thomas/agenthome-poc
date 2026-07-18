@@ -989,6 +989,7 @@ public sealed class CustomLoopAuthoringServiceTests
             "test",
             new CustomLoopModelSnapshot("test", null),
             "admit-run",
+            "embodysense.test",
             new string('a', CustomLoopLimits.Sha256HexCharacters),
             definition,
             string.Empty,
@@ -1001,9 +1002,39 @@ public sealed class CustomLoopAuthoringServiceTests
             null,
             null);
 
+        public Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CustomLoopRunStoreResult.AlreadyCreated(_run));
+        }
+
+        public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<CustomLoopRunRecord?>(string.Equals(runId, _run.Id, StringComparison.Ordinal) ? _run : null);
+        }
+
+        public Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<CustomLoopRunRecord?>(string.Equals(admissionOperationId, _run.AdmissionOperationId, StringComparison.Ordinal) ? _run : null);
+        }
+
         public Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default)
         {
             return Task.FromResult<CustomLoopRunRecord?>(string.Equals(loopId, _run.LoopId, StringComparison.Ordinal) ? _run : null);
+        }
+
+        public Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<CustomLoopRunSummary>>([]);
+        }
+
+        public Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<CustomLoopRunRecord>>([_run]);
+        }
+
+        public Task<CustomLoopRunStoreResult> UpdateAsync(CustomLoopRunRecord run, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CustomLoopRunStoreResult.Updated(run));
         }
     }
 

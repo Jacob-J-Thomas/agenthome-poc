@@ -13,13 +13,13 @@ public sealed record CustomLoopContextSnapshot(
 
     [JsonIgnore]
     public CustomLoopMessageSnapshot[] DirectoryRoleMessages => (SourceManifest ?? [])
-            .Where(source => source.Included && source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.ContextualState)
+            .Where(source => source is not null && source.Included && (source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.ContextualState))
             .Select(source => new CustomLoopMessageSnapshot(source.Role, source.Content))
             .ToArray();
 
     [JsonIgnore]
     public CustomLoopMessageSnapshot[] InvokingConversationMessages => (SourceManifest ?? [])
-            .Where(source => source.Included && source.SourceType == CustomLoopContextSource.InvokingConversation)
+            .Where(source => source is not null && source.Included && source.SourceType == CustomLoopContextSource.InvokingConversation)
             .Select(source => new CustomLoopMessageSnapshot(source.Role, source.Content))
             .ToArray();
 
