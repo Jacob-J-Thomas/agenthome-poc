@@ -1166,6 +1166,29 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Thrown_post_outcome_trace_failure_is_durably_quarantined_for_review()
+    {
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (candidate.Events[^1].Kind == CustomLoopRunEventKind.NodeAttemptCompleted)
+                {
+                    throw new IOException("Outcome store unavailable.");
+                }
+            }
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("provider outcome may exist"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("post_outcome_persistence_conflict", result.Run.FailureCode);
+        Assert.Contains(nameof(IOException), result.Run.FailureDetail, StringComparison.Ordinal);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+    }
+
+    [Fact]
     public async Task Conflict_after_a_provider_outcome_preserves_a_concurrent_needs_review_trace()
     {
         var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
@@ -1285,6 +1308,29 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
         Assert.Equal("final", result.Run!.FinalOutput);
         Assert.Contains(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_deterministic_Exit_persistence_cancels_before_the_outcome_is_committed()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
+        {
+            BeforeUpdate = (candidate, token) =>
+            {
+                if (candidate.Events[^1].Kind == CustomLoopRunEventKind.ExitDecisionCompleted)
+                {
+                    cancellation.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+            }
+        };
+
+        var result = await Runner(store, new QueueExecutor(Result("final"))).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted);
     }
 
     [Fact]

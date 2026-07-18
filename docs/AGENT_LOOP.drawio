@@ -1,4 +1,4 @@
-<mxfile host="app.diagrams.net" modified="2026-06-12T00:00:00.000Z" agent="Codex" version="26.0.0" type="device">
+<mxfile host="app.diagrams.net" modified="2026-07-18T20:00:00.000Z" agent="Codex" version="26.0.0" type="device">
   <diagram id="embodysense-agent-loop" name="Current Agent Loop">
     <mxGraphModel dx="1896" dy="1214" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
       <root>
@@ -49,8 +49,8 @@
         <mxCell id="blankDecision" value="blank input?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="700" y="920" width="135" height="90" as="geometry" />
         </mxCell>
-        <mxCell id="addUser" value="DefaultConversationLoopRunner.RunTurnAsync(input)&lt;br&gt;Create loop run identity + started record&lt;br&gt;Validate current system-locked default graph + edge chain&lt;br&gt;Append user message to state + memory&lt;br&gt;Build request from ConversationRuntimeState" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
-          <mxGeometry x="930" y="930" width="245" height="70" as="geometry" />
+        <mxCell id="addUser" value="DefaultConversationLoopRunner.RunTurnAsync(input)&lt;br&gt;Acquire exclusive ConversationRuntimeState lease before context assembly&lt;br&gt;Create + validate run, append user state + memory&lt;br&gt;Hold lease across inference and assistant state + memory persistence" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
+          <mxGeometry x="930" y="920" width="245" height="90" as="geometry" />
         </mxCell>
         <mxCell id="generate" value="LlmInferenceClient.GenerateAsync(request)&lt;br&gt;Delegates through audited provider pipeline&lt;br&gt;Append llm.inference.start if .agent exists" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1240" y="920" width="285" height="95" as="geometry" />
@@ -76,14 +76,14 @@
         <mxCell id="success" value="Success path&lt;br&gt;Extract final agentMessage from turn/completed&lt;br&gt;Return LlmInferenceResponse&lt;br&gt;Append llm.inference.complete succeeded if audit log exists" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1240" y="1610" width="285" height="95" as="geometry" />
         </mxCell>
-        <mxCell id="print" value="DefaultConversationLoopRunner stores assistant output&lt;br&gt;Record completed loop run or surface terminal persistence failure&lt;br&gt;Console/Web project streamed or final output&lt;br&gt;Prompt again" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
+        <mxCell id="print" value="DefaultConversationLoopRunner stores assistant output while lease remains held&lt;br&gt;Record completed loop run or surface terminal persistence failure&lt;br&gt;Release exclusive conversation lease&lt;br&gt;Console/Web projects output; prompt again" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F0FFF4;strokeColor=#2F855A;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="930" y="1630" width="240" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- Default conversation turns flow through DefaultConversationLoopRunner.&lt;br&gt;- Default loop definition is loaded from .agent/loops/definitions when present.&lt;br&gt;- Current definition shape requires an explicit system-locked graph and validated edge chain.&lt;br&gt;- Loop run records are written for started/completed/failed/cancelled turns.&lt;br&gt;- Terminal completed-run persistence failure surfaces as a failed turn.&lt;br&gt;- Loop CapabilityIds filter workspace commands before permissions.&lt;br&gt;- ToolPermissionService + ToolBroker enforce path policy, approval, execution, and audit.&lt;br&gt;- Verbose mode shows logical pre-provider context, graph summary, loop authority, memory status, limits, and compaction status.&lt;br&gt;- Web and CLI turns share AgentRuntime.RunTurnAsync." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
-          <mxGeometry x="70" y="870" width="520" height="185" as="geometry" />
+        <mxCell id="boundaries" value="Current boundaries&lt;br&gt;- Default conversation turns flow through DefaultConversationLoopRunner.&lt;br&gt;- One exclusive conversation lease serializes each default turn from pre-context assembly through inference and assistant state + memory persistence.&lt;br&gt;- Default loop definition is loaded from .agent/loops/definitions when present.&lt;br&gt;- Current definition shape requires an explicit system-locked graph and validated edge chain.&lt;br&gt;- Loop run records are written for started/completed/failed/cancelled turns.&lt;br&gt;- Terminal completed-run persistence failure surfaces as a failed turn.&lt;br&gt;- Loop CapabilityIds filter workspace commands before permissions.&lt;br&gt;- ToolPermissionService + ToolBroker enforce path policy, approval, execution, and audit.&lt;br&gt;- Verbose mode shows logical pre-provider context, graph summary, loop authority, memory status, limits, and compaction status.&lt;br&gt;- Web and CLI turns share AgentRuntime.RunTurnAsync." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7FAFC;strokeColor=#718096;fontSize=12;dashed=1" vertex="1" parent="1">
+          <mxGeometry x="70" y="870" width="520" height="205" as="geometry" />
         </mxCell>
         <mxCell id="maintenance" value="Documentation maintenance&lt;br&gt;Agents should update README.md and this draw.io source in the same change when real implementation behavior changes." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFAF0;strokeColor=#C05621;fontSize=12;dashed=1" vertex="1" parent="1">
-          <mxGeometry x="70" y="1070" width="520" height="85" as="geometry" />
+          <mxGeometry x="70" y="1090" width="520" height="85" as="geometry" />
         </mxCell>
         <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2D3748;endArrow=block;endFill=1" edge="1" parent="1" source="program" target="command">
           <mxGeometry relative="1" as="geometry" />

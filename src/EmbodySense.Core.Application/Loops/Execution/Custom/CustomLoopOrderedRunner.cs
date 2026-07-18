@@ -755,6 +755,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "invalid_exit_policy", $"The deterministic Exit policy is invalid: {SafeExceptionClass(exception)}.");
         }
 
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return await CancelBeforeDispatchAsync(run, actor);
+        }
+
         var exitEvent = Event(
             run,
             Now(run),
@@ -767,7 +772,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             published: outputPolicy.PublishToInvokingConversation,
             publicationId: outputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, run.Checkpoint.Iteration, "exit", isExit: true) : null,
             exitDecision: CustomLoopExitDecision.Complete);
-        var exitPersisted = await PersistAsync(run, Append(run, exitEvent.TimestampUtc, [exitEvent]), IntegrityToken(), outcomeMayExist: false);
+        var exitCandidate = Append(run, exitEvent.TimestampUtc, [exitEvent]);
+        RunAdvance exitPersisted;
+        try
+        {
+            exitPersisted = await PersistAsync(run, exitCandidate, cancellationToken, outcomeMayExist: false, propagateCancellation: true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return await CancelAfterInterruptedPreDispatchPersistenceAsync(run, exitCandidate, actor);
+        }
+
         if (exitPersisted.Terminal is not null)
         {
             return exitPersisted.Terminal;
@@ -1248,7 +1263,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             if (result.Status is CustomLoopRunStoreStatus.Conflict or CustomLoopRunStoreStatus.TerminalImmutable)
             {
                 return outcomeMayExist
-                    ? await EscalatePostOutcomeConflictAsync(current)
+                    ? await EscalatePostOutcomePersistenceUncertaintyAsync(current, "An external outcome may exist, but its required trace update conflicted with concurrent lifecycle state. Human review is required before resume.")
                     : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, null, "The run changed concurrently; no automatic replay was attempted."));
             }
 
@@ -1265,20 +1280,20 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         catch (OperationCanceledException)
         {
             return outcomeMayExist
-                ? await EscalatePostOutcomeConflictAsync(current)
+                ? await EscalatePostOutcomePersistenceUncertaintyAsync(current, "An external outcome may exist, but its required trace update timed out. Human review is required before resume.")
                 : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, current, "The required pre-effect run-trace update timed out; no later attempt was started."));
         }
         catch (Exception exception)
         {
-            var status = outcomeMayExist ? CustomLoopOrderedRunStatus.NeedsReview : CustomLoopOrderedRunStatus.Failed;
-            return new RunAdvance(null, Result(status, current, $"The required run-trace update failed: {SafeExceptionClass(exception)}. No later attempt was started."));
+            return outcomeMayExist
+                ? await EscalatePostOutcomePersistenceUncertaintyAsync(current, $"An external outcome may exist, but its required trace update failed with {SafeExceptionClass(exception)}. Human review is required before resume.")
+                : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, current, $"The required run-trace update failed: {SafeExceptionClass(exception)}. No later attempt was started."));
         }
     }
 
-    private async Task<RunAdvance> EscalatePostOutcomeConflictAsync(CustomLoopRunRecord current)
+    private async Task<RunAdvance> EscalatePostOutcomePersistenceUncertaintyAsync(CustomLoopRunRecord current, string detail)
     {
         const string failureCode = "post_outcome_persistence_conflict";
-        const string detail = "An external outcome may exist, but its required trace update conflicted with concurrent lifecycle state. Human review is required before resume.";
         try
         {
             for (var attempt = 0; attempt < 2; attempt++)
