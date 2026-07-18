@@ -22,6 +22,7 @@ public sealed class ToolBroker : IToolBroker
     private readonly IAuditLog _auditLog;
     private readonly LoopDefinition _loopDefinition;
     private readonly IToolGovernanceObserver? _governanceObserver;
+    private readonly ToolAuditMetadataFactory _auditMetadataFactory;
 
     public ToolBroker(
         WorkspacePaths paths,
@@ -47,6 +48,7 @@ public sealed class ToolBroker : IToolBroker
         _loopDefinition = loopDefinition;
         _governanceObserver = governanceObserver;
         AvailableCommands = GetAvailableCommands(_loopDefinition);
+        _auditMetadataFactory = new ToolAuditMetadataFactory(_paths, _loopDefinition, AvailableCommands);
     }
 
     public IReadOnlyList<ToolCommand> AvailableCommands { get; }
@@ -142,7 +144,7 @@ public sealed class ToolBroker : IToolBroker
                 check,
                 approvedByHuman,
                 AuditSchema.Outcomes.Failed,
-                new Dictionary<string, object?> { ["error_type"] = exception.GetType().Name },
+                ToolAuditMetadataFactory.ForError(exception),
                 cancellationToken);
             return result;
         }
@@ -150,8 +152,8 @@ public sealed class ToolBroker : IToolBroker
 
     private Task RecordExecutionIntentAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, CancellationToken cancellationToken)
     {
-        var metadata = BaseMetadata(requestId, request, check);
-        metadata["approved_by_human"] = approvedByHuman;
+        var metadata = _auditMetadataFactory.CreateBase(requestId, request, check);
+        ToolAuditMetadataFactory.AddApprovedByHuman(metadata, approvedByHuman);
         return AppendAuditAsync(AuditEvent.Create(
             AuditSchema.Actors.Tool,
             AuditSchema.Actions.ToolExecutionIntent,
@@ -203,13 +205,13 @@ public sealed class ToolBroker : IToolBroker
             target: check.ResolvedPath,
             outcome: FormatDecision(check.Evaluation.Decision),
             detail: check.Evaluation.Detail,
-            metadata: BaseMetadata(requestId, request, check)), cancellationToken);
+            metadata: _auditMetadataFactory.CreateBase(requestId, request, check)), cancellationToken);
     }
 
     private Task RecordApprovalRequestAsync(ToolApprovalRequest request, CancellationToken cancellationToken)
     {
-        var metadata = BaseMetadata(request.RequestId, request.ToolRequest, request.ResolvedPath, request.Operation, request.PermissionEvaluation.MatchedPath);
-        metadata["permission_policy_hash"] = request.PermissionPolicyHash;
+        var metadata = _auditMetadataFactory.CreateBase(request.RequestId, request.ToolRequest, request.ResolvedPath, request.Operation, request.PermissionEvaluation.MatchedPath);
+        ToolAuditMetadataFactory.AddPermissionPolicyHash(metadata, request.PermissionPolicyHash);
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
             action: AuditSchema.Actions.ToolApprovalRequest,
@@ -221,9 +223,8 @@ public sealed class ToolBroker : IToolBroker
 
     private Task RecordApprovalDecisionAsync(ToolApprovalRequest request, ToolApprovalResponse response, CancellationToken cancellationToken)
     {
-        var metadata = BaseMetadata(request.RequestId, request.ToolRequest, request.ResolvedPath, request.Operation, request.PermissionEvaluation.MatchedPath);
-        metadata["decision_by"] = response.DecisionBy;
-        metadata["permission_policy_hash"] = request.PermissionPolicyHash;
+        var metadata = _auditMetadataFactory.CreateBase(request.RequestId, request.ToolRequest, request.ResolvedPath, request.Operation, request.PermissionEvaluation.MatchedPath);
+        ToolAuditMetadataFactory.AddDecision(metadata, response.DecisionBy, request.PermissionPolicyHash);
 
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
@@ -243,13 +244,9 @@ public sealed class ToolBroker : IToolBroker
         IReadOnlyDictionary<string, object?> executionMetadata,
         CancellationToken cancellationToken)
     {
-        var metadata = BaseMetadata(requestId, request, check);
-        metadata["approved_by_human"] = approvedByHuman;
-
-        foreach (var item in executionMetadata)
-        {
-            metadata[item.Key] = item.Value;
-        }
+        var metadata = _auditMetadataFactory.CreateBase(requestId, request, check);
+        ToolAuditMetadataFactory.AddApprovedByHuman(metadata, approvedByHuman);
+        ToolAuditMetadataFactory.MergeExecution(metadata, executionMetadata);
 
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
@@ -267,21 +264,7 @@ public sealed class ToolBroker : IToolBroker
 
     private Task RecordLoopAuthorityAsync(string requestId, ToolRequest request, string resolvedPath, string outcome, CancellationToken cancellationToken)
     {
-        var metadata = new Dictionary<string, object?>
-        {
-            ["request_id"] = requestId,
-            ["command"] = ToolCommandFormatter.Format(request.Command),
-            ["target_path"] = request.TargetPath,
-            ["resolved_path"] = resolvedPath,
-            ["loop_id"] = _loopDefinition.Id,
-            ["role_id"] = _loopDefinition.RoleId,
-            ["loop_trigger"] = _loopDefinition.Trigger.ToString(),
-            ["required_capability"] = LoopCapabilityIds.WorkspaceCommandFor(request.Command),
-            ["fallback_capability"] = LoopCapabilityIds.WorkspaceCommand,
-            ["available_commands"] = string.Join(",", AvailableCommands.Select(ToolCommandFormatter.Format)),
-            ["loop_capability_ids"] = string.Join(",", _loopDefinition.CapabilityIds)
-        };
-        AddCorrelationMetadata(metadata, request);
+        var metadata = _auditMetadataFactory.CreateLoopAuthority(requestId, request, resolvedPath);
 
         return AppendAuditAsync(AuditEvent.Create(
             actor: AuditSchema.Actors.Tool,
@@ -292,60 +275,6 @@ public sealed class ToolBroker : IToolBroker
                 ? $"Loop `{_loopDefinition.Id}` allowed {ToolCommandFormatter.Format(request.Command)} workspace command authority."
                 : $"Loop `{_loopDefinition.Id}` denied {ToolCommandFormatter.Format(request.Command)} workspace command authority.",
             metadata: metadata), cancellationToken);
-    }
-
-    private Dictionary<string, object?> BaseMetadata(string requestId, ToolRequest request, ToolPermissionCheck check)
-    {
-        var metadata = BaseMetadata(requestId, request, check.ResolvedPath, check.Operation, check.Evaluation.MatchedPath);
-        metadata["permission_policy_hash"] = check.PolicyHash;
-        return metadata;
-    }
-
-    private Dictionary<string, object?> BaseMetadata(string requestId, ToolRequest request, string resolvedPath, FileSystemOperation operation, string matchedPath)
-    {
-        var metadata = new Dictionary<string, object?>
-        {
-            ["request_id"] = requestId,
-            ["command"] = ToolCommandFormatter.Format(request.Command),
-            ["target_path"] = request.TargetPath,
-            ["resolved_path"] = resolvedPath,
-            ["workspace_root"] = _paths.RootPath,
-            ["filesystem_operation"] = operation.ToString().ToLowerInvariant(),
-            ["matched_path"] = matchedPath
-        };
-
-        metadata["loop_id"] = _loopDefinition.Id;
-        metadata["role_id"] = _loopDefinition.RoleId;
-        metadata["loop_trigger"] = _loopDefinition.Trigger.ToString();
-        AddCorrelationMetadata(metadata, request);
-
-        return metadata;
-    }
-
-    private static void AddCorrelationMetadata(Dictionary<string, object?> metadata, ToolRequest request)
-    {
-        if (!string.IsNullOrWhiteSpace(request.CorrelationId))
-        {
-            metadata["tool_request_correlation_id"] = request.CorrelationId;
-        }
-
-        if (request.AuditCorrelation is not null)
-        {
-            metadata["run_id"] = request.AuditCorrelation.RunId;
-            metadata["loop_id"] = request.AuditCorrelation.LoopId;
-            metadata["role_id"] = request.AuditCorrelation.RoleId;
-            metadata["definition_version"] = request.AuditCorrelation.DefinitionVersion;
-            metadata["definition_hash"] = request.AuditCorrelation.DefinitionHash;
-            metadata["iteration"] = request.AuditCorrelation.Iteration;
-            metadata["step_id"] = request.AuditCorrelation.StepId;
-            metadata["attempt"] = request.AuditCorrelation.Attempt;
-            metadata["attempt_correlation_id"] = request.AuditCorrelation.AttemptCorrelationId;
-            metadata["admitted_commands"] = request.AuditCorrelation.AdmittedCommands;
-            metadata["current_role_commands"] = request.AuditCorrelation.CurrentRoleCommands;
-            metadata["effective_commands"] = request.AuditCorrelation.EffectiveCommands;
-            metadata["role_ceiling_hash"] = request.AuditCorrelation.RoleCeilingHash;
-            metadata["catalog_hash"] = request.AuditCorrelation.CatalogHash;
-        }
     }
 
     private bool IsCommandAvailable(ToolCommand command)
