@@ -1,12 +1,5 @@
 namespace EmbodySense.Core.Common.Context;
 
-public enum WorkspaceContextDocumentKind
-{
-    Unknown = 0,
-    RoleInstruction = 1,
-    ContextualState = 2
-}
-
 public sealed record WorkspaceContextDocument(
     string SourceId,
     string DisplayPath,

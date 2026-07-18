@@ -1,29 +1,10 @@
-using System.Security.Cryptography;
-using System.Text;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using static EmbodySense.Core.Common.Loops.Models.Custom.Execution.CustomLoopRunValidationRules;
 
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
-
-public static class CustomLoopTraceContentHash
-{
-    public static string Compute(string content)
-    {
-        ArgumentNullException.ThrowIfNull(content);
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
-    }
-
-    public static bool Matches(string content, string contentHash)
-    {
-        ArgumentNullException.ThrowIfNull(content);
-        ArgumentNullException.ThrowIfNull(contentHash);
-        var expected = Encoding.ASCII.GetBytes(Compute(content));
-        var actual = Encoding.ASCII.GetBytes(contentHash);
-        return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
-    }
-}
 
 public static class CustomLoopRunValidator
 {
@@ -1288,100 +1269,4 @@ public static class CustomLoopRunValidator
             && left.SourceManifest.SequenceEqual(right.SourceManifest);
     }
 
-    private static void ValidateContentHash(string? content, string? hash, string field, List<CustomLoopValidationError> errors)
-    {
-        ValidateHash(hash, field, errors);
-        if (content is not null && hash is not null && !CustomLoopTraceContentHash.Matches(content, hash))
-        {
-            Add(errors, "content_hash_mismatch", field, "Content hash does not match the exact retained content.");
-        }
-    }
-
-    private static void ValidateHash(string? hash, string field, List<CustomLoopValidationError> errors)
-    {
-        if (hash is not { Length: CustomLoopLimits.Sha256HexCharacters } || hash.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
-        {
-            Add(errors, "invalid_sha256_hash", field, "Hash must be a 64-character lowercase SHA-256 hexadecimal value.");
-        }
-    }
-
-    private static bool IsSha256(string? hash)
-    {
-        return hash is { Length: CustomLoopLimits.Sha256HexCharacters } && hash.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
-    }
-
-    private static void ValidateArtifactId(string? value, string field, List<CustomLoopValidationError> errors)
-    {
-        if (!CustomLoopArtifactIdentifier.IsValid(value))
-        {
-            Add(errors, "invalid_artifact_id", field, "Artifact id must be a safe lowercase filename identifier.");
-        }
-    }
-
-    private static void ValidateOptionalText(string? value, string field, int maxCharacters, List<CustomLoopValidationError> errors, bool requireNormalized = true)
-    {
-        if (value is not null)
-        {
-            ValidateText(value, field, maxCharacters, required: false, errors, requireNormalized);
-        }
-    }
-
-    private static void ValidateText(string? value, string field, int maxCharacters, bool required, List<CustomLoopValidationError> errors, bool requireNormalized = true)
-    {
-        if (value is null || required && string.IsNullOrWhiteSpace(value))
-        {
-            Add(errors, "text_required", field, $"{field} is required.");
-            return;
-        }
-
-        if (value.Length > maxCharacters)
-        {
-            Add(errors, "text_too_long", field, $"{field} cannot exceed {maxCharacters} characters.");
-        }
-
-        if (requireNormalized && !value.IsNormalized(NormalizationForm.FormC) || ContainsUnsafeCharacters(value))
-        {
-            Add(errors, "unsafe_text", field, $"{field} must use normalized valid Unicode without unsupported control characters.");
-        }
-    }
-
-    private static bool IsRuntimeSurface(string? value)
-    {
-        return !string.IsNullOrEmpty(value) && value.Length <= CustomLoopLimits.MaxArtifactIdCharacters && value[0] is >= 'a' and <= 'z' or >= '0' and <= '9' && value[^1] is >= 'a' and <= 'z' or >= '0' and <= '9' && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
-    }
-
-    private static bool IsUtcTimestamp(DateTimeOffset value)
-    {
-        return value != default && value.Offset == TimeSpan.Zero;
-    }
-
-    private static bool ContainsUnsafeCharacters(string value)
-    {
-        for (var index = 0; index < value.Length; index++)
-        {
-            var character = value[index];
-            if (char.IsHighSurrogate(character))
-            {
-                if (index + 1 >= value.Length || !char.IsLowSurrogate(value[index + 1]))
-                {
-                    return true;
-                }
-
-                index++;
-                continue;
-            }
-
-            if (char.IsLowSurrogate(character) || char.IsControl(character) && character is not '\r' and not '\n' and not '\t')
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static void Add(List<CustomLoopValidationError> errors, string code, string field, string message)
-    {
-        errors.Add(new CustomLoopValidationError(code, field, message));
-    }
 }

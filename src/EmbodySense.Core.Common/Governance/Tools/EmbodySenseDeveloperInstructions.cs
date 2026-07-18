@@ -4,15 +4,6 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Common.Governance.Tools;
 
-public sealed record EmbodySenseDeveloperInstructionSet(
-    string Version,
-    string Content,
-    string ContentHash);
-
-public sealed record EmbodySenseTrustedInstruction(
-    string SourceId,
-    string Content);
-
 public static class EmbodySenseDeveloperInstructions
 {
     public const string CurrentVersion = "codex-app-server-governance-v1";
