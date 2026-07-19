@@ -236,6 +236,7 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(run.LifecycleVersion + 1, store[run.Id].LifecycleVersion);
         Assert.Equal(1, store.UpdateCallCount);
         Assert.Equal("cancel-paused-atomic", store[run.Id].Events[^1].EventId);
+        Assert.Equal(run.LifecycleVersion, store[run.Id].Events[^1].ControlExpectedLifecycleVersion);
         Assert.Empty(cancellation.RunIds);
         var receipt = await operations.GetAsync("cancel-paused-atomic");
         Assert.Equal(CustomLoopControlOperationState.Complete, receipt!.State);
@@ -269,20 +270,27 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
-    public async Task Pending_receipt_recovers_by_operation_event_id_without_repeating_the_transition()
+    public async Task Pending_receipt_recovers_from_transition_owned_metadata_after_later_multi_event_writes()
     {
         const string operationId = "pause-receipt-recovery";
-        var seed = Run("run-receipt", CustomLoopRunStatus.PauseRequested);
-        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        const int expectedLifecycleVersion = 2;
+        var seed = Run("run-receipt", CustomLoopRunStatus.PauseRequested, openAttempt: true);
+        var lifecycle = seed.Events[2] with { EventId = operationId, ControlExpectedLifecycleVersion = expectedLifecycleVersion };
+        var outcome = new CustomLoopRunEvent(5, "outcome-after-control", Now.AddSeconds(3), CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-only", 1, "Outcome observed after control committed.", [], "outcome", 7, false, false, false, null, "provider", "model", "response", null);
+        var completed = new CustomLoopRunEvent(6, "completed-after-control", Now.AddSeconds(3), CustomLoopRunEventKind.NodeAttemptCompleted, 1, "step-only", 1, "Attempt completed after control committed.", [], "outcome", 7, false, false, false, null, "provider", "model", "response", null);
+        var run = seed with { LifecycleVersion = seed.LifecycleVersion + 1, UpdatedAtUtc = Now.AddSeconds(3), Events = [seed.Events[0], seed.Events[1], lifecycle, seed.Events[3], outcome, completed] };
+        Assert.True(CustomLoopRunValidator.Validate(run).IsValid);
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion - 1, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, expectedLifecycleVersion, operationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
 
         var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
 
+        var latestTraceOffset = run.Events.LongLength - run.LifecycleVersion;
+        Assert.NotEqual((long)pending.ExpectedLifecycleVersion + 1 + latestTraceOffset, lifecycle.Sequence);
         Assert.Equal(CustomLoopControlStatus.PauseRequested, result.Status);
         Assert.Equal(run.LifecycleVersion, store[run.Id].LifecycleVersion);
         Assert.True((await operations.GetAsync(operationId))!.OutcomeAuditRecorded);
@@ -418,7 +426,7 @@ public sealed class CustomLoopLifecycleServiceTests
     {
         const string operationId = "resume-receipt-recovery";
         var seed = Run("run-resume-receipt", CustomLoopRunStatus.Running);
-        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId, ControlExpectedLifecycleVersion = seed.LifecycleVersion - 1 }] };
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
         var pending = Pending(CustomLoopControlKind.Resume, run.Id, run.LifecycleVersion - 1, operationId, AuditSchema.Actors.Web);

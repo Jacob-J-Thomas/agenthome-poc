@@ -44,6 +44,37 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        IDisposable conversationLease;
+        try
+        {
+            conversationLease = await _conversationState.AcquireExclusiveAccessAsync(request.CancellationToken);
+        }
+        catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
+        {
+            return DefaultConversationLoopTurnResult.Cancelled("Turn was cancelled while waiting to enter the conversation.");
+        }
+
+        using var ownedConversationLease = conversationLease;
+        if (_conversationMemoryStore is not null)
+        {
+            try
+            {
+                var durableTranscript = await _conversationMemoryStore.LoadCurrentConversationAsync(request.CancellationToken);
+                if (!_conversationState.TrySynchronizeConversationTranscript(durableTranscript))
+                {
+                    return DefaultConversationLoopTurnResult.Failed("The durable workspace conversation changed outside this runtime. Active local context was preserved; use /new or explicitly load a stored conversation before sending another model turn.");
+                }
+            }
+            catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
+            {
+                return DefaultConversationLoopTurnResult.Cancelled("Turn was cancelled while synchronizing the durable conversation.");
+            }
+            catch (Exception exception)
+            {
+                return DefaultConversationLoopTurnResult.Failed($"Could not synchronize the durable conversation before context assembly: {exception.Message}");
+            }
+        }
+
         var userMessage = request.ToUserMessage();
         var inferenceContextMessages = _conversationState.ContextMessages
             .Concat([new RuntimeContextMessage(userMessage, RuntimeContextSource.CurrentTurnInput, "Current user input being evaluated by the active loop before provider dispatch.")])
@@ -110,7 +141,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             acceptedTranscriptMessages.Add(new RuntimeTranscriptMessage(assistantMessage));
             if (_conversationMemoryStore is not null)
             {
-                await _conversationMemoryStore.AppendMessageAsync(assistantMessage, request.CancellationToken);
+                await _conversationMemoryStore.AppendMessageAsync(assistantMessage, CancellationToken.None);
             }
 
             var transcriptMessages = acceptedTranscriptMessages.ToArray();

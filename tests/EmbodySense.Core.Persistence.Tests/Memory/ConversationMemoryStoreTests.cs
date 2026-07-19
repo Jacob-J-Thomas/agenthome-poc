@@ -56,6 +56,93 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task Concurrent_appends_from_distinct_store_instances_commit_unique_contiguous_sequences()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var first = new ConversationMemoryStore(paths);
+        var second = new ConversationMemoryStore(paths);
+
+        await Task.WhenAll(Enumerable.Range(1, 40).Select(index => (index % 2 == 0 ? first : second).AppendMessageAsync(LlmMessage.User($"message-{index}"))));
+
+        var messages = await first.LoadCurrentConversationAsync();
+        Assert.Equal(40, messages.Count);
+        Assert.Equal(40, messages.Select(message => message.Content).Distinct(StringComparer.Ordinal).Count());
+        var entries = (await File.ReadAllLinesAsync(paths.CurrentConversationPath)).Select(line => JsonSerializer.Deserialize<ConversationMemoryEntry>(line, JsonOptions)!).ToArray();
+        Assert.Equal(Enumerable.Range(1, 40), entries.Select(entry => entry.Sequence));
+    }
+
+    [Fact]
+    public async Task Atomic_expected_prefix_append_has_exactly_one_winner_across_store_instances()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var first = new ConversationMemoryStore(paths);
+        var second = new ConversationMemoryStore(paths);
+        await first.AppendMessageAsync(LlmMessage.User("seed"));
+        var expected = await first.LoadCurrentConversationSnapshotAsync();
+
+        var results = await Task.WhenAll(
+            first.TryAppendMessageAsync(expected.ConversationId, expected.Version, expected.Messages, LlmMessage.Assistant("winner-a")),
+            second.TryAppendMessageAsync(expected.ConversationId, expected.Version, expected.Messages, LlmMessage.Assistant("winner-b")));
+
+        Assert.Single(results, result => result);
+        Assert.Single(results, result => !result);
+        var messages = await first.LoadCurrentConversationAsync();
+        Assert.Equal(2, messages.Count);
+        Assert.Contains(messages[^1].Content, new[] { "winner-a", "winner-b" });
+    }
+
+    [Fact]
+    public async Task Atomic_expected_prefix_append_refuses_to_race_an_existing_external_writer()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("seed"));
+        var expected = await store.LoadCurrentConversationSnapshotAsync();
+        await using var externalWriter = new FileStream(paths.CurrentConversationPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+
+        await Assert.ThrowsAsync<IOException>(() => store.TryAppendMessageAsync(expected.ConversationId, expected.Version, expected.Messages, LlmMessage.Assistant("must not race")));
+
+        Assert.Single(await store.LoadCurrentConversationAsync());
+    }
+
+    [Fact]
+    public async Task Atomic_append_rejects_an_identical_empty_prefix_after_the_logical_conversation_is_reset()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        var captured = await store.LoadCurrentConversationSnapshotAsync();
+
+        await store.StartFreshConversationAsync();
+        var appended = await store.TryAppendMessageAsync(captured.ConversationId, captured.Version, captured.Messages, LlmMessage.Assistant("stale output"));
+        var current = await store.LoadCurrentConversationSnapshotAsync();
+
+        Assert.False(appended);
+        Assert.NotEqual(captured.Version, current.Version);
+        Assert.Empty(current.Messages);
+    }
+
+    [Fact]
+    public async Task AppendMessageAsync_preserves_valid_ndjson_when_the_existing_final_line_has_no_newline()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.ConversationMemoryPath);
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, JsonSerializer.Serialize(Entry("current", 1, "user", "seed"), JsonOptions));
+        var store = new ConversationMemoryStore(paths);
+
+        await store.AppendMessageAsync(LlmMessage.Assistant("second"));
+
+        Assert.Collection(
+            await store.LoadCurrentConversationAsync(),
+            message => Assert.Equal("seed", message.Content),
+            message => Assert.Equal("second", message.Content));
+        Assert.Equal(2, (await File.ReadAllLinesAsync(paths.CurrentConversationPath)).Length);
+    }
+
+    [Fact]
     public async Task SearchCurrentConversationAsync_returns_matching_entries()
     {
         using var workspace = new TestWorkspace();
@@ -109,6 +196,24 @@ public sealed class ConversationMemoryStoreTests
         Assert.Equal(2, conversation.MessageCount);
         Assert.Equal("first saved prompt", conversation.FirstPrompt);
         Assert.False(conversation.IsCurrent);
+    }
+
+    [Fact]
+    public async Task ListConversationsAsync_waits_for_the_cross_process_current_conversation_lease()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("active prompt"));
+        await using var externalLease = new FileStream(paths.CurrentConversationPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var listing = store.ListConversationsAsync();
+        await Task.Delay(75);
+
+        Assert.False(listing.IsCompleted);
+        await externalLease.DisposeAsync();
+        var conversation = Assert.Single(await listing.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(conversation.IsCurrent);
     }
 
     [Fact]

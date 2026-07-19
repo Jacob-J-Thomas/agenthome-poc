@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
@@ -10,25 +13,67 @@ namespace EmbodySense.Core.Persistence.Memory;
 public sealed class ConversationMemoryStore : IConversationMemoryStore
 {
     private const int SchemaVersion = 1;
+    private const int IdentitySchemaVersion = 1;
     private const string CurrentConversationId = "current";
     private const string ArchiveDirectoryName = "archive";
+    private static readonly TimeSpan CurrentConversationLeaseRetryDelay = TimeSpan.FromMilliseconds(25);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> CurrentConversationGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly WorkspacePaths _paths;
+    private readonly SemaphoreSlim _currentConversationGate;
+    private string CurrentConversationIdentityPath => _paths.CurrentConversationPath + ".identity.json";
+    private string CurrentConversationLockPath => _paths.CurrentConversationPath + ".lock";
 
     public ConversationMemoryStore(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
         _paths = paths;
+        _currentConversationGate = CurrentConversationGates.GetOrAdd(Path.GetFullPath(paths.CurrentConversationPath), _ => new SemaphoreSlim(1, 1));
     }
 
     public async Task<IReadOnlyList<LlmMessage>> LoadCurrentConversationAsync(CancellationToken cancellationToken = default)
     {
-        var entries = await LoadCurrentEntriesAsync(cancellationToken);
-        return entries.Select(ToMessage).ToArray();
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            return (await LoadCurrentConversationSnapshotUnsafeAsync(cancellationToken)).Messages;
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
+    }
+
+    public async Task<ConversationMemorySnapshot> LoadCurrentConversationSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await LoadCurrentConversationSnapshotUnsafeAsync(cancellationToken);
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
     }
 
     public async Task<IReadOnlyList<ConversationTranscriptListItem>> ListConversationsAsync(CancellationToken cancellationToken = default)
+    {
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            Directory.CreateDirectory(_paths.ConversationMemoryPath);
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            return await ListConversationsUnsafeAsync(cancellationToken);
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<ConversationTranscriptListItem>> ListConversationsUnsafeAsync(CancellationToken cancellationToken)
     {
         if (!Directory.Exists(_paths.ConversationMemoryPath))
         {
@@ -65,18 +110,34 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
 
     public async Task StartFreshConversationAsync(CancellationToken cancellationToken = default)
     {
-        Directory.CreateDirectory(_paths.ConversationMemoryPath);
-        if (File.Exists(_paths.CurrentConversationPath) && new FileInfo(_paths.CurrentConversationPath).Length > 0)
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
         {
-            await ArchiveCurrentConversationAsync(cancellationToken);
-        }
+            Directory.CreateDirectory(_paths.ConversationMemoryPath);
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            if (File.Exists(_paths.CurrentConversationPath) && new FileInfo(_paths.CurrentConversationPath).Length > 0)
+            {
+                await ArchiveCurrentConversationAsync(cancellationToken);
+            }
 
-        await File.WriteAllTextAsync(_paths.CurrentConversationPath, string.Empty, cancellationToken);
+            await WriteCurrentConversationIdentityAsync(CreateCurrentConversationIdentity(), cancellationToken);
+            await File.WriteAllTextAsync(_paths.CurrentConversationPath, string.Empty, cancellationToken);
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
     }
 
     public async Task<IReadOnlyList<LlmMessage>> LoadConversationAsync(string conversationId, CancellationToken cancellationToken = default)
     {
-        var path = GetConversationPath(conversationId);
+        var normalizedConversationId = NormalizeConversationId(conversationId);
+        if (IsCurrentConversationId(normalizedConversationId))
+        {
+            return await LoadCurrentConversationAsync(cancellationToken);
+        }
+
+        var path = GetConversationPath(normalizedConversationId);
         if (!File.Exists(path))
         {
             throw new FileNotFoundException($"Conversation `{conversationId}` was not found.", path);
@@ -94,28 +155,115 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             return;
         }
 
-        var sourcePath = GetConversationPath(normalizedConversationId);
-        if (!File.Exists(sourcePath))
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
         {
-            throw new FileNotFoundException($"Conversation `{conversationId}` was not found.", sourcePath);
-        }
+            Directory.CreateDirectory(_paths.ConversationMemoryPath);
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            var sourcePath = GetConversationPath(normalizedConversationId);
+            if (!File.Exists(sourcePath))
+            {
+                throw new FileNotFoundException($"Conversation `{conversationId}` was not found.", sourcePath);
+            }
 
-        var sourceEntries = await LoadEntriesAsync(sourcePath, cancellationToken);
-        Directory.CreateDirectory(_paths.ConversationMemoryPath);
-        if (File.Exists(_paths.CurrentConversationPath) && new FileInfo(_paths.CurrentConversationPath).Length > 0)
+            var sourceEntries = await LoadEntriesAsync(sourcePath, cancellationToken);
+            if (File.Exists(_paths.CurrentConversationPath) && new FileInfo(_paths.CurrentConversationPath).Length > 0)
+            {
+                await ArchiveCurrentConversationAsync(cancellationToken);
+            }
+
+            await WriteCurrentConversationIdentityAsync(CreateCurrentConversationIdentity(), cancellationToken);
+            await WriteEntriesAsync(_paths.CurrentConversationPath, sourceEntries.Select(entry => entry with { ConversationId = CurrentConversationId }), cancellationToken);
+        }
+        finally
         {
-            await ArchiveCurrentConversationAsync(cancellationToken);
+            _currentConversationGate.Release();
         }
-
-        await WriteEntriesAsync(_paths.CurrentConversationPath, sourceEntries.Select(entry => entry with { ConversationId = CurrentConversationId }), cancellationToken);
     }
 
     public async Task AppendMessageAsync(LlmMessage message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
 
-        Directory.CreateDirectory(_paths.ConversationMemoryPath);
-        var sequence = await GetNextSequenceAsync(cancellationToken);
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            Directory.CreateDirectory(_paths.ConversationMemoryPath);
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            await AppendMessageUnsafeAsync(message, cancellationToken);
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
+    }
+
+    public async Task<bool> TryAppendMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedConversationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedConversationVersion);
+        ArgumentNullException.ThrowIfNull(expectedPrefix);
+        ArgumentNullException.ThrowIfNull(message);
+
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            Directory.CreateDirectory(_paths.ConversationMemoryPath);
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            await using var stream = OpenCurrentConversationForAtomicAppend();
+            var currentEntries = await LoadEntriesAsync(stream, _paths.CurrentConversationPath, cancellationToken);
+            var identity = await LoadOrCreateCurrentConversationIdentityAsync(cancellationToken);
+            var current = currentEntries.Select(ToMessage).ToArray();
+            var matches = string.Equals(identity.ConversationId, expectedConversationId, StringComparison.Ordinal)
+                && string.Equals(identity.Version, expectedConversationVersion, StringComparison.Ordinal)
+                && current.Length == expectedPrefix.Count
+                && current.Zip(expectedPrefix).All(pair => pair.First.Role == pair.Second.Role && string.Equals(pair.First.Content, pair.Second.Content, StringComparison.Ordinal));
+            if (!matches)
+            {
+                return false;
+            }
+
+            await AppendMessageAsync(stream, message, currentEntries, cancellationToken);
+            return true;
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
+    }
+
+    private async Task AppendMessageUnsafeAsync(LlmMessage message, CancellationToken cancellationToken)
+    {
+        _ = await LoadOrCreateCurrentConversationIdentityAsync(cancellationToken);
+        await using var stream = OpenCurrentConversationForAtomicAppend();
+        var entries = await LoadEntriesAsync(stream, _paths.CurrentConversationPath, cancellationToken);
+        await AppendMessageAsync(stream, message, entries, cancellationToken);
+    }
+
+    private FileStream OpenCurrentConversationForAtomicAppend()
+    {
+        return new FileStream(_paths.CurrentConversationPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 16 * 1024, FileOptions.Asynchronous);
+    }
+
+    private async Task<FileStream> AcquireCurrentConversationLeaseAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(CurrentConversationLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.Asynchronous);
+            }
+            catch (IOException)
+            {
+                await Task.Delay(CurrentConversationLeaseRetryDelay, cancellationToken);
+            }
+        }
+    }
+
+    private static async Task AppendMessageAsync(FileStream stream, LlmMessage message, IReadOnlyList<ConversationMemoryEntry> entries, CancellationToken cancellationToken)
+    {
+        var sequence = entries.Count == 0 ? 1 : entries.Max(entry => entry.Sequence) + 1;
         var entry = new ConversationMemoryEntry(
             SchemaVersion,
             CurrentConversationId,
@@ -124,7 +272,36 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             message.Role.ToString().ToLowerInvariant(),
             message.Content);
         var line = JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine;
-        await File.AppendAllTextAsync(_paths.CurrentConversationPath, line, cancellationToken);
+        stream.Position = stream.Length;
+        if (stream.Length > 0)
+        {
+            stream.Position--;
+            var lastByte = stream.ReadByte();
+            stream.Position = stream.Length;
+            if (lastByte != '\n')
+            {
+                line = Environment.NewLine + line;
+            }
+        }
+
+        var originalLength = stream.Length;
+        try
+        {
+            await using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), 16 * 1024, leaveOpen: true))
+            {
+                await writer.WriteAsync(line.AsMemory(), cancellationToken);
+                await writer.FlushAsync(cancellationToken);
+            }
+
+            stream.Flush(flushToDisk: true);
+        }
+        catch
+        {
+            stream.SetLength(originalLength);
+            stream.Position = originalLength;
+            stream.Flush(flushToDisk: true);
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<ConversationMemorySearchResult>> SearchCurrentConversationAsync(
@@ -138,23 +315,84 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             throw new ArgumentOutOfRangeException(nameof(limit), limit, "Limit must be greater than zero.");
         }
 
-        var entries = await LoadCurrentEntriesAsync(cancellationToken);
-        return entries
-            .Where(entry => entry.Content.Contains(query.Trim(), StringComparison.OrdinalIgnoreCase))
-            .Take(limit)
-            .Select(entry => new ConversationMemorySearchResult(
-                entry.ConversationId,
-                entry.Sequence,
-                entry.TimestampUtc,
-                ParseRole(entry.Role),
-                entry.Content))
-            .ToArray();
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            Directory.CreateDirectory(_paths.ConversationMemoryPath);
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            var entries = await LoadCurrentEntriesAsync(cancellationToken);
+            return entries
+                .Where(entry => entry.Content.Contains(query.Trim(), StringComparison.OrdinalIgnoreCase))
+                .Take(limit)
+                .Select(entry => new ConversationMemorySearchResult(
+                    entry.ConversationId,
+                    entry.Sequence,
+                    entry.TimestampUtc,
+                    ParseRole(entry.Role),
+                    entry.Content))
+                .ToArray();
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
     }
 
-    private async Task<int> GetNextSequenceAsync(CancellationToken cancellationToken)
+    private async Task<ConversationMemorySnapshot> LoadCurrentConversationSnapshotUnsafeAsync(CancellationToken cancellationToken)
     {
+        Directory.CreateDirectory(_paths.ConversationMemoryPath);
+        await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
         var entries = await LoadCurrentEntriesAsync(cancellationToken);
-        return entries.Count == 0 ? 1 : entries.Max(entry => entry.Sequence) + 1;
+        var identity = await LoadOrCreateCurrentConversationIdentityAsync(cancellationToken);
+        return new ConversationMemorySnapshot(identity.ConversationId, identity.Version, entries.Select(ToMessage).ToArray());
+    }
+
+    private async Task<CurrentConversationIdentity> LoadOrCreateCurrentConversationIdentityAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(CurrentConversationIdentityPath))
+        {
+            var created = CreateCurrentConversationIdentity();
+            await WriteCurrentConversationIdentityAsync(created, cancellationToken);
+            return created;
+        }
+
+        var json = await File.ReadAllTextAsync(CurrentConversationIdentityPath, cancellationToken);
+        var identity = JsonSerializer.Deserialize<CurrentConversationIdentity>(json, JsonOptions)
+            ?? throw new FormatException("Current conversation identity metadata was empty.");
+        if (identity.SchemaVersion != IdentitySchemaVersion
+            || !string.Equals(identity.ConversationId, CurrentConversationId, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(identity.Version)
+            || identity.Version.Length != 64
+            || identity.Version.Any(character => !Uri.IsHexDigit(character)))
+        {
+            throw new FormatException("Current conversation identity metadata was invalid.");
+        }
+
+        return identity;
+    }
+
+    private async Task WriteCurrentConversationIdentityAsync(CurrentConversationIdentity identity, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(_paths.ConversationMemoryPath);
+        var temporaryPath = CurrentConversationIdentityPath + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
+        try
+        {
+            await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(identity, JsonOptions), cancellationToken);
+            File.Move(temporaryPath, CurrentConversationIdentityPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
+    }
+
+    private static CurrentConversationIdentity CreateCurrentConversationIdentity()
+    {
+        var version = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        return new CurrentConversationIdentity(IdentitySchemaVersion, CurrentConversationId, version);
     }
 
     private async Task<IReadOnlyList<ConversationMemoryEntry>> LoadCurrentEntriesAsync(CancellationToken cancellationToken)
@@ -169,8 +407,16 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             return [];
         }
 
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return await LoadEntriesAsync(stream, path, cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<ConversationMemoryEntry>> LoadEntriesAsync(Stream stream, string path, CancellationToken cancellationToken)
+    {
+        stream.Position = 0;
         var entries = new List<ConversationMemoryEntry>();
-        await foreach (var line in File.ReadLinesAsync(path, cancellationToken))
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, 16 * 1024, leaveOpen: true);
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
             if (string.IsNullOrWhiteSpace(line))
             {
@@ -348,4 +594,6 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
 
         return parsed;
     }
+
+    private sealed record CurrentConversationIdentity(int SchemaVersion, string ConversationId, string Version);
 }

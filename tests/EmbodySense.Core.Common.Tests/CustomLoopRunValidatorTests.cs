@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -79,6 +80,29 @@ public sealed class CustomLoopRunValidatorTests
         AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [unexpectedOutputMetadata] }), "unexpected_output_metadata");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [missingPublication] }), "conversation_publication_id_required");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [unexpectedPublication] }), "unexpected_conversation_publication_id");
+    }
+
+    [Fact]
+    public void Control_lifecycle_ownership_is_lifecycle_only_unique_and_bound_to_the_update_source_version()
+    {
+        var seed = CreateRun();
+        var unexpected = seed with { Events = [seed.Events[0] with { ControlExpectedLifecycleVersion = 1 }] };
+        AssertCodes(CustomLoopRunValidator.Validate(unexpected), "unexpected_control_lifecycle_version");
+
+        var valid = Advance(seed, CustomLoopRunStatus.Running);
+        valid = valid with { Events = [.. valid.Events[..^1], valid.Events[^1] with { ControlExpectedLifecycleVersion = seed.LifecycleVersion }] };
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(seed, valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(seed, valid).Errors));
+        var invalidVersion = valid with { Events = [.. valid.Events[..^1], valid.Events[^1] with { ControlExpectedLifecycleVersion = valid.LifecycleVersion }] };
+        AssertCodes(CustomLoopRunValidator.Validate(invalidVersion), "invalid_control_lifecycle_version");
+
+        var duplicate = Advance(valid, CustomLoopRunStatus.Paused);
+        duplicate = duplicate with { Events = [.. duplicate.Events[..^1], duplicate.Events[^1] with { ControlExpectedLifecycleVersion = seed.LifecycleVersion }] };
+        AssertCodes(CustomLoopRunValidator.Validate(duplicate), "duplicate_control_lifecycle_version");
+
+        var audited = seed with { LifecycleVersion = 2, Events = [.. seed.Events, Event(2, "event-audit-complete", CustomLoopRunEventKind.AdmissionAuditCompleted)] };
+        var mismatched = Advance(audited, CustomLoopRunStatus.Running);
+        mismatched = mismatched with { Events = [.. mismatched.Events[..^1], mismatched.Events[^1] with { ControlExpectedLifecycleVersion = 1 }] };
+        AssertCodes(CustomLoopRunValidator.ValidateUpdate(audited, mismatched), "control_lifecycle_version_mismatch");
     }
 
     [Fact]
@@ -208,6 +232,22 @@ public sealed class CustomLoopRunValidatorTests
         var validation = CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], badEvent] });
 
         AssertCodes(validation, "non_monotonic_event_sequence", "duplicate_event_id", "invalid_event_timestamp", "invalid_event_iteration", "invalid_event_attempt", "node_event_coordinates_required", "text_required", "unsupported_context_source", "unsupported_context_role", "omission_reason_required", "context_character_count_mismatch", "content_hash_mismatch", "context_block_required", "observed_output_required");
+    }
+
+    [Fact]
+    public void Validate_binds_tool_authority_and_command_to_the_matching_attempt_start()
+    {
+        var seed = CreateRun();
+        var attemptAuthority = Authority([CustomLoopToolAssignment.Read]);
+        var widenedAuthority = Authority([CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search]);
+        var started = new CustomLoopRunEvent(2, "attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, attemptAuthority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        var widenedEvidence = ToolEvidence(widenedAuthority, ToolCommand.Search);
+        var widenedEvent = new CustomLoopRunEvent(3, "tool-widened", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, widenedAuthority, widenedEvidence);
+        var unauthorizedEvidence = ToolEvidence(attemptAuthority, ToolCommand.Search);
+        var unauthorizedEvent = new CustomLoopRunEvent(3, "tool-unauthorized", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, attemptAuthority, unauthorizedEvidence);
+
+        AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, widenedEvent] }), "tool_authority_not_attempt_bound", "tool_command_not_attempt_authorized");
+        AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, unauthorizedEvent] }), "tool_command_not_attempt_authorized");
     }
 
     [Fact]
@@ -428,6 +468,17 @@ public sealed class CustomLoopRunValidatorTests
             null,
             null);
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopToolAuthoritySnapshot Authority(CustomLoopToolAssignment[] effectiveAssignments)
+    {
+        var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
+        return new CustomLoopToolAuthoritySnapshot("default-role", effectiveAssignments, effectiveAssignments, catalog, effectiveAssignments, new string('a', CustomLoopLimits.Sha256HexCharacters), new string('b', CustomLoopLimits.Sha256HexCharacters), Timestamp, true, "Test authority snapshot.");
+    }
+
+    private static CustomLoopToolTraceEvidence ToolEvidence(CustomLoopToolAuthoritySnapshot authority, ToolCommand command)
+    {
+        return new CustomLoopToolTraceEvidence(CustomLoopToolEvidencePhase.RequestReserved, 1, "tool-correlation", null, command, "shared/file.txt", null, null, null, authority, null, null, null, null, null, false, CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
     }
 
     private static CustomLoopRunRecord Advance(CustomLoopRunRecord run, CustomLoopRunStatus status)

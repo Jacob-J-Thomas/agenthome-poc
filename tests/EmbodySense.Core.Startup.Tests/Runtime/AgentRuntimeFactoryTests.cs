@@ -25,6 +25,7 @@ public sealed class AgentRuntimeFactoryTests
 
         Assert.Equal(string.Empty, await File.ReadAllTextAsync(paths.CurrentConversationPath));
         Assert.NotEmpty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
+        Assert.True(File.Exists(paths.ConversationTurnLockPath));
     }
 
     [Fact]

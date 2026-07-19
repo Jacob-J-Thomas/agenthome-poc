@@ -22,6 +22,53 @@ public sealed class RuntimeCommandServiceTests
     }
 
     [Fact]
+    public void Static_command_handling_rejects_blank_input_and_returns_help()
+    {
+        Assert.False(RuntimeCommandService.TryHandleStaticCommand(" ", out var blank));
+        Assert.Same(RuntimeCommandResult.NotHandled, blank);
+
+        Assert.True(RuntimeCommandService.TryHandleStaticCommand("/help", out var help));
+        Assert.Equal(RuntimeCommandOutput.HelpText, help.Output);
+    }
+
+    [Fact]
+    public async Task Session_commands_report_and_change_runtime_state_through_the_public_boundary()
+    {
+        var service = new RuntimeCommandService();
+        var conversationState = new ConversationRuntimeState();
+        var runtimeState = new RuntimeSessionState();
+
+        var unknown = await service.TryHandleAsync("/not-a-command", conversationState, runtimeState);
+        var initialStatus = await service.TryHandleAsync("/verbose", conversationState, runtimeState);
+        var enabled = await service.TryHandleAsync("/verbose true", conversationState, runtimeState);
+        var enabledStatus = await service.TryHandleAsync("/verbose", conversationState, runtimeState);
+        var disabled = await service.TryHandleAsync("/verbose false", conversationState, runtimeState);
+        var exit = await service.TryHandleAsync("/exit", conversationState, runtimeState);
+
+        Assert.False(unknown.Handled);
+        Assert.Equal("Verbose mode is off.", initialStatus.Output);
+        Assert.Equal(RuntimeCommandOutput.VerboseEnabledText, enabled.Output);
+        Assert.Equal("Verbose mode is on.", enabledStatus.Output);
+        Assert.Equal("Verbose mode disabled.", disabled.Output);
+        Assert.False(runtimeState.Verbose);
+        Assert.True(exit.ExitRequested);
+        Assert.True(runtimeState.ExitRequested);
+    }
+
+    [Fact]
+    public async Task History_explains_when_storage_is_unavailable_or_empty()
+    {
+        var conversationState = new ConversationRuntimeState();
+        var runtimeState = new RuntimeSessionState();
+
+        var unavailable = await new RuntimeCommandService().TryHandleAsync("/history", conversationState, runtimeState);
+        var empty = await new RuntimeCommandService(new FakeConversationMemoryStore()).TryHandleAsync("/history", conversationState, runtimeState);
+
+        Assert.Equal("Conversation history is not available for this session.", unavailable.Output);
+        Assert.Equal("No stored conversations were found.", empty.Output);
+    }
+
+    [Fact]
     public async Task Cancel_is_pending_input_command_only()
     {
         var service = new RuntimeCommandService();
@@ -154,6 +201,11 @@ public sealed class RuntimeCommandServiceTests
             return Task.FromResult<IReadOnlyList<LlmMessage>>([]);
         }
 
+        public Task<ConversationMemorySnapshot> LoadCurrentConversationSnapshotAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ConversationMemorySnapshot("current", "runtime-command-version", []));
+        }
+
         public Task<IReadOnlyList<ConversationTranscriptListItem>> ListConversationsAsync(CancellationToken cancellationToken = default)
         {
             ListConversationCallCount++;
@@ -181,6 +233,11 @@ public sealed class RuntimeCommandServiceTests
         public Task AppendMessageAsync(LlmMessage message, CancellationToken cancellationToken = default)
         {
             return Task.CompletedTask;
+        }
+
+        public Task<bool> TryAppendMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(false);
         }
 
         public Task<IReadOnlyList<ConversationMemorySearchResult>> SearchCurrentConversationAsync(string query, int limit = 20, CancellationToken cancellationToken = default)

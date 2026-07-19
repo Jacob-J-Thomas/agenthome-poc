@@ -23,6 +23,7 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom"), paths.CustomLoopRunsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom-trace-deletion-operations"), paths.CustomLoopTraceDeletionOperationsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "default-conversation.json"), paths.DefaultConversationLoopDefinitionPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "memory", "conversations", ".workspace-turn.lock"), paths.ConversationTurnLockPath);
         Assert.Equal(Path.Combine(paths.RootPath, "shared"), paths.WorkspaceSharedPath);
         Assert.Equal(Path.Combine(paths.RootPath, "private"), paths.WorkspacePrivatePath);
     }

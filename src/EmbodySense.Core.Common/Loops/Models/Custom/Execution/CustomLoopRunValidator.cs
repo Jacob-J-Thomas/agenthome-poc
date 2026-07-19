@@ -78,6 +78,7 @@ public static class CustomLoopRunValidator
         ValidateImmutableAdmission(current, candidate, errors);
         ValidateLifecycleTransition(current, candidate, errors);
         ValidateAppendOnlyEvents(current, candidate, errors);
+        ValidateAppendedControlOwnership(current, candidate, errors);
         ValidateMonotonicCheckpoint(current, candidate, errors);
         ValidateMonotonicExecutionClock(current, candidate, errors);
         if (candidate.UpdatedAtUtc < current.UpdatedAtUtc)
@@ -131,7 +132,7 @@ public static class CustomLoopRunValidator
             || warning.CanonicalOutput is not null || warning.OriginalOutputCharacterCount is not null || warning.CanonicalOutputTruncated is not null
             || warning.RetainedForLoopReasoning is not null || warning.PublishedToInvokingConversation is not null || warning.ConversationPublicationId is not null
             || warning.Provider is not null || warning.Model is not null || warning.ProviderResponseId is not null || warning.ExitDecision is not null
-            || warning.ToolAuthority is not null || warning.ToolEvidence is not null || warning.TraceReservationUtf8Bytes is not null)
+            || warning.ToolAuthority is not null || warning.ToolEvidence is not null || warning.TraceReservationUtf8Bytes is not null || warning.ControlExpectedLifecycleVersion is not null)
         {
             Add(errors, "invalid_terminal_integrity_warning", "warning", "The post-terminal integrity warning can carry only its sequence, id, timestamp, kind, detail, and an empty context-block list.");
         }
@@ -532,6 +533,7 @@ public static class CustomLoopRunValidator
         }
 
         var eventIds = new HashSet<string>(StringComparer.Ordinal);
+        var controlExpectedLifecycleVersions = new HashSet<int>();
         DateTimeOffset? previousTimestamp = null;
         for (var index = 0; index < run.Events.Length; index++)
         {
@@ -566,6 +568,22 @@ public static class CustomLoopRunValidator
                 Add(errors, "unsupported_event_kind", $"{field}.kind", "Run event kind must be a supported concrete value.");
             }
 
+            if (item.ControlExpectedLifecycleVersion is { } expectedLifecycleVersion)
+            {
+                if (item.Kind != CustomLoopRunEventKind.LifecycleChanged)
+                {
+                    Add(errors, "unexpected_control_lifecycle_version", $"{field}.controlExpectedLifecycleVersion", "Only a lifecycle event owned by a control operation may carry its expected lifecycle version.");
+                }
+                else if (expectedLifecycleVersion < 1 || expectedLifecycleVersion >= run.LifecycleVersion)
+                {
+                    Add(errors, "invalid_control_lifecycle_version", $"{field}.controlExpectedLifecycleVersion", "A control-owned lifecycle event must identify an earlier positive lifecycle version.");
+                }
+                else if (!controlExpectedLifecycleVersions.Add(expectedLifecycleVersion))
+                {
+                    Add(errors, "duplicate_control_lifecycle_version", $"{field}.controlExpectedLifecycleVersion", "A lifecycle source version may be owned by only one durable control transition.");
+                }
+            }
+
             ValidateEventCoordinates(item, field, errors);
             var detailLimit = item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning
                 ? CustomLoopLimits.MaxLifecycleControlDetailCharacters
@@ -594,6 +612,11 @@ public static class CustomLoopRunValidator
             if (item.ToolEvidence is { } toolEvidence && !ToolPhaseMatchesEventKind(toolEvidence.Phase, item.Kind))
             {
                 Add(errors, "tool_evidence_phase_mismatch", $"{field}.toolEvidence.phase", "Tool evidence phase must match its durable run-event kind.");
+            }
+
+            if (isToolEvent)
+            {
+                ValidateToolAttemptBinding(run.Events, index, item, field, errors);
             }
 
             if (item.ToolAuthority is not null && !isToolEvent && item.Kind is not CustomLoopRunEventKind.Admitted and not CustomLoopRunEventKind.NodeAttemptStarted and not CustomLoopRunEventKind.ExitDecisionStarted)
@@ -639,7 +662,7 @@ public static class CustomLoopRunValidator
             if (marker.Iteration is not null || marker.StepId is not null || marker.Attempt is not null || marker.ContextBlocks is not { Length: 0 }
                 || marker.CanonicalOutput is not null || marker.OriginalOutputCharacterCount is not null || marker.CanonicalOutputTruncated is not null
                 || marker.RetainedForLoopReasoning is not null || marker.PublishedToInvokingConversation is not null || marker.ConversationPublicationId is not null
-                || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null)
+                || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null)
             {
                 Add(errors, "invalid_admission_audit_marker", $"events[{markerIndex}]", "The admission-audit completion marker cannot carry prompt, output, provider, publication, or node-attempt data.");
             }
@@ -1130,6 +1153,47 @@ public static class CustomLoopRunValidator
         }
     }
 
+    private static void ValidateToolAttemptBinding(CustomLoopRunEvent[] events, int eventIndex, CustomLoopRunEvent item, string field, List<CustomLoopValidationError> errors)
+    {
+        var attemptStart = events.Take(eventIndex).LastOrDefault(candidate => candidate is not null
+            && (candidate.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
+            && candidate.Iteration == item.Iteration
+            && string.Equals(candidate.StepId, item.StepId, StringComparison.Ordinal)
+            && candidate.Attempt == item.Attempt);
+        if (attemptStart?.ToolAuthority is null)
+        {
+            Add(errors, "tool_attempt_start_required", field, "Tool trace evidence must follow a matching provider-attempt start with an exact authority snapshot.");
+            return;
+        }
+
+        if (!attemptStart.ToolAuthority.Matches(item.ToolAuthority) || item.ToolEvidence is { } evidence && !attemptStart.ToolAuthority.Matches(evidence.Authority))
+        {
+            Add(errors, "tool_authority_not_attempt_bound", $"{field}.toolAuthority", "Every tool trace phase must retain the exact authority snapshot committed by its matching attempt start.");
+        }
+
+        if (item.ToolEvidence is { } toolEvidence && !attemptStart.ToolAuthority.AllowsCommand(toolEvidence.Command))
+        {
+            Add(errors, "tool_command_not_attempt_authorized", $"{field}.toolEvidence.command", "The governed tool command must be included in the matching attempt-start effective authority.");
+        }
+    }
+
+    private static void ValidateAppendedControlOwnership(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
+    {
+        if (current.Events is null || candidate.Events is null)
+        {
+            return;
+        }
+
+        foreach (var item in candidate.Events.Skip(current.Events.Length))
+        {
+            if (item?.ControlExpectedLifecycleVersion is { } expectedLifecycleVersion && expectedLifecycleVersion != current.LifecycleVersion)
+            {
+                var index = Array.IndexOf(candidate.Events, item);
+                Add(errors, "control_lifecycle_version_mismatch", $"events[{index}].controlExpectedLifecycleVersion", "A newly appended control-owned lifecycle event must identify the exact persisted lifecycle version used for compare-and-swap.");
+            }
+        }
+    }
+
     private static void ValidateMonotonicCheckpoint(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)
     {
         if (current.Checkpoint is null || candidate.Checkpoint is null)
@@ -1226,23 +1290,13 @@ public static class CustomLoopRunValidator
             && left.ExitDecision == right.ExitDecision
             && ToolAuthoritiesEqual(left.ToolAuthority, right.ToolAuthority)
             && ToolEvidenceEqual(left.ToolEvidence, right.ToolEvidence)
-            && left.TraceReservationUtf8Bytes == right.TraceReservationUtf8Bytes;
+            && left.TraceReservationUtf8Bytes == right.TraceReservationUtf8Bytes
+            && left.ControlExpectedLifecycleVersion == right.ControlExpectedLifecycleVersion;
     }
 
     private static bool ToolAuthoritiesEqual(CustomLoopToolAuthoritySnapshot? left, CustomLoopToolAuthoritySnapshot? right)
     {
-        return ReferenceEquals(left, right)
-            || left is not null && right is not null
-            && string.Equals(left.RoleId, right.RoleId, StringComparison.Ordinal)
-            && left.AdmittedMaximum.SequenceEqual(right.AdmittedMaximum)
-            && left.CurrentRoleCeiling.SequenceEqual(right.CurrentRoleCeiling)
-            && left.ImplementedCatalog.SequenceEqual(right.ImplementedCatalog)
-            && left.EffectiveAssignments.SequenceEqual(right.EffectiveAssignments)
-            && string.Equals(left.RoleCeilingHash, right.RoleCeilingHash, StringComparison.Ordinal)
-            && string.Equals(left.CatalogHash, right.CatalogHash, StringComparison.Ordinal)
-            && left.EvaluatedAtUtc == right.EvaluatedAtUtc
-            && left.IsValid == right.IsValid
-            && string.Equals(left.Detail, right.Detail, StringComparison.Ordinal);
+        return ReferenceEquals(left, right) || left?.Matches(right) == true;
     }
 
     private static bool ToolEvidenceEqual(CustomLoopToolTraceEvidence? left, CustomLoopToolTraceEvidence? right)
