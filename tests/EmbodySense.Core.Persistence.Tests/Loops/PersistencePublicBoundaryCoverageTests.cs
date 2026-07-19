@@ -308,6 +308,8 @@ public sealed class PersistencePublicBoundaryCoverageTests
 
         var integrity = CreateToolRun(includeIntegrity: true);
         RejectRun(ReplaceEvidence(integrity, 6, evidence => evidence with { CanonicalResultHash = new string('0', 64) }));
+        RejectRun(InsertEvent(integrity, integrity.Events.Length, integrity.Events[3] with { EventId = "event-governance-after-integrity" }));
+        RejectRun(InsertEvent(integrity, integrity.Events.Length, integrity.Events[^1] with { EventId = "event-integrity-duplicate" }));
     }
 
     [Fact]
@@ -354,6 +356,8 @@ public sealed class PersistencePublicBoundaryCoverageTests
             marker["hasOutcome"] = true;
             marker["hasCanonicalResult"] = true;
         }, includeIntegrity: true);
+        RejectTool(root => AppendCompactToolEvent(root, 3, "event-governance-after-integrity"), includeIntegrity: true);
+        RejectTool(root => AppendCompactToolEvent(root, 6, "event-integrity-duplicate"), includeIntegrity: true);
     }
 
     private static byte[] Artifact() => CustomLoopRunArtifactSerializer.Serialize(CreateRun());
@@ -538,6 +542,15 @@ public sealed class PersistencePublicBoundaryCoverageTests
     private static JsonArray Events(JsonObject root) => root["run"]!["events"]!.AsArray();
 
     private static JsonObject ToolEvidence(JsonObject root, int eventIndex) => Events(root)[eventIndex]!["toolEvidence"]!.AsObject();
+
+    private static void AppendCompactToolEvent(JsonObject root, int sourceIndex, string eventId)
+    {
+        var events = Events(root);
+        var appended = events[sourceIndex]!.DeepClone().AsObject();
+        appended["sequence"] = events.Count + 1;
+        appended["eventId"] = eventId;
+        events.Add(appended);
+    }
 
     private static JsonObject FirstEvent(JsonObject root) => root["run"]!["events"]![0]!.AsObject();
 

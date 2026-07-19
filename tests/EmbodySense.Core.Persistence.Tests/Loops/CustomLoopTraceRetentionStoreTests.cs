@@ -104,6 +104,26 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Deletion_rejects_default_request_and_persisted_operation_timestamps()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = await store.InspectTraceAsync(terminal.Id);
+        Assert.NotNull(inspection);
+        var request = Request(terminal.Id, inspection.PersistedArtifactHash);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.DeleteTerminalTraceAsync(Mutation(request) with { RequestedAtUtc = default }));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(Mutation(request))).Status);
+        var operation = (await store.GetTraceDeletionOperationAsync(request.OperationId)).Operation;
+        Assert.NotNull(operation);
+        await WriteOperationAsync(paths, operation! with { RequestedAtUtc = default });
+
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync(request.OperationId));
+    }
+
+    [Fact]
     public async Task Pending_ledger_and_tombstone_first_crash_windows_recover_without_a_second_mutation()
     {
         using var workspace = new TestWorkspace();

@@ -300,6 +300,28 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Dangling_mutation_lock_symlink_is_rejected_without_creating_its_target()
+    {
+        using var workspace = new TestWorkspace();
+        using var outsideWorkspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopRunsPath);
+        var target = outsideWorkspace.File("missing-lock-target");
+        var lockPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-runs.lock");
+        try
+        {
+            File.CreateSymbolicLink(lockPath, target);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        await Assert.ThrowsAsync<IOException>(() => new CustomLoopRunStore(paths).CreateAsync(CreateRun()));
+        Assert.False(File.Exists(target));
+    }
+
+    [Fact]
     public async Task Update_returns_missing_stale_and_terminal_results_without_overwrite()
     {
         using var workspace = new TestWorkspace();

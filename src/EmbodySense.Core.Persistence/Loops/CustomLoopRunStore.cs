@@ -1307,11 +1307,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
-                    if (File.Exists(_mutationLockPath))
-                    {
-                        RejectReparsePoint(_mutationLockPath);
-                    }
-
+                    RejectReparsePointIfPresent(_mutationLockPath);
                     var stream = new FileStream(_mutationLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
                     RejectReparsePoint(_mutationLockPath);
                     return new MutationLease(stream, _processMutationGate);
@@ -1383,6 +1379,30 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
         {
             throw new IOException($"Custom loop artifact path `{path}` cannot traverse a reparse point.");
+        }
+    }
+
+    private static void RejectReparsePointIfPresent(string path)
+    {
+        try
+        {
+            if (File.ResolveLinkTarget(path, returnFinalTarget: false) is not null)
+            {
+                throw new IOException($"Custom loop artifact path `{path}` cannot traverse a reparse point.");
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+
+        if (File.Exists(path) || Directory.Exists(path))
+        {
+            RejectReparsePoint(path);
         }
     }
 
@@ -1569,9 +1589,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private static void RequireUtc(DateTimeOffset value, string parameterName)
     {
-        if (value.Offset != TimeSpan.Zero)
+        if (value == default || value.Offset != TimeSpan.Zero)
         {
-            throw new FormatException($"`{parameterName}` must use UTC offset zero.");
+            throw new FormatException($"`{parameterName}` must be a non-default timestamp with UTC offset zero.");
         }
     }
 

@@ -398,6 +398,11 @@ internal static class CustomLoopRunArtifactCodec
                     throw new FormatException("Tool evidence references a request that has no earlier exact reservation.");
                 }
 
+                if (state.IntegrityFailed)
+                {
+                    throw new FormatException("Tool evidence cannot continue after the request recorded an integrity failure.");
+                }
+
                 RequireRepeatedRequest(evidence, state.Request, state.Authority);
                 if (!string.Equals(state.AuthorityId, authorityId, StringComparison.Ordinal))
                 {
@@ -484,6 +489,7 @@ internal static class CustomLoopRunArtifactCodec
                         ["hasCanonicalResult"] = evidence["canonicalResultReturnedToModel"] is not null
                     };
                     RequireIntegrityReferences(evidence, state);
+                    state.IntegrityFailed = true;
                 }
                 else
                 {
@@ -551,6 +557,11 @@ internal static class CustomLoopRunArtifactCodec
                     || !string.Equals(state.AuthorityId, authorityId, StringComparison.Ordinal))
                 {
                     throw new FormatException("Compact tool evidence has a dangling request reference.");
+                }
+
+                if (state.IntegrityFailed)
+                {
+                    throw new FormatException("Compact tool evidence cannot continue after the request recorded an integrity failure.");
                 }
 
                 if (shape == 2)
@@ -622,6 +633,7 @@ internal static class CustomLoopRunArtifactCodec
                     }
 
                     evidence = FullEvidence(state.Request, state.Authority, hasGovernance ? state.Governance : null, outcome, canonical, canonicalHash, canonicalCount, returned: false, compact);
+                    state.IntegrityFailed = true;
                 }
                 else
                 {
@@ -1300,6 +1312,7 @@ internal static class CustomLoopRunArtifactCodec
         public JsonObject? Outcome { get; set; }
         public long? OutcomeSequence { get; set; }
         public bool Returned { get; set; }
+        public bool IntegrityFailed { get; set; }
     }
 
     private sealed class ToolHydrationState(JsonObject request, JsonObject authority, string authorityId)
@@ -1312,5 +1325,6 @@ internal static class CustomLoopRunArtifactCodec
         public JsonObject? OutcomeEvidence { get; set; }
         public long? OutcomeSequence { get; set; }
         public bool Returned { get; set; }
+        public bool IntegrityFailed { get; set; }
     }
 }
