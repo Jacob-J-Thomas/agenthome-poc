@@ -97,6 +97,7 @@ public sealed class CustomLoopRunStoreTests
         Assert.Empty(await store.ListRecentAsync(50));
         Assert.Empty(await store.ListNonterminalAsync());
         Assert.Equal(CustomLoopTraceQuota.Empty(), await store.GetTraceQuotaAsync());
+        Assert.Null(await store.InspectTraceAsync("run-missing"));
         Assert.False(Directory.Exists(paths.CustomLoopRunsPath));
     }
 
@@ -373,6 +374,8 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(completed.FailureDetail, persisted.FailureDetail);
         Assert.Equal(prefixJson, JsonSerializer.Serialize(persisted.Events.Take(completed.Events.Length)));
         Assert.Equal(warning.EventId, persisted.Events[^1].EventId);
+        var malformedReplay = warning with { ControlExpectedLifecycleVersion = completed.LifecycleVersion };
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, (await store.AppendTerminalIntegrityWarningAsync(completed.Id, completed.LifecycleVersion, malformedReplay)).Status);
         Assert.Equal(CustomLoopRunStoreStatus.Conflict, (await store.AppendTerminalIntegrityWarningAsync(completed.Id, completed.LifecycleVersion - 1, warning)).Status);
         var second = warning with { Sequence = warning.Sequence + 1, EventId = "event-second-terminal-warning", TimestampUtc = warning.TimestampUtc.AddMinutes(1) };
         await Assert.ThrowsAsync<FormatException>(() => store.AppendTerminalIntegrityWarningAsync(completed.Id, persisted.LifecycleVersion, second));

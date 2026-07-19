@@ -221,6 +221,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     public async Task<CustomLoopTraceInspection?> InspectTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
         var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
+        if (!Directory.Exists(_runsRoot))
+        {
+            return null;
+        }
+
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
         var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, safeRunId, StringComparison.Ordinal)).ToArray();
         if (matches.Length > 1)
@@ -629,7 +634,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             && left.ToolEvidence is null
             && right.ToolEvidence is null
             && left.TraceReservationUtf8Bytes is null
-            && right.TraceReservationUtf8Bytes is null;
+            && right.TraceReservationUtf8Bytes is null
+            && left.ControlExpectedLifecycleVersion is null
+            && right.ControlExpectedLifecycleVersion is null;
     }
 
     private async Task<IReadOnlyList<CustomLoopRunRecord>> ReadAllRunsAsync(CancellationToken cancellationToken)
@@ -1561,6 +1568,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         if (!IsActor(tombstone.DeletionActor) || !IsSurface(tombstone.DeletionSurface))
         {
             throw new FormatException("Custom loop trace tombstone actor or surface is invalid.");
+        }
+
+        var deletionRequest = new CustomLoopTraceDeletionRequest(tombstone.RunId, tombstone.OriginalTraceHash, tombstone.DeletionOperationId, tombstone.DeletionActor, tombstone.DeletionSurface);
+        if (!string.Equals(tombstone.DeletionRequestHash, CustomLoopTraceDeletionRequestHash.Compute(deletionRequest), StringComparison.Ordinal))
+        {
+            throw new FormatException("Custom loop trace tombstone deletion metadata does not match its canonical request hash.");
         }
 
         if (!string.Equals(tombstone.IntentAuditCorrelationId, tombstone.DeletionOperationId, StringComparison.Ordinal)

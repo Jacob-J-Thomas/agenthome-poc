@@ -249,6 +249,34 @@ public sealed class CustomLoopTraceRetentionStoreTests
         }
     }
 
+    [Fact]
+    public async Task Tombstone_reader_binds_deletion_metadata_to_its_request_hash()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = await store.InspectTraceAsync(terminal.Id);
+        Assert.NotNull(inspection);
+        var request = Request(terminal.Id, inspection.PersistedArtifactHash);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(Mutation(request))).Status);
+        var path = Path.Combine(paths.CustomLoopRunsPath, terminal.LoopId, terminal.Id + ".json");
+        var tombstone = JsonSerializer.Deserialize<CustomLoopTraceTombstone>(await File.ReadAllTextAsync(path), JsonOptions);
+        Assert.NotNull(tombstone);
+        var tampered = new[]
+        {
+            tombstone! with { OriginalTraceHash = new string('a', CustomLoopLimits.Sha256HexCharacters) },
+            tombstone with { DeletionActor = "actor-other" },
+            tombstone with { DeletionSurface = "cli" }
+        };
+
+        foreach (var candidate in tampered)
+        {
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(candidate, JsonOptions) + "\n");
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).InspectTraceAsync(terminal.Id));
+        }
+    }
+
     private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store)
     {
         var admitted = CreateAdmittedRun();
