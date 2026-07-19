@@ -1,8 +1,6 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
@@ -14,11 +12,6 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustomLoopExecutionCancellationSignal
 {
     private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
-    private static readonly JsonSerializerOptions TraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = true,
-        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
-    };
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly CustomLoopContextResolver _contextResolver;
@@ -317,10 +310,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var sequenceOwner = events.Count == 0 ? run : run with { Events = [.. run.Events, .. events] };
         events.Add(Event(sequenceOwner, now, CustomLoopRunEventKind.NodeAttemptStarted, "Inference attempt trace committed before provider dispatch.", iteration, step.Id, 1, assembly.Blocks, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes));
         var startedCandidate = Append(run, now, events);
-        if (!HasTraceCapacityForDispatch(startedCandidate))
+        var capacityBoundary = await RejectUnavailableTraceCapacityAsync(run, startedCandidate, actor, "provider", cancellationToken);
+        if (capacityBoundary is not null)
         {
-            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_trace_capacity_exhausted", "The durable run trace cannot reserve enough bounded space for another provider attempt and its mandatory outcome evidence.");
-            return new RunAdvance(terminal.Run, terminal);
+            return capacityBoundary;
         }
 
         RunAdvance started;
@@ -518,10 +511,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var now = Now(run);
         var startedEvent = Event(run, now, CustomLoopRunEventKind.ExitDecisionStarted, "Exit-decision trace committed before tool-less provider dispatch.", iteration, "exit", 1, assembly.Blocks, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation, toolAuthority: authority, traceReservationUtf8Bytes: CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
         var startedCandidate = Append(run, now, [startedEvent]);
-        if (!HasTraceCapacityForDispatch(startedCandidate))
+        var capacityBoundary = await RejectUnavailableTraceCapacityAsync(run, startedCandidate, actor, "Exit", cancellationToken);
+        if (capacityBoundary is not null)
         {
-            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "run_trace_capacity_exhausted", "The durable run trace cannot reserve enough bounded space for another Exit attempt and its mandatory outcome evidence.");
-            return new RunAdvance(terminal.Run, terminal);
+            return capacityBoundary;
         }
 
         RunAdvance started;
@@ -1515,13 +1508,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return "A governed tool request recorded an integrity failure and cannot be counted as a completed request.";
             }
 
-            if (ordered.Length != 3
+            if (ordered.Length != 4
                 || ordered[0].Kind != CustomLoopRunEventKind.ToolRequestReserved
                 || ordered[1].Kind != CustomLoopRunEventKind.ToolGovernanceDecided
                 || ordered[2].Kind != CustomLoopRunEventKind.ToolOutcomeObserved
+                || ordered[3].Kind != CustomLoopRunEventKind.ToolOutcomeObserved
+                || ordered[2].ToolEvidence!.ReturnedToModel
+                || !ordered[3].ToolEvidence!.ReturnedToModel
+                || !ToolOutcomeEvidenceMatches(ordered[2].ToolEvidence!, ordered[3].ToolEvidence!)
                 || ordered.Select(item => item.ToolEvidence!.RequestOrdinal).Distinct().Count() != 1)
             {
-                return "Each durable governed tool request must have one ordered reservation, governance decision, and observed outcome before attempt completion.";
+                return "Each durable governed tool request must have one ordered reservation, governance decision, observed outcome, and exact returned-to-model marker before attempt completion.";
             }
         }
 
@@ -1531,6 +1528,27 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         return null;
+    }
+
+    private static bool ToolOutcomeEvidenceMatches(CustomLoopToolTraceEvidence observed, CustomLoopToolTraceEvidence returned)
+    {
+        return observed.Phase == CustomLoopToolEvidencePhase.OutcomeObserved
+            && returned.Phase == CustomLoopToolEvidencePhase.OutcomeObserved
+            && observed.RequestOrdinal == returned.RequestOrdinal
+            && string.Equals(observed.RequestCorrelationId, returned.RequestCorrelationId, StringComparison.Ordinal)
+            && string.Equals(observed.BrokerRequestId, returned.BrokerRequestId, StringComparison.Ordinal)
+            && observed.Command == returned.Command
+            && string.Equals(observed.TargetPath, returned.TargetPath, StringComparison.Ordinal)
+            && string.Equals(observed.Content, returned.Content, StringComparison.Ordinal)
+            && string.Equals(observed.Pattern, returned.Pattern, StringComparison.Ordinal)
+            && string.Equals(observed.ResolvedTarget, returned.ResolvedTarget, StringComparison.Ordinal)
+            && observed.Authority.Matches(returned.Authority)
+            && Equals(observed.Governance, returned.Governance)
+            && observed.Outcome == returned.Outcome
+            && string.Equals(observed.CanonicalResultReturnedToModel, returned.CanonicalResultReturnedToModel, StringComparison.Ordinal)
+            && string.Equals(observed.CanonicalResultHash, returned.CanonicalResultHash, StringComparison.Ordinal)
+            && observed.CanonicalResultCharacterCount == returned.CanonicalResultCharacterCount
+            && observed.ReservedUtf8Bytes == returned.ReservedUtf8Bytes;
     }
 
     private static void EnsureRequestBound(CustomLoopContextAssembly assembly)
@@ -1602,11 +1620,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 && item.ExitDecision == CustomLoopExitDecision.Complete);
     }
 
-    private static bool HasTraceCapacityForDispatch(CustomLoopRunRecord candidate)
+    private async Task<RunAdvance?> RejectUnavailableTraceCapacityAsync(CustomLoopRunRecord current, CustomLoopRunRecord candidate, string actor, string attemptKind, CancellationToken cancellationToken)
     {
-        var candidateBytes = JsonSerializer.SerializeToUtf8Bytes(candidate, TraceSizingJsonOptions).LongLength;
-        var requiredReserve = CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + CustomLoopLimits.MaxTraceControlReserveUtf8Bytes + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes;
-        return candidateBytes + requiredReserve <= CustomLoopLimits.MaxRunTraceUtf8Bytes;
+        try
+        {
+            if (await _runStore.HasSufficientTraceCapacityForDispatchAsync(candidate, current.LifecycleVersion, cancellationToken))
+            {
+                return null;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var cancelled = await CancelBeforeDispatchAsync(current, actor);
+            return new RunAdvance(cancelled.Run, cancelled);
+        }
+        catch (Exception exception)
+        {
+            var terminal = await TerminateAsync(current, actor, CustomLoopRunStatus.Failed, "run_trace_capacity_check_failed", $"The durable run trace capacity check failed before the {attemptKind} request: {SafeExceptionClass(exception)}.");
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
+        var exhausted = await TerminateAsync(current, actor, CustomLoopRunStatus.Failed, "run_trace_capacity_exhausted", $"The durable run trace cannot reserve enough bounded space for another {attemptKind} attempt and its mandatory outcome evidence.");
+        return new RunAdvance(exhausted.Run, exhausted);
     }
 
     private bool ExecutionDeadlineReached(CustomLoopRunRecord run) => GetAccumulatedRunningMilliseconds(run, Now(run)) >= CustomLoopLimits.MaxRunExecutionMilliseconds;

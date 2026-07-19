@@ -553,6 +553,37 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         return CustomLoopRunStoreResult.Updated(run);
     }
 
+    public async Task<bool> HasSufficientTraceCapacityForDispatchAsync(CustomLoopRunRecord candidate, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
+    {
+        ValidateCanonicalRun(candidate);
+        if (expectedLifecycleVersion < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedLifecycleVersion), expectedLifecycleVersion, "Expected lifecycle version must be at least 1.");
+        }
+
+        await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, candidate.Id, StringComparison.Ordinal)).ToArray();
+        if (matches.Length != 1)
+        {
+            return true;
+        }
+
+        var artifact = await ReadArtifactAsync(matches[0], cancellationToken);
+        if (artifact.Tombstone is not null || artifact.Run is null || artifact.Run.LifecycleVersion != expectedLifecycleVersion || artifact.Run.IsTerminal)
+        {
+            return true;
+        }
+
+        return HasSufficientTraceCapacityForDispatch(candidate, artifact.PersistedBytes);
+    }
+
+    private static bool HasSufficientTraceCapacityForDispatch(CustomLoopRunRecord candidate, byte[]? previousEnvelope = null)
+    {
+        var serialized = CustomLoopRunArtifactCodec.Encode(candidate, previousEnvelope);
+        return serialized.LongLength <= CustomLoopLimits.MaxRunTraceUtf8Bytes
+            && CalculateRequiredTraceCapacity(candidate, serialized.LongLength) <= CustomLoopLimits.MaxRunTraceUtf8Bytes;
+    }
+
     private static bool TerminalWarningsEqual(CustomLoopRunEvent left, CustomLoopRunEvent right)
     {
         return left.Sequence == right.Sequence
@@ -916,25 +947,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var outstanding = CalculateOutstandingReservation(run);
-        var futureAttempts = maximumAttempts - startedAttempts;
-        var materializedAttemptShapes = run.Events
-            .Where(item => item.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted)
-            .Select(AttemptStartIdentity)
-            .ToHashSet();
-        var remainingInferenceStarts = run.AdmittedDefinition.InferenceSteps.Count(step => !materializedAttemptShapes.Contains(new AttemptStartShape(IsExit: false, step.Id)));
-        var remainingExitStarts = run.AdmittedDefinition.ExitPolicy.MaxAdditionalIterations > 0 && !materializedAttemptShapes.Contains(new AttemptStartShape(IsExit: true, "exit")) ? 1 : 0;
-        var remainingDistinctStarts = remainingInferenceStarts + remainingExitStarts;
-        var firstOverallStartPending = startedAttempts == 0 && remainingDistinctStarts > 0;
-        var remainingLaterDistinctStarts = remainingDistinctStarts - (firstOverallStartPending ? 1 : 0);
-        var futureToolRequests = maximumRecordedToolRequests - recordedToolRequests;
         var remainingControlReserve = CustomLoopLimits.MaxTraceControlReserveUtf8Bytes - checked(controlEventCount * CustomLoopLimits.MaxTraceControlEventUtf8Bytes);
+        // Reserve evidence only for effects that are already open. Future provider and tool effects are
+        // independently capacity-gated before dispatch; workspace quota reserves the full per-run ceiling.
         return checked(
             persistedUtf8Bytes
             + outstanding.Utf8Bytes
-            + checked((long)futureAttempts * CustomLoopLimits.MaxFutureAttemptEvidenceReservationUtf8Bytes)
-            + (firstOverallStartPending ? CustomLoopLimits.MaxFirstAttemptStartSurchargeUtf8Bytes : 0)
-            + checked((long)remainingLaterDistinctStarts * CustomLoopLimits.MaxFirstDistinctNodeAttemptStartSurchargeUtf8Bytes)
-            + checked((long)futureToolRequests * CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes)
             + remainingControlReserve
             + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes);
     }

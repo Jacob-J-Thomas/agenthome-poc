@@ -200,6 +200,11 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         var artifactPath = await WriteArtifactAsync(paths, transition.Current, currentArtifact);
         var store = new CustomLoopRunStore(paths);
 
+        if (Appended(transition).Any(IsAttemptStart))
+        {
+            Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(transition.Candidate, transition.Current.LifecycleVersion));
+        }
+
         var result = await store.UpdateAsync(transition.Candidate, transition.Current.LifecycleVersion);
 
         Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
@@ -363,10 +368,17 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
     private static CustomLoopRunRecord WithSecondAuthority(CustomLoopRunRecord run)
     {
         var secondReservation = run.Events.Where(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved).Skip(1).First();
-        var correlationId = secondReservation.ToolEvidence!.RequestCorrelationId;
-        var alternate = secondReservation.ToolAuthority! with { Detail = MaxText("alternate-authority", CustomLoopLimits.MaxToolGovernanceDetailCharacters) };
-        var events = run.Events.Select(item => string.Equals(item.ToolEvidence?.RequestCorrelationId, correlationId, StringComparison.Ordinal)
-            ? item with { ToolAuthority = alternate, ToolEvidence = item.ToolEvidence! with { Authority = alternate } }
+        var attemptStart = run.Events.Last(item => item.Sequence < secondReservation.Sequence
+            && item.Kind == CustomLoopRunEventKind.NodeAttemptStarted
+            && item.Iteration == secondReservation.Iteration
+            && string.Equals(item.StepId, secondReservation.StepId, StringComparison.Ordinal)
+            && item.Attempt == secondReservation.Attempt);
+        var alternate = attemptStart.ToolAuthority! with { Detail = MaxText("alternate-authority", CustomLoopLimits.MaxToolGovernanceDetailCharacters) };
+        var events = run.Events.Select(item => item.Iteration == attemptStart.Iteration
+                && string.Equals(item.StepId, attemptStart.StepId, StringComparison.Ordinal)
+                && item.Attempt == attemptStart.Attempt
+                && (item.Kind == CustomLoopRunEventKind.NodeAttemptStarted || item.ToolEvidence is not null)
+            ? item with { ToolAuthority = alternate, ToolEvidence = item.ToolEvidence is null ? null : item.ToolEvidence with { Authority = alternate } }
             : item).ToArray();
         return run with { Events = events };
     }
@@ -572,9 +584,10 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             var hash = CustomLoopTraceContentHash.Compute(formatted);
             var reservation = Evidence(CustomLoopToolEvidencePhase.RequestReserved, null, null, null, false);
             var governed = Evidence(CustomLoopToolEvidencePhase.GovernanceDecided, brokerId, governance, null, false);
-            var outcome = Evidence(CustomLoopToolEvidencePhase.OutcomeObserved, brokerId, governance, outcomeValue, true);
-            var evidences = new[] { reservation, governed, outcome };
-            var kinds = new[] { CustomLoopRunEventKind.ToolRequestReserved, CustomLoopRunEventKind.ToolGovernanceDecided, CustomLoopRunEventKind.ToolOutcomeObserved };
+            var outcome = Evidence(CustomLoopToolEvidencePhase.OutcomeObserved, brokerId, governance, outcomeValue, false);
+            var returned = outcome with { ReturnedToModel = true };
+            var evidences = new[] { reservation, governed, outcome, returned };
+            var kinds = new[] { CustomLoopRunEventKind.ToolRequestReserved, CustomLoopRunEventKind.ToolGovernanceDecided, CustomLoopRunEventKind.ToolOutcomeObserved, CustomLoopRunEventKind.ToolOutcomeObserved };
             for (var index = 0; index < evidences.Length; index++)
             {
                 var current = await store.GetAsync(attempt.RunId, cancellationToken);
@@ -657,6 +670,12 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         public Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default) => Task.FromResult<CustomLoopRunRecord?>(Current.IsTerminal ? null : Current);
         public Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<CustomLoopRunSummary>>([]);
         public Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<CustomLoopRunRecord>>(Current.IsTerminal ? [] : [Current]);
+
+        public Task<bool> HasSufficientTraceCapacityForDispatchAsync(CustomLoopRunRecord candidate, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
+        {
+            Assert.Equal(Current.LifecycleVersion, expectedLifecycleVersion);
+            return Task.FromResult(true);
+        }
     }
 
     private sealed record MaximumExecutionFixture(
