@@ -48,13 +48,10 @@ public static class CustomLoopLimits
     public const int MaxAttemptStartEvidenceUtf8Bytes = 45_000;
     public const int MaxFirstAttemptStartEvidenceUtf8Bytes = 265 * 1_024;
     public const int MaxFirstDistinctNodeAttemptStartEvidenceUtf8Bytes = 128 * 1_024;
-    public const int MaxFirstAttemptStartSurchargeUtf8Bytes = MaxFirstAttemptStartEvidenceUtf8Bytes - MaxAttemptStartEvidenceUtf8Bytes;
-    public const int MaxFirstDistinctNodeAttemptStartSurchargeUtf8Bytes = MaxFirstDistinctNodeAttemptStartEvidenceUtf8Bytes - MaxAttemptStartEvidenceUtf8Bytes;
     private const int MaxJsonEscapedUtf8BytesPerCharacter = 6;
     private const int MaxAttemptOutcomeMetadataUtf8Bytes = 32 * 1_024;
     // The observed and completed events both retain canonical output; six bytes covers the default JSON encoder's worst-case UTF-16 escape.
     public const int MaxAttemptEvidenceReservationUtf8Bytes = (2 * MaxCanonicalModelOutputCharacters * MaxJsonEscapedUtf8BytesPerCharacter) + MaxAttemptOutcomeMetadataUtf8Bytes;
-    public const int MaxFutureAttemptEvidenceReservationUtf8Bytes = MaxAttemptStartEvidenceUtf8Bytes + MaxAttemptEvidenceReservationUtf8Bytes;
     public const int MaxGovernedToolRequestEvidenceUtf8Bytes = 18 * 1_024;
     public const int MaxGovernedToolGovernanceEvidenceUtf8Bytes = 14 * 1_024;
     public const int MaxGovernedToolOutcomeEvidenceUtf8Bytes = 251 * 1_024;

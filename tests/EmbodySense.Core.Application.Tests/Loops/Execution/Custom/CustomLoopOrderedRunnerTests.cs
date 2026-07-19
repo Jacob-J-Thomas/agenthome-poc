@@ -18,6 +18,11 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 public sealed class CustomLoopOrderedRunnerTests
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+    private static readonly JsonSerializerOptions RawTraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
+    };
 
     [Fact]
     public void Attempt_reservation_covers_two_maximally_escaped_outcome_events()
@@ -979,7 +984,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
-        Assert.Contains("reservation, governance decision, and observed outcome", result.Run!.FailureDetail, StringComparison.Ordinal);
+        Assert.Contains("reservation, governance decision, observed outcome, and exact returned-to-model marker", result.Run!.FailureDetail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1645,7 +1650,7 @@ public sealed class CustomLoopOrderedRunnerTests
             }
         }
 
-        var store = new FakeRunStore(run);
+        var store = new FakeRunStore(run) { ApplyRawTraceCapacityLimit = true };
         var executor = new QueueExecutor(outcomes.ToArray());
 
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
@@ -1759,13 +1764,15 @@ public sealed class CustomLoopOrderedRunnerTests
                 CanonicalResultReturnedToModel = canonicalResult,
                 CanonicalResultHash = CustomLoopTraceContentHash.Compute(canonicalResult),
                 CanonicalResultCharacterCount = canonicalResult.Length,
-                ReturnedToModel = true
+                ReturnedToModel = false
             };
+            var returned = outcome with { ReturnedToModel = true };
             events.Add(ToolEvent(store.Current.Events.Length + events.Count + 1, CustomLoopRunEventKind.ToolRequestReserved, request, reservation));
             events.Add(ToolEvent(store.Current.Events.Length + events.Count + 1, CustomLoopRunEventKind.ToolGovernanceDecided, request, governed));
             if (includeOutcomes)
             {
                 events.Add(ToolEvent(store.Current.Events.Length + events.Count + 1, CustomLoopRunEventKind.ToolOutcomeObserved, request, outcome));
+                events.Add(ToolEvent(store.Current.Events.Length + events.Count + 1, CustomLoopRunEventKind.ToolOutcomeObserved, request, returned));
             }
         }
 
@@ -1780,7 +1787,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
     private static CustomLoopRunEvent ToolEvent(long sequence, CustomLoopRunEventKind kind, CustomLoopInferenceAttemptRequest request, CustomLoopToolTraceEvidence evidence)
     {
-        return new CustomLoopRunEvent(sequence, $"event-{evidence.RequestCorrelationId}-{evidence.Phase.ToString().ToLowerInvariant()}", Now, kind, request.Iteration, request.StepId, request.Attempt, $"Durable {evidence.Phase} test evidence.", [], null, null, null, null, null, null, null, null, null, null, evidence.Authority, evidence);
+        var returnMarker = evidence.ReturnedToModel ? "-returned" : string.Empty;
+        return new CustomLoopRunEvent(sequence, $"event-{evidence.RequestCorrelationId}-{evidence.Phase.ToString().ToLowerInvariant()}{returnMarker}", Now, kind, request.Iteration, request.StepId, request.Attempt, $"Durable {evidence.Phase} test evidence.", [], null, null, null, null, null, null, null, null, null, null, evidence.Authority, evidence);
     }
 
     private static CustomLoopInferenceAttemptResult Result(string output, int toolCalls = 0)
@@ -1843,6 +1851,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Exception? GetExceptionAfterOutcomeConflict { get; init; }
 
+        public bool ApplyRawTraceCapacityLimit { get; init; }
+
         public List<CustomLoopRunRecord> Writes { get; } = [];
 
         public List<CustomLoopValidationError> ValidationFailures { get; } = [];
@@ -1890,6 +1900,19 @@ public sealed class CustomLoopOrderedRunnerTests
         {
             IReadOnlyList<CustomLoopRunRecord> runs = Current.IsTerminal ? [] : [Current];
             return Task.FromResult(runs);
+        }
+
+        public Task<bool> HasSufficientTraceCapacityForDispatchAsync(CustomLoopRunRecord candidate, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
+        {
+            Assert.Equal(Current.LifecycleVersion, expectedLifecycleVersion);
+            if (!ApplyRawTraceCapacityLimit)
+            {
+                return Task.FromResult(true);
+            }
+
+            var candidateBytes = JsonSerializer.SerializeToUtf8Bytes(candidate, RawTraceSizingJsonOptions).LongLength;
+            var requiredReserve = CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + CustomLoopLimits.MaxTraceControlReserveUtf8Bytes + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes;
+            return Task.FromResult(candidateBytes + requiredReserve <= CustomLoopLimits.MaxRunTraceUtf8Bytes);
         }
 
         public Task<CustomLoopRunStoreResult> AppendTerminalIntegrityWarningAsync(string runId, int expectedLifecycleVersion, CustomLoopRunEvent warning, CancellationToken cancellationToken = default)
