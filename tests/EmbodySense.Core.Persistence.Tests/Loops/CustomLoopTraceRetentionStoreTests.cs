@@ -185,6 +185,37 @@ public sealed class CustomLoopTraceRetentionStoreTests
         await Assert.ThrowsAsync<FormatException>(() => restarted.DeleteTerminalTraceAsync(Mutation(conflictRequest)));
     }
 
+    [Fact]
+    public async Task Committed_operation_binds_request_derived_tombstone_metadata()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = await store.InspectTraceAsync(terminal.Id);
+        Assert.NotNull(inspection);
+        var request = Request(terminal.Id, inspection.PersistedArtifactHash);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(Mutation(request))).Status);
+        var operation = (await store.GetTraceDeletionOperationAsync(request.OperationId)).Operation;
+        Assert.NotNull(operation?.Tombstone);
+        var tombstone = operation!.Tombstone!;
+        var tampered = new[]
+        {
+            tombstone with { RunId = "run-other" },
+            tombstone with { OriginalTraceHash = new string('a', CustomLoopLimits.Sha256HexCharacters) },
+            tombstone with { DeletionActor = "actor-other" },
+            tombstone with { DeletionSurface = "cli" }
+        };
+
+        foreach (var candidate in tampered)
+        {
+            await WriteOperationAsync(paths, operation with { Tombstone = candidate });
+            var restarted = new CustomLoopRunStore(paths);
+            await Assert.ThrowsAsync<FormatException>(() => restarted.GetTraceDeletionOperationAsync(request.OperationId));
+            await Assert.ThrowsAsync<FormatException>(() => restarted.DeleteTerminalTraceAsync(Mutation(request)));
+        }
+    }
+
     private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store)
     {
         var admitted = CreateAdmittedRun();

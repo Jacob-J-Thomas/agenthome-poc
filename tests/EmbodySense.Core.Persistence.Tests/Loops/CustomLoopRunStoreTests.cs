@@ -278,6 +278,28 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Unsafe_mutation_lock_fails_closed_instead_of_retrying_as_contention()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopRunsPath);
+        var target = workspace.File("lock-target");
+        await File.WriteAllTextAsync(target, "unsafe");
+        var lockPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-runs.lock");
+        try
+        {
+            File.CreateSymbolicLink(lockPath, target);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await Assert.ThrowsAsync<IOException>(() => new CustomLoopRunStore(paths).CreateAsync(CreateRun(), cancellation.Token));
+    }
+
+    [Fact]
     public async Task Update_returns_missing_stale_and_terminal_results_without_overwrite()
     {
         using var workspace = new TestWorkspace();
@@ -680,6 +702,29 @@ public sealed class CustomLoopRunStoreTests
 
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).CreateAsync(run));
         Assert.False(Directory.Exists(paths.CustomLoopRunsPath));
+    }
+
+    [Fact]
+    public async Task Create_rejects_a_valid_artifact_that_cannot_retain_terminal_capacity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        var blocks = Enumerable.Range(0, 48).Select(index =>
+        {
+            var prefix = index.ToString("D2") + ":";
+            var content = prefix + new string('x', CustomLoopLimits.MaxLogicalProviderRequestCharacters - prefix.Length);
+            return new CustomLoopContextBlock(CustomLoopContextSource.HarnessGovernance, $"source-{index}", LlmMessageRole.System, true, null, content, CustomLoopTraceContentHash.Compute(content), content.Length, false, EmbodySenseDeveloperInstructions.CurrentVersion);
+        }).ToArray();
+        run = run with { Events = [run.Events[0] with { ContextBlocks = blocks }] };
+        var serialized = CustomLoopRunArtifactSerializer.Serialize(run);
+
+        Assert.True(serialized.LongLength <= CustomLoopLimits.MaxRunTraceUtf8Bytes);
+
+        var result = await new CustomLoopRunStore(paths).CreateAsync(run);
+
+        Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, result.Status);
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json")));
     }
 
     [Fact]

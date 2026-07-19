@@ -100,6 +100,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return CustomLoopRunStoreResult.NonterminalRunExists(activeLoopRun);
         }
 
+        if (CalculateRequiredTraceCapacity(run, serialized.LongLength) > CustomLoopLimits.MaxRunTraceUtf8Bytes)
+        {
+            return CustomLoopRunStoreResult.LimitExceeded();
+        }
+
         var quota = CalculateQuota(artifacts);
         if (quota.RetainedTraceCount >= quota.MaximumTraceCount
             || quota.AccountedTraceUtf8Bytes > quota.MaximumWorkspaceUtf8Bytes - quota.MaximumPerTraceUtf8Bytes)
@@ -1311,7 +1316,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                     RejectReparsePoint(_mutationLockPath);
                     return new MutationLease(stream, _processMutationGate);
                 }
-                catch (IOException)
+                catch (IOException exception) when (IsLockContention(exception))
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(15), cancellationToken);
                 }
@@ -1379,6 +1384,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         {
             throw new IOException($"Custom loop artifact path `{path}` cannot traverse a reparse point.");
         }
+    }
+
+    private static bool IsLockContention(IOException exception)
+    {
+        const int sharingViolation = 32;
+        const int lockViolation = 33;
+        return (exception.HResult & 0xFFFF) is sharingViolation or lockViolation;
     }
 
     private static void EnsureContained(string root, string candidate)
@@ -1457,6 +1469,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             ValidateTombstone(operation.Tombstone);
             if (!string.Equals(operation.Tombstone!.DeletionOperationId, operation.OperationId, StringComparison.Ordinal)
                 || !string.Equals(operation.Tombstone.DeletionRequestHash, operation.RequestHash, StringComparison.Ordinal)
+                || !string.Equals(operation.Tombstone.RunId, operation.Request.RunId, StringComparison.Ordinal)
+                || !string.Equals(operation.Tombstone.OriginalTraceHash, operation.Request.ExpectedTraceHash, StringComparison.Ordinal)
+                || !string.Equals(operation.Tombstone.DeletionActor, operation.Request.Actor, StringComparison.Ordinal)
+                || !string.Equals(operation.Tombstone.DeletionSurface, operation.Request.Surface, StringComparison.Ordinal)
                 || operation.Tombstone.OutcomeIntegrity != operation.Integrity)
             {
                 throw new FormatException("Trace-deletion operation outcome does not match its tombstone identity or integrity state.");
