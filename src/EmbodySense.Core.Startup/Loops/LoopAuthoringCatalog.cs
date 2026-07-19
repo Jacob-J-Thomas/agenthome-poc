@@ -1,3 +1,5 @@
+using EmbodySense.Core.Startup.Loops.Execution;
+
 namespace EmbodySense.Core.Startup.Loops;
 
 public sealed record LoopAuthoringCatalog(
@@ -5,4 +7,7 @@ public sealed record LoopAuthoringCatalog(
     LoopDefinitionSnapshot SystemDefault,
     IReadOnlyList<LoopDefinitionSnapshot> CustomDefinitions,
     LoopAuthoringLimits Limits,
-    LoopToolCatalog Tools);
+    LoopToolCatalog Tools)
+{
+    public LoopRunModelSnapshot? RuntimeModel { get; init; }
+}
