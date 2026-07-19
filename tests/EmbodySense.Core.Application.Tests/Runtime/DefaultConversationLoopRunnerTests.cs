@@ -474,6 +474,25 @@ public sealed class DefaultConversationLoopRunnerTests
     }
 
     [Fact]
+    public async Task RunTurnAsync_preserves_active_context_when_another_runtime_rotates_the_durable_conversation()
+    {
+        var client = new RecordingInferenceClient("must not run");
+        var memory = new RecordingConversationMemoryStore();
+        var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
+        state.AppendMessage(LlmMessage.User("active prompt"));
+        state.AppendMessage(LlmMessage.Assistant("active response"));
+        var runner = new DefaultConversationLoopRunner(client, state, memory);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("next prompt"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.Contains("changed outside this runtime", result.FailureDetail, StringComparison.Ordinal);
+        Assert.False(result.UserMessageAccepted);
+        Assert.Empty(client.Requests);
+        Assert.Equal(["startup context", "active prompt", "active response"], state.Messages.Select(message => message.Content));
+    }
+
+    [Fact]
     public async Task RunTurnAsync_cancels_a_queued_turn_without_accepting_its_prompt_or_creating_a_run()
     {
         var client = new BlockingInferenceClient("first response");

@@ -60,7 +60,10 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             try
             {
                 var durableTranscript = await _conversationMemoryStore.LoadCurrentConversationAsync(request.CancellationToken);
-                _conversationState.SynchronizeConversationTranscript(durableTranscript);
+                if (!_conversationState.TrySynchronizeConversationTranscript(durableTranscript))
+                {
+                    return DefaultConversationLoopTurnResult.Failed("The durable workspace conversation changed outside this runtime. Active local context was preserved; use /new or explicitly load a stored conversation before sending another model turn.");
+                }
             }
             catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
             {

@@ -233,6 +233,7 @@ public sealed class CustomLoopOrderedRunnerTests
     [InlineData("complete")]
     [InlineData("repeat")]
     [InlineData("rEpEaT")]
+    [InlineData("Repeat\u00A0")]
     public async Task Invalid_Exit_output_never_repeats_and_becomes_NeedsReview(string decision)
     {
         var definition = Definition(
@@ -250,6 +251,26 @@ public sealed class CustomLoopOrderedRunnerTests
         var exit = Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted);
         Assert.Equal(CustomLoopExitDecision.Invalid, exit.ExitDecision);
         Assert.Equal(decision, exit.CanonicalOutput);
+    }
+
+    [Fact]
+    public async Task Exit_decision_is_validated_against_the_complete_raw_response_when_evidence_is_truncated()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: false))],
+            maxAdditionalIterations: 2,
+            exitPolicy: Policy(Output(retain: true, publish: false)));
+        var store = new FakeRunStore(Run(definition));
+        var malformed = "Repeat" + new string(' ', CustomLoopLimits.MaxCanonicalModelOutputCharacters - "Repeat".Length) + "unexpected";
+        var executor = new QueueExecutor(Result("iteration one"), Result(malformed));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(2, executor.Requests.Count);
+        var exit = Assert.Single(result.Run!.Events, item => item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted);
+        Assert.True(exit.CanonicalOutputTruncated);
+        Assert.Equal(CustomLoopExitDecision.Invalid, exit.ExitDecision);
     }
 
     [Fact]

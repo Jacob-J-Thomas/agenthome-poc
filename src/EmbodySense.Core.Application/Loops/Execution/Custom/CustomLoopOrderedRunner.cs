@@ -625,8 +625,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         run = refreshed.Run!;
 
+        var decision = ParseExitDecision(result.OutputText ?? string.Empty);
         var canonical = Canonicalize(result.OutputText);
-        var decision = ParseExitDecision(canonical.Text);
         var publicationId = assembly.ResolvedOutputPolicy.PublishToInvokingConversation ? PublicationOperationId(run.Id, iteration, "exit", isExit: true) : null;
         var observedNow = Now(run);
         var safeProviderResponseId = SafeReference(result.ProviderResponseId);
@@ -1718,7 +1718,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static CustomLoopExitDecision ParseExitDecision(string output)
     {
-        var token = output.Trim();
+        var token = TrimAsciiWhitespace(output);
         if (string.Equals(token, "Complete", StringComparison.Ordinal))
         {
             return CustomLoopExitDecision.Complete;
@@ -1726,6 +1726,25 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         return string.Equals(token, "Repeat", StringComparison.Ordinal) ? CustomLoopExitDecision.Repeat : CustomLoopExitDecision.Invalid;
     }
+
+    private static string TrimAsciiWhitespace(string value)
+    {
+        var start = 0;
+        while (start < value.Length && IsAsciiWhitespace(value[start]))
+        {
+            start++;
+        }
+
+        var end = value.Length - 1;
+        while (end >= start && IsAsciiWhitespace(value[end]))
+        {
+            end--;
+        }
+
+        return value[start..(end + 1)];
+    }
+
+    private static bool IsAsciiWhitespace(char value) => value is ' ' or '\t' or '\r' or '\n' or '\f' or '\v';
 
     private static string PublicationOperationId(string runId, int iteration, string stepId, bool isExit)
     {

@@ -126,6 +126,42 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    public bool TrySynchronizeConversationTranscript(IReadOnlyList<LlmMessage> transcript)
+    {
+        ArgumentNullException.ThrowIfNull(transcript);
+
+        var changed = false;
+        lock (_messagesSync)
+        {
+            var currentTranscript = _messages.Where(message => message.Source != RuntimeContextSource.StartupContext).Select(message => message.Message).ToArray();
+            if (currentTranscript.Length > 0 && !MessagesEqual(currentTranscript, transcript))
+            {
+                return false;
+            }
+
+            if (MessagesEqual(currentTranscript, transcript))
+            {
+                return true;
+            }
+
+            _messages.RemoveAll(message => message.Source != RuntimeContextSource.StartupContext);
+            _messages.AddRange(transcript.Select(message => CreateContextMessage(message, RuntimeContextSource.RestoredConversationHistory, "Synchronized from the durable workspace conversation before turn context assembly.")));
+            changed = true;
+        }
+
+        if (changed)
+        {
+            _resettableInferenceClient?.ResetConversation();
+        }
+
+        return true;
+    }
+
+    private static bool MessagesEqual(IReadOnlyList<LlmMessage> left, IReadOnlyList<LlmMessage> right)
+    {
+        return left.Count == right.Count && left.Zip(right).All(pair => pair.First.Role == pair.Second.Role && string.Equals(pair.First.Content, pair.Second.Content, StringComparison.Ordinal));
+    }
+
     private static RuntimeContextMessage CreateContextMessage(LlmMessage message, RuntimeContextSource source, string? detail = null)
     {
         return new RuntimeContextMessage(message, source, detail ?? GetDefaultDetail(source));
