@@ -283,12 +283,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     {
         CustomLoopContextAssembly assembly;
         CustomLoopToolAuthoritySnapshot authority;
+        CustomLoopToolAssignment[] effectiveAssignments;
         try
         {
             authority = await _authorityProvider.ResolveAsync(run.AdmittedDefinition.RoleId, run.AdmittedDefinition.ToolAssignments, cancellationToken);
             EnsureAuthorityBound(run, authority, run.AdmittedDefinition.ToolAssignments);
 
-            assembly = _contextResolver.ResolveInference(run, step, authority.EffectiveAssignments);
+            effectiveAssignments = run.Checkpoint.ToolRequestsUsed < CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun ? authority.EffectiveAssignments : [];
+            assembly = _contextResolver.ResolveInference(run, step, effectiveAssignments);
             EnsureRequestBound(assembly);
             EnsureAttemptBound(run);
         }
@@ -365,7 +367,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             1,
             correlation,
             IsExit: false,
-            AllowTools: authority.EffectiveAssignments.Length > 0,
+            AllowTools: effectiveAssignments.Length > 0,
             run.ModelSnapshot,
             assignments,
             run.Checkpoint.ToolRequestsUsed,
@@ -918,9 +920,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         publication ??= new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Uncertain, null, "Publisher returned no result after publication may have occurred.");
 
-        var isPublished = publication.Outcome is CustomLoopConversationPublicationOutcome.Published or CustomLoopConversationPublicationOutcome.AlreadyPublished;
-        var publicationId = publication.PublicationId ?? operationId;
-        var eventDetail = publication.Outcome switch
+        var publicationIdMatches = publication.PublicationId is null || string.Equals(publication.PublicationId, operationId, StringComparison.Ordinal);
+        var isPublished = publicationIdMatches && (publication.Outcome is CustomLoopConversationPublicationOutcome.Published or CustomLoopConversationPublicationOutcome.AlreadyPublished);
+        var publicationId = operationId;
+        var eventDetail = !publicationIdMatches
+            ? "Conversation publisher returned an operation ID that did not match the durable publication intent."
+            : publication.Outcome switch
         {
             CustomLoopConversationPublicationOutcome.Published => "Canonical output was published to the invoking conversation.",
             CustomLoopConversationPublicationOutcome.AlreadyPublished => "Idempotent conversation publication was already committed.",

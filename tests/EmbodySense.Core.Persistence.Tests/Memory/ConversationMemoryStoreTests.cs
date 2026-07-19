@@ -199,6 +199,24 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task ListConversationsAsync_waits_for_the_cross_process_current_conversation_lease()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("active prompt"));
+        await using var externalLease = new FileStream(paths.CurrentConversationPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var listing = store.ListConversationsAsync();
+        await Task.Delay(75);
+
+        Assert.False(listing.IsCompleted);
+        await externalLease.DisposeAsync();
+        var conversation = Assert.Single(await listing.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(conversation.IsCurrent);
+    }
+
+    [Fact]
     public async Task ResumeConversationAsync_makes_selected_transcript_current_and_archives_previous_current()
     {
         using var workspace = new TestWorkspace();

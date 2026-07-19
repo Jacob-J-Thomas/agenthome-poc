@@ -119,6 +119,22 @@ public sealed class ConversationRuntimeStateTests
     }
 
     [Fact]
+    public void Guarded_synchronization_accepts_an_append_only_durable_update()
+    {
+        var state = new ConversationRuntimeState([LlmMessage.System("startup")]);
+        state.AppendMessage(LlmMessage.User("active prompt"));
+        state.AppendMessage(LlmMessage.Assistant("active response"));
+
+        var synchronized = state.TrySynchronizeConversationTranscript([
+            LlmMessage.User("active prompt"),
+            LlmMessage.Assistant("active response"),
+            LlmMessage.Assistant("custom-loop publication")]);
+
+        Assert.True(synchronized);
+        Assert.Equal(["startup", "active prompt", "active response", "custom-loop publication"], state.Messages.Select(message => message.Content));
+    }
+
+    [Fact]
     public void Replace_messages_validates_the_startup_boundary_and_describes_each_remaining_context_source()
     {
         var state = new ConversationRuntimeState();

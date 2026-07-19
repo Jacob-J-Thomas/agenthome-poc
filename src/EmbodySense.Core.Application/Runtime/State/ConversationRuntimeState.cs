@@ -134,7 +134,7 @@ public sealed class ConversationRuntimeState
         lock (_messagesSync)
         {
             var currentTranscript = _messages.Where(message => message.Source != RuntimeContextSource.StartupContext).Select(message => message.Message).ToArray();
-            if (currentTranscript.Length > 0 && !MessagesEqual(currentTranscript, transcript))
+            if (currentTranscript.Length > 0 && !IsPrefix(currentTranscript, transcript))
             {
                 return false;
             }
@@ -160,6 +160,11 @@ public sealed class ConversationRuntimeState
     private static bool MessagesEqual(IReadOnlyList<LlmMessage> left, IReadOnlyList<LlmMessage> right)
     {
         return left.Count == right.Count && left.Zip(right).All(pair => pair.First.Role == pair.Second.Role && string.Equals(pair.First.Content, pair.Second.Content, StringComparison.Ordinal));
+    }
+
+    private static bool IsPrefix(IReadOnlyList<LlmMessage> prefix, IReadOnlyList<LlmMessage> messages)
+    {
+        return prefix.Count <= messages.Count && prefix.Zip(messages).All(pair => pair.First.Role == pair.Second.Role && string.Equals(pair.First.Content, pair.Second.Content, StringComparison.Ordinal));
     }
 
     private static RuntimeContextMessage CreateContextMessage(LlmMessage message, RuntimeContextSource source, string? detail = null)
