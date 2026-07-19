@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 
@@ -284,7 +285,22 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         {
             CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.RunId is null && string.Equals(operation.AdmissionStatus, "WorkspaceExecutionBusy", StringComparison.Ordinal),
             CustomLoopInvocationOutcome.Admitted => CustomLoopArtifactIdentifier.IsValid(operation.RunId) && string.Equals(operation.AdmissionStatus, "Admitted", StringComparison.Ordinal),
-            CustomLoopInvocationOutcome.Rejected => operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId),
+            CustomLoopInvocationOutcome.Rejected => ValidRejectedOutcome(operation),
+            _ => false
+        };
+    }
+
+    private static bool ValidRejectedOutcome(CustomLoopInvocationOperation operation)
+    {
+        var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
+        return operation.AdmissionStatus switch
+        {
+            nameof(CustomLoopAdmissionStatus.Invalid) => hasValidOptionalRun,
+            nameof(CustomLoopAdmissionStatus.Conflict) => hasValidOptionalRun,
+            nameof(CustomLoopAdmissionStatus.NonterminalRunExists) => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
+            nameof(CustomLoopAdmissionStatus.LimitExceeded) => operation.RunId is null,
+            nameof(CustomLoopAdmissionStatus.NotFound) => operation.RunId is null,
+            nameof(CustomLoopAdmissionStatus.AuditUnavailable) => hasValidOptionalRun,
             _ => false
         };
     }

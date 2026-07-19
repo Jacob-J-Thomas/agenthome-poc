@@ -307,6 +307,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         Assert.Same(tombstone, result.Tombstone);
         Assert.Equal(1, store.DeleteCalls);
         Assert.Equal(2, store.InspectCalls);
+        Assert.False(store.RecoveryReusedMutationToken);
     }
 
     [Fact]
@@ -513,6 +514,8 @@ public sealed class CustomLoopTraceRetentionServiceTests
         public int InspectCalls { get; private set; }
         public int QuotaCalls { get; private set; }
         public int MarkAttempts { get; private set; }
+        public bool RecoveryReusedMutationToken { get; private set; }
+        private CancellationToken _mutationToken;
 
         public Task<CustomLoopTraceQuota> GetTraceQuotaAsync(CancellationToken cancellationToken = default)
         {
@@ -523,6 +526,11 @@ public sealed class CustomLoopTraceRetentionServiceTests
         public Task<CustomLoopTraceInspection?> InspectTraceAsync(string runId, CancellationToken cancellationToken = default)
         {
             InspectCalls++;
+            if (DeleteCalls > 0)
+            {
+                RecoveryReusedMutationToken = cancellationToken == _mutationToken;
+            }
+
             var exception = DeleteCalls > 0 ? InspectExceptionAfterDeleteFailure ?? InspectException : InspectException;
             if (exception is not null)
             {
@@ -547,6 +555,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         public Task<CustomLoopTraceDeletionStoreResult> DeleteTerminalTraceAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
         {
             DeleteCalls++;
+            _mutationToken = cancellationToken;
             if (DeleteException is not null)
             {
                 throw DeleteException;

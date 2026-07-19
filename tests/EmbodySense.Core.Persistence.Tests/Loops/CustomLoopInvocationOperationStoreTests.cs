@@ -134,6 +134,58 @@ public sealed class CustomLoopInvocationOperationStoreTests
         await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("invoke-corrupt"));
     }
 
+    [Theory]
+    [InlineData("Admitted", null)]
+    [InlineData("WorkspaceExecutionBusy", null)]
+    [InlineData("arbitrary", null)]
+    [InlineData("NotFound", "run-contradictory")]
+    [InlineData("LimitExceeded", "run-contradictory")]
+    [InlineData("NonterminalRunExists", null)]
+    public async Task Rejected_completion_rejects_contradictory_status_and_run_shapes(string admissionStatus, string? runId)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var pending = Pending("invoke-rejected-shape", "prompt");
+        await store.BeginAsync(pending);
+        var contradictory = pending with
+        {
+            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = admissionStatus,
+            RunId = runId,
+            Detail = "The invocation was rejected."
+        };
+
+        await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(contradictory));
+    }
+
+    [Theory]
+    [InlineData("Invalid", null)]
+    [InlineData("Conflict", "run-conflict")]
+    [InlineData("NonterminalRunExists", "run-active")]
+    [InlineData("LimitExceeded", null)]
+    [InlineData("NotFound", null)]
+    [InlineData("AuditUnavailable", "run-audit")]
+    public async Task Rejected_completion_accepts_defined_status_and_run_shapes(string admissionStatus, string? runId)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var pending = Pending("invoke-rejected-valid", "prompt");
+        await store.BeginAsync(pending);
+        var rejected = pending with
+        {
+            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = admissionStatus,
+            RunId = runId,
+            Detail = "The invocation was rejected."
+        };
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(rejected)).Status);
+    }
+
     private static CustomLoopInvocationOperation Pending(string operationId, string prompt)
     {
         const string loopId = "loop-store";

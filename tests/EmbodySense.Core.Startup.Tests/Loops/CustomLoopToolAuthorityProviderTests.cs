@@ -110,6 +110,27 @@ public sealed class CustomLoopToolAuthorityProviderTests
     }
 
     [Fact]
+    public async Task Resolve_fails_closed_when_the_authority_file_contains_a_different_definition_identity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new LoopDefinitionStore(paths);
+        var substituted = LoopDefinition.CreateDefaultConversation() with { Id = "substituted-conversation" };
+        await store.SaveAsync(substituted);
+        File.Move(
+            Path.Combine(paths.LoopDefinitionsPath, substituted.Id + ".json"),
+            Path.Combine(paths.LoopDefinitionsPath, "default-conversation.json"));
+        var provider = new CustomLoopToolAuthorityProvider(store, new FixedTimeProvider(Timestamp));
+
+        var authority = await provider.ResolveAsync(substituted.RoleId, [CustomLoopToolAssignment.Read]);
+
+        Assert.False(authority.IsValid);
+        Assert.Empty(authority.CurrentRoleCeiling);
+        Assert.Empty(authority.EffectiveAssignments);
+        Assert.Contains("expected default-conversation identity", authority.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Public_boundaries_reject_missing_inputs()
     {
         using var workspace = new TestWorkspace();

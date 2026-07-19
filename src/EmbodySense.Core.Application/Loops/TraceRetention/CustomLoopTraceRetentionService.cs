@@ -111,7 +111,8 @@ public sealed class CustomLoopTraceRetentionService
         {
             try
             {
-                var inspection = await _store.InspectTraceAsync(request.RunId, mutationIntegrityWindow.Token);
+                using var recoveryWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+                var inspection = await _store.InspectTraceAsync(request.RunId, recoveryWindow.Token);
                 if (inspection?.Tombstone is not null
                     && string.Equals(inspection.Tombstone.DeletionOperationId, request.OperationId, StringComparison.Ordinal)
                     && string.Equals(inspection.Tombstone.DeletionRequestHash, requestHash, StringComparison.Ordinal))

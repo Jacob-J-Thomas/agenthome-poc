@@ -39,6 +39,11 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
             return Invalid(roleId, admittedMaximum, evaluatedAtUtc, "The current directory-role authority definition is missing; custom-loop execution failed closed.");
         }
 
+        if (!string.Equals(definition.Id, "default-conversation", StringComparison.Ordinal))
+        {
+            return Invalid(roleId, admittedMaximum, evaluatedAtUtc, "The current directory-role authority definition does not have the expected default-conversation identity; custom-loop execution failed closed.");
+        }
+
         var current = ResolveCurrentRoleCeiling(definition);
         var admitted = admittedMaximum.ToArray();
         var roleMatches = string.Equals(definition.RoleId, roleId, StringComparison.Ordinal);
