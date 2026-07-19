@@ -1430,9 +1430,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                 throw new FormatException("Trace-deletion operation outcome does not match its tombstone identity or integrity state.");
             }
         }
-        else if (operation.Tombstone is not null && operation.Outcome != CustomLoopTraceDeletionStoreStatus.OperationConflict)
+        else if (operation.Tombstone is not null)
         {
-            throw new FormatException("A rejected trace-deletion operation cannot retain an unrelated tombstone.");
+            ValidateTombstone(operation.Tombstone);
+            if (operation.Outcome != CustomLoopTraceDeletionStoreStatus.OperationConflict)
+            {
+                throw new FormatException("A rejected trace-deletion operation cannot retain an unrelated tombstone.");
+            }
         }
 
         if (operation.Outcome is not CustomLoopTraceDeletionStoreStatus.Deleted and not CustomLoopTraceDeletionStoreStatus.AlreadyDeleted

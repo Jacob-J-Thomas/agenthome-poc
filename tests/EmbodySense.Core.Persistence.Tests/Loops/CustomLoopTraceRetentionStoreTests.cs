@@ -159,6 +159,30 @@ public sealed class CustomLoopTraceRetentionStoreTests
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync(request.OperationId));
     }
 
+    [Fact]
+    public async Task Conflict_operation_rejects_a_malformed_embedded_tombstone_on_read_and_replay()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = await store.InspectTraceAsync(terminal.Id);
+        Assert.NotNull(inspection);
+
+        var deletionRequest = Request(terminal.Id, inspection.PersistedArtifactHash);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(Mutation(deletionRequest))).Status);
+        var conflictRequest = Request(terminal.Id, inspection.PersistedArtifactHash, "delete-conflict");
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.OperationConflict, (await store.DeleteTerminalTraceAsync(Mutation(conflictRequest))).Status);
+
+        var operation = (await store.GetTraceDeletionOperationAsync(conflictRequest.OperationId)).Operation;
+        Assert.NotNull(operation?.Tombstone);
+        await WriteOperationAsync(paths, operation! with { Tombstone = operation.Tombstone! with { SchemaVersion = 99 } });
+
+        var restarted = new CustomLoopRunStore(paths);
+        await Assert.ThrowsAsync<FormatException>(() => restarted.GetTraceDeletionOperationAsync(conflictRequest.OperationId));
+        await Assert.ThrowsAsync<FormatException>(() => restarted.DeleteTerminalTraceAsync(Mutation(conflictRequest)));
+    }
+
     private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store)
     {
         var admitted = CreateAdmittedRun();
