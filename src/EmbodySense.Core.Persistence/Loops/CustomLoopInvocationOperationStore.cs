@@ -95,9 +95,10 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
 
+            var normalized = operation with { CreatedAtUtc = existing.CreatedAtUtc };
             if (existing.State == CustomLoopInvocationOperationState.Complete)
             {
-                return existing == operation
+                return existing == normalized
                     ? new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Replayed, existing)
                     : new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
@@ -107,10 +108,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
 
-            var completed = operation with { CreatedAtUtc = existing.CreatedAtUtc };
-            Validate(completed, requirePending: false);
-            await WriteAsync(completed, SerializeBounded(completed), cancellationToken);
-            return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Completed, completed);
+            Validate(normalized, requirePending: false);
+            var json = SerializeBounded(normalized);
+            EnsureCapacity(Encoding.UTF8.GetByteCount(json), normalized.OperationId);
+            await WriteAsync(normalized, json, cancellationToken);
+            return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Completed, normalized);
         }
         finally
         {
@@ -168,10 +170,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         return json;
     }
 
-    private void EnsureCapacityForNewOperation(long newArtifactBytes)
+    private void EnsureCapacityForNewOperation(long newArtifactBytes) => EnsureCapacity(newArtifactBytes, replacingOperationId: null);
+
+    private void EnsureCapacity(long newArtifactBytes, string? replacingOperationId)
     {
         var paths = EnumerateOperationPaths();
-        if (paths.Count >= CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace)
+        if (replacingOperationId is null && paths.Count >= CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace)
         {
             throw new InvalidOperationException($"Custom-loop invocation receipt count reached the workspace limit of {CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace}.");
         }
@@ -179,6 +183,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         long accountedBytes = 0;
         foreach (var path in paths)
         {
+            if (replacingOperationId is not null && string.Equals(Path.GetFileNameWithoutExtension(path), replacingOperationId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             accountedBytes = checked(accountedBytes + new FileInfo(path).Length);
         }
 

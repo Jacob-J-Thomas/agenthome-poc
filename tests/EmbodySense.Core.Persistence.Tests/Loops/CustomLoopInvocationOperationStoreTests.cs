@@ -62,9 +62,11 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var regressed = CompletedAdmitted(pending) with { CreatedAtUtc = Timestamp.AddMinutes(-1), UpdatedAtUtc = Timestamp.AddSeconds(4) };
         var conflict = await store.CompleteAsync(regressed);
         var completed = await store.CompleteAsync(regressed with { UpdatedAtUtc = Timestamp.AddSeconds(6) });
+        var replayed = await store.CompleteAsync(regressed with { UpdatedAtUtc = Timestamp.AddSeconds(6) });
 
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, conflict.Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, completed.Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, replayed.Status);
         Assert.Equal(Timestamp, completed.Operation!.CreatedAtUtc);
         Assert.Equal(Timestamp.AddSeconds(6), completed.Operation.UpdatedAtUtc);
     }
@@ -87,6 +89,27 @@ public sealed class CustomLoopInvocationOperationStoreTests
         }
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => store.BeginAsync(Pending("invoke-over-quota", "prompt")));
+    }
+
+    [Fact]
+    public async Task Completion_applies_the_workspace_byte_quota_to_the_replacement_delta()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-completion-quota", "prompt");
+        await store.BeginAsync(pending);
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var quotaPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, "existing-quota.json");
+        await using (var quota = new FileStream(quotaPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            quota.SetLength(CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes - new FileInfo(receiptPath).Length);
+        }
+
+        var expanded = CompletedAdmitted(pending) with { Detail = new string('x', CustomLoopLimits.MaxRunDetailCharacters) };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.CompleteAsync(expanded));
+        Assert.Equal(pending, await store.GetAsync(pending.OperationId));
     }
 
     [Fact]

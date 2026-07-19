@@ -230,6 +230,11 @@ public sealed class CustomLoopTraceRetentionService
         {
             await _store.MarkTraceDeletionOutcomeAsync(request.OperationId, CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning, integrityWindow.Token);
             var refreshed = await _store.GetTraceDeletionOperationAsync(request.OperationId, integrityWindow.Token);
+            if (refreshed.Operation?.Integrity == CustomLoopTraceDeletionIntegrity.Complete)
+            {
+                return Result(CustomLoopTraceDeletionStatus.Replayed, refreshed.Operation.Tombstone ?? tombstone, "The confirmed trace deletion was completed by its original outcome-audit owner.");
+            }
+
             return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, refreshed.Operation?.Tombstone ?? tombstone, "The trace deletion is committed; a prior outcome-audit attempt was interrupted, so audit integrity requires review and the audit was not duplicated.");
         }
         catch (Exception)

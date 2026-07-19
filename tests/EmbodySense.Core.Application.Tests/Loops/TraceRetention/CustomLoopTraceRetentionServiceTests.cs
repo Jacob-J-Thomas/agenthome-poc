@@ -111,6 +111,28 @@ public sealed class CustomLoopTraceRetentionServiceTests
     }
 
     [Fact]
+    public async Task Stale_recovery_reports_a_concurrently_completed_outcome_owner()
+    {
+        var request = Request();
+        var startedTombstone = Tombstone(request, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted);
+        var started = Operation(request, startedTombstone, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted);
+        var completedTombstone = Tombstone(request, CustomLoopTraceDeletionIntegrity.Complete);
+        var store = new RecordingStore(null, null)
+        {
+            Operation = started,
+            OperationWhenAlreadyMarked = Operation(request, completedTombstone, CustomLoopTraceDeletionIntegrity.Complete)
+        };
+        store.MarkStatuses.Enqueue(CustomLoopTraceDeletionAuditMarkStatus.AlreadyMarked);
+        var now = started.UpdatedAtUtc.AddSeconds(31);
+
+        var result = await new CustomLoopTraceRetentionService(store, new RecordingAuditLog(), new FixedTimeProvider(now)).DeleteAsync(request);
+
+        Assert.Equal(CustomLoopTraceDeletionStatus.Replayed, result.Status);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.Complete, result.Tombstone!.OutcomeIntegrity);
+        Assert.Empty(store.MarkedIntegrities);
+    }
+
+    [Fact]
     public async Task Same_operation_changed_request_conflicts_without_audit_or_mutation()
     {
         var original = Request();
