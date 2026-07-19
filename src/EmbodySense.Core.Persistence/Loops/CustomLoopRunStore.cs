@@ -355,7 +355,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var completedAtUtc = run.CompletedAtUtc ?? throw new FormatException("A terminal custom-loop run must have a completion timestamp before trace deletion.");
-        var deletedAtUtc = mutation.RequestedAtUtc < completedAtUtc ? completedAtUtc : mutation.RequestedAtUtc;
+        var deletedAtUtc = operation.RequestedAtUtc < completedAtUtc ? completedAtUtc : operation.RequestedAtUtc;
         var tombstone = new CustomLoopTraceTombstone(
             CustomLoopTraceTombstone.CurrentSchemaVersion,
             CustomLoopTraceTombstone.CurrentArtifactKind,
@@ -751,6 +751,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
             foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, PathComparer))
             {
+                if (IsTemporaryArtifactPath(path))
+                {
+                    continue;
+                }
+
                 EnsureSafeArtifactPath(path, mustExist: true);
                 var runId = Path.GetFileNameWithoutExtension(path);
                 if (!string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase) || !CustomLoopArtifactIdentifier.IsValid(runId))
@@ -1135,7 +1140,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new FormatException("Custom loop trace-deletion operation storage cannot contain subdirectories.");
         }
 
-        var paths = Directory.EnumerateFiles(_traceDeletionOperationsRoot, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, PathComparer).ToArray();
+        var paths = Directory.EnumerateFiles(_traceDeletionOperationsRoot, "*", SearchOption.TopDirectoryOnly).Where(path => !IsTemporaryArtifactPath(path)).OrderBy(path => path, PathComparer).ToArray();
         if (paths.Length > CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
         {
             throw new FormatException($"Custom loop trace-deletion operation storage exceeds its explicit {CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace}-artifact limit.");
@@ -1152,6 +1157,33 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         return paths;
+    }
+
+    private static bool IsTemporaryArtifactPath(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        if (!fileName.StartsWith(".", StringComparison.Ordinal) || !fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var nonceSeparator = fileName.LastIndexOf(".json.", StringComparison.OrdinalIgnoreCase);
+        var nonceStart = nonceSeparator + ".json.".Length;
+        var nonceLength = fileName.Length - nonceStart - ".tmp".Length;
+        if (nonceSeparator <= 1 || nonceLength != 32)
+        {
+            return false;
+        }
+
+        for (var index = nonceStart; index < nonceStart + nonceLength; index++)
+        {
+            if (!Uri.IsHexDigit(fileName[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private async Task WriteTraceDeletionOperationAsync(CustomLoopTraceDeletionOperation operation, bool overwrite, CancellationToken cancellationToken)

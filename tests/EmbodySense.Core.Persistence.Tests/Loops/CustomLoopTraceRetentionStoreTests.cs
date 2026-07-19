@@ -116,14 +116,16 @@ public sealed class CustomLoopTraceRetentionStoreTests
         var mutation = Mutation(request);
         var pending = PendingOperation(mutation);
         await WriteOperationAsync(paths, pending);
+        var retry = mutation with { RequestedAtUtc = mutation.RequestedAtUtc.AddMinutes(10) };
 
-        var recoveredBeforeMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(mutation);
+        var recoveredBeforeMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(retry);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, recoveredBeforeMutation.Status);
         var firstTombstone = (await store.InspectTraceAsync(terminal.Id))!.Tombstone;
         Assert.NotNull(firstTombstone);
+        Assert.Equal(pending.RequestedAtUtc, firstTombstone.DeletedAtUtc);
 
         await WriteOperationAsync(paths, pending);
-        var recoveredAfterMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(mutation);
+        var recoveredAfterMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(retry);
 
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, recoveredAfterMutation.Status);
         Assert.Equal(firstTombstone, recoveredAfterMutation.Tombstone);

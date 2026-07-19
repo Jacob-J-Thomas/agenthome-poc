@@ -101,6 +101,29 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Lock_free_reads_ignore_only_internal_temporary_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var run = CreateRun();
+        await store.CreateAsync(run);
+        var runDirectory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
+        await File.WriteAllTextAsync(Path.Combine(runDirectory, $".{run.Id}.json.{Guid.NewGuid():N}.tmp"), "partial");
+        Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, $".delete-trace.json.{Guid.NewGuid():N}.tmp"), "partial");
+
+        AssertRun(run, await store.GetAsync(run.Id));
+        AssertRun(run, await store.GetByAdmissionOperationAsync(run.AdmissionOperationId));
+        Assert.Equal(run.Id, Assert.Single(await store.ListRecentAsync(50)).Id);
+        Assert.Equal(run.Id, Assert.Single(await store.ListNonterminalAsync()).Id);
+        Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync("delete-trace")).Status);
+
+        await File.WriteAllTextAsync(Path.Combine(runDirectory, "unexpected.tmp"), "partial");
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(run.Id));
+    }
+
+    [Fact]
     public async Task Trace_quota_reserves_the_maximum_for_nonterminal_runs_and_commits_actual_bytes_at_terminalization()
     {
         using var workspace = new TestWorkspace();
