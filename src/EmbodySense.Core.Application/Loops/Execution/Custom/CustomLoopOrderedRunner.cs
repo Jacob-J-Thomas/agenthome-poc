@@ -920,7 +920,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         publication ??= new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Uncertain, null, "Publisher returned no result after publication may have occurred.");
 
-        var publicationIdMatches = publication.PublicationId is null || string.Equals(publication.PublicationId, operationId, StringComparison.Ordinal);
+        var publicationIdMatches = string.Equals(publication.PublicationId, operationId, StringComparison.Ordinal);
         var isPublished = publicationIdMatches && (publication.Outcome is CustomLoopConversationPublicationOutcome.Published or CustomLoopConversationPublicationOutcome.AlreadyPublished);
         var publicationId = operationId;
         var eventDetail = !publicationIdMatches

@@ -575,6 +575,29 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Theory]
+    [InlineData(CustomLoopConversationPublicationOutcome.Published)]
+    [InlineData(CustomLoopConversationPublicationOutcome.AlreadyPublished)]
+    public async Task Missing_publication_operation_id_is_not_accepted_as_success(CustomLoopConversationPublicationOutcome outcome)
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            maxAdditionalIterations: 0,
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var publisher = new RecordingPublisher { NextResult = new CustomLoopConversationPublicationResult(outcome, null, "Missing operation ID.") };
+
+        var result = await Runner(store, new QueueExecutor(Result("evidence")), publisher).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("conversation_publication_uncertain", result.Run!.FailureCode);
+        var request = Assert.Single(publisher.Requests);
+        var publication = Assert.Single(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+        Assert.Equal(request.OperationId, publication.ConversationPublicationId);
+        Assert.False(publication.PublishedToInvokingConversation);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
+    }
+
+    [Theory]
     [InlineData("different-provider", "model", 0)]
     [InlineData("provider", "different-model", 0)]
     [InlineData("provider", "model", 7)]
