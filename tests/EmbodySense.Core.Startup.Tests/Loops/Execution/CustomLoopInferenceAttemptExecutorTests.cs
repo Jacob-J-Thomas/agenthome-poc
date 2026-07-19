@@ -521,6 +521,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             "web",
             new CustomLoopModelSnapshot("openai", "pinned-model"),
             "invoke-real-limit",
+            "test-user",
             string.Empty,
             definition,
             "prompt",

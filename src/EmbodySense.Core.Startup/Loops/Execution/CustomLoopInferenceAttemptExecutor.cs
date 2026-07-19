@@ -478,7 +478,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                 throw;
             }
 
-            var authority = await _authorityProvider.ResolveAsync(_attempt.RoleId, _attempt.AdmittedToolAssignments, cancellationToken);
+            var authority = _attempt.AuthoritySnapshot!;
             var correlation = CreateAuditCorrelation(authority);
             var correlatedRequest = boundedRequest with { AuditCorrelation = correlation };
             string resolvedTarget;

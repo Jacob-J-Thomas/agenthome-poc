@@ -58,7 +58,7 @@ public static class CustomLoopLimits
     public const int MaxGovernedToolRequestEvidenceUtf8Bytes = 18 * 1_024;
     public const int MaxGovernedToolGovernanceEvidenceUtf8Bytes = 14 * 1_024;
     public const int MaxGovernedToolOutcomeEvidenceUtf8Bytes = 251 * 1_024;
-    public const int MaxGovernedToolReturnEvidenceUtf8Bytes = 1 * 1_024;
+    public const int MaxGovernedToolReturnEvidenceUtf8Bytes = 8 * 1_024;
     public const int MaxGovernedToolEvidenceReservationUtf8Bytes = MaxGovernedToolRequestEvidenceUtf8Bytes + MaxGovernedToolGovernanceEvidenceUtf8Bytes + MaxGovernedToolOutcomeEvidenceUtf8Bytes + MaxGovernedToolReturnEvidenceUtf8Bytes;
     public const int MaxTraceControlReserveUtf8Bytes = 512 * 1_024;
     public const int MaxTraceControlEventUtf8Bytes = 8 * 1_024;

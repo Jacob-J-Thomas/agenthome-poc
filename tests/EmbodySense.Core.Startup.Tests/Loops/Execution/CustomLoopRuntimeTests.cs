@@ -251,6 +251,7 @@ public sealed class CustomLoopRuntimeTests
             "cli",
             new CustomLoopModelSnapshot("OpenAiCodex", "test-model"),
             "invoke-legacy-no-conversation",
+            WorkspaceActors.Cli,
             new string('0', CustomLoopLimits.Sha256HexCharacters),
             definition,
             "legacy prompt",

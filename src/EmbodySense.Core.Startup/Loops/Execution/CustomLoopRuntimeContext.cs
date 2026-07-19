@@ -304,24 +304,24 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
                 return DefinitelyFailed(request, "The invoking conversation did not equal the immutable admission prefix plus this run's exact prior publications; publication was not attempted.");
             }
 
-            IReadOnlyList<LlmMessage> persistedMessages;
+            ConversationMemorySnapshot persistedConversation;
             try
             {
-                persistedMessages = await _conversationMemory.LoadCurrentConversationAsync(cancellationToken);
+                persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 return Uncertain(request, $"The persisted conversation could not be verified before publication: {exception.GetType().Name}.");
             }
 
-            if (!MessagesEqual(persistedMessages, stateMessages))
+            if (!MessagesEqual(persistedConversation.Messages, stateMessages))
             {
                 return DefinitelyFailed(request, "The persisted conversation and active logical conversation differed before publication.");
             }
 
             try
             {
-                var appended = await _conversationMemory.TryAppendMessageAsync(stateMessages, LlmMessage.Assistant(request.CanonicalOutput), cancellationToken);
+                var appended = await _conversationMemory.TryAppendMessageAsync(persistedConversation.ConversationId, persistedConversation.Version, stateMessages, LlmMessage.Assistant(request.CanonicalOutput), cancellationToken);
                 if (!appended)
                 {
                     return DefinitelyFailed(request, "The persisted invoking conversation changed at the atomic publication boundary; no custom-loop output was appended.");

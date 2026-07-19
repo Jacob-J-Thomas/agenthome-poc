@@ -72,7 +72,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             null,
             "Invocation receipt persisted before the simulated interruption.");
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
-        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths)).AdmitAsync(
+        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
                 definition.DefinitionVersion,
@@ -181,7 +181,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             null,
             "Invocation receipt persisted before the simulated interruption.");
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
-        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths)).AdmitAsync(
+        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
                 definition.DefinitionVersion,
