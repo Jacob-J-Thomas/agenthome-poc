@@ -50,7 +50,7 @@ public sealed class LoopAuthoringFacade
     public async Task<LoopAuthoringCatalog> GetCatalogAsync(CancellationToken cancellationToken = default)
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
-        var definitions = await _service.ListAsync(cancellationToken);
+        var definitions = await _service.ListAsync(systemDefinition.RoleId, cancellationToken);
         return new LoopAuthoringCatalog(
             systemDefinition.RoleId,
             MapSystemDefinition(systemDefinition),
@@ -61,7 +61,8 @@ public sealed class LoopAuthoringFacade
 
     public async Task<LoopDefinitionSnapshot?> GetAsync(string loopId, CancellationToken cancellationToken = default)
     {
-        var definition = await _service.GetAsync(loopId, cancellationToken);
+        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var definition = await _service.GetAsync(loopId, systemDefinition.RoleId, cancellationToken);
         return definition is null ? null : Map(definition);
     }
 
@@ -90,7 +91,8 @@ public sealed class LoopAuthoringFacade
 
     public async Task<LoopAuthoringResponse> DeleteAsync(string loopId, int expectedDefinitionVersion, string operationId, CancellationToken cancellationToken = default)
     {
-        return Map(await _service.DeleteAsync(loopId, expectedDefinitionVersion, operationId, _actor, cancellationToken));
+        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        return Map(await _service.DeleteAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, cancellationToken));
     }
 
     private async Task<LoopDefinition> GetSystemDefinitionAsync(CancellationToken cancellationToken)

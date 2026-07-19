@@ -120,10 +120,7 @@ public sealed record LoopAuthoringCatalog(
     LoopDefinitionSnapshot SystemDefault,
     IReadOnlyList<LoopDefinitionSnapshot> CustomDefinitions,
     LoopAuthoringLimits Limits,
-    LoopToolCatalog Tools)
-{
-    public LoopRunModelSnapshot? RuntimeModel { get; init; }
-}
+    LoopToolCatalog Tools);
 
 public sealed record LoopToolCatalog(
     IReadOnlyList<LoopToolAssignment> CustomAssignable,
