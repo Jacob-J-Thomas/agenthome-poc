@@ -10,7 +10,6 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOperationStore
 {
-    private const long MaximumArtifactBytes = 64 * 1024;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -48,7 +47,9 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                     : new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
 
-            await WriteAsync(operation, cancellationToken);
+            var json = SerializeBounded(operation);
+            EnsureCapacityForNewOperation(Encoding.UTF8.GetByteCount(json));
+            await WriteAsync(operation, json, cancellationToken);
             return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Created, operation);
         }
         finally
@@ -101,8 +102,15 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                     : new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
 
-            await WriteAsync(operation, cancellationToken);
-            return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Completed, operation);
+            if (operation.UpdatedAtUtc < existing.UpdatedAtUtc)
+            {
+                return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+            }
+
+            var completed = operation with { CreatedAtUtc = existing.CreatedAtUtc };
+            Validate(completed, requirePending: false);
+            await WriteAsync(completed, SerializeBounded(completed), cancellationToken);
+            return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Completed, completed);
         }
         finally
         {
@@ -123,7 +131,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             return null;
         }
 
-        var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, MaximumArtifactBytes, "Custom-loop invocation operation", cancellationToken);
+        var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, CustomLoopLimits.MaxInvocationOperationUtf8Bytes, "Custom-loop invocation operation", cancellationToken);
         CustomLoopInvocationOperation? operation;
         try
         {
@@ -143,16 +151,54 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         return operation;
     }
 
-    private async Task WriteAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)
+    private async Task WriteAsync(CustomLoopInvocationOperation operation, string json, CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.Serialize(operation, JsonOptions);
-        if (Encoding.UTF8.GetByteCount(json) > MaximumArtifactBytes)
-        {
-            throw new ArgumentException($"Custom-loop invocation operation exceeds {MaximumArtifactBytes} UTF-8 bytes.", nameof(operation));
-        }
-
         var path = _pathGuard.GetFilePath(_root, operation.OperationId + ".json");
         await _pathGuard.WriteTextAtomicallyAsync(_root, path, json, cancellationToken);
+    }
+
+    private static string SerializeBounded(CustomLoopInvocationOperation operation)
+    {
+        var json = JsonSerializer.Serialize(operation, JsonOptions);
+        if (Encoding.UTF8.GetByteCount(json) > CustomLoopLimits.MaxInvocationOperationUtf8Bytes)
+        {
+            throw new ArgumentException($"Custom-loop invocation operation exceeds {CustomLoopLimits.MaxInvocationOperationUtf8Bytes} UTF-8 bytes.", nameof(operation));
+        }
+
+        return json;
+    }
+
+    private void EnsureCapacityForNewOperation(long newArtifactBytes)
+    {
+        var paths = EnumerateOperationPaths();
+        if (paths.Count >= CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace)
+        {
+            throw new InvalidOperationException($"Custom-loop invocation receipt count reached the workspace limit of {CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace}.");
+        }
+
+        long accountedBytes = 0;
+        foreach (var path in paths)
+        {
+            accountedBytes = checked(accountedBytes + new FileInfo(path).Length);
+        }
+
+        if (accountedBytes > CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes - newArtifactBytes)
+        {
+            throw new InvalidOperationException($"Custom-loop invocation receipts reached the workspace limit of {CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes} UTF-8 bytes.");
+        }
+    }
+
+    private IReadOnlyList<string> EnumerateOperationPaths()
+    {
+        if (!_pathGuard.DirectoryExists(_root))
+        {
+            return [];
+        }
+
+        return Directory.EnumerateFiles(_root, "*.json", SearchOption.TopDirectoryOnly)
+            .Select(path => _pathGuard.GetFilePath(_root, Path.GetFileName(path)))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
     }
 
     private static bool SameRequest(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right)
@@ -165,7 +211,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && string.Equals(left.Actor, right.Actor, StringComparison.Ordinal)
             && string.Equals(left.Surface, right.Surface, StringComparison.Ordinal)
             && string.Equals(left.CurrentRoleId, right.CurrentRoleId, StringComparison.Ordinal)
-            && string.Equals(left.InvocationPrompt, right.InvocationPrompt, StringComparison.Ordinal)
+            && string.Equals(left.InvocationPromptHash, right.InvocationPromptHash, StringComparison.Ordinal)
             && string.Equals(left.Provider, right.Provider, StringComparison.Ordinal)
             && string.Equals(left.Model, right.Model, StringComparison.Ordinal);
     }
@@ -185,8 +231,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && IsBoundedText(operation.Actor, CustomLoopLimits.MaxTraceReferenceCharacters)
             && CustomLoopArtifactIdentifier.IsValid(operation.Surface)
             && CustomLoopArtifactIdentifier.IsValid(operation.CurrentRoleId)
-            && operation.InvocationPrompt.Length <= CustomLoopLimits.MaxPresetPromptCharacters
-            && operation.InvocationPrompt.IsNormalized(NormalizationForm.FormC)
+            && IsHash(operation.InvocationPromptHash)
             && IsBoundedText(operation.Provider, CustomLoopLimits.MaxTraceReferenceCharacters)
             && (operation.Model is null || IsBoundedText(operation.Model, CustomLoopLimits.MaxTraceReferenceCharacters))
             && IsHash(operation.RequestHash)

@@ -31,7 +31,7 @@ public sealed record CustomLoopInvocationOperation(
     string Actor,
     string Surface,
     string CurrentRoleId,
-    string InvocationPrompt,
+    string InvocationPromptHash,
     string Provider,
     string? Model,
     DateTimeOffset CreatedAtUtc,
@@ -80,6 +80,27 @@ public static class CustomLoopInvocationRequestHash
         string provider,
         string? model)
     {
+        return ComputeFromPromptHash(operationId, loopId, expectedDefinitionVersion, expectedDefinitionHash, actor, surface, currentRoleId, ComputePromptHash(invocationPrompt), provider, model);
+    }
+
+    public static string ComputePromptHash(string? invocationPrompt)
+    {
+        var canonical = invocationPrompt?.Normalize(NormalizationForm.FormC) ?? string.Empty;
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+    }
+
+    private static string ComputeFromPromptHash(
+        string operationId,
+        string loopId,
+        int expectedDefinitionVersion,
+        string expectedDefinitionHash,
+        string actor,
+        string surface,
+        string currentRoleId,
+        string invocationPromptHash,
+        string provider,
+        string? model)
+    {
         var buffer = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(buffer))
         {
@@ -91,7 +112,7 @@ public static class CustomLoopInvocationRequestHash
             writer.WriteString("actor", actor);
             writer.WriteString("surface", surface);
             writer.WriteString("currentRoleId", currentRoleId);
-            writer.WriteString("invocationPrompt", invocationPrompt?.Normalize(NormalizationForm.FormC) ?? string.Empty);
+            writer.WriteString("invocationPromptHash", invocationPromptHash);
             writer.WriteString("provider", provider);
             writer.WriteString("model", model);
             writer.WriteEndObject();
@@ -103,7 +124,7 @@ public static class CustomLoopInvocationRequestHash
     public static bool Matches(CustomLoopInvocationOperation operation)
     {
         ArgumentNullException.ThrowIfNull(operation);
-        var expected = Encoding.ASCII.GetBytes(Compute(
+        var expected = Encoding.ASCII.GetBytes(ComputeFromPromptHash(
             operation.OperationId,
             operation.LoopId,
             operation.ExpectedDefinitionVersion,
@@ -111,7 +132,7 @@ public static class CustomLoopInvocationRequestHash
             operation.Actor,
             operation.Surface,
             operation.CurrentRoleId,
-            operation.InvocationPrompt,
+            operation.InvocationPromptHash,
             operation.Provider,
             operation.Model));
         var actual = Encoding.ASCII.GetBytes(operation.RequestHash ?? string.Empty);

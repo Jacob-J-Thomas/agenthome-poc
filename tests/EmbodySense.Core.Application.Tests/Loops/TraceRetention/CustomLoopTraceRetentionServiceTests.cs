@@ -92,6 +92,25 @@ public sealed class CustomLoopTraceRetentionServiceTests
     }
 
     [Fact]
+    public async Task Active_outcome_audit_owner_is_not_overwritten_by_an_overlapping_replay()
+    {
+        var request = Request();
+        var tombstone = Tombstone(request, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted);
+        var operation = Operation(request, tombstone, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted);
+        var store = new RecordingStore(null, null) { Operation = operation };
+        var audit = new RecordingAuditLog();
+        var now = operation.UpdatedAtUtc.AddSeconds(15);
+
+        var result = await new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(now)).DeleteAsync(request);
+
+        Assert.Equal(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, result.Status);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted, result.Tombstone!.OutcomeIntegrity);
+        Assert.Contains("still active", result.Detail, StringComparison.Ordinal);
+        Assert.Empty(store.MarkedIntegrities);
+        Assert.Equal(0, audit.Attempts);
+    }
+
+    [Fact]
     public async Task Same_operation_changed_request_conflicts_without_audit_or_mutation()
     {
         var original = Request();

@@ -16,7 +16,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
     public async Task Resolve_projects_default_role_ceiling_and_admitted_intersection()
     {
         using var workspace = new TestWorkspace();
-        var provider = Provider(workspace, new FixedTimeProvider(Timestamp));
+        var provider = await ProviderWithDefaultAsync(workspace, new FixedTimeProvider(Timestamp));
 
         var authority = await provider.ResolveAsync("default-assistant", [CustomLoopToolAssignment.Search, CustomLoopToolAssignment.List]);
 
@@ -36,7 +36,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
     public async Task Resolve_rejects_role_drift_duplicate_and_unsupported_admissions()
     {
         using var workspace = new TestWorkspace();
-        var provider = Provider(workspace);
+        var provider = await ProviderWithDefaultAsync(workspace);
 
         var roleDrift = await provider.ResolveAsync("other-role", [CustomLoopToolAssignment.Read]);
         var duplicate = await provider.ResolveAsync("default-assistant", [CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Read]);
@@ -51,6 +51,20 @@ public sealed class CustomLoopToolAuthorityProviderTests
         Assert.False(unsupported.IsValid);
         Assert.Empty(unsupported.EffectiveAssignments);
         Assert.Contains("unsupported or duplicate", unsupported.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Resolve_fails_closed_when_the_directory_role_definition_is_missing()
+    {
+        using var workspace = new TestWorkspace();
+        var provider = Provider(workspace, new FixedTimeProvider(Timestamp));
+
+        var authority = await provider.ResolveAsync("default-assistant", [CustomLoopToolAssignment.Read]);
+
+        Assert.False(authority.IsValid);
+        Assert.Empty(authority.CurrentRoleCeiling);
+        Assert.Empty(authority.EffectiveAssignments);
+        Assert.Contains("missing", authority.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -113,6 +127,13 @@ public sealed class CustomLoopToolAuthorityProviderTests
     private static CustomLoopToolAuthorityProvider Provider(TestWorkspace workspace, TimeProvider? timeProvider = null)
     {
         return new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(new WorkspacePaths(workspace.RootPath)), timeProvider);
+    }
+
+    private static async Task<CustomLoopToolAuthorityProvider> ProviderWithDefaultAsync(TestWorkspace workspace, TimeProvider? timeProvider = null)
+    {
+        var store = new LoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        await store.SaveAsync(LoopDefinition.CreateDefaultConversation());
+        return new CustomLoopToolAuthorityProvider(store, timeProvider);
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider

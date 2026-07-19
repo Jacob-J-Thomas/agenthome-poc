@@ -24,14 +24,19 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
         ArgumentException.ThrowIfNullOrWhiteSpace(roleId);
         ArgumentNullException.ThrowIfNull(admittedMaximum);
         var evaluatedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
-        LoopDefinition definition;
+        LoopDefinition? definition;
         try
         {
-            definition = await _definitionStore.LoadAsync("default-conversation", cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
+            definition = await _definitionStore.LoadAsync("default-conversation", cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             return Invalid(roleId, admittedMaximum, evaluatedAtUtc, $"The current directory-role authority could not be loaded safely: {exception.GetType().Name}.");
+        }
+
+        if (definition is null)
+        {
+            return Invalid(roleId, admittedMaximum, evaluatedAtUtc, "The current directory-role authority definition is missing; custom-loop execution failed closed.");
         }
 
         var current = ResolveCurrentRoleCeiling(definition);

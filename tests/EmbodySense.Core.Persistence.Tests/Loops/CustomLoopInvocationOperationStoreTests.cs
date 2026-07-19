@@ -44,8 +44,49 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, changedCompletion.Status);
         Assert.Equal(completed, loaded);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, replayedComplete.Status);
-        Assert.True(File.Exists(Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json")));
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        Assert.True(File.Exists(receiptPath));
+        Assert.DoesNotContain("first prompt", await File.ReadAllTextAsync(receiptPath), StringComparison.Ordinal);
         Assert.Empty(Directory.EnumerateFiles(paths.CustomLoopInvocationOperationsPath, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task Completion_preserves_creation_time_and_rejects_update_time_regression()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-chronology", "prompt") with { UpdatedAtUtc = Timestamp.AddSeconds(5) };
+        await store.BeginAsync(pending);
+
+        var regressed = CompletedAdmitted(pending) with { CreatedAtUtc = Timestamp.AddMinutes(-1), UpdatedAtUtc = Timestamp.AddSeconds(4) };
+        var conflict = await store.CompleteAsync(regressed);
+        var completed = await store.CompleteAsync(regressed with { UpdatedAtUtc = Timestamp.AddSeconds(6) });
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, conflict.Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, completed.Status);
+        Assert.Equal(Timestamp, completed.Operation!.CreatedAtUtc);
+        Assert.Equal(Timestamp.AddSeconds(6), completed.Operation.UpdatedAtUtc);
+    }
+
+    [Fact]
+    public async Task Valid_maximum_detail_fits_and_workspace_receipt_quota_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var maximumDetail = Pending("invoke-maximum-detail", "prompt") with { Detail = new string('\u0001', CustomLoopLimits.MaxRunDetailCharacters) };
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(maximumDetail)).Status);
+        Assert.NotNull(await store.GetAsync(maximumDetail.OperationId));
+
+        var quotaPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, "existing-quota.json");
+        await using (var quota = new FileStream(quotaPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            quota.SetLength(CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes);
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.BeginAsync(Pending("invoke-over-quota", "prompt")));
     }
 
     [Fact]
@@ -76,6 +117,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         const int version = 2;
         var definitionHash = new string('a', CustomLoopLimits.Sha256HexCharacters);
         var requestHash = CustomLoopInvocationRequestHash.Compute(operationId, loopId, version, definitionHash, "embodysense.web", "web", "default", prompt, "OpenAiCodex", "test-model");
+        var promptHash = CustomLoopInvocationRequestHash.ComputePromptHash(prompt);
         return new CustomLoopInvocationOperation(
             CustomLoopInvocationOperation.CurrentSchemaVersion,
             operationId,
@@ -86,7 +128,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
             "embodysense.web",
             "web",
             "default",
-            prompt,
+            promptHash,
             "OpenAiCodex",
             "test-model",
             Timestamp,
