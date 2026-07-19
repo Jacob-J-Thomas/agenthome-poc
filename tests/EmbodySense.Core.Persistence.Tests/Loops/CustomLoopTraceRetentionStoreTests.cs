@@ -203,6 +203,19 @@ public sealed class CustomLoopTraceRetentionStoreTests
         var restarted = new CustomLoopRunStore(paths);
         await Assert.ThrowsAsync<FormatException>(() => restarted.GetTraceDeletionOperationAsync(conflictRequest.OperationId));
         await Assert.ThrowsAsync<FormatException>(() => restarted.DeleteTerminalTraceAsync(Mutation(conflictRequest)));
+
+        await WriteOperationAsync(paths, operation with { Tombstone = operation.Tombstone with { RunId = "run-other" } });
+        await Assert.ThrowsAsync<FormatException>(() => restarted.GetTraceDeletionOperationAsync(conflictRequest.OperationId));
+
+        var rebound = operation.Tombstone with
+        {
+            DeletionOperationId = operation.OperationId,
+            DeletionRequestHash = operation.RequestHash,
+            IntentAuditCorrelationId = operation.OperationId,
+            OutcomeAuditCorrelationId = operation.OperationId
+        };
+        await WriteOperationAsync(paths, operation with { Tombstone = rebound });
+        await Assert.ThrowsAsync<FormatException>(() => restarted.GetTraceDeletionOperationAsync(conflictRequest.OperationId));
     }
 
     [Fact]

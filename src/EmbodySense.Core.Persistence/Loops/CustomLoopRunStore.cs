@@ -912,7 +912,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new FormatException("The run consumed lifecycle/control slots reserved for terminalization or its one optional post-terminal integrity warning.");
         }
 
-        if (lifecycleEvents > 0 && delta > checked((long)lifecycleEvents * CustomLoopLimits.MaxTraceControlEventUtf8Bytes))
+        var terminalDataBudget = !current.IsTerminal && candidate.IsTerminal ? CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes : 0;
+        if (lifecycleEvents > 0 && delta > checked((long)lifecycleEvents * CustomLoopLimits.MaxTraceControlEventUtf8Bytes + terminalDataBudget))
         {
             throw new FormatException("A lifecycle control event exceeded its permanent reserved serialized footprint.");
         }
@@ -1408,9 +1409,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private static bool IsLockContention(IOException exception)
     {
+        const int resourceTemporarilyUnavailable = 11;
         const int sharingViolation = 32;
         const int lockViolation = 33;
-        return (exception.HResult & 0xFFFF) is sharingViolation or lockViolation;
+        return (exception.HResult & 0xFFFF) is resourceTemporarilyUnavailable or sharingViolation or lockViolation;
     }
 
     private static void EnsureContained(string root, string candidate)
@@ -1504,6 +1506,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             if (operation.Outcome != CustomLoopTraceDeletionStoreStatus.OperationConflict)
             {
                 throw new FormatException("A rejected trace-deletion operation cannot retain an unrelated tombstone.");
+            }
+
+            if (!string.Equals(operation.Tombstone.RunId, operation.Request.RunId, StringComparison.Ordinal)
+                || string.Equals(operation.Tombstone.DeletionOperationId, operation.OperationId, StringComparison.Ordinal)
+                || string.Equals(operation.Tombstone.DeletionRequestHash, operation.RequestHash, StringComparison.Ordinal))
+            {
+                throw new FormatException("A conflicting trace-deletion operation must retain a tombstone for the requested run and a distinct deletion identity.");
             }
         }
 

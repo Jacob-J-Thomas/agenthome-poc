@@ -439,6 +439,27 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Terminal_content_uses_its_permanent_reserve_outside_the_control_event_budget()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        await store.CreateAsync(admitted);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        await store.UpdateAsync(running, admitted.LifecycleVersion);
+        var path = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var runningBytes = new FileInfo(path).Length;
+        var completed = Advance(running, CustomLoopRunStatus.Completed) with { FinalOutput = new string('x', CustomLoopLimits.MaxCanonicalModelOutputCharacters) };
+
+        var result = await store.UpdateAsync(completed, running.LifecycleVersion);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        Assert.True(new FileInfo(path).Length - runningBytes > CustomLoopLimits.MaxTraceControlEventUtf8Bytes);
+        Assert.Equal(completed.FinalOutput, (await new CustomLoopRunStore(paths).GetAsync(completed.Id))!.FinalOutput);
+    }
+
+    [Fact]
     public async Task Update_rejects_non_successor_invalid_transition_and_admitted_snapshot_mutation()
     {
         using var workspace = new TestWorkspace();
