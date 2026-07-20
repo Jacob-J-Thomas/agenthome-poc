@@ -303,7 +303,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             _actor,
             _surface,
             _currentRoleId,
-            invocationPrompt,
+            CustomLoopInvocationRequestHash.ComputePromptHash(invocationPrompt),
             _modelSnapshot.Provider,
             _modelSnapshot.Model,
             now,
@@ -422,14 +422,14 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     private static bool InvocationMatchesRun(CustomLoopInvocationOperation operation, CustomLoopRunRecord run)
     {
-        var expectedPrompt = run.AdmittedDefinition.TriggerPolicy.PromptSource switch
+        var promptMatches = run.AdmittedDefinition.TriggerPolicy.PromptSource switch
         {
-            CustomLoopTriggerPromptSource.Invocation => operation.InvocationPrompt,
-            CustomLoopTriggerPromptSource.Preset => run.AdmittedDefinition.TriggerPolicy.PresetPrompt,
-            CustomLoopTriggerPromptSource.None => string.Empty,
-            _ => null
+            CustomLoopTriggerPromptSource.Invocation => string.Equals(operation.InvocationPromptHash, CustomLoopInvocationRequestHash.ComputePromptHash(run.TriggerPrompt), StringComparison.Ordinal),
+            CustomLoopTriggerPromptSource.Preset => string.Equals(run.AdmittedDefinition.TriggerPolicy.PresetPrompt, run.TriggerPrompt, StringComparison.Ordinal),
+            CustomLoopTriggerPromptSource.None => run.TriggerPrompt.Length == 0,
+            _ => false
         };
-        return expectedPrompt is not null
+        return promptMatches
             && string.Equals(operation.OperationId, run.AdmissionOperationId, StringComparison.Ordinal)
             && string.Equals(operation.LoopId, run.LoopId, StringComparison.Ordinal)
             && operation.ExpectedDefinitionVersion == run.AdmittedDefinition.DefinitionVersion
@@ -437,8 +437,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             && string.Equals(operation.Surface, run.Surface, StringComparison.Ordinal)
             && string.Equals(operation.CurrentRoleId, run.AdmittedDefinition.RoleId, StringComparison.Ordinal)
             && string.Equals(operation.Provider, run.ModelSnapshot.Provider, StringComparison.Ordinal)
-            && string.Equals(operation.Model, run.ModelSnapshot.Model, StringComparison.Ordinal)
-            && string.Equals(expectedPrompt, run.TriggerPrompt, StringComparison.Ordinal);
+            && string.Equals(operation.Model, run.ModelSnapshot.Model, StringComparison.Ordinal);
     }
 
     private async Task<LoopRunInvocationResponse> CompleteRejectedAsync(

@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
-using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 
@@ -295,12 +294,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
         return operation.AdmissionStatus switch
         {
-            nameof(CustomLoopAdmissionStatus.Invalid) => hasValidOptionalRun,
-            nameof(CustomLoopAdmissionStatus.Conflict) => hasValidOptionalRun,
-            nameof(CustomLoopAdmissionStatus.NonterminalRunExists) => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
-            nameof(CustomLoopAdmissionStatus.LimitExceeded) => operation.RunId is null,
-            nameof(CustomLoopAdmissionStatus.NotFound) => operation.RunId is null,
-            nameof(CustomLoopAdmissionStatus.AuditUnavailable) => hasValidOptionalRun,
+            "Invalid" => hasValidOptionalRun,
+            "Conflict" => hasValidOptionalRun,
+            "NonterminalRunExists" => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
+            "LimitExceeded" => operation.RunId is null,
+            "NotFound" => operation.RunId is null,
+            "AuditUnavailable" => hasValidOptionalRun,
             _ => false
         };
     }
