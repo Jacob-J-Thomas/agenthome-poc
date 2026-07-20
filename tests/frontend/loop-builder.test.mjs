@@ -130,6 +130,25 @@ test("loop settings expose inherited provider, model, tools, and context default
   assert.match(app.elements.inspectorContent.textContent, /Inference: 4 context-in sources/);
 });
 
+test("initial and user-requested run evidence failures remain visibly unavailable", async () => {
+  const initialServer = new FakeFetchServer(createCatalog());
+  initialServer.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 503, body: { detail: "Corrupt retained run evidence." } }));
+  const initial = await loadLoopBuilder({ server: initialServer });
+
+  assert.match(initial.elements.validationBanner.textContent, /Run evidence unavailable/);
+  assert.match(initial.elements.validationBanner.textContent, /Corrupt retained run evidence/);
+
+  const requestedServer = new FakeFetchServer(createCatalog());
+  const requested = await loadLoopBuilder({ server: requestedServer });
+  await selectCustomLoop(requested);
+  requestedServer.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 503, body: { detail: "Run history cannot be read." } }));
+  await requested.elements.runsTab.click();
+  await flushAsyncWork();
+
+  assert.match(requested.elements.validationBanner.textContent, /Run evidence unavailable/);
+  assert.match(requested.elements.validationBanner.textContent, /Run history cannot be read/);
+});
+
 test("SignalR transport sends keepalives for long-running invocations and stops them on close", async () => {
   const app = await loadLoopBuilder();
   const sockets = [];

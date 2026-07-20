@@ -50,6 +50,11 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         return Task.FromResult(_approvals.GetPending(Context.ConnectionId));
     }
 
+    public async Task<IReadOnlyList<WebTranscriptMessage>?> GetCurrentTranscript()
+    {
+        return await _host.GetCurrentTranscriptAsync(Context.ConnectionAborted);
+    }
+
     public async Task<WebApprovalDecisionResult> DecideApproval(string requestId, WebApprovalDecision? decision)
     {
         return await _approvals.SubmitDecisionAsync(requestId, decision?.Approved ?? false, decision?.Detail, Context.ConnectionId, Context.ConnectionAborted);

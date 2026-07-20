@@ -32,9 +32,11 @@ public sealed class WebSessionHubTests
         var status = Assert.Single(clients.CallerClient.Statuses);
         var approvalSnapshot = Assert.Single(clients.CallerClient.ApprovalSnapshots);
         var approval = Assert.Single(approvalSnapshot);
+        var transcript = await hub.GetCurrentTranscript();
         Assert.False(status.Initialized);
         Assert.True(decision.Accepted);
         Assert.Equal("req-connect", approval.RequestId);
+        Assert.Null(transcript);
     }
 
     [Fact]

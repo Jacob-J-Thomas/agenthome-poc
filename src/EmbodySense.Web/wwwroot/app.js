@@ -33,7 +33,6 @@ async function boot() {
   await refreshStatus();
   await connectHub();
   await refreshConfiguration();
-  hydrateCurrentTranscript();
 }
 
 async function fetchJson(url, options = {}) {
@@ -91,6 +90,8 @@ async function connectHub() {
   hub.on("StreamEvent", handleStreamEvent);
   hub.onclose = scheduleReconnect;
   await hub.start();
+  const currentTranscript = await hub.invoke("GetCurrentTranscript");
+  replaceTranscript(Array.isArray(currentTranscript) ? currentTranscript : []);
   applyStatus(status);
 }
 
@@ -584,13 +585,6 @@ function replaceTranscript(messages) {
   const renderedMessages = (messages ?? []).map(message => createMessage(messageKind(message.role), message.content ?? ""));
   elements.transcript.replaceChildren(...renderedMessages);
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
-}
-
-function hydrateCurrentTranscript() {
-  const currentTranscript = configuration?.conversationHistory?.transcripts?.find(transcript => transcript.isCurrent);
-  if (currentTranscript) {
-    replaceTranscript(currentTranscript.messages);
-  }
 }
 
 function messageKind(role) {

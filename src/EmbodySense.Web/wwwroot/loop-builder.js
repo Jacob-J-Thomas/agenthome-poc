@@ -82,7 +82,7 @@ async function boot() {
     }
 
     await loadCatalog();
-    await loadRuns({ silent: true });
+    await loadRuns();
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
@@ -199,7 +199,11 @@ async function switchView(view) {
   if (view !== "builder" && view !== "runs") return;
   if (view === "builder" && historicalLoopId) return;
   currentView = view;
-  if (view === "runs") await loadRuns({ silent: true });
+  if (view === "runs") {
+    renderAll();
+    await loadRuns();
+    return;
+  }
   renderAll();
 }
 

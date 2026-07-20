@@ -56,6 +56,24 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return new LoopRunModelSnapshot("OpenAiCodex", string.IsNullOrWhiteSpace(_options.Model) ? null : _options.Model);
     }
 
+    public async Task<IReadOnlyList<WebTranscriptMessage>?> GetCurrentTranscriptAsync(CancellationToken cancellationToken = default)
+    {
+        await _runtimeGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_runtime is null || _discardRuntimeWhenCustomOperationsComplete)
+            {
+                return null;
+            }
+
+            return _runtime.GetActiveConversationTranscript().Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
+        }
+        finally
+        {
+            _runtimeGate.Release();
+        }
+    }
+
     public async Task<WebStatus> InitializeWorkspaceAsync(CancellationToken cancellationToken = default)
     {
         var status = _statusReader.Read(_options.WorkingDirectory);

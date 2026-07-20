@@ -95,6 +95,18 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(response.Output, assistantEvent.Text);
         Assert.Equal(response.RunIdentity, assistantEvent.RunIdentity);
         Assert.Equal(["runtime guide observed: hello"], chunks);
+        Assert.Collection(
+            runtime.GetActiveConversationTranscript(),
+            message =>
+            {
+                Assert.Equal("User", message.Role);
+                Assert.Equal("hello", message.Content);
+            },
+            message =>
+            {
+                Assert.Equal("Assistant", message.Role);
+                Assert.Equal("runtime guide observed: hello", message.Content);
+            });
     }
 
     [Fact]

@@ -30,8 +30,11 @@ test("history_loaded replaces the transcript using role labels and text content"
   assert.equal(findByTag(app.elements.transcript, "img").length, 0);
 });
 
-test("boot hydrates the durable current transcript after returning from Loops", async () => {
+test("boot hydrates the complete active runtime transcript instead of the bounded configuration snapshot", async () => {
+  const activeTranscript = Array.from({ length: 201 }, (_, index) => ({ role: index % 2 === 0 ? "user" : "assistant", content: `active message ${index}` }));
+  activeTranscript[200].content = "x".repeat(5000);
   const app = await loadApp({
+    activeTranscript,
     configuration: {
       status: { initialized: true },
       runtime: { surface: "web", model: "gpt-test", codexSandbox: "read-only" },
@@ -44,10 +47,7 @@ test("boot hydrates the durable current transcript after returning from Loops", 
         transcripts: [{
           conversationId: "current",
           isCurrent: true,
-          messages: [
-            { role: "user", content: "visible before navigating to Loops" },
-            { role: "assistant", content: "saved while the other page was open" }
-          ]
+          messages: [{ role: "user", content: "bounded inspection copy that must not hydrate Chat" }]
         }]
       },
       paths: [],
@@ -57,9 +57,9 @@ test("boot hydrates the durable current transcript after returning from Loops", 
     }
   });
 
-  assert.equal(app.elements.transcript.children.length, 2);
-  assert.equal(messageContent(app.elements.transcript.children[0]), "visible before navigating to Loops");
-  assert.equal(messageContent(app.elements.transcript.children[1]), "saved while the other page was open");
+  assert.equal(app.elements.transcript.children.length, 201);
+  assert.equal(messageContent(app.elements.transcript.children[0]), "active message 0");
+  assert.equal(messageContent(app.elements.transcript.children[200]).length, 5000);
 });
 
 test("assistant deltas update one active message and final text resets the active message", async () => {
@@ -156,6 +156,7 @@ test("approval panel renders pending requests and dispatches approve and reject 
 
 async function loadApp(overrides = {}) {
   FakeWebSocket.instances = [];
+  FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
   const document = new FakeDocument(indexSource);
   const context = {
     URL,
@@ -169,7 +170,7 @@ async function loadApp(overrides = {}) {
   };
   context.globalThis = context;
   vm.runInNewContext(appSource, context, { filename: "app.js" });
-  await flushAsyncWork();
+  for (let attempt = 0; attempt < 4; attempt++) await flushAsyncWork();
   assert.equal(FakeWebSocket.instances.length, 1);
   return { elements: document.elementsObject, configTabs: document.configTabs, socket: FakeWebSocket.instances[0] };
 }
@@ -239,6 +240,7 @@ function findByTag(root, tagName) {
 class FakeWebSocket {
   static OPEN = 1;
   static instances = [];
+  static currentTranscript = null;
 
   constructor(url) {
     this.url = url;
@@ -257,7 +259,12 @@ class FakeWebSocket {
     }
 
     if (payload.type === 1 && payload.invocationId !== undefined) {
-      setTimeout(() => this.serverSend({ type: 3, invocationId: payload.invocationId, result: payload.target === "DecideApproval" ? { accepted: true } : true }), 0);
+      const result = payload.target === "DecideApproval"
+        ? { accepted: true }
+        : payload.target === "GetCurrentTranscript"
+          ? FakeWebSocket.currentTranscript
+          : true;
+      setTimeout(() => this.serverSend({ type: 3, invocationId: payload.invocationId, result }), 0);
     }
   }
 
