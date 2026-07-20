@@ -20,6 +20,42 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 public sealed class CustomLoopRuntimeTests
 {
     [Fact]
+    public async Task Context_capture_truncates_role_and_conversation_sources_only_at_valid_utf16_boundaries()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var roleLabel = $"[EmbodySense role instruction source: .agent/AGENT.md]{Environment.NewLine}";
+        var roleMarker = $"{Environment.NewLine}[source truncated to fit the 12000-character admitted source limit]";
+        var rolePrefixCharacters = 12_000 - roleLabel.Length - roleMarker.Length;
+        await File.WriteAllTextAsync(workspace.File(".agent", "AGENT.md"), new string('r', rolePrefixCharacters - 1) + "😀" + new string('r', 500));
+        var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-unicode-context", "update-runtime-unicode-context");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var conversationMarker = $"{Environment.NewLine}[truncated to {CustomLoopLimits.MaxInvokingConversationCharacters} characters for invoking-conversation admission]{Environment.NewLine}";
+        var availableConversationCharacters = CustomLoopLimits.MaxInvokingConversationCharacters - conversationMarker.Length;
+        var conversationHeadCharacters = availableConversationCharacters / 2;
+        var conversationTailCharacters = availableConversationCharacters - conversationHeadCharacters;
+        var formattedPrefix = $"[EmbodySense untrusted logical conversation assistant source: message 2]{Environment.NewLine}fake response: ";
+        var promptPrefixCharacters = conversationHeadCharacters - formattedPrefix.Length - 1;
+        const int tailBoundaryOffset = 100;
+        var oversizedPrompt = new string('p', promptPrefixCharacters)
+            + "😀"
+            + new string('p', tailBoundaryOffset - 2)
+            + "😀"
+            + new string('p', conversationTailCharacters - 1);
+        _ = await runtime.RunTurnAsync(oversizedPrompt);
+
+        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-unicode-context", "capture Unicode safely"));
+
+        Assert.Equal("Completed", response.ExecutionStatus);
+        var roleSource = Assert.Single(response.Run!.Context.SourceManifest, source => source.SourceId == "agent");
+        var conversationSource = Assert.Single(response.Run.Context.SourceManifest, source => source.SourceType == "InvokingConversation" && source.OmissionReason is null);
+        Assert.True(roleSource.Truncated);
+        Assert.True(conversationSource.Truncated);
+        Assert.True(HasValidSurrogatePairs(roleSource.Content));
+        Assert.True(HasValidSurrogatePairs(conversationSource.Content));
+    }
+
+    [Fact]
     public async Task Public_runtime_rejects_malformed_invocations_and_durably_replays_a_missing_loop_outcome()
     {
         using var workspace = new TestWorkspace();
@@ -507,6 +543,51 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("Completed", resumed.Run!.Status);
     }
 
+    [Fact]
+    public async Task Restart_preserves_the_current_conversation_bound_to_a_paused_run_before_explicit_resume()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-restart-conversation")).Definition);
+        var input = new LoopDefinitionInput(
+            "Restart conversation loop",
+            "Publishes a later inference result after an explicit post-restart resume.",
+            new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, false),
+            [
+                new LoopInferenceStep(created.InferenceSteps.Single().Id, "First", "Produce the first result.", new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)),
+                new LoopInferenceStep(null, "Second", "Produce the second result.", new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null))
+            ],
+            [],
+            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)));
+        var definition = Assert.IsType<LoopDefinitionSnapshot>((await facade.UpdateAsync(created.Id, created.DefinitionVersion, "update-runtime-restart-conversation", input)).Definition);
+        LoopRunSnapshot paused;
+        await using (var runtime = await CreateRuntimeAsync(workspace))
+        {
+            _ = await runtime.RunTurnAsync("conversation prefix before the paused run");
+            var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-restart-conversation", "delayed restart conversation"));
+            await WaitForAttemptStartAsync(workspace);
+            var running = Assert.Single(await runtime.ListCustomLoopRunsAsync(), run => run.LoopId == definition.Id);
+            _ = await runtime.PauseCustomLoopAsync(new LoopRunControlInput(running.Id, (await runtime.GetCustomLoopRunAsync(running.Id))!.LifecycleVersion, "pause-runtime-restart-conversation"));
+            paused = Assert.IsType<LoopRunSnapshot>((await invocation).Run);
+            Assert.Equal("Paused", paused.Status);
+            Assert.Equal(1, paused.Checkpoint.NextStepIndex);
+        }
+
+        var conversationStore = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        var beforeRestart = await conversationStore.LoadCurrentConversationAsync();
+        await using var restarted = await CreateRuntimeAsync(workspace);
+        var afterRestart = await conversationStore.LoadCurrentConversationAsync();
+        var resumed = await restarted.ResumeCustomLoopAsync(new LoopRunControlInput(paused.Id, paused.LifecycleVersion, "resume-runtime-restart-conversation"));
+        var afterResume = await conversationStore.LoadCurrentConversationAsync();
+
+        Assert.Equal(beforeRestart, afterRestart);
+        Assert.Equal("Completed", resumed.Status);
+        Assert.Equal("Completed", resumed.Run!.Status);
+        Assert.Contains(resumed.Run.Events, runEvent => runEvent.Sequence > paused.Events[^1].Sequence && runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == true);
+        Assert.True(afterResume.Count > afterRestart.Count);
+    }
+
     private static void AssertInspectableProjection(LoopRunSnapshot run, LoopRunSummarySnapshot summary)
     {
         Assert.Equal(CustomLoopRunRecord.CurrentSchemaVersion, run.SchemaVersion);
@@ -520,6 +601,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.False(string.IsNullOrWhiteSpace(run.Model.Provider));
         Assert.Equal("test-model", run.Model.Model);
         Assert.False(string.IsNullOrWhiteSpace(run.AdmissionOperationId));
+        Assert.Equal(WorkspaceActors.Cli, run.AdmissionActor);
         Assert.Equal(CustomLoopLimits.Sha256HexCharacters, run.AdmissionRequestHash.Length);
         Assert.Equal(run.LoopId, run.AdmittedDefinition.Id);
         Assert.False(string.IsNullOrWhiteSpace(run.TriggerPrompt));
@@ -605,6 +687,26 @@ public sealed class CustomLoopRuntimeTests
 
         Assert.Equal("Updated", updated.Status);
         return Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
+    }
+
+    private static bool HasValidSurrogatePairs(string value)
+    {
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]))
+            {
+                if (++index >= value.Length || !char.IsLowSurrogate(value[index]))
+                {
+                    return false;
+                }
+            }
+            else if (char.IsLowSurrogate(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace)

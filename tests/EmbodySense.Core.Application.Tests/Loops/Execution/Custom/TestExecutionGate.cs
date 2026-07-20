@@ -22,6 +22,11 @@ internal sealed class TestExecutionGate : ICustomLoopWorkspaceExecutionGate
         return new CustomLoopExecutionLeaseResult(_status, lease, "Test execution ownership outcome.");
     }
 
+    public CustomLoopExecutionLeaseResult TryReserveWorkspaceBusyOutcome(string operationId, string requestHash)
+    {
+        throw new NotSupportedException("Lifecycle service tests never persist invocation workspace-busy receipts.");
+    }
+
     public ValueTask DisposeAsync()
     {
         return ValueTask.CompletedTask;

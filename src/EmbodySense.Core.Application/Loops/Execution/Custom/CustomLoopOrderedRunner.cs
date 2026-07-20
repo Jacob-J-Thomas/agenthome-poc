@@ -94,7 +94,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Public execution starts only from Admitted. Interrupted runs require explicit recovery to Paused and a separate authenticated Resume path.");
         }
 
-        return await ContinueAsync(run, request.Actor, cancellationToken);
+        var dispatchState = new ProviderDispatchState();
+        var result = await ContinueAsync(run, request.Actor, dispatchState, cancellationToken);
+        return result with { ProviderWasInvoked = dispatchState.ProviderWasInvoked };
     }
 
     public async Task<CustomLoopOrderedRunResult> ResumeAsync(CustomLoopResumeExecutionRequest request, CancellationToken cancellationToken = default)
@@ -142,7 +144,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Internal Resume requires the exact Paused-to-Running lifecycle version and matching durable operation event; public RunAsync cannot resume Running state.");
         }
 
-        return await ContinueAsync(run, request.Actor, cancellationToken);
+        var dispatchState = new ProviderDispatchState();
+        var result = await ContinueAsync(run, request.Actor, dispatchState, cancellationToken);
+        return result with { ProviderWasInvoked = dispatchState.ProviderWasInvoked };
     }
 
     public void CancelActiveAttempt(string runId)
@@ -165,7 +169,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
     }
 
-    private async Task<CustomLoopOrderedRunResult> ContinueAsync(CustomLoopRunRecord run, string actor, CancellationToken cancellationToken)
+    private async Task<CustomLoopOrderedRunResult> ContinueAsync(CustomLoopRunRecord run, string actor, ProviderDispatchState dispatchState, CancellationToken cancellationToken)
     {
         while (true)
         {
@@ -189,7 +193,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             if (run.Checkpoint.NextStepIndex < run.AdmittedDefinition.InferenceSteps.Length)
             {
                 var step = run.AdmittedDefinition.InferenceSteps[run.Checkpoint.NextStepIndex];
-                var advanced = await ExecuteInferenceStepAsync(run, step, actor, cancellationToken);
+                var advanced = await ExecuteInferenceStepAsync(run, step, actor, dispatchState, cancellationToken);
                 if (advanced.Terminal is not null)
                 {
                     return advanced.Terminal;
@@ -215,7 +219,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return await CompleteDeterministicallyAsync(run, actor, "The repeat ceiling was reached; Exit completed without a model call.", cancellationToken);
             }
 
-            var exitAdvance = await ExecuteExitAsync(run, actor, cancellationToken);
+            var exitAdvance = await ExecuteExitAsync(run, actor, dispatchState, cancellationToken);
             if (exitAdvance.Terminal is not null)
             {
                 return exitAdvance.Terminal;
@@ -272,7 +276,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
     }
 
-    private async Task<RunAdvance> ExecuteInferenceStepAsync(CustomLoopRunRecord run, CustomLoopInferenceStep step, string actor, CancellationToken cancellationToken)
+    private async Task<RunAdvance> ExecuteInferenceStepAsync(CustomLoopRunRecord run, CustomLoopInferenceStep step, string actor, ProviderDispatchState dispatchState, CancellationToken cancellationToken)
     {
         CustomLoopContextAssembly assembly;
         CustomLoopToolAuthoritySnapshot authority;
@@ -392,6 +396,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
             providerToken.Token.ThrowIfCancellationRequested();
             providerInvoked = true;
+            dispatchState.ProviderWasInvoked = true;
             result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
         }
         catch (OperationCanceledException) when (!providerInvoked)
@@ -482,7 +487,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return await CommitCheckpointAsync(run, checkpoint, $"Inference checkpoint committed after `{step.Id}`.");
     }
 
-    private async Task<RunAdvance> ExecuteExitAsync(CustomLoopRunRecord run, string actor, CancellationToken cancellationToken)
+    private async Task<RunAdvance> ExecuteExitAsync(CustomLoopRunRecord run, string actor, ProviderDispatchState dispatchState, CancellationToken cancellationToken)
     {
         CustomLoopContextAssembly assembly;
         CustomLoopToolAuthoritySnapshot authority;
@@ -592,6 +597,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
             providerToken.Token.ThrowIfCancellationRequested();
             providerInvoked = true;
+            dispatchState.ProviderWasInvoked = true;
             result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
         }
         catch (OperationCanceledException) when (!providerInvoked)
@@ -1864,6 +1870,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     }
 
     private sealed record RunAdvance(CustomLoopRunRecord? Run, CustomLoopOrderedRunResult? Terminal);
+
+    private sealed class ProviderDispatchState
+    {
+        public bool ProviderWasInvoked { get; set; }
+    }
 
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);
 

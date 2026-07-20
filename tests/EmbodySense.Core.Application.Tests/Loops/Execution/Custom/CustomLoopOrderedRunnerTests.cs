@@ -88,6 +88,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
         Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, string.Join(Environment.NewLine, store.ValidationFailures));
+        Assert.True(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Completed, result.Run!.Status);
         Assert.Equal("final output", result.Run.FinalOutput);
         Assert.Equal(["step-first", "step-second"], executor.Requests.Select(item => item.StepId));
@@ -325,6 +326,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.True(result.ProviderWasInvoked);
         Assert.Single(executor.Requests);
         Assert.DoesNotContain(result.Run!.Events, item => item.StepId == "step-second");
     }
@@ -637,6 +639,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.True(result.ProviderWasInvoked);
         Assert.Contains(result.Run!.Events, item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved);
         Assert.Contains(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
     }
@@ -742,6 +745,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Empty(executor.Requests);
     }
@@ -767,6 +771,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Null(result.Run.FailureCode);
         Assert.DoesNotContain("run_start_audit_failed", result.Detail, StringComparison.Ordinal);
@@ -794,6 +799,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Null(result.Run.FailureCode);
         Assert.DoesNotContain("attempt_start_audit_failed", result.Detail, StringComparison.Ordinal);
@@ -822,6 +828,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.True(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Null(result.Run.FailureCode);
         Assert.DoesNotContain("exit_start_audit_failed", result.Detail, StringComparison.Ordinal);

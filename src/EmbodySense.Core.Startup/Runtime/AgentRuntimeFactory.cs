@@ -83,9 +83,10 @@ public sealed class AgentRuntimeFactory
                 throw new InvalidOperationException("custom_workspace_host_busy: restart recovery could not obtain exclusive custom-loop execution ownership without waiting.");
             }
 
+            IReadOnlyList<CustomLoopRecoveryResult> recoveryResults;
             using (recoveryOwnership.Lease)
             {
-                var recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
+                recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
                 if (recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
                 {
                     throw new InvalidOperationException("custom_loop_recovery_failed: persisted custom-loop state could not be recovered exactly; no automatic execution was started.");
@@ -103,7 +104,14 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                await conversationMemory.StartFreshConversationAsync(cancellationToken);
+                if (ShouldPreserveCurrentConversation(recoveryResults))
+                {
+                    conversationState.SynchronizeConversationTranscript(await conversationMemory.LoadCurrentConversationAsync(cancellationToken));
+                }
+                else
+                {
+                    await conversationMemory.StartFreshConversationAsync(cancellationToken);
+                }
             }
 
             var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId);
@@ -164,5 +172,10 @@ public sealed class AgentRuntimeFactory
         }
 
         return "embodysense." + surface.Id;
+    }
+
+    private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults)
+    {
+        return recoveryResults.Any(result => result.Run is { Status: CustomLoopRunStatus.Paused, InvokingConversation.ConversationId: "current" });
     }
 }

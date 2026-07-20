@@ -54,6 +54,7 @@ public sealed record LoopRunSnapshot(
     string Surface,
     LoopRunModelSnapshot Model,
     string AdmissionOperationId,
+    string AdmissionActor,
     string AdmissionRequestHash,
     LoopDefinitionSnapshot AdmittedDefinition,
     string TriggerPrompt,

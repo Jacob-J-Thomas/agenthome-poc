@@ -94,16 +94,41 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             }
         }
 
-        var ownership = _executionGate.TryAcquire(input.OperationId, pending.RequestHash);
-        if (ownership.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
+        CustomLoopExecutionLeaseResult ownership;
+        while (true)
         {
+            ownership = _executionGate.TryAcquire(input.OperationId, pending.RequestHash);
+            if (ownership.Status != CustomLoopExecutionLeaseStatus.WorkspaceBusy)
+            {
+                break;
+            }
+
             var recoveredAdmission = existingOperation is null ? null : await ReconcilePendingAdmissionBeforeBusyAsync(existingOperation, cancellationToken);
             if (recoveredAdmission is not null)
             {
                 return recoveredAdmission;
             }
 
-            return await RecordWorkspaceBusyAsync(existingOperation ?? pending, cancellationToken);
+            var busyReservation = _executionGate.TryReserveWorkspaceBusyOutcome(input.OperationId, pending.RequestHash);
+            if (busyReservation.Status == CustomLoopExecutionLeaseStatus.WorkspaceAvailable)
+            {
+                continue;
+            }
+
+            if (busyReservation.Status == CustomLoopExecutionLeaseStatus.OperationInProgress)
+            {
+                return new LoopRunInvocationResponse("OperationInProgress", null, false, null, [], "The same custom-loop invocation acquired execution ownership or is finalizing its durable busy receipt; retry later.");
+            }
+
+            if (busyReservation.Status == CustomLoopExecutionLeaseStatus.OperationConflict || busyReservation.Lease is null)
+            {
+                return Conflict("The active or reserved invocation operation id is bound to different canonical authorized request content.");
+            }
+
+            using (busyReservation.Lease)
+            {
+                return await RecordWorkspaceBusyAsync(existingOperation ?? pending, cancellationToken);
+            }
         }
 
         if (ownership.Status == CustomLoopExecutionLeaseStatus.OperationInProgress)
@@ -209,11 +234,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
             var execution = await _runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, _actor), cancellationToken);
             var executedRun = execution.Run ?? admission.Run;
-            var wasDispatched = executedRun.Events.Any(runEvent => runEvent.Kind is CustomLoopRunEventKind.NodeAttemptStarted or CustomLoopRunEventKind.ExitDecisionStarted);
             return new LoopRunInvocationResponse(
                 CustomLoopAdmissionStatus.Admitted.ToString(),
                 execution.Status.ToString(),
-                wasDispatched,
+                execution.ProviderWasInvoked,
                 Map(executedRun),
                 admission.ValidationErrors.Select(Map).ToArray(),
                 execution.Detail);
@@ -592,6 +616,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             run.Surface,
             new LoopRunModelSnapshot(run.ModelSnapshot.Provider, run.ModelSnapshot.Model),
             run.AdmissionOperationId,
+            run.AdmissionActor,
             run.AdmissionRequestHash,
             LoopAuthoringFacade.Map(run.AdmittedDefinition),
             run.TriggerPrompt,

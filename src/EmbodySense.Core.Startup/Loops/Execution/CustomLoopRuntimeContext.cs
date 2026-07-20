@@ -92,7 +92,8 @@ internal sealed class CustomLoopRuntimeContext
 
         var marker = $"{Environment.NewLine}[source truncated to fit the {MaxDirectoryRoleSourceCharacters}-character admitted source limit]";
         var availableSourceCharacters = MaxDirectoryRoleSourceCharacters - label.Length - marker.Length;
-        var content = label + document.Content[..availableSourceCharacters] + marker;
+        var safeSourceCharacters = SafePrefixLength(document.Content, availableSourceCharacters);
+        var content = label + document.Content[..safeSourceCharacters] + marker;
         return CreateManifestSource(order, sourceType, document.SourceId, document.ExactPath, provenance, trustClass, content, fullContent.Length, true, $"Source exceeded the {MaxDirectoryRoleSourceCharacters}-character per-source admission limit.", null, capturedAtUtc);
     }
 
@@ -182,7 +183,21 @@ internal sealed class CustomLoopRuntimeContext
         var available = CustomLoopLimits.MaxInvokingConversationCharacters - marker.Length;
         var headCharacters = available / 2;
         var tailCharacters = available - headCharacters;
-        return content[..headCharacters] + marker + content[^tailCharacters..];
+        var safeHeadCharacters = SafePrefixLength(content, headCharacters);
+        var safeTailStart = SafeSuffixStart(content, content.Length - tailCharacters);
+        return content[..safeHeadCharacters] + marker + content[safeTailStart..];
+    }
+
+    private static int SafePrefixLength(string value, int maximumCharacters)
+    {
+        var length = Math.Min(value.Length, maximumCharacters);
+        return length > 0 && length < value.Length && char.IsHighSurrogate(value[length - 1]) && char.IsLowSurrogate(value[length]) ? length - 1 : length;
+    }
+
+    private static int SafeSuffixStart(string value, int minimumStart)
+    {
+        var start = Math.Clamp(minimumStart, 0, value.Length);
+        return start > 0 && start < value.Length && char.IsHighSurrogate(value[start - 1]) && char.IsLowSurrogate(value[start]) ? start + 1 : start;
     }
 
     private static CustomLoopContextManifestSource CreateManifestSource(
