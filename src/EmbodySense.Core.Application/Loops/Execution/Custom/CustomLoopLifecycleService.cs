@@ -127,22 +127,12 @@ public sealed class CustomLoopLifecycleService
 
         if (run is null)
         {
-            if (isPendingReplay)
-            {
-                return Result(CustomLoopControlStatus.OperationInProgress, null, operationId, "The same lifecycle operation is still pending and has not durably committed its transition event.");
-            }
-
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.NotFound, null, "The custom-loop run does not exist.");
         }
 
         var validation = CustomLoopRunValidator.Validate(run);
         if (!validation.IsValid)
         {
-            if (isPendingReplay)
-            {
-                return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation is still pending and has not durably committed a valid transition event.");
-            }
-
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, "The persisted custom-loop run is invalid; no lifecycle mutation was attempted.");
         }
 
@@ -167,9 +157,9 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, $"Expected lifecycle version {expectedLifecycleVersion}, but the durable run is version {run.LifecycleVersion}.");
         }
 
-        if (isPendingReplay)
+        if (isPendingReplay && RequiresLifecycleMutationOrSignal(kind, run))
         {
-            return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation is still pending and has not durably committed its transition event.");
+            return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation may still be mutating or signalling this run and has not durably committed its transition event.");
         }
 
         return kind switch
@@ -178,6 +168,17 @@ public sealed class CustomLoopLifecycleService
             CustomLoopControlKind.Cancel => await CancelCoreAsync(operation, run),
             CustomLoopControlKind.Resume => await ResumeCoreAsync(operation, run, cancellationToken),
             _ => await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, "The control kind is unsupported.")
+        };
+    }
+
+    private static bool RequiresLifecycleMutationOrSignal(CustomLoopControlKind kind, CustomLoopRunRecord run)
+    {
+        return kind switch
+        {
+            CustomLoopControlKind.Pause => run.Status == CustomLoopRunStatus.Running,
+            CustomLoopControlKind.Cancel => run.Status is CustomLoopRunStatus.Admitted or CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested,
+            CustomLoopControlKind.Resume => run.Status == CustomLoopRunStatus.Paused,
+            _ => false
         };
     }
 

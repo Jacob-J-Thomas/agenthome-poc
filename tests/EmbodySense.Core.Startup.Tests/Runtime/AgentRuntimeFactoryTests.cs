@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
@@ -139,6 +140,25 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Null(await new CustomLoopControlOperationStore(paths).GetAsync(blockedCancel.OperationId));
         Assert.Equal("WorkspaceHostUnavailable", afterRelease.AdmissionStatus);
         Assert.Equal("NotFound", afterRecreate.AdmissionStatus);
+    }
+
+    [Fact]
+    public async Task CreateAsync_keeps_ordinary_chat_available_while_an_in_process_custom_loop_owns_execution()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
+        using var activeExecution = gate.TryAcquire("active-custom-loop", new string('a', CustomLoopLimits.Sha256HexCharacters)).Lease!;
+
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var turn = await runtime.RunTurnAsync("hello");
+        var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('b', CustomLoopLimits.Sha256HexCharacters), "invoke-while-busy", "prompt"));
+
+        Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
+        Assert.Equal("WorkspaceHostUnavailable", customLoop.AdmissionStatus);
+        Assert.False(customLoop.WasDispatched);
     }
 
     [Fact]

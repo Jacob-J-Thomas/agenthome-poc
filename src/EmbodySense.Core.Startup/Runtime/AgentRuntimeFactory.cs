@@ -78,7 +78,7 @@ public sealed class AgentRuntimeFactory
             var recovery = new CustomLoopRecoveryService(customRunStore, auditLog);
             var recoveryOperationId = "recovery-" + Guid.NewGuid().ToString("N");
             var recoveryOwnership = customExecutionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
-            if (recoveryOwnership.Status != CustomLoopExecutionLeaseStatus.Acquired && recoveryOwnership.Status != CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+            if (recoveryOwnership.Status is not (CustomLoopExecutionLeaseStatus.Acquired or CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable))
             {
                 throw new InvalidOperationException("custom_workspace_host_busy: restart recovery could not obtain exclusive custom-loop execution ownership without waiting.");
             }
@@ -107,7 +107,7 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable || ShouldPreserveCurrentConversation(recoveryResults))
+                if (recoveryOwnership.Status != CustomLoopExecutionLeaseStatus.Acquired || ShouldPreserveCurrentConversation(recoveryResults))
                 {
                     conversationState.SynchronizeConversationTranscript(await conversationMemory.LoadCurrentConversationAsync(cancellationToken));
                 }
