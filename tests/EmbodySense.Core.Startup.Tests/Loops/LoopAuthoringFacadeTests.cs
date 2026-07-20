@@ -1,4 +1,6 @@
+using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops;
@@ -88,6 +90,21 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal("NotFound", missingUpdate.Status);
         Assert.Equal("NotFound", missingDelete.Status);
         Assert.Empty((await facade.GetCatalogAsync()).CustomDefinitions);
+    }
+
+    [Fact]
+    public async Task Missing_system_authority_in_initialized_workspace_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        File.Delete(new WorkspacePaths(workspace.RootPath).DefaultConversationLoopDefinitionPath);
+        var facade = new LoopAuthoringFacade(workspace.RootPath);
+
+        var catalogException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.GetCatalogAsync());
+        var mutationException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.CreateAsync("blocked-create"));
+
+        Assert.Contains("missing its default conversation authority", catalogException.Message, StringComparison.Ordinal);
+        Assert.Contains("failed closed", mutationException.Message, StringComparison.Ordinal);
     }
 
     [Fact]

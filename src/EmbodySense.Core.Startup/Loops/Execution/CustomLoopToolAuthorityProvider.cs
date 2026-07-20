@@ -27,7 +27,7 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
         LoopDefinition? definition;
         try
         {
-            definition = await _definitionStore.LoadAsync("default-conversation", cancellationToken);
+            definition = await _definitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -39,7 +39,7 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
             return Invalid(roleId, admittedMaximum, evaluatedAtUtc, "The current directory-role authority definition is missing; custom-loop execution failed closed.");
         }
 
-        if (!string.Equals(definition.Id, "default-conversation", StringComparison.Ordinal))
+        if (!string.Equals(definition.Id, BuiltInLoopIds.DefaultConversation, StringComparison.Ordinal))
         {
             return Invalid(roleId, admittedMaximum, evaluatedAtUtc, "The current directory-role authority definition does not have the expected default-conversation identity; custom-loop execution failed closed.");
         }

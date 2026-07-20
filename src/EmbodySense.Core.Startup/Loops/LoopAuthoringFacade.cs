@@ -18,6 +18,7 @@ public sealed class LoopAuthoringFacade
 {
     private readonly CustomLoopAuthoringService _service;
     private readonly LoopDefinitionStore _systemDefinitionStore;
+    private readonly WorkspacePaths? _paths;
     private readonly string _actor;
 
     public LoopAuthoringFacade(string workingDirectory) : this(workingDirectory, WorkspaceActors.Web)
@@ -33,6 +34,7 @@ public sealed class LoopAuthoringFacade
         var store = new CustomLoopDefinitionStore(paths);
         _service = new CustomLoopAuthoringService(store, new AuditLog(paths), runStore: new CustomLoopRunStore(paths));
         _systemDefinitionStore = new LoopDefinitionStore(paths);
+        _paths = paths;
         _actor = actor;
     }
 
@@ -97,7 +99,18 @@ public sealed class LoopAuthoringFacade
 
     private async Task<LoopDefinition> GetSystemDefinitionAsync(CancellationToken cancellationToken)
     {
-        return await _systemDefinitionStore.LoadAsync("default-conversation", cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
+        var definition = await _systemDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken);
+        if (definition is not null)
+        {
+            return definition;
+        }
+
+        if (_paths?.IsInitialized == true)
+        {
+            throw new InvalidOperationException("The initialized workspace is missing its default conversation authority definition; loop authoring failed closed.");
+        }
+
+        return LoopDefinition.CreateDefaultConversation();
     }
 
     private static LoopAuthoringLimits CreateLimits()
