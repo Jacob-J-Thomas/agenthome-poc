@@ -79,20 +79,22 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return await CancelBeforeDispatchAsync(run, request.Actor);
             }
 
+            using var ownership = TryRegisterActiveRun(run.Id);
+            if (ownership is null)
+            {
+                return Result(CustomLoopOrderedRunStatus.Failed, run, "This runtime is already coordinating ordered execution for the custom-loop run.");
+            }
+
             var started = await StartRunAsync(run, request.Actor, cancellationToken);
             if (started.Terminal is not null)
             {
                 return started.Terminal;
             }
 
-            run = started.Run!;
-        }
-        else
-        {
-            return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Public execution starts only from Admitted. Interrupted runs require explicit recovery to Paused and a separate authenticated Resume path.");
+            return await ContinueRegisteredAsync(started.Run!, request.Actor, cancellationToken);
         }
 
-        return await ContinueOwnedAsync(run, request.Actor, cancellationToken);
+        return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Public execution starts only from Admitted. Interrupted runs require explicit recovery to Paused and a separate authenticated Resume path.");
     }
 
     public async Task<CustomLoopOrderedRunResult> ResumeAsync(CustomLoopResumeExecutionRequest request, CancellationToken cancellationToken = default)
@@ -140,7 +142,27 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Internal Resume requires the exact Paused-to-Running lifecycle version and matching durable operation event; public RunAsync cannot resume Running state.");
         }
 
-        return await ContinueOwnedAsync(run, request.Actor, cancellationToken);
+        if (request.ActiveRunAlreadyRegistered)
+        {
+            return _activeRuns.ContainsKey(run.Id)
+                ? await ContinueRegisteredAsync(run, request.Actor, cancellationToken)
+                : Result(CustomLoopOrderedRunStatus.Failed, run, "The resumed run was not registered as locally owned before its Running transition.");
+        }
+
+        using var ownership = TryRegisterActiveRun(run.Id);
+        return ownership is null
+            ? Result(CustomLoopOrderedRunStatus.Failed, run, "This runtime is already coordinating ordered execution for the custom-loop run.")
+            : await ContinueRegisteredAsync(run, request.Actor, cancellationToken);
+    }
+
+    public IDisposable? TryRegisterActiveRun(string runId)
+    {
+        if (!CustomLoopArtifactIdentifier.IsValid(runId) || !_activeRuns.TryAdd(runId, 0))
+        {
+            return null;
+        }
+
+        return new ActiveRunRegistration(_activeRuns, runId);
     }
 
     public void CancelActiveAttempt(string runId)
@@ -172,23 +194,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         throw new InvalidOperationException("The active provider attempt is not owned by this runtime and could not be signalled locally.");
     }
 
-    private async Task<CustomLoopOrderedRunResult> ContinueOwnedAsync(CustomLoopRunRecord run, string actor, CancellationToken cancellationToken)
+    private async Task<CustomLoopOrderedRunResult> ContinueRegisteredAsync(CustomLoopRunRecord run, string actor, CancellationToken cancellationToken)
     {
-        if (!_activeRuns.TryAdd(run.Id, 0))
-        {
-            return Result(CustomLoopOrderedRunStatus.Failed, run, "This runtime is already coordinating ordered execution for the custom-loop run.");
-        }
-
-        try
-        {
-            var dispatchState = new ProviderDispatchState();
-            var result = await ContinueAsync(run, actor, dispatchState, cancellationToken);
-            return result with { ProviderWasInvoked = dispatchState.ProviderWasInvoked };
-        }
-        finally
-        {
-            _activeRuns.TryRemove(run.Id, out _);
-        }
+        var dispatchState = new ProviderDispatchState();
+        var result = await ContinueAsync(run, actor, dispatchState, cancellationToken);
+        return result with { ProviderWasInvoked = dispatchState.ProviderWasInvoked };
     }
 
     private async Task<CustomLoopOrderedRunResult> ContinueAsync(CustomLoopRunRecord run, string actor, ProviderDispatchState dispatchState, CancellationToken cancellationToken)
@@ -398,7 +408,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         using var providerToken = CreateProviderToken(run, cancellationToken);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
-            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: false);
+            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: false, providerWasInvoked: false);
         }
 
         try
@@ -429,7 +439,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         catch (Exception exception)
         {
-            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, exception, isExit: false);
+            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, exception, isExit: false, providerWasInvoked: providerInvoked);
         }
         finally
         {
@@ -438,7 +448,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         if (result is null)
         {
-            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, new InvalidOperationException("Provider executor returned no result."), isExit: false);
+            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, new InvalidOperationException("Provider executor returned no result."), isExit: false, providerWasInvoked: providerInvoked);
         }
 
         var refreshed = await RefreshControlUpdateAsync(run);
@@ -601,7 +611,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         using var providerToken = CreateProviderToken(run, cancellationToken);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
-            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: true);
+            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: true, providerWasInvoked: false);
         }
 
         try
@@ -632,7 +642,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         catch (Exception exception)
         {
-            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, exception, isExit: true);
+            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, exception, isExit: true, providerWasInvoked: providerInvoked);
         }
         finally
         {
@@ -641,7 +651,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         if (result is null)
         {
-            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, new InvalidOperationException("Provider executor returned no result."), isExit: true);
+            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, new InvalidOperationException("Provider executor returned no result."), isExit: true, providerWasInvoked: providerInvoked);
         }
 
         var refreshed = await RefreshControlUpdateAsync(run);
@@ -913,9 +923,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(run, null);
             }
 
-            var request = new CustomLoopConversationPublicationRequest(operationId, run.Id, run.LoopId, run.Checkpoint.Iteration, stepId, conversation.ConversationId, conversation.CapturedVersion, output.Content, output.ContentHash, priorPublications);
+            var request = new CustomLoopConversationPublicationRequest(operationId, run.Id, run.LoopId, run.Checkpoint.Iteration, stepId, conversation.ConversationId, conversation.CapturedVersion, output.Content, output.ContentHash, priorPublications, () => publicationDispatched = true);
             publicationToken.Token.ThrowIfCancellationRequested();
-            publicationDispatched = true;
             publication = await _conversationPublisher.PublishAsync(request, publicationToken.Token);
         }
         catch (OperationCanceledException) when (!publicationDispatched && publicationToken.IsCancellationRequested)
@@ -994,7 +1003,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return await PersistAsync(run, candidate, IntegrityToken(), outcomeMayExist: true);
     }
 
-    private async Task<RunAdvance> RecordAttemptFailureAsync(CustomLoopRunRecord run, string actor, string stepId, int iteration, string correlation, CustomLoopContextAssembly assembly, Exception exception, bool isExit)
+    private async Task<RunAdvance> RecordAttemptFailureAsync(CustomLoopRunRecord run, string actor, string stepId, int iteration, string correlation, CustomLoopContextAssembly assembly, Exception exception, bool isExit, bool providerWasInvoked)
     {
         var refreshed = await RefreshControlUpdateAsync(run);
         if (refreshed.Terminal is not null)
@@ -1003,8 +1012,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         run = refreshed.Run!;
-        var uncertain = IsUncertainProviderFailure(exception);
-        var detail = uncertain ? "Provider attempt was cancelled after dispatch and its outcome cannot be proven." : $"Provider attempt failed without an automatic retry: {SafeExceptionClass(exception)}.";
+        var uncertain = providerWasInvoked && IsUncertainProviderFailure(exception);
+        var needsReview = providerWasInvoked && (isExit || uncertain);
+        var detail = !providerWasInvoked
+            ? $"Provider setup failed before dispatch: {SafeExceptionClass(exception)}."
+            : uncertain
+                ? "Provider attempt failed after dispatch and its outcome cannot be proven."
+                : $"Provider attempt failed without an automatic retry: {SafeExceptionClass(exception)}.";
         var failure = Event(run, Now(run), CustomLoopRunEventKind.NodeAttemptFailed, detail, iteration, stepId, 1, provider: run.ModelSnapshot.Provider, model: run.ModelSnapshot.Model, providerResponseId: correlation);
         var persisted = await PersistAsync(run, Append(run, failure.TimestampUtc, [failure]), IntegrityToken(), outcomeMayExist: uncertain);
         if (persisted.Terminal is not null)
@@ -1016,16 +1030,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         try
         {
             var action = isExit ? AuditSchema.Actions.LoopExitDecision : AuditSchema.Actions.LoopNodeAttempt;
-            var outcome = uncertain || isExit ? AuditSchema.Outcomes.NeedsReview : AuditSchema.Outcomes.Failed;
+            var outcome = needsReview ? AuditSchema.Outcomes.NeedsReview : AuditSchema.Outcomes.Failed;
             await _auditLog.AppendAsync(AttemptAudit(actor, run, stepId, iteration, correlation, assembly, action, outcome, null, null), IntegrityToken());
         }
         catch (Exception auditException)
         {
             detail = $"Provider failure evidence exists, but its outcome audit failed: {SafeExceptionClass(auditException)}.";
             uncertain = true;
+            needsReview = true;
         }
 
-        var status = isExit || uncertain ? CustomLoopRunStatus.NeedsReview : CustomLoopRunStatus.Failed;
+        var status = needsReview ? CustomLoopRunStatus.NeedsReview : CustomLoopRunStatus.Failed;
         var code = isExit ? "exit_attempt_failed" : uncertain ? "inference_attempt_uncertain" : "inference_attempt_failed";
         var terminal = await TerminateAsync(run, actor, status, code, detail);
         return new RunAdvance(terminal.Run, terminal);
@@ -1904,6 +1919,19 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         public bool ProviderWasInvoked => Volatile.Read(ref _providerWasInvoked) != 0;
 
         public void MarkProviderRequestStarted() => Interlocked.Exchange(ref _providerWasInvoked, 1);
+    }
+
+    private sealed class ActiveRunRegistration(ConcurrentDictionary<string, byte> activeRuns, string runId) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                activeRuns.TryRemove(runId, out _);
+            }
+        }
     }
 
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);

@@ -10,4 +10,5 @@ public sealed record CustomLoopConversationPublicationRequest(
     string ExpectedConversationVersion,
     string CanonicalOutput,
     string CanonicalOutputHash,
-    IReadOnlyList<CustomLoopPriorConversationPublication>? PriorPublications = null);
+    IReadOnlyList<CustomLoopPriorConversationPublication>? PriorPublications = null,
+    Action? AppendStarted = null);

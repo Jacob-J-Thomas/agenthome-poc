@@ -706,6 +706,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         public Task<CustomLoopConversationPublicationResult> PublishAsync(CustomLoopConversationPublicationRequest request, CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
+            request.AppendStarted?.Invoke();
             return Task.FromResult(new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Published, request.OperationId, "Published."));
         }
     }

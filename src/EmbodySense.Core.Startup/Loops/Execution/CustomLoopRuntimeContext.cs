@@ -346,6 +346,7 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
 
             try
             {
+                request.AppendStarted?.Invoke();
                 var appended = await _conversationMemory.TryAppendMessageAsync(persistedConversation.ConversationId, request.ConversationId, stateMessages, LlmMessage.Assistant(request.CanonicalOutput), cancellationToken);
                 if (!appended)
                 {

@@ -137,13 +137,20 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         }
         finally
         {
-            if (client is IAsyncDisposable asyncDisposable)
+            try
             {
-                await asyncDisposable.DisposeAsync();
+                if (client is IAsyncDisposable asyncDisposable)
+                {
+                    await asyncDisposable.DisposeAsync();
+                }
+                else
+                {
+                    ((IDisposable)client).Dispose();
+                }
             }
-            else
+            catch
             {
-                ((IDisposable)client).Dispose();
+                // Attempt outcome is authoritative; per-attempt transport cleanup must not replace it.
             }
         }
     }

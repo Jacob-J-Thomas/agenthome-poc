@@ -134,6 +134,7 @@ public sealed class AgentRuntimeFactory
                 customDefinitionStore,
                 customRunStore,
                 customInvocationOperations,
+                customControlOperations,
                 customExecutionGate,
                 customAdmission,
                 recovery,

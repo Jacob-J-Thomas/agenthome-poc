@@ -14,6 +14,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopInvocationOperationStore _invocationOperationStore;
+    private readonly ICustomLoopControlOperationStore _controlOperationStore;
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly CustomLoopAdmissionService _admissionService;
     private readonly CustomLoopRecoveryService _recoveryService;
@@ -31,6 +32,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         ICustomLoopDefinitionStore definitionStore,
         ICustomLoopRunStore runStore,
         ICustomLoopInvocationOperationStore invocationOperationStore,
+        ICustomLoopControlOperationStore controlOperationStore,
         ICustomLoopWorkspaceExecutionGate executionGate,
         CustomLoopAdmissionService admissionService,
         CustomLoopRecoveryService recoveryService,
@@ -47,6 +49,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _invocationOperationStore = invocationOperationStore ?? throw new ArgumentNullException(nameof(invocationOperationStore));
+        _controlOperationStore = controlOperationStore ?? throw new ArgumentNullException(nameof(controlOperationStore));
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _admissionService = admissionService ?? throw new ArgumentNullException(nameof(admissionService));
         _recoveryService = recoveryService ?? throw new ArgumentNullException(nameof(recoveryService));
@@ -237,7 +240,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             if (!completed)
             {
                 var parked = await ParkUndispatchedAdmissionAsync(admission.Run!);
-                return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.AuditUnavailable.ToString(), parked.Status.ToString(), false, Map(parked), admission.ValidationErrors.Select(Map).ToArray(), "The run was admitted, but its strict invocation receipt could not be completed. The undispatched run was conservatively parked and no provider request was dispatched.");
+                var detail = parked.IsParked
+                    ? "The run was admitted, but its strict invocation receipt could not be completed. The undispatched run was conservatively parked and no provider request was dispatched."
+                    : $"The run was admitted, but its strict invocation receipt could not be completed and automatic parking could not be proved: {parked.Detail} No provider request was dispatched by this invocation path.";
+                return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.AuditUnavailable.ToString(), parked.Run.Status.ToString(), false, Map(parked.Run), admission.ValidationErrors.Select(Map).ToArray(), detail);
             }
 
             if (admission.Status == CustomLoopAdmissionStatus.Replayed)
@@ -289,26 +295,38 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         return ExecuteControlAsync(awaitable: _lifecycleService.PauseAsync(new CustomLoopPauseRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
     }
 
-    public Task<LoopRunControlResponse> CancelAsync(LoopRunControlInput input, CancellationToken cancellationToken)
+    public async Task<LoopRunControlResponse> CancelAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
-        if (!_customExecutionAvailable)
+        var replay = await TryReplayControlAsync(CustomLoopControlKind.Cancel, input, cancellationToken);
+        if (replay is not null)
         {
-            return Task.FromResult(new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can cancel custom loops."));
+            return replay;
         }
 
-        return ExecuteControlAsync(awaitable: _lifecycleService.CancelAsync(new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
+        if (!_customExecutionAvailable)
+        {
+            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can cancel custom loops.");
+        }
+
+        return await ExecuteControlAsync(awaitable: _lifecycleService.CancelAsync(new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
     }
 
-    public Task<LoopRunControlResponse> ResumeAsync(LoopRunControlInput input, CancellationToken cancellationToken)
+    public async Task<LoopRunControlResponse> ResumeAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
-        if (!_customExecutionAvailable)
+        var replay = await TryReplayControlAsync(CustomLoopControlKind.Resume, input, cancellationToken);
+        if (replay is not null)
         {
-            return Task.FromResult(new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can resume custom loops."));
+            return replay;
         }
 
-        return ExecuteControlAsync(awaitable: _lifecycleService.ResumeAsync(new CustomLoopResumeRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
+        if (!_customExecutionAvailable)
+        {
+            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can resume custom loops.");
+        }
+
+        return await ExecuteControlAsync(awaitable: _lifecycleService.ResumeAsync(new CustomLoopResumeRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
     }
 
     public async ValueTask DisposeAsync()
@@ -452,20 +470,58 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             : new LoopRunInvocationResponse(CustomLoopAdmissionStatus.AuditUnavailable.ToString(), run.Status.ToString(), false, Map(run), [], "The prior admission was found, but its invocation receipt could not be reconciled safely; no provider request was dispatched.");
     }
 
-    private async Task<CustomLoopRunRecord> ParkUndispatchedAdmissionAsync(CustomLoopRunRecord run)
+    private async Task<UndispatchedParkingResult> ParkUndispatchedAdmissionAsync(CustomLoopRunRecord run)
     {
         using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
         try
         {
             var recovery = await _recoveryService.RecoverAsync(_actor, integrity.Token);
-            return recovery.SingleOrDefault(result => string.Equals(result.Run.Id, run.Id, StringComparison.Ordinal))?.Run
-                ?? await _runStore.GetAsync(run.Id, integrity.Token)
-                ?? run;
+            var result = recovery.SingleOrDefault(item => string.Equals(item.Run.Id, run.Id, StringComparison.Ordinal));
+            if (result is not null)
+            {
+                return new UndispatchedParkingResult(result.Run, IsParked(result.Run), result.Detail);
+            }
+
+            var reloaded = await _runStore.GetAsync(run.Id, integrity.Token) ?? run;
+            return new UndispatchedParkingResult(reloaded, IsParked(reloaded), "Recovery returned no result for the admitted run.");
         }
-        catch
+        catch (Exception exception)
         {
-            return await TryReloadRunAsync(run.Id) ?? run;
+            var reloaded = await TryReloadRunAsync(run.Id) ?? run;
+            return new UndispatchedParkingResult(reloaded, IsParked(reloaded), $"Recovery failed with {exception.GetType().Name}.");
         }
+    }
+
+    private async Task<LoopRunControlResponse?> TryReplayControlAsync(CustomLoopControlKind kind, LoopRunControlInput input, CancellationToken cancellationToken)
+    {
+        CustomLoopControlOperation? operation;
+        try
+        {
+            operation = await _controlOperationStore.GetAsync(input.OperationId, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return new LoopRunControlResponse(CustomLoopControlStatus.Failed.ToString(), null, input.OperationId, $"The control-operation receipt could not be read safely: {exception.GetType().Name}.");
+        }
+
+        if (operation is null || operation.State != CustomLoopControlOperationState.Complete)
+        {
+            return null;
+        }
+
+        var requestHash = CustomLoopControlRequestHash.Compute(kind, input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor);
+        if (!string.Equals(operation.RequestHash, requestHash, StringComparison.Ordinal))
+        {
+            return new LoopRunControlResponse(CustomLoopControlStatus.Conflict.ToString(), null, input.OperationId, "The operation id is already bound to different control-request content.");
+        }
+
+        var run = await TryReloadRunAsync(operation.RunId);
+        return new LoopRunControlResponse(operation.Outcome.ToString(), run is null ? null : Map(run), input.OperationId, operation.Detail);
+    }
+
+    private static bool IsParked(CustomLoopRunRecord run)
+    {
+        return run.Status == CustomLoopRunStatus.Paused && run.ExecutionClock.ActiveSinceUtc is null;
     }
 
     private async Task<CustomLoopRunRecord?> TryReloadRunAsync(string runId)
@@ -577,7 +633,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             [],
             operation.Outcome == CustomLoopInvocationOutcome.Admitted
                 ? "The durable admitted invocation outcome was replayed without another provider dispatch."
-                : $"The durable {operation.AdmissionStatus} invocation outcome was replayed without context capture or provider dispatch.");
+                : $"{operation.Detail} The durable {operation.AdmissionStatus} invocation outcome was replayed without context capture or provider dispatch.");
     }
 
     private DateTimeOffset UtcNow(DateTimeOffset minimum)
@@ -600,6 +656,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     {
         return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.Conflict.ToString(), null, false, null, [], detail);
     }
+
+    private sealed record UndispatchedParkingResult(CustomLoopRunRecord Run, bool IsParked, string Detail);
 
     private static LoopRunInvocationResponse MapAdmission(CustomLoopAdmissionResult result, string? executionStatus, bool wasDispatched)
     {

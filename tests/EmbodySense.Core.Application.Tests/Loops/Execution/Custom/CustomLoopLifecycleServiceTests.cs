@@ -468,6 +468,22 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Resume_registers_local_ownership_before_exposing_running_state()
+    {
+        var run = Run("run-resume-owned", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([run]);
+        var cancellation = new RecordingCancellationSignal();
+        var executor = new NoopResumeExecutor(beforeResult: request => Assert.Contains(request.RunId, cancellation.ActiveRunIds));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-owned", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.Completed, result.Status);
+        Assert.True(Assert.Single(executor.Requests).ActiveRunAlreadyRegistered);
+        Assert.Empty(cancellation.ActiveRunIds);
+    }
+
+    [Fact]
     public async Task Resume_executor_failure_quarantines_the_durable_running_run()
     {
         var run = Run("run-resume-executor-failure", CustomLoopRunStatus.Paused);
@@ -1006,7 +1022,19 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public List<string> RunIds { get; } = [];
 
+        public HashSet<string> ActiveRunIds { get; } = new(StringComparer.Ordinal);
+
         public int AttemptCount { get; private set; }
+
+        public IDisposable? TryRegisterActiveRun(string runId)
+        {
+            if (!ActiveRunIds.Add(runId))
+            {
+                return null;
+            }
+
+            return new Registration(() => ActiveRunIds.Remove(runId));
+        }
 
         public void CancelActiveAttempt(string runId)
         {
@@ -1018,6 +1046,19 @@ public sealed class CustomLoopLifecycleServiceTests
             }
 
             RunIds.Add(runId);
+        }
+
+        private sealed class Registration(Action release) : IDisposable
+        {
+            private int _disposed;
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                {
+                    release();
+                }
+            }
         }
     }
 

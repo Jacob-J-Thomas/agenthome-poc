@@ -343,6 +343,23 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_preserves_successful_inference_when_transport_disposal_throws()
+    {
+        using var workspace = new TestWorkspace();
+        ThrowingDisposeInferenceClient? client = null;
+        var executor = CreateInjectedExecutor(
+            CreateOptions(workspace),
+            new RecordingApprovalPrompt(),
+            (_, _) => client = new ThrowingDisposeInferenceClient());
+
+        var result = await executor.ExecuteAsync(CreateRequest());
+
+        Assert.Equal("completed", result.OutputText);
+        Assert.NotNull(client);
+        Assert.True(client.DisposeAttempted);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_does_not_report_dispatch_when_transport_construction_fails()
     {
         using var workspace = new TestWorkspace();
@@ -793,7 +810,24 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     {
         public Task<CustomLoopConversationPublicationResult> PublishAsync(CustomLoopConversationPublicationRequest request, CancellationToken cancellationToken = default)
         {
+            request.AppendStarted?.Invoke();
             return Task.FromResult(new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Published, request.OperationId, "Published."));
+        }
+    }
+
+    private sealed class ThrowingDisposeInferenceClient : ILlmInferenceClient, IAsyncDisposable
+    {
+        public bool DisposeAttempted { get; private set; }
+
+        public Task<LlmInferenceResponse> GenerateAsync(LlmInferenceRequest request, Func<string, CancellationToken, Task>? responseChunkHandler = null, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(Response("completed"));
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeAttempted = true;
+            return ValueTask.FromException(new IOException("transport cleanup failed"));
         }
     }
 

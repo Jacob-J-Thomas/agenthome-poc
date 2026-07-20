@@ -344,6 +344,21 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Single(executor.Requests);
     }
 
+    [Fact]
+    public async Task Transport_failure_before_provider_dispatch_is_definitive_and_does_not_require_review()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(new IOException("transport construction failed")) { MarkProviderRequestStarted = false };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Failed, result.Run!.Status);
+        Assert.Equal("inference_attempt_failed", result.Run.FailureCode);
+        Assert.Contains("before dispatch", result.Run.FailureDetail, StringComparison.OrdinalIgnoreCase);
+        Assert.False(result.ProviderWasInvoked);
+    }
+
     [Theory]
     [InlineData("timeout")]
     [InlineData("io")]
@@ -496,6 +511,33 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.NotEqual(CustomLoopRunStatus.Completed, result.Run!.Status);
         Assert.Contains(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
+    }
+
+    [Fact]
+    public async Task Cancellation_while_waiting_before_publication_append_is_not_marked_uncertain()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            maxAdditionalIterations: 0,
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var store = new FakeRunStore(run);
+        CustomLoopOrderedRunner? runner = null;
+        var publisher = new RecordingPublisher
+        {
+            BeforePublish = request =>
+            {
+                runner!.CancelActiveAttempt(request.RunId);
+                return Task.CompletedTask;
+            }
+        };
+        runner = Runner(store, new QueueExecutor(Result("evidence")), publisher);
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("publication_cancelled_before_dispatch", result.Run!.FailureCode);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
     }
 
     [Fact]
@@ -762,6 +804,27 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.False(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Public_execution_registers_local_ownership_before_persisting_running_state()
+    {
+        CustomLoopOrderedRunner? runner = null;
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (candidate.Status == CustomLoopRunStatus.Running)
+                {
+                    runner!.CancelActiveAttempt(candidate.Id);
+                }
+            }
+        };
+        runner = Runner(store, new QueueExecutor(Result("completed")));
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
     }
 
     [Fact]
@@ -2273,6 +2336,7 @@ public sealed class CustomLoopOrderedRunnerTests
             }
 
             cancellationToken.ThrowIfCancellationRequested();
+            request.AppendStarted?.Invoke();
 
             return ReturnNull ? null! : NextResult ?? new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Published, request.OperationId, "Published.");
         }

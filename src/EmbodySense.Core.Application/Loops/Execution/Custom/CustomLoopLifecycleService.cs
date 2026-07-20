@@ -319,6 +319,12 @@ public sealed class CustomLoopLifecycleService
 
         using (gate.Lease)
         {
+            using var activeRun = _cancellationSignal.TryRegisterActiveRun(run.Id);
+            if (activeRun is null)
+            {
+                return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Failed, run, "Resume could not register local execution ownership before exposing the Running transition; the run remains Paused and no provider request was dispatched.");
+            }
+
             var resumed = await PersistTransitionAsync(run, CustomLoopRunStatus.Running, operation.Actor, operation.OperationId, "Explicit Resume admitted the persisted checkpoint for ordered execution.");
             if (resumed.Run is null)
             {
@@ -338,7 +344,7 @@ public sealed class CustomLoopLifecycleService
             CustomLoopOrderedRunResult execution;
             try
             {
-                execution = await _resumeExecutor.ResumeAsync(new CustomLoopResumeExecutionRequest(resumed.Run.Id, resumed.Run.LifecycleVersion, operation.OperationId, operation.Actor), cancellationToken);
+                execution = await _resumeExecutor.ResumeAsync(new CustomLoopResumeExecutionRequest(resumed.Run.Id, resumed.Run.LifecycleVersion, operation.OperationId, operation.Actor, ActiveRunAlreadyRegistered: true), cancellationToken);
             }
             catch (Exception exception)
             {
