@@ -604,9 +604,14 @@ public sealed class CustomLoopRuntimeTests
         var competitorOutcome = await competitor;
         Assert.Contains(competitorOutcome.Run!.Status, new[] { "Cancelled", "NeedsReview" });
 
-        var resumed = await runtime.ResumeCustomLoopAsync(resumeInput with { OperationId = "resume-runtime-after-release" });
+        var successfulResumeInput = resumeInput with { OperationId = "resume-runtime-after-release" };
+        var resumed = await runtime.ResumeCustomLoopAsync(successfulResumeInput);
+        var completedReplay = await runtime.ResumeCustomLoopAsync(successfulResumeInput);
         Assert.Equal("Completed", resumed.Status);
         Assert.Equal("Completed", resumed.Run!.Status);
+        Assert.Equal("Completed", completedReplay.Status);
+        Assert.Equal("Completed", completedReplay.Run!.Status);
+        Assert.Equal(resumed.Run.Events.Count, completedReplay.Run.Events.Count);
     }
 
     [Fact]

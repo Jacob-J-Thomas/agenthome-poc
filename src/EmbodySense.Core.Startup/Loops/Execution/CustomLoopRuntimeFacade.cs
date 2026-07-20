@@ -516,7 +516,29 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         }
 
         var run = await TryReloadRunAsync(operation.RunId);
-        return new LoopRunControlResponse(operation.Outcome.ToString(), run is null ? null : Map(run), input.OperationId, operation.Detail);
+        var replayStatus = ResolveControlReplayStatus(operation, run);
+        var detail = replayStatus == operation.Outcome
+            ? operation.Detail
+            : $"{operation.Detail} The completed Resume operation was replayed from durable run status {run!.Status}; no provider request was dispatched.";
+        return new LoopRunControlResponse(replayStatus.ToString(), run is null ? null : Map(run), input.OperationId, detail);
+    }
+
+    private static CustomLoopControlStatus ResolveControlReplayStatus(CustomLoopControlOperation operation, CustomLoopRunRecord? run)
+    {
+        if (operation.Kind != CustomLoopControlKind.Resume || operation.Outcome != CustomLoopControlStatus.Resumed || run is null)
+        {
+            return operation.Outcome;
+        }
+
+        return run.Status switch
+        {
+            CustomLoopRunStatus.Paused => CustomLoopControlStatus.Paused,
+            CustomLoopRunStatus.Cancelled => CustomLoopControlStatus.Cancelled,
+            CustomLoopRunStatus.Completed => CustomLoopControlStatus.Completed,
+            CustomLoopRunStatus.Failed => CustomLoopControlStatus.Failed,
+            CustomLoopRunStatus.NeedsReview => CustomLoopControlStatus.NeedsReview,
+            _ => operation.Outcome
+        };
     }
 
     private static bool IsParked(CustomLoopRunRecord run)
