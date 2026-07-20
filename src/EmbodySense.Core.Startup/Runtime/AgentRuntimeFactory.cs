@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
@@ -65,7 +66,7 @@ public sealed class AgentRuntimeFactory
         var auditLog = new AuditLog(paths);
         var workspaceClient = new LocalWorkspaceClient(paths);
         var loopDefinitionStore = new LoopDefinitionStore(paths);
-        var defaultLoop = await loopDefinitionStore.LoadAsync("default-conversation", cancellationToken) ?? EmbodySense.Core.Common.Loops.Models.LoopDefinition.CreateDefaultConversation();
+        var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
         var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog, defaultLoop);
         var conversationMemory = new ConversationMemoryStore(paths);
         var loopRunStore = new LoopRunStore(paths);

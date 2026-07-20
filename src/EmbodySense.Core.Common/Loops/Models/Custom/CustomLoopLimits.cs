@@ -22,6 +22,9 @@ public static class CustomLoopLimits
     public const int MaxMutationOperationIdCharacters = 120;
     public const int MaxRunTracesPerWorkspace = 250;
     public const int MaxRunTraceTombstonesPerWorkspace = 10_000;
+    public const int MaxInvocationOperationReceiptsPerWorkspace = 10_000;
+    public const int MaxInvocationOperationUtf8Bytes = 512 * 1024;
+    public const long MaxInvocationOperationWorkspaceUtf8Bytes = 128L * 1024 * 1024;
     public const int MaxRecentRunsPageSize = 50;
     public const int MaxRunTraceUtf8Bytes = 16 * 1024 * 1024;
     public const int MaxRunTraceTombstoneUtf8Bytes = 16 * 1024;

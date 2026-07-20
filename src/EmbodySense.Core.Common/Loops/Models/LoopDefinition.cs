@@ -23,7 +23,7 @@ public sealed record LoopDefinition(
     {
         return new LoopDefinition(
             CurrentSchemaVersion,
-            "default-conversation",
+            BuiltInLoopIds.DefaultConversation,
             "Default conversation loop",
             "The governed loop behind ordinary chat turns in this workspace.",
             "default-assistant",

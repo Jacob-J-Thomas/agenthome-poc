@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Models;
+
 namespace EmbodySense.Core.Common.Workspace;
 
 public sealed class WorkspacePaths
@@ -59,7 +61,7 @@ public sealed class WorkspacePaths
 
     public string CustomLoopHostLockPath => Path.Combine(LoopRunsPath, ".custom-workspace-host.lock");
 
-    public string DefaultConversationLoopDefinitionPath => Path.Combine(LoopDefinitionsPath, "default-conversation.json");
+    public string DefaultConversationLoopDefinitionPath => Path.Combine(LoopDefinitionsPath, BuiltInLoopIds.DefaultConversation + ".json");
 
     public string TasksPath => Path.Combine(AgentPath, "tasks");
 

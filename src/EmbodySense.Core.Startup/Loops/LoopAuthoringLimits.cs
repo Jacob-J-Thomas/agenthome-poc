@@ -1,0 +1,26 @@
+namespace EmbodySense.Core.Startup.Loops;
+
+public sealed record LoopAuthoringLimits(
+    int MaxDefinitionsPerWorkspace,
+    int MinInferenceSteps,
+    int MaxInferenceSteps,
+    int MaxAdditionalIterations,
+    int MaxModelAttemptsPerRun,
+    int MaxGovernedToolRequestsPerAttempt,
+    int MaxGovernedToolRequestsPerRun,
+    int MaxNameCharacters,
+    int MaxDescriptionCharacters,
+    int MaxInstructionCharacters,
+    int MaxTriggerPromptCharacters,
+    int MaxInvokingConversationCharacters,
+    int MaxInvokingConversationEntries,
+    int MaxGovernedToolTargetCharacters,
+    int MaxGovernedToolArgumentCharacters,
+    int MaxToolGovernanceDetailCharacters,
+    int MaxCanonicalModelOutputCharacters,
+    int MaxCanonicalToolResultCharacters,
+    int MaxLifecycleControlEventsPerRun,
+    int MaxTraceEventsPerRun,
+    int MaxLifecycleControlDetailCharacters,
+    int MaxRunTraceUtf8Bytes,
+    long MaxRunExecutionMilliseconds);
