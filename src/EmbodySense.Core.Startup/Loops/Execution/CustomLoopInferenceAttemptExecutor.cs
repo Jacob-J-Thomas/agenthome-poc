@@ -28,7 +28,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     private readonly LlmInferenceClientOptions _options;
     private readonly WorkspacePaths _paths;
     private readonly IToolApprovalPrompt _approvalPrompt;
-    private readonly CustomLoopInferenceClientFactory _clientFactory;
+    private readonly CustomLoopInferenceClientFactory? _clientFactory;
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly ICustomLoopToolEvidenceSink _evidenceSink;
@@ -71,7 +71,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         _options = options with { WorkingDirectory = Path.GetFullPath(options.WorkingDirectory) };
         _paths = new WorkspacePaths(_options.WorkingDirectory);
         _approvalPrompt = approvalPrompt;
-        _clientFactory = clientFactory ?? ((effectiveOptions, broker) => new LlmInferenceClient(effectiveOptions, broker));
+        _clientFactory = clientFactory;
         _auditLog = new AuditLog(_paths);
         _authorityProvider = authorityProvider;
         _evidenceSink = evidenceSink;
@@ -107,7 +107,14 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         }
 
         var effectiveOptions = _options with { Model = request.ModelSnapshot.Model };
-        var client = _clientFactory(effectiveOptions, toolBroker) ?? throw new InvalidOperationException("The custom-loop inference client factory returned null.");
+        var usesInjectedFactory = _clientFactory is not null;
+        var client = usesInjectedFactory
+            ? _clientFactory!(effectiveOptions, toolBroker)
+            : new LlmInferenceClient(effectiveOptions, toolBroker, providerRequestStarted: providerRequestStarted);
+        if (client is null)
+        {
+            throw new InvalidOperationException("The custom-loop inference client factory returned null.");
+        }
         if (client is not IAsyncDisposable && client is not IDisposable)
         {
             throw new InvalidOperationException("Custom-loop inference clients must be disposable so every attempt owns a fresh provider transport.");
@@ -115,7 +122,11 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
 
         try
         {
-            providerRequestStarted?.Invoke();
+            if (usesInjectedFactory)
+            {
+                providerRequestStarted?.Invoke();
+            }
+
             var response = await client.GenerateAsync(request.InferenceRequest, cancellationToken: cancellationToken);
             return new CustomLoopInferenceAttemptResult(
                 response.OutputText,
@@ -142,7 +153,8 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         ArgumentNullException.ThrowIfNull(modelSnapshot);
         ArgumentException.ThrowIfNullOrWhiteSpace(modelSnapshot.Provider);
         cancellationToken.ThrowIfCancellationRequested();
-        var available = ProviderMatches(_options.Surface, modelSnapshot.Provider)
+        var available = (_clientFactory is not null || _options.Surface == LlmInferenceSurface.OpenAiCodex)
+            && ProviderMatches(_options.Surface, modelSnapshot.Provider)
             && string.Equals(_options.Model, modelSnapshot.Model, StringComparison.Ordinal);
         return Task.FromResult(available);
     }

@@ -21,13 +21,15 @@ internal sealed class CustomLoopRuntimeContext
     private const int MaxDirectoryRoleSourceCharacters = 12_000;
     private readonly WorkspacePaths _paths;
     private readonly ConversationRuntimeState _conversationState;
+    private readonly IConversationMemoryStore _conversationMemory;
     private readonly WorkspaceContextStore _workspaceContextStore;
     private readonly TimeProvider _timeProvider;
 
-    public CustomLoopRuntimeContext(WorkspacePaths paths, ConversationRuntimeState conversationState, WorkspaceContextStore? workspaceContextStore = null, TimeProvider? timeProvider = null)
+    public CustomLoopRuntimeContext(WorkspacePaths paths, ConversationRuntimeState conversationState, IConversationMemoryStore conversationMemory, WorkspaceContextStore? workspaceContextStore = null, TimeProvider? timeProvider = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _conversationState = conversationState ?? throw new ArgumentNullException(nameof(conversationState));
+        _conversationMemory = conversationMemory ?? throw new ArgumentNullException(nameof(conversationMemory));
         _workspaceContextStore = workspaceContextStore ?? new WorkspaceContextStore();
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -39,6 +41,7 @@ internal sealed class CustomLoopRuntimeContext
         LlmMessage[] logicalMessages;
         using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))
         {
+            _conversationState.SynchronizeConversationTranscript(await _conversationMemory.LoadCurrentConversationAsync(cancellationToken));
             logicalMessages = GetLogicalConversationMessages(_conversationState);
         }
         var conversationVersion = CustomLoopConversationVersion.Compute(logicalMessages);

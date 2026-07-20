@@ -180,6 +180,27 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task Public_runtime_refreshes_durable_conversation_before_custom_loop_context_capture()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-peer-conversation", "update-runtime-peer-conversation");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var conversationMemory = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("peer durable prompt"));
+
+        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-peer-conversation", "custom task"));
+        var persistedConversation = await conversationMemory.LoadCurrentConversationAsync();
+
+        Assert.Equal("Completed", response.ExecutionStatus);
+        var admittedMessage = Assert.Single(response.Run!.Context.InvokingConversationMessages);
+        Assert.Contains("peer durable prompt", admittedMessage.Content, StringComparison.Ordinal);
+        Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == true);
+        Assert.Equal("peer durable prompt", persistedConversation[0].Content);
+        Assert.Equal(response.Run.FinalOutput, persistedConversation[^1].Content);
+    }
+
+    [Fact]
     public async Task Runtime_publishes_multiple_node_and_Exit_outputs_against_the_admission_prefix_plus_the_exact_durable_run_suffix()
     {
         using var workspace = new TestWorkspace();

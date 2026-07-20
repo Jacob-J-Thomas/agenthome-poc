@@ -20,6 +20,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private readonly ICodexAppServerToolBridge? _toolBridge;
     private readonly ICodexAppServerContextBuilder _contextBuilder;
     private readonly ICodexAppServerRequestHandler _requestHandler;
+    private readonly Action? _providerRequestStarted;
     private readonly string _runtimeDirectory;
     private int _nextRequestId;
     private bool _initialized;
@@ -29,7 +30,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         LlmInferenceClientOptions options,
         IToolBroker? toolBroker = null,
         ICodexAppServerTransport? transport = null,
-        IAuditLog? auditLog = null)
+        IAuditLog? auditLog = null,
+        Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -39,6 +41,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         _contextBuilder = new CodexAppServerContextBuilder(toolBroker?.AvailableCommands);
         _runtimeDirectory = CreateRuntimeDirectory();
         _requestHandler = new CodexAppServerRequestHandler(_toolBridge, auditLog);
+        _providerRequestStarted = providerRequestStarted;
     }
 
     public async Task<LlmInferenceResponse> GenerateAsync(
@@ -64,6 +67,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                 }
             }
         }, cancellationToken);
+        _providerRequestStarted?.Invoke();
 
         var streamedText = new StringBuilder();
         string? turnId = null;

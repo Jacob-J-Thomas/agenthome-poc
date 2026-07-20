@@ -440,6 +440,18 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(nameof(LlmInferenceSurface.AzureAiFoundry), result.Provider);
     }
 
+    [Fact]
+    public async Task Model_availability_rejects_a_configured_surface_without_a_production_adapter()
+    {
+        using var workspace = new TestWorkspace();
+        var options = CreateOptions(workspace) with { Surface = LlmInferenceSurface.AzureAiFoundry };
+        var executor = new CustomLoopInferenceAttemptExecutor(options, (IAgentToolApprovalPrompt)new RecordingApprovalPrompt());
+
+        var available = await executor.IsAvailableAsync(new CustomLoopModelSnapshot("azure-ai-foundry", "configured-model"));
+
+        Assert.False(available);
+    }
+
     [Theory]
     [InlineData("openai", "configured-model", true)]
     [InlineData("openai-codex", "configured-model", true)]

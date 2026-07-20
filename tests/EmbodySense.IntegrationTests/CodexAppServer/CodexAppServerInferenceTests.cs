@@ -32,7 +32,8 @@ public sealed class CodexAppServerInferenceTests
             Notification("item/agentMessage/delta", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"hello "}"""),
             Notification("item/agentMessage/delta", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"world"}"""),
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"hello world","phase":"final_answer"}]}}"""));
-        var client = CreateClient(transport);
+        var providerRequestStarted = false;
+        var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
         var chunks = new List<string>();
 
         var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("say hello"), (chunk, _) =>
@@ -43,6 +44,7 @@ public sealed class CodexAppServerInferenceTests
 
         Assert.Equal(["hello ", "world"], chunks);
         Assert.Equal("hello world", response.OutputText);
+        Assert.True(providerRequestStarted);
         Assert.Equal("turn-1", response.ProviderResponseId);
         Assert.Contains(transport.Writes, line => JsonDocument.Parse(line).RootElement.GetProperty("method").GetString() == "thread/start");
         Assert.Contains(transport.Writes, line => line.Contains("\"shell_tool\":false", StringComparison.Ordinal));
@@ -363,11 +365,13 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_reports_initialize_errors()
     {
         var transport = new ScriptedAppServerTransport("""{"id":1,"error":{"message":"init denied"}}""");
-        var client = CreateClient(transport);
+        var providerRequestStarted = false;
+        var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
 
         Assert.Contains("init denied", exception.Message, StringComparison.Ordinal);
+        Assert.False(providerRequestStarted);
     }
 
     [Fact]
@@ -444,7 +448,8 @@ public sealed class CodexAppServerInferenceTests
     private static LlmInferenceClient CreateClient(
         ScriptedAppServerTransport transport,
         IToolBroker? broker = null,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        Action? providerRequestStarted = null)
     {
         return new LlmInferenceClient(new LlmInferenceClientOptions
         {
@@ -452,7 +457,7 @@ public sealed class CodexAppServerInferenceTests
             Model = "gpt-test",
             WorkingDirectory = workingDirectory ?? Directory.GetCurrentDirectory(),
             CodexSandbox = "read-only"
-        }, broker, transport);
+        }, broker, transport, providerRequestStarted);
     }
 
     private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)
