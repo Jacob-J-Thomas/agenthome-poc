@@ -1,3 +1,5 @@
+using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -95,13 +97,17 @@ public sealed class AgentRuntimeFactoryTests
         Directory.CreateDirectory(paths.LoopRunsPath);
         var conversationMemory = new ConversationMemoryStore(paths);
         await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved external-host transcript"));
+        var replayInput = new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-replayed", "prompt");
+        await PersistCompletedMissingInvocationAsync(paths, replayInput);
         using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
 
         await using var runtime = await CreateRuntimeAsync(workspace);
 
         var preserved = await conversationMemory.LoadCurrentConversationAsync();
         var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-one", "prompt"));
+        var replay = await runtime.InvokeCustomLoopAsync(replayInput);
         var blockedResume = await runtime.ResumeCustomLoopAsync(new LoopRunControlInput("run-one", 1, "resume-one"));
+        var blockedCancel = await runtime.CancelCustomLoopAsync(new LoopRunControlInput("run-one", 1, "cancel-one"));
         var turn = await runtime.RunTurnAsync("hello");
         ownership.Dispose();
         var afterRelease = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-two", "prompt"));
@@ -112,8 +118,12 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
         Assert.Equal("WorkspaceHostUnavailable", customLoop.AdmissionStatus);
         Assert.False(customLoop.WasDispatched);
+        Assert.Equal("NotFound", replay.AdmissionStatus);
         Assert.Equal("WorkspaceHostUnavailable", blockedResume.Status);
         Assert.Equal("resume-one", blockedResume.OperationId);
+        Assert.Equal("WorkspaceHostUnavailable", blockedCancel.Status);
+        Assert.Equal("cancel-one", blockedCancel.OperationId);
+        Assert.Null(await new CustomLoopControlOperationStore(paths).GetAsync(blockedCancel.OperationId));
         Assert.Equal("WorkspaceHostUnavailable", afterRelease.AdmissionStatus);
         Assert.Equal("NotFound", afterRecreate.AdmissionStatus);
     }
@@ -167,6 +177,42 @@ public sealed class AgentRuntimeFactoryTests
                 Assert.Equal("terminal persistence failed", turnEvent.Text);
                 Assert.Equal(runIdentity, turnEvent.RunIdentity);
             });
+    }
+
+    private static async Task PersistCompletedMissingInvocationAsync(WorkspacePaths paths, LoopRunInvocationInput input)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var prompt = input.InvocationPrompt ?? string.Empty;
+        var requestHash = CustomLoopInvocationRequestHash.Compute(input.OperationId, input.LoopId, input.ExpectedDefinitionVersion, input.ExpectedDefinitionHash, WorkspaceActors.Cli, AgentRuntimeSurface.Cli.Id, "default-assistant", prompt, LlmInferenceSurface.OpenAiCodex.ToString(), null);
+        var pending = new CustomLoopInvocationOperation(
+            CustomLoopInvocationOperation.CurrentSchemaVersion,
+            input.OperationId,
+            requestHash,
+            input.LoopId,
+            input.ExpectedDefinitionVersion,
+            input.ExpectedDefinitionHash,
+            WorkspaceActors.Cli,
+            AgentRuntimeSurface.Cli.Id,
+            "default-assistant",
+            CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
+            LlmInferenceSurface.OpenAiCodex.ToString(),
+            null,
+            now,
+            now,
+            CustomLoopInvocationOperationState.Pending,
+            CustomLoopInvocationOutcome.Unknown,
+            string.Empty,
+            null,
+            "The invocation is pending.");
+        var store = new CustomLoopInvocationOperationStore(paths);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(pending with
+        {
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = "NotFound",
+            Detail = "The loop definition does not exist."
+        })).Status);
     }
 
     [Fact]

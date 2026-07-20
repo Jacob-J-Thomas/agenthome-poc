@@ -74,11 +74,6 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return Invalid(exception.Message);
         }
 
-        if (!_customExecutionAvailable)
-        {
-            return new LoopRunInvocationResponse("WorkspaceHostUnavailable", null, false, null, [], "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can execute custom loops.");
-        }
-
         CustomLoopInvocationOperation? existingOperation;
         try
         {
@@ -100,6 +95,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             {
                 return await ReplayOperationAsync(existingOperation, cancellationToken);
             }
+        }
+
+        if (!_customExecutionAvailable)
+        {
+            return new LoopRunInvocationResponse("WorkspaceHostUnavailable", null, false, null, [], "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can execute custom loops.");
         }
 
         CustomLoopExecutionLeaseResult ownership;
@@ -292,6 +292,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     public Task<LoopRunControlResponse> CancelAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
+        if (!_customExecutionAvailable)
+        {
+            return Task.FromResult(new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can cancel custom loops."));
+        }
+
         return ExecuteControlAsync(awaitable: _lifecycleService.CancelAsync(new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
     }
 
