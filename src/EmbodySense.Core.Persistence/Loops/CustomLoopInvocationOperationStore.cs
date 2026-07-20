@@ -282,8 +282,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
         return operation.Outcome switch
         {
-            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.RunId is null && string.Equals(operation.AdmissionStatus, "WorkspaceExecutionBusy", StringComparison.Ordinal),
-            CustomLoopInvocationOutcome.Admitted => CustomLoopArtifactIdentifier.IsValid(operation.RunId) && string.Equals(operation.AdmissionStatus, "Admitted", StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.RunId is null && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.Admitted => CustomLoopArtifactIdentifier.IsValid(operation.RunId) && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
             CustomLoopInvocationOutcome.Rejected => ValidRejectedOutcome(operation),
             _ => false
         };
@@ -294,12 +294,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
         return operation.AdmissionStatus switch
         {
-            "Invalid" => hasValidOptionalRun,
-            "Conflict" => hasValidOptionalRun,
-            "NonterminalRunExists" => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
-            "LimitExceeded" => operation.RunId is null,
-            "NotFound" => operation.RunId is null,
-            "AuditUnavailable" => hasValidOptionalRun,
+            CustomLoopAdmissionStatusNames.Invalid => hasValidOptionalRun,
+            CustomLoopAdmissionStatusNames.Conflict => hasValidOptionalRun,
+            CustomLoopAdmissionStatusNames.NonterminalRunExists => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
+            CustomLoopAdmissionStatusNames.LimitExceeded => operation.RunId is null,
+            CustomLoopAdmissionStatusNames.NotFound => operation.RunId is null,
+            CustomLoopAdmissionStatusNames.AuditUnavailable => hasValidOptionalRun,
             _ => false
         };
     }

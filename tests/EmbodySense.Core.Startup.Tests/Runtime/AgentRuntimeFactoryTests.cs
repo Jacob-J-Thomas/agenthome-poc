@@ -48,6 +48,13 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public void Workspace_actor_uses_the_canonical_runtime_surface_id()
+    {
+        Assert.Equal("embodysense.editor-panel", WorkspaceActors.ForSurface(AgentRuntimeSurface.Create(" Editor-Panel ").SurfaceId));
+        Assert.Throws<ArgumentNullException>(() => WorkspaceActors.ForSurface(null!));
+    }
+
+    [Fact]
     public async Task CreateAsync_requires_explicit_runtime_surface()
     {
         using var workspace = new TestWorkspace();

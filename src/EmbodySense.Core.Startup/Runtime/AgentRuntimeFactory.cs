@@ -176,7 +176,7 @@ public sealed class AgentRuntimeFactory
             return WorkspaceActors.Cli;
         }
 
-        return "embodysense." + surface.Id;
+        return WorkspaceActors.ForSurface(surface.SurfaceId);
     }
 
     private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults)
