@@ -736,13 +736,14 @@ public sealed class CustomLoopOrderedRunnerTests
         var failed = await failedRunner.ResumeAsync(new CustomLoopResumeExecutionRequest(running.Id, running.LifecycleVersion, lifecycle.EventId, AuditSchema.Actors.Web));
         var failedPublicRun = await failedRunner.RunAsync(new CustomLoopOrderedRunRequest(running.Id, AuditSchema.Actors.Web));
         failedRunner.CancelActiveAttempt("INVALID");
-        failedRunner.CancelActiveAttempt(running.Id);
+        var remoteCancellation = Assert.Throws<InvalidOperationException>(() => failedRunner.CancelActiveAttempt(running.Id));
 
         Assert.Equal(CustomLoopOrderedRunStatus.NotFound, missing.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, mismatch.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, invalid.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, failed.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, failedPublicRun.Status);
+        Assert.Contains("not owned by this runtime", remoteCancellation.Message, StringComparison.Ordinal);
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => mismatchRunner.ResumeAsync(new CustomLoopResumeExecutionRequest(running.Id, 0, lifecycle.EventId, AuditSchema.Actors.Web)));
         Assert.Empty(executor.Requests);
     }

@@ -9,47 +9,20 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     private static readonly object HostsSync = new();
     private static readonly Dictionary<string, WorkspaceHost> Hosts = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
+    private readonly WorkspacePaths _paths;
     private readonly string _workspaceKey;
-    private readonly WorkspaceHost? _host;
+    private WorkspaceHost? _host;
     private bool _disposed;
 
     public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        _paths = paths;
         _workspaceKey = CanonicalWorkspaceKey(paths.RootPath);
 
         lock (HostsSync)
         {
-            if (Hosts.TryGetValue(_workspaceKey, out var existing))
-            {
-                existing.ReferenceCount++;
-                _host = existing;
-                return;
-            }
-
-            var pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
-            pathGuard.PrepareRoot(paths.LoopRunsPath);
-            FileStream? ownership = null;
-            try
-            {
-                var hostLockPath = pathGuard.GetFilePath(paths.LoopRunsPath, Path.GetFileName(paths.CustomLoopHostLockPath));
-                ownership = new FileStream(hostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.WriteThrough);
-                pathGuard.GetFilePath(paths.LoopRunsPath, Path.GetFileName(paths.CustomLoopHostLockPath));
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                ownership?.Dispose();
-                _host = null;
-                return;
-            }
-            catch
-            {
-                ownership?.Dispose();
-                throw;
-            }
-
-            _host = new WorkspaceHost(ownership);
-            Hosts.Add(_workspaceKey, _host);
+            _host = TryAttachOrAcquireHost();
         }
     }
 
@@ -60,34 +33,35 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         lock (HostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_host is null)
+            var host = _host ??= TryAttachOrAcquireHost();
+            if (host is null)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
             }
 
-            if (_host.BusyOutcomeReservations.TryGetValue(operationId, out var busyReservation))
+            if (host.BusyOutcomeReservations.TryGetValue(operationId, out var busyReservation))
             {
                 return SameRequest(busyReservation.RequestHash, requestHash)
                     ? new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.OperationInProgress, null, "The invocation operation is durably recording a workspace-busy outcome.")
                     : new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.OperationConflict, null, "The invocation operation id is reserved for different canonical authorized request content.");
             }
 
-            if (_host.ActiveOperationId is null)
+            if (host.ActiveOperationId is null)
             {
-                _host.ActiveOperationId = operationId;
-                _host.ActiveRequestHash = requestHash;
-                _host.Generation++;
-                _host.ReferenceCount++;
-                var lease = new ExecutionLease(_workspaceKey, _host, operationId, _host.Generation);
+                host.ActiveOperationId = operationId;
+                host.ActiveRequestHash = requestHash;
+                host.Generation++;
+                host.ReferenceCount++;
+                var lease = new ExecutionLease(_workspaceKey, host, operationId, host.Generation);
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.Acquired, lease, "Custom-loop execution ownership was acquired without waiting.");
             }
 
-            if (!string.Equals(_host.ActiveOperationId, operationId, StringComparison.Ordinal))
+            if (!string.Equals(host.ActiveOperationId, operationId, StringComparison.Ordinal))
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceBusy, null, "Another custom-loop run is actively executing in this workspace; no request was queued.");
             }
 
-            var status = string.Equals(_host.ActiveRequestHash, requestHash, StringComparison.Ordinal)
+            var status = string.Equals(host.ActiveRequestHash, requestHash, StringComparison.Ordinal)
                 ? CustomLoopExecutionLeaseStatus.OperationInProgress
                 : CustomLoopExecutionLeaseStatus.OperationConflict;
             var detail = status == CustomLoopExecutionLeaseStatus.OperationInProgress
@@ -104,26 +78,27 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         lock (HostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_host is null)
+            var host = _host ??= TryAttachOrAcquireHost();
+            if (host is null)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
             }
 
-            if (_host.BusyOutcomeReservations.TryGetValue(operationId, out var existingReservation))
+            if (host.BusyOutcomeReservations.TryGetValue(operationId, out var existingReservation))
             {
                 return SameRequest(existingReservation.RequestHash, requestHash)
                     ? new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.OperationInProgress, null, "The invocation operation is already recording a workspace-busy outcome.")
                     : new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.OperationConflict, null, "The invocation operation id is reserved for different canonical authorized request content.");
             }
 
-            if (_host.ActiveOperationId is null)
+            if (host.ActiveOperationId is null)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceAvailable, null, "Workspace execution ownership became available before the busy outcome was reserved.");
             }
 
-            if (string.Equals(_host.ActiveOperationId, operationId, StringComparison.Ordinal))
+            if (string.Equals(host.ActiveOperationId, operationId, StringComparison.Ordinal))
             {
-                var status = SameRequest(_host.ActiveRequestHash, requestHash)
+                var status = SameRequest(host.ActiveRequestHash, requestHash)
                     ? CustomLoopExecutionLeaseStatus.OperationInProgress
                     : CustomLoopExecutionLeaseStatus.OperationConflict;
                 var detail = status == CustomLoopExecutionLeaseStatus.OperationInProgress
@@ -132,11 +107,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
                 return new CustomLoopExecutionLeaseResult(status, null, detail);
             }
 
-            _host.BusyOutcomeGeneration++;
-            _host.ReferenceCount++;
-            var reservation = new BusyOutcomeReservation(requestHash, _host.BusyOutcomeGeneration);
-            _host.BusyOutcomeReservations.Add(operationId, reservation);
-            var lease = new BusyOutcomeReservationLease(_workspaceKey, _host, operationId, reservation.Generation);
+            host.BusyOutcomeGeneration++;
+            host.ReferenceCount++;
+            var reservation = new BusyOutcomeReservation(requestHash, host.BusyOutcomeGeneration);
+            host.BusyOutcomeReservations.Add(operationId, reservation);
+            var lease = new BusyOutcomeReservationLease(_workspaceKey, host, operationId, reservation.Generation);
             return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.BusyOutcomeReserved, lease, "The workspace-busy outcome reservation prevents the same operation from acquiring execution ownership until its receipt is finalized.");
         }
     }
@@ -197,6 +172,39 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
         Hosts.Remove(workspaceKey);
         host.Ownership.Dispose();
+    }
+
+    private WorkspaceHost? TryAttachOrAcquireHost()
+    {
+        if (Hosts.TryGetValue(_workspaceKey, out var existing))
+        {
+            existing.ReferenceCount++;
+            return existing;
+        }
+
+        var pathGuard = new CustomLoopArtifactPathGuard(_paths.RootPath);
+        pathGuard.PrepareRoot(_paths.LoopRunsPath);
+        FileStream? ownership = null;
+        try
+        {
+            var hostLockPath = pathGuard.GetFilePath(_paths.LoopRunsPath, Path.GetFileName(_paths.CustomLoopHostLockPath));
+            ownership = new FileStream(hostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.WriteThrough);
+            pathGuard.GetFilePath(_paths.LoopRunsPath, Path.GetFileName(_paths.CustomLoopHostLockPath));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            ownership?.Dispose();
+            return null;
+        }
+        catch
+        {
+            ownership?.Dispose();
+            throw;
+        }
+
+        var host = new WorkspaceHost(ownership);
+        Hosts.Add(_workspaceKey, host);
+        return host;
     }
 
     private static string CanonicalWorkspaceKey(string rootPath)

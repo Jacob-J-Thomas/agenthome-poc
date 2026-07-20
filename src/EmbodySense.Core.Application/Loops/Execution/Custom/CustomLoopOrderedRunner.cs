@@ -20,6 +20,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly TimeProvider _timeProvider;
+    private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
 
     public CustomLoopOrderedRunner(
@@ -94,9 +95,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Public execution starts only from Admitted. Interrupted runs require explicit recovery to Paused and a separate authenticated Resume path.");
         }
 
-        var dispatchState = new ProviderDispatchState();
-        var result = await ContinueAsync(run, request.Actor, dispatchState, cancellationToken);
-        return result with { ProviderWasInvoked = dispatchState.ProviderWasInvoked };
+        return await ContinueOwnedAsync(run, request.Actor, cancellationToken);
     }
 
     public async Task<CustomLoopOrderedRunResult> ResumeAsync(CustomLoopResumeExecutionRequest request, CancellationToken cancellationToken = default)
@@ -144,9 +143,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Internal Resume requires the exact Paused-to-Running lifecycle version and matching durable operation event; public RunAsync cannot resume Running state.");
         }
 
-        var dispatchState = new ProviderDispatchState();
-        var result = await ContinueAsync(run, request.Actor, dispatchState, cancellationToken);
-        return result with { ProviderWasInvoked = dispatchState.ProviderWasInvoked };
+        return await ContinueOwnedAsync(run, request.Actor, cancellationToken);
     }
 
     public void CancelActiveAttempt(string runId)
@@ -166,6 +163,34 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             {
                 // The provider attempt completed concurrently with the durable cancellation request.
             }
+
+            return;
+        }
+
+        if (_activeRuns.ContainsKey(runId))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException("The active provider attempt is not owned by this runtime and could not be signalled locally.");
+    }
+
+    private async Task<CustomLoopOrderedRunResult> ContinueOwnedAsync(CustomLoopRunRecord run, string actor, CancellationToken cancellationToken)
+    {
+        if (!_activeRuns.TryAdd(run.Id, 0))
+        {
+            return Result(CustomLoopOrderedRunStatus.Failed, run, "This runtime is already coordinating ordered execution for the custom-loop run.");
+        }
+
+        try
+        {
+            var dispatchState = new ProviderDispatchState();
+            var result = await ContinueAsync(run, actor, dispatchState, cancellationToken);
+            return result with { ProviderWasInvoked = dispatchState.ProviderWasInvoked };
+        }
+        finally
+        {
+            _activeRuns.TryRemove(run.Id, out _);
         }
     }
 

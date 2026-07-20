@@ -107,7 +107,7 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                if (ShouldPreserveCurrentConversation(recoveryResults))
+                if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable || ShouldPreserveCurrentConversation(recoveryResults))
                 {
                     conversationState.SynchronizeConversationTranscript(await conversationMemory.LoadCurrentConversationAsync(cancellationToken));
                 }

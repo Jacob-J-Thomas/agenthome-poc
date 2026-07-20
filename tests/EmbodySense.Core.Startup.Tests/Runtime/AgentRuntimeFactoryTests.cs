@@ -93,15 +93,23 @@ public sealed class AgentRuntimeFactoryTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.LoopRunsPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved external-host transcript"));
         using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
 
         await using var runtime = await CreateRuntimeAsync(workspace);
 
-        var turn = await runtime.RunTurnAsync("hello");
+        var preserved = await conversationMemory.LoadCurrentConversationAsync();
         var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-one", "prompt"));
+        var turn = await runtime.RunTurnAsync("hello");
+        ownership.Dispose();
+        var afterRelease = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-two", "prompt"));
+
+        Assert.Collection(preserved, message => Assert.Equal("preserved external-host transcript", message.Content));
         Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
         Assert.Equal("WorkspaceExecutionBusy", customLoop.AdmissionStatus);
         Assert.False(customLoop.WasDispatched);
+        Assert.Equal("NotFound", afterRelease.AdmissionStatus);
     }
 
     [Fact]
