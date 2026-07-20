@@ -34,6 +34,7 @@ public sealed class LoopApiControllerTests
             var catalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
             var catalog = await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(JsonOptions);
             var systemGet = await SendAsync(client, HttpMethod.Get, "/api/loops/default-conversation", token);
+            var malformedGet = await SendAsync(client, HttpMethod.Get, "/api/loops/INVALID%20ID", token);
             var systemUpdate = await SendAsync(client, HttpMethod.Put, "/api/loops/default-conversation", token, CreateUpdateBody(catalog!.SystemDefault, "system-update", "System loop"));
             var systemDelete = await SendAsync(client, HttpMethod.Delete, "/api/loops/default-conversation", token, new { expectedDefinitionVersion = 1, operationId = "system-delete" });
 
@@ -53,6 +54,8 @@ public sealed class LoopApiControllerTests
             Assert.Equal("OpenAiCodex", catalog.RuntimeModel!.Provider);
             Assert.Null(catalog.RuntimeModel.Model);
             Assert.Equal(HttpStatusCode.OK, systemGet.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, malformedGet.StatusCode);
+            Assert.Contains("invalid_loop_id", await malformedGet.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Equal(HttpStatusCode.Conflict, systemUpdate.StatusCode);
             Assert.Contains("system_loop_locked", await systemUpdate.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Equal(HttpStatusCode.Conflict, systemDelete.StatusCode);

@@ -212,7 +212,7 @@ function selectedLoopId() {
   return draft?.id ?? historicalLoopId;
 }
 
-async function loadRuns({ silent = false, preferredRunId = null, preferredAdmissionOperationId = null } = {}) {
+async function loadRuns({ silent = false, preferredRunId = null, preferredAdmissionOperationId = null, preserveEmptySelection = false } = {}) {
   if (!catalog) return;
   try {
     const [payload, quotaPayload] = await Promise.all([
@@ -224,18 +224,24 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     const visible = runsForCurrentLoop();
     const preferred = visible.find(run => run.id === preferredRunId || run.admissionOperationId === preferredAdmissionOperationId);
     if (preferred) selectedRunId = preferred.id;
-    if (!visible.some(run => run.id === selectedRunId)) selectedRunId = visible[0]?.id ?? null;
+    if (!visible.some(run => run.id === selectedRunId)) selectedRunId = preserveEmptySelection ? null : visible[0]?.id ?? null;
     if (selectedRunId) {
-      const summary = visible.find(run => run.id === selectedRunId);
+      const requestedRunId = selectedRunId;
+      const summary = visible.find(run => run.id === requestedRunId);
+      let nextRun;
+      let nextTrace;
       if (summary?.isDeleted) {
-        selectedRun = null;
-        selectedTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(selectedRunId)}/trace`);
+        nextRun = null;
+        nextTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}/trace`);
       } else {
-        [selectedRun, selectedTrace] = await Promise.all([
-          requestJson(`/api/loop-runs/${encodeURIComponent(selectedRunId)}`),
-          requestJson(`/api/loop-runs/${encodeURIComponent(selectedRunId)}/trace`)
+        [nextRun, nextTrace] = await Promise.all([
+          requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}`),
+          requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}/trace`)
         ]);
       }
+      if (selectedRunId !== requestedRunId) return false;
+      selectedRun = nextRun;
+      selectedTrace = nextTrace;
     } else {
       selectedRun = null;
       selectedTrace = null;
@@ -316,21 +322,31 @@ function renderRuns() {
 
 async function selectRun(runId) {
   selectedRunId = runId;
+  selectedRun = null;
+  selectedTrace = null;
+  renderRuns();
+  renderRunEvidence();
   try {
     const summary = runsForCurrentLoop().find(run => run.id === runId);
+    let nextRun;
+    let nextTrace;
     if (summary?.isDeleted) {
-      selectedRun = null;
-      selectedTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`);
+      nextRun = null;
+      nextTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`);
     } else {
-      [selectedRun, selectedTrace] = await Promise.all([
+      [nextRun, nextTrace] = await Promise.all([
         requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
         requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`)
       ]);
     }
+    if (selectedRunId !== runId) return;
+    selectedRun = nextRun;
+    selectedTrace = nextTrace;
     renderRuns();
     renderRunEvidence();
     scheduleSelectedRunRefresh();
   } catch (error) {
+    if (selectedRunId !== runId) return;
     showBanner(`Run detail unavailable: ${error.message}`);
   }
 }
@@ -1004,11 +1020,20 @@ async function startRun() {
     });
     closeInvokeModal();
     currentView = "runs";
+    selectedRunId = null;
+    selectedRun = null;
+    selectedTrace = null;
     renderAll();
-    const response = await waitForRunOperation(invocation, { preferredAdmissionOperationId: operationId });
-    selectedRunId = response?.run?.id ?? null;
-    selectedRun = response?.run ?? null;
-    await loadRuns({ silent: true });
+    const response = await waitForRunOperation(invocation, { preferredAdmissionOperationId: operationId, preserveEmptySelection: true });
+    if (!response?.run) {
+      await loadRuns({ silent: true, preserveEmptySelection: true });
+      renderAll();
+      showBanner(`Run was not admitted: ${response?.detail ?? "The runtime rejected the invocation."}`);
+      return;
+    }
+    selectedRunId = response.run.id;
+    selectedRun = response.run;
+    await loadRuns({ silent: true, preferredRunId: response.run.id });
     renderAll();
     showToast(response?.detail ?? "Run finished. Durable evidence is available in Runs.");
   } catch (error) {

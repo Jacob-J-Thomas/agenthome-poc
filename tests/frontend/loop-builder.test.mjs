@@ -425,6 +425,61 @@ test("live run monitoring binds the exact admission operation instead of another
   assert.match(app.elements.inspectorContent.textContent, /run run-preferred/);
 });
 
+test("a rejected invocation leaves run selection empty instead of selecting unrelated history", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const existing = createRunSnapshot();
+  existing.id = "run-existing";
+  server.runs = [{ id: existing.id, loopId: existing.loopId, admissionOperationId: existing.admissionOperationId, definitionVersion: 2, status: existing.status, createdAtUtc: existing.createdAtUtc, updatedAtUtc: existing.updatedAtUtc, completedAtUtc: existing.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(existing.id, existing);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.context.testHub = {
+    connected: true,
+    invoke: () => Promise.resolve({ admissionStatus: "WorkspaceExecutionBusy", run: null, detail: "Another loop is already running." })
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Try this run.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(app.elements.runTitle.textContent, "No run selected");
+  assert.equal(app.elements.runList.children.some(item => item.className.includes("selected")), false);
+  assert.match(app.elements.validationBanner.textContent, /Run was not admitted: Another loop is already running/);
+});
+
+test("slower run detail responses cannot overwrite a newer run selection", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const runA = createRunSnapshot();
+  runA.id = "run-a";
+  const runB = createRunSnapshot();
+  runB.id = "run-b";
+  server.runs = [runA, runB].map(run => ({ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: run.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }));
+  server.runDetails.set(runA.id, runA);
+  server.runDetails.set(runB.id, runB);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  let releaseRunA;
+  const runAReleased = new Promise(resolve => { releaseRunA = resolve; });
+  server.on("GET", "/api/loop-runs/run-a", async () => {
+    await runAReleased;
+    return { status: 200, body: clone(runA) };
+  });
+  const runAButton = app.elements.runList.children.find(item => item.textContent.includes("run-a"));
+  const runBButton = app.elements.runList.children.find(item => item.textContent.includes("run-b"));
+
+  const selectingRunA = runAButton.click();
+  await Promise.resolve();
+  await runBButton.click();
+  releaseRunA();
+  await selectingRunA;
+
+  assert.match(app.elements.runTitle.textContent, /run-b/);
+  assert.match(app.elements.inspectorContent.textContent, /run run-b/);
+  assert.equal(app.elements.runList.children.find(item => item.className.includes("selected")).textContent.includes("run-b"), true);
+});
+
 test("opening an existing nonterminal run keeps refreshing independently of its original invoker", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();

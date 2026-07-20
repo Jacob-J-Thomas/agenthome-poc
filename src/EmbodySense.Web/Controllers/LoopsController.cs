@@ -48,8 +48,15 @@ public sealed class LoopsController : ControllerBase
             return Ok((await _loops.GetCatalogAsync(cancellationToken)).SystemDefault);
         }
 
-        var definition = await _loops.GetAsync(loopId, cancellationToken);
-        return definition is null ? NotFound() : Ok(definition);
+        try
+        {
+            var definition = await _loops.GetAsync(loopId, cancellationToken);
+            return definition is null ? NotFound() : Ok(definition);
+        }
+        catch (ArgumentException)
+        {
+            return BadRequest(new { error = "invalid_loop_id", detail = "The loop id is not a valid artifact identifier." });
+        }
     }
 
     [HttpPost]
