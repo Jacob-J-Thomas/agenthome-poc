@@ -102,7 +102,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
         if (!_customExecutionAvailable)
         {
-            return new LoopRunInvocationResponse("WorkspaceHostUnavailable", null, false, null, [], "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can execute custom loops.");
+            return new LoopRunInvocationResponse("WorkspaceHostUnavailable", null, false, null, [], "workspace_host_unavailable: this runtime could not safely obtain or retain custom-loop hosting and must be recreated before it can execute custom loops.");
         }
 
         CustomLoopExecutionLeaseResult ownership;
@@ -306,7 +306,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
         if (!_customExecutionAvailable)
         {
-            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can cancel custom loops.");
+            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime could not safely obtain or retain custom-loop hosting and must be recreated before it can cancel custom loops.");
         }
 
         return await ExecuteControlAsync(awaitable: _lifecycleService.CancelAsync(new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
@@ -323,7 +323,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
         if (!_customExecutionAvailable)
         {
-            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can resume custom loops.");
+            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime could not safely obtain or retain custom-loop hosting and must be recreated before it can resume custom loops.");
         }
 
         return await ExecuteControlAsync(awaitable: _lifecycleService.ResumeAsync(new CustomLoopResumeRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));

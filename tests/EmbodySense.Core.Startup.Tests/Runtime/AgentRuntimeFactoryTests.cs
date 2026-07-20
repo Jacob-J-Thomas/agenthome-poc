@@ -169,6 +169,30 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task CreateAsync_keeps_ordinary_chat_available_when_custom_loop_recovery_cannot_read_persisted_state()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved recovery-failure transcript"));
+        var runDirectory = Path.Combine(paths.CustomLoopRunsPath, "loop-one");
+        Directory.CreateDirectory(runDirectory);
+        await File.WriteAllTextAsync(Path.Combine(runDirectory, "run-one.json"), "{ malformed");
+
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var preserved = await conversationMemory.LoadCurrentConversationAsync();
+        var turn = await runtime.RunTurnAsync("hello");
+        var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-recovery-failure", "prompt"));
+
+        Assert.Collection(preserved, message => Assert.Equal("preserved recovery-failure transcript", message.Content));
+        Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
+        Assert.Equal("WorkspaceHostUnavailable", customLoop.AdmissionStatus);
+        Assert.False(customLoop.WasDispatched);
+    }
+
+    [Fact]
     public async Task RunTurnAsync_returns_failed_runtime_result_with_loop_identity_when_provider_fails()
     {
         using var workspace = new TestWorkspace();

@@ -84,14 +84,23 @@ public sealed class AgentRuntimeFactory
             }
 
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
+            var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
+            var preserveCurrentConversation = !customExecutionAvailable;
             if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
             {
                 using (recoveryOwnership.Lease!)
                 {
-                    recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
-                    if (recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
+                    try
                     {
-                        throw new InvalidOperationException("custom_loop_recovery_failed: persisted custom-loop state could not be recovered exactly; no automatic execution was started.");
+                        recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
+                        var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
+                        customExecutionAvailable &= !recoveryFailed;
+                        preserveCurrentConversation |= recoveryFailed;
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        customExecutionAvailable = false;
+                        preserveCurrentConversation = true;
                     }
                 }
             }
@@ -107,7 +116,7 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                if (recoveryOwnership.Status != CustomLoopExecutionLeaseStatus.Acquired || ShouldPreserveCurrentConversation(recoveryResults))
+                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults))
                 {
                     conversationState.SynchronizeConversationTranscript(await conversationMemory.LoadCurrentConversationAsync(cancellationToken));
                 }
@@ -141,7 +150,7 @@ public sealed class AgentRuntimeFactory
                 customLifecycle,
                 customRunner,
                 customRuntimeContext,
-                recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired,
+                customExecutionAvailable,
                 runtimeSurface.Id,
                 actor,
                 defaultLoop.RoleId,
