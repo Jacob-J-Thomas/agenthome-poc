@@ -38,10 +38,16 @@ internal sealed class CustomLoopRuntimeContext
     {
         var capturedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
         var documents = await _workspaceContextStore.LoadDocumentsAsync(_paths, cancellationToken);
+        ConversationMemorySnapshot persistedConversation;
         LlmMessage[] logicalMessages;
         using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))
         {
-            _conversationState.SynchronizeConversationTranscript(await _conversationMemory.LoadCurrentConversationAsync(cancellationToken));
+            persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+            if (!_conversationState.TrySynchronizeConversationTranscript(persistedConversation.Messages))
+            {
+                throw new InvalidOperationException("The active logical conversation diverged from durable workspace state; custom-loop context was not captured.");
+            }
+
             logicalMessages = GetLogicalConversationMessages(_conversationState);
         }
         var conversationVersion = CustomLoopConversationVersion.Compute(logicalMessages);
@@ -53,7 +59,7 @@ internal sealed class CustomLoopRuntimeContext
 
         return new CustomLoopRuntimeContextCapture(
             CustomLoopContextSnapshotHash.Apply(snapshot),
-            new CustomLoopConversationReference("current", conversationVersion, capturedAtUtc));
+            new CustomLoopConversationReference(persistedConversation.Version, conversationVersion, capturedAtUtc));
     }
 
     internal static LlmMessage[] GetLogicalConversationMessages(ConversationRuntimeState conversationState)
@@ -296,10 +302,6 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
         try
         {
             using var conversationLease = await _conversationState.AcquireExclusiveAccessAsync(cancellationToken);
-            if (!string.Equals(request.ConversationId, "current", StringComparison.Ordinal))
-            {
-                return DefinitelyFailed(request, "Only the runtime's exact current logical conversation can receive custom-loop output in this MVP.");
-            }
 
             if (!MatchesHash(request.CanonicalOutput, request.CanonicalOutputHash))
             {
@@ -309,6 +311,21 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
             if (!ValidatePriorPublications(request, out var priorValidationDetail))
             {
                 return DefinitelyFailed(request, priorValidationDetail);
+            }
+
+            ConversationMemorySnapshot persistedConversation;
+            try
+            {
+                persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return Uncertain(request, $"The persisted conversation could not be verified before publication: {exception.GetType().Name}.");
+            }
+
+            if (!string.Equals(persistedConversation.Version, request.ConversationId, StringComparison.Ordinal))
+            {
+                return DefinitelyFailed(request, "The durable current conversation identity no longer matches the conversation admitted for this run.");
             }
 
             var stateMessages = CustomLoopRuntimeContext.GetLogicalConversationMessages(_conversationState);
@@ -322,16 +339,6 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
                 return DefinitelyFailed(request, "The invoking conversation did not equal the immutable admission prefix plus this run's exact prior publications; publication was not attempted.");
             }
 
-            ConversationMemorySnapshot persistedConversation;
-            try
-            {
-                persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                return Uncertain(request, $"The persisted conversation could not be verified before publication: {exception.GetType().Name}.");
-            }
-
             if (!MessagesEqual(persistedConversation.Messages, stateMessages))
             {
                 return DefinitelyFailed(request, "The persisted conversation and active logical conversation differed before publication.");
@@ -339,7 +346,7 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
 
             try
             {
-                var appended = await _conversationMemory.TryAppendMessageAsync(persistedConversation.ConversationId, persistedConversation.Version, stateMessages, LlmMessage.Assistant(request.CanonicalOutput), cancellationToken);
+                var appended = await _conversationMemory.TryAppendMessageAsync(persistedConversation.ConversationId, request.ConversationId, stateMessages, LlmMessage.Assistant(request.CanonicalOutput), cancellationToken);
                 if (!appended)
                 {
                     return DefinitelyFailed(request, "The persisted invoking conversation changed at the atomic publication boundary; no custom-loop output was appended.");
@@ -371,10 +378,10 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
     {
         try
         {
-            var persistedMessages = await _conversationMemory.LoadCurrentConversationAsync(cancellationToken);
-            return MessagesEqual(persistedMessages, stateMessages)
+            var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+            return string.Equals(persistedConversation.Version, request.ConversationId, StringComparison.Ordinal) && MessagesEqual(persistedConversation.Messages, stateMessages)
                 ? new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.AlreadyPublished, request.OperationId, "The exact expected conversation prefix plus one canonical assistant output was already committed.")
-                : Uncertain(request, "The active conversation contains the canonical output, but durable conversation state does not match it.");
+                : Uncertain(request, "The active conversation contains the canonical output, but durable conversation identity or state does not match it.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -387,13 +394,18 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
         using var reconciliation = new CancellationTokenSource(ReconciliationTimeout);
         try
         {
-            var persistedMessages = await _conversationMemory.LoadCurrentConversationAsync(reconciliation.Token);
-            if (MessagesEqual(persistedMessages, expectedPrefix))
+            var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(reconciliation.Token);
+            if (!string.Equals(persistedConversation.Version, request.ConversationId, StringComparison.Ordinal))
+            {
+                return Uncertain(request, $"Conversation append failed with {exception.GetType().Name}, and the durable conversation identity changed before reconciliation.");
+            }
+
+            if (MessagesEqual(persistedConversation.Messages, expectedPrefix))
             {
                 return DefinitelyFailed(request, $"Conversation append failed with {exception.GetType().Name}, and no append was observed.");
             }
 
-            if (!IsExpectedPrefixPlusOutput(persistedMessages, request))
+            if (!IsExpectedPrefixPlusOutput(persistedConversation.Messages, request))
             {
                 return Uncertain(request, $"Conversation append failed with {exception.GetType().Name}, and durable state no longer has a provable expected shape.");
             }
@@ -412,8 +424,8 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
         try
         {
             var stateMessages = CustomLoopRuntimeContext.GetLogicalConversationMessages(_conversationState);
-            var persistedMessages = await _conversationMemory.LoadCurrentConversationAsync(cancellationToken);
-            if (!IsExpectedPrefixPlusOutput(stateMessages, request) || !MessagesEqual(stateMessages, persistedMessages) || !PrefixMatches(stateMessages, expectedPrefix))
+            var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+            if (!string.Equals(persistedConversation.Version, request.ConversationId, StringComparison.Ordinal) || !IsExpectedPrefixPlusOutput(stateMessages, request) || !MessagesEqual(stateMessages, persistedConversation.Messages) || !PrefixMatches(stateMessages, expectedPrefix))
             {
                 return Uncertain(request, "The append returned, but the exact expected-prefix-plus-one-output state could not be proven.");
             }

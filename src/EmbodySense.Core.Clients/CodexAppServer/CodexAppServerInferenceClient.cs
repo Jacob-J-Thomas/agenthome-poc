@@ -55,6 +55,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         var requestId = NextRequestId();
         var userText = _contextBuilder.CreateTurnInput(request);
+        _providerRequestStarted?.Invoke();
         await SendRequestAsync("turn/start", requestId, new JsonObject
         {
             ["threadId"] = _threadId,
@@ -67,7 +68,6 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                 }
             }
         }, cancellationToken);
-        _providerRequestStarted?.Invoke();
 
         var streamedText = new StringBuilder();
         string? turnId = null;

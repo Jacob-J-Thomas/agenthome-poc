@@ -100,7 +100,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             ownership = _executionGate.TryAcquire(input.OperationId, pending.RequestHash);
             if (ownership.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
             {
-                return new LoopRunInvocationResponse("WorkspaceExecutionBusy", null, false, null, [], ownership.Detail);
+                return new LoopRunInvocationResponse("WorkspaceHostUnavailable", null, false, null, [], ownership.Detail);
             }
 
             if (ownership.Status != CustomLoopExecutionLeaseStatus.WorkspaceBusy)

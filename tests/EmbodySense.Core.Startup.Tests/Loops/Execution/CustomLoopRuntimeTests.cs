@@ -137,7 +137,7 @@ public sealed class CustomLoopRuntimeTests
         var fetched = await runtime.GetCustomLoopRunAsync(response.Run!.Id);
         var listed = await runtime.ListCustomLoopRunsAsync();
         var replay = await runtime.InvokeCustomLoopAsync(input);
-        var persistedConversationAfterReplay = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadCurrentConversationAsync();
+        var persistedConversationAfterReplay = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadCurrentConversationSnapshotAsync();
         var ordinaryTurnAfterCustomRun = await runtime.RunTurnAsync("ordinary turn still works");
 
         Assert.Equal("MessageCompleted", prior.Status.ToString());
@@ -148,7 +148,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("OpenAiCodex", response.Run.Model.Provider);
         Assert.Equal("test-model", response.Run.Model.Model);
         Assert.Equal(definition.ContentHash, response.Run.AdmittedDefinition.ContentHash);
-        Assert.Equal("current", response.Run.InvokingConversation!.ConversationId);
+        Assert.Equal(persistedConversationAfterReplay.Version, response.Run.InvokingConversation!.ConversationId);
         Assert.Empty(response.Run.Context.InvokingConversationMessages);
         var agentSource = Assert.Single(response.Run.Context.SourceManifest, source => source.SourceId == "agent");
         Assert.Equal("RoleInstruction", agentSource.SourceType);
@@ -173,8 +173,8 @@ public sealed class CustomLoopRuntimeTests
         Assert.False(replay.WasDispatched);
         Assert.Equal(response.Run.Id, replay.Run!.Id);
         Assert.Equal(response.Run.Events.Count, replay.Run.Events.Count);
-        Assert.Equal(3, persistedConversationAfterReplay.Count);
-        Assert.Equal(response.Run.FinalOutput, persistedConversationAfterReplay[^1].Content);
+        Assert.Equal(3, persistedConversationAfterReplay.Messages.Count);
+        Assert.Equal(response.Run.FinalOutput, persistedConversationAfterReplay.Messages[^1].Content);
         Assert.Equal("MessageCompleted", ordinaryTurnAfterCustomRun.Status.ToString());
         Assert.Equal("default-conversation", ordinaryTurnAfterCustomRun.RunIdentity!.LoopId);
     }
@@ -198,6 +198,51 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == true);
         Assert.Equal("peer durable prompt", persistedConversation[0].Content);
         Assert.Equal(response.Run.FinalOutput, persistedConversation[^1].Content);
+    }
+
+    [Fact]
+    public async Task Context_capture_rejects_local_and_durable_conversation_divergence_without_overwriting_local_state()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-divergent-context", "update-runtime-divergent-context");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var conversationMemory = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        var defaultTurn = runtime.RunTurnAsync("delayed default turn");
+        await WaitForAttemptStartAsync(workspace);
+        await conversationMemory.StartFreshConversationAsync();
+        Assert.Equal("MessageCompleted", (await defaultTurn).Status.ToString());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-divergent-context", "custom task")));
+        var followingTurn = await runtime.RunTurnAsync("following default turn");
+
+        Assert.Contains("diverged", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("MessageFailed", followingTurn.Status.ToString());
+        Assert.Contains("Active local context was preserved", followingTurn.FailureDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Conversation_publication_rejects_a_replaced_durable_conversation_with_the_same_transcript()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-conversation-identity", "update-runtime-conversation-identity");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var conversationMemory = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+        var originalIdentity = (await conversationMemory.LoadCurrentConversationSnapshotAsync()).Version;
+        var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-conversation-identity", "delayed custom task"));
+        await WaitForAttemptStartAsync(workspace);
+        await conversationMemory.StartFreshConversationAsync();
+        var replacementIdentity = (await conversationMemory.LoadCurrentConversationSnapshotAsync()).Version;
+
+        var response = await invocation;
+        var persistedConversation = await conversationMemory.LoadCurrentConversationAsync();
+
+        Assert.NotEqual(originalIdentity, replacementIdentity);
+        Assert.Equal("Failed", response.ExecutionStatus);
+        Assert.Equal("conversation_publication_failed", response.Run!.FailureCode);
+        Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == false);
+        Assert.Empty(persistedConversation);
     }
 
     [Fact]
@@ -390,10 +435,10 @@ public sealed class CustomLoopRuntimeTests
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-idempotent-publish", "update-runtime-idempotent-publish");
         const string prompt = "delayed idempotent task";
         var expectedOutput = "fake response: [EmbodySense untrusted trigger prompt data]" + Environment.NewLine + prompt;
-        await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).AppendMessageAsync(LlmMessage.Assistant(expectedOutput));
         await using var runtime = await CreateRuntimeAsync(workspace);
         var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-idempotent-publish", prompt));
         await WaitForAttemptStartAsync(workspace);
+        await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).AppendMessageAsync(LlmMessage.Assistant(expectedOutput));
 
         var history = await runtime.RunTurnAsync("/history");
         var loaded = await runtime.RunTurnAsync("1");

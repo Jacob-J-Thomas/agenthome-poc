@@ -179,6 +179,6 @@ public sealed class AgentRuntimeFactory
 
     private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults)
     {
-        return recoveryResults.Any(result => result.Run is { Status: CustomLoopRunStatus.Paused, InvokingConversation.ConversationId: "current" });
+        return recoveryResults.Any(result => result.Run is { Status: CustomLoopRunStatus.Paused, InvokingConversation: not null });
     }
 }

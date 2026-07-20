@@ -107,7 +107,7 @@ public sealed class AgentRuntimeFactoryTests
 
         Assert.Collection(preserved, message => Assert.Equal("preserved external-host transcript", message.Content));
         Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
-        Assert.Equal("WorkspaceExecutionBusy", customLoop.AdmissionStatus);
+        Assert.Equal("WorkspaceHostUnavailable", customLoop.AdmissionStatus);
         Assert.False(customLoop.WasDispatched);
         Assert.Equal("NotFound", afterRelease.AdmissionStatus);
     }

@@ -765,6 +765,28 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Caller_cancellation_during_admitted_run_load_parks_the_run_before_returning()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeGet = token =>
+            {
+                cancellation.Cancel();
+                token.ThrowIfCancellationRequested();
+            }
+        };
+        var executor = new QueueExecutor(Result("must not run"));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_during_the_run_start_audit_cancels_instead_of_reporting_an_audit_failure()
     {
         using var cancellation = new CancellationTokenSource();
@@ -1856,6 +1878,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Exception? GetException { get; set; }
 
+        public Action<CancellationToken>? BeforeGet { get; init; }
+
         public Exception? AppendTerminalWarningException { get; init; }
 
         public Func<CustomLoopRunRecord, Task>? AfterUpdate { get; init; }
@@ -1889,6 +1913,7 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
         {
+            BeforeGet?.Invoke(cancellationToken);
             if (OutcomeConflictInjected && GetExceptionAfterOutcomeConflict is not null)
             {
                 throw GetExceptionAfterOutcomeConflict;

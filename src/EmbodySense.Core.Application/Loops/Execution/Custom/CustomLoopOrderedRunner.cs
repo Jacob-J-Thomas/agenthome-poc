@@ -50,11 +50,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopRunRecord? run;
         try
         {
-            run = await _runStore.GetAsync(request.RunId, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
+            using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+            run = await _runStore.GetAsync(request.RunId, integrity.Token);
         }
         catch (Exception exception)
         {

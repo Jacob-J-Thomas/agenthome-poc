@@ -375,6 +375,24 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_conservatively_reports_dispatch_when_the_turn_write_fails()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteFailure = line => line.Contains("\"method\":\"turn/start\"", StringComparison.Ordinal) ? new IOException("turn write failed") : null
+        };
+        var providerRequestStarted = false;
+        var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+
+        Assert.Equal("turn write failed", exception.Message);
+        Assert.True(providerRequestStarted);
+    }
+
+    [Fact]
     public async Task GenerateAsync_reports_missing_thread_ids()
     {
         var transport = new ScriptedAppServerTransport(
@@ -529,6 +547,8 @@ public sealed class CodexAppServerInferenceTests
 
         public List<string> Writes { get; } = [];
 
+        public Func<string, Exception?>? WriteFailure { get; init; }
+
         public bool Disposed { get; private set; }
 
         public ValueTask DisposeAsync()
@@ -544,6 +564,11 @@ public sealed class CodexAppServerInferenceTests
 
         public Task WriteLineAsync(string line, CancellationToken cancellationToken = default)
         {
+            if (WriteFailure?.Invoke(line) is { } exception)
+            {
+                throw exception;
+            }
+
             Writes.Add(line);
             return Task.CompletedTask;
         }
