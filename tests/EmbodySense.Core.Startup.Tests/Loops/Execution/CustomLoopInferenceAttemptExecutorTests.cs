@@ -263,6 +263,9 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Single(toolEvents, item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.RequestReserved);
         Assert.Single(toolEvents, item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.IntegrityFailed);
         Assert.Single(toolEvents.Select(item => item.ToolEvidence!.RequestCorrelationId).Distinct(StringComparer.Ordinal));
+        var sourceEvent = Assert.Single(toolEvents, item => item.ToolEvidence!.Governance is not null && item.ToolEvidence.Phase == CustomLoopToolEvidencePhase.GovernanceDecided);
+        var projectedRun = Assert.IsType<LoopRunSnapshot>(await new LoopRunInspectionFacade(workspace.RootPath).GetAsync(admitted.Id));
+        AssertToolEvidenceProjection(sourceEvent, Assert.Single(projectedRun.Events, item => item.Sequence == sourceEvent.Sequence));
         var audit = await new AuditLog(paths).ReadTailAsync(200);
         Assert.DoesNotContain(audit, item => item.Action == AuditSchema.Actions.ToolExecute);
         Assert.Single(audit, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "limit_scope") == "run");
@@ -593,6 +596,48 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal("step-one", Metadata(auditEvent, "step_id"));
         Assert.Equal("1", Metadata(auditEvent, "attempt"));
         Assert.Equal("attempt-1", Metadata(auditEvent, "attempt_correlation_id"));
+    }
+
+    private static void AssertToolEvidenceProjection(CustomLoopRunEvent sourceEvent, LoopRunEventSnapshot projectedEvent)
+    {
+        var source = Assert.IsType<CustomLoopToolTraceEvidence>(sourceEvent.ToolEvidence);
+        var projected = Assert.IsType<LoopRunToolEvidenceSnapshot>(projectedEvent.ToolEvidence);
+        Assert.Equal(source.Phase.ToString(), projected.Phase);
+        Assert.Equal(source.RequestOrdinal, projected.RequestOrdinal);
+        Assert.Equal(source.RequestCorrelationId, projected.RequestCorrelationId);
+        Assert.Equal(source.BrokerRequestId, projected.BrokerRequestId);
+        Assert.Equal(source.Command.ToString(), projected.Command);
+        Assert.Equal(source.TargetPath, projected.TargetPath);
+        Assert.Equal(source.Content, projected.Content);
+        Assert.Equal(source.Pattern, projected.Pattern);
+        Assert.Equal(source.ResolvedTarget, projected.ResolvedTarget);
+        Assert.Equal(source.Outcome?.ToString(), projected.Outcome);
+        Assert.Equal(source.CanonicalResultReturnedToModel, projected.CanonicalResultReturnedToModel);
+        Assert.Equal(source.CanonicalResultHash, projected.CanonicalResultHash);
+        Assert.Equal(source.CanonicalResultCharacterCount, projected.CanonicalResultCharacterCount);
+        Assert.Equal(source.ReturnedToModel, projected.ReturnedToModel);
+        Assert.Equal(source.ReservedUtf8Bytes, projected.ReservedUtf8Bytes);
+        Assert.Equal(source.Authority.RoleId, projected.Authority.RoleId);
+        Assert.Equal(source.Authority.AdmittedMaximum.Select(value => value.ToString()), projected.Authority.AdmittedMaximum);
+        Assert.Equal(source.Authority.CurrentRoleCeiling.Select(value => value.ToString()), projected.Authority.CurrentRoleCeiling);
+        Assert.Equal(source.Authority.ImplementedCatalog.Select(value => value.ToString()), projected.Authority.ImplementedCatalog);
+        Assert.Equal(source.Authority.EffectiveAssignments.Select(value => value.ToString()), projected.Authority.EffectiveAssignments);
+        Assert.Equal(source.Authority.RoleCeilingHash, projected.Authority.RoleCeilingHash);
+        Assert.Equal(source.Authority.CatalogHash, projected.Authority.CatalogHash);
+        Assert.Equal(source.Authority.EvaluatedAtUtc, projected.Authority.EvaluatedAtUtc);
+        Assert.Equal(source.Authority.IsValid, projected.Authority.IsValid);
+        Assert.Equal(source.Authority.Detail, projected.Authority.Detail);
+        var sourceGovernance = Assert.IsType<ToolGovernanceEvidence>(source.Governance);
+        var projectedGovernance = Assert.IsType<LoopRunToolGovernanceSnapshot>(projected.Governance);
+        Assert.Equal(sourceGovernance.AuthorityDecision.ToString(), projectedGovernance.AuthorityDecision);
+        Assert.Equal(sourceGovernance.AuthorityDetail, projectedGovernance.AuthorityDetail);
+        Assert.Equal(sourceGovernance.PermissionDecision?.ToString(), projectedGovernance.PermissionDecision);
+        Assert.Equal(sourceGovernance.PermissionMatchedPath, projectedGovernance.PermissionMatchedPath);
+        Assert.Equal(sourceGovernance.PermissionDetail, projectedGovernance.PermissionDetail);
+        Assert.Equal(sourceGovernance.PermissionPolicyHash, projectedGovernance.PermissionPolicyHash);
+        Assert.Equal(sourceGovernance.ApprovalDecision.ToString(), projectedGovernance.ApprovalDecision);
+        Assert.Equal(sourceGovernance.ApprovalDecisionBy, projectedGovernance.ApprovalDecisionBy);
+        Assert.Equal(sourceGovernance.ApprovalDetail, projectedGovernance.ApprovalDetail);
     }
 
     private sealed class RecordingApprovalPrompt(bool approved = false) : IAgentToolApprovalPrompt, IToolApprovalPrompt

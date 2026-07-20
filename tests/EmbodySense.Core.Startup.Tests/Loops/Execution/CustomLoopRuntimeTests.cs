@@ -20,6 +20,51 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 public sealed class CustomLoopRuntimeTests
 {
     [Fact]
+    public async Task Public_runtime_rejects_malformed_invocations_and_durably_replays_a_missing_loop_outcome()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var validHash = new string('a', CustomLoopLimits.Sha256HexCharacters);
+        var invalidInputs = new[]
+        {
+            new LoopRunInvocationInput("loop-valid", 1, validHash, "!", "prompt"),
+            new LoopRunInvocationInput("!", 1, validHash, "invoke-invalid-loop", "prompt"),
+            new LoopRunInvocationInput("loop-valid", 0, validHash, "invoke-invalid-version", "prompt"),
+            new LoopRunInvocationInput("loop-valid", 1, validHash.ToUpperInvariant(), "invoke-invalid-hash", "prompt"),
+            new LoopRunInvocationInput("loop-valid", 1, validHash, "invoke-invalid-prompt", new string('p', CustomLoopLimits.MaxPresetPromptCharacters + 1))
+        };
+
+        foreach (var input in invalidInputs)
+        {
+            var invalid = await runtime.InvokeCustomLoopAsync(input);
+            Assert.Equal("Invalid", invalid.AdmissionStatus);
+            Assert.Null(invalid.ExecutionStatus);
+            Assert.False(invalid.WasDispatched);
+            Assert.Null(invalid.Run);
+            Assert.Empty(invalid.ValidationErrors);
+            Assert.False(string.IsNullOrWhiteSpace(invalid.Detail));
+        }
+
+        var missingInput = new LoopRunInvocationInput("loop-missing", 1, validHash, "invoke-missing-loop", "missing loop prompt");
+        var missing = await runtime.InvokeCustomLoopAsync(missingInput);
+        var replay = await runtime.InvokeCustomLoopAsync(missingInput);
+
+        Assert.Equal("NotFound", missing.AdmissionStatus);
+        Assert.Null(missing.ExecutionStatus);
+        Assert.False(missing.WasDispatched);
+        Assert.Null(missing.Run);
+        Assert.Empty(missing.ValidationErrors);
+        Assert.Contains("does not exist", missing.Detail, StringComparison.Ordinal);
+        Assert.Equal(missing.AdmissionStatus, replay.AdmissionStatus);
+        Assert.Equal(missing.ExecutionStatus, replay.ExecutionStatus);
+        Assert.False(replay.WasDispatched);
+        Assert.Null(replay.Run);
+        Assert.Empty(replay.ValidationErrors);
+        Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Context_capture_bounds_selected_conversation_entries_and_aggregates_all_omissions_once()
     {
         using var workspace = new TestWorkspace();
