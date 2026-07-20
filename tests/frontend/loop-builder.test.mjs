@@ -114,7 +114,9 @@ test("Exit continuation is model-gated and its iteration value is presented as a
 });
 
 test("loop settings expose inherited provider, model, tools, and context defaults", async () => {
-  const app = await loadLoopBuilder();
+  const catalog = createCatalog();
+  catalog.tools.customAssignable = ["read"];
+  const app = await loadLoopBuilder({ catalog });
   await selectCustomLoop(app);
 
   await app.elements.loopSettingsButton.click();
@@ -123,7 +125,38 @@ test("loop settings expose inherited provider, model, tools, and context default
   assert.match(app.elements.inspectorContent.textContent, /OpenAiCodex · gpt-5-test/);
   assert.match(app.elements.inspectorContent.textContent, /Provider and model cannot be overridden per loop/);
   assert.match(app.elements.inspectorContent.textContent, /Workspace tools/);
+  assert.ok(findControlByLabel(app.elements.inspectorContent, "Read", "input"));
+  assert.doesNotMatch(app.elements.inspectorContent.textContent, /Allow inference nodes to request the governed (list|search) command/);
   assert.match(app.elements.inspectorContent.textContent, /Inference: 4 context-in sources/);
+});
+
+test("SignalR transport sends keepalives for long-running invocations and stops them on close", async () => {
+  const app = await loadLoopBuilder();
+  const sockets = [];
+  class FakeWebSocket {
+    static OPEN = 1;
+    constructor(url) { this.url = url; this.readyState = 0; this.sent = []; sockets.push(this); }
+    send(message) { this.sent.push(message); }
+    open() { this.readyState = FakeWebSocket.OPEN; this.onopen?.(); }
+    message(data) { this.onmessage?.({ data }); }
+    closeFromServer() { this.readyState = 3; this.onclose?.(); }
+  }
+  app.context.WebSocket = FakeWebSocket;
+  const Connection = vm.runInContext("JsonSignalRConnection", app.context);
+  const connection = new Connection("ws://127.0.0.1/hubs/session");
+
+  const start = connection.start();
+  sockets[0].open();
+  await Promise.resolve();
+  sockets[0].message(`{}\u001e`);
+  await start;
+  const keepAlive = app.window.intervalHandlers[0];
+  assert.equal(keepAlive.delay, 10000);
+
+  keepAlive.handler();
+  assert.deepEqual(JSON.parse(sockets[0].sent.at(-1).slice(0, -1)), { type: 6 });
+  sockets[0].closeFromServer();
+  assert.equal(keepAlive.cancelled, true);
 });
 
 test("create and save send versioned server-owned definition shapes", async () => {
@@ -246,6 +279,42 @@ test("a stale save conflict stays visible with the current server version and re
   assert.equal(app.elements.reloadButton.disabled, false);
 });
 
+test("definition mutation locks editing, navigation, and reload until the response is applied", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let releaseSave;
+  const saveReleased = new Promise(resolve => { releaseSave = resolve; });
+  server.on("PUT", "/api/loops/loop-research", async ({ body }) => {
+    await saveReleased;
+    const updated = { ...server.catalog.customDefinitions[0], ...clone(body.definition), definitionVersion: 3 };
+    server.catalog.customDefinitions = [updated];
+    return { status: 200, body: authoringResponse("Updated", updated) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "An edited description.";
+  await app.elements.loopDescription.input();
+
+  const saving = app.elements.saveButton.click();
+  await Promise.resolve();
+
+  assert.equal(app.elements.loopName.disabled, true);
+  assert.equal(app.elements.loopDescription.disabled, true);
+  assert.equal(app.elements.reloadButton.disabled, true);
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  assert.equal(app.elements.builderTab.disabled, true);
+  assert.equal(app.elements.runsTab.disabled, true);
+  assert.equal(app.elements.builderView.inert, true);
+  assert.equal(app.elements.loopList.inert, true);
+  assert.ok(app.elements.loopList.children.every(item => item.disabled));
+
+  releaseSave();
+  await saving;
+  assert.equal(app.elements.loopName.disabled, false);
+  assert.equal(app.elements.builderView.inert, false);
+  assert.equal(app.elements.loopList.inert, false);
+  assert.equal(app.elements.saveState.textContent, "Saved · v3");
+});
+
 test("delete explicitly preserves historical run evidence and sends an expected version", async () => {
   const server = new FakeFetchServer(createCatalog());
   server.on("DELETE", "/api/loops/loop-research", () => {
@@ -263,6 +332,20 @@ test("delete explicitly preserves historical run evidence and sends an expected 
   assert.equal(typeof deletion.body.operationId, "string");
   assert.equal(app.elements.toast.textContent, "Loop deleted. Historical run evidence was preserved.");
   assert.equal(app.elements.loopName.value, "Default conversation");
+});
+
+test("delete surfaces committed audit warnings returned by the server", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("DELETE", "/api/loops/loop-research", () => {
+    server.catalog.customDefinitions = [];
+    return { status: 200, body: { ...authoringResponse("CommittedWithAuditWarning", null), detail: "Loop deletion committed, but the outcome audit needs review." } };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.deleteButton.click();
+
+  assert.equal(app.elements.toast.textContent, "Loop deletion committed, but the outcome audit needs review.");
 });
 
 test("Runs projects durable timeline and context evidence from the authenticated API", async () => {
@@ -543,6 +626,7 @@ async function loadLoopBuilder(options = {}) {
   const window = {
     confirmations: [],
     delayedHandlers: [],
+    intervalHandlers: [],
     location: { href: "http://127.0.0.1:4378/loops.html" },
     addEventListener() { },
     confirm(message) { this.confirmations.push(message); return true; },
@@ -557,6 +641,14 @@ async function loadLoopBuilder(options = {}) {
     clearTimeout(handle) {
       if (handle && typeof handle === "object" && Object.hasOwn(handle, "cancelled")) handle.cancelled = true;
       else clearTimeout(handle);
+    },
+    setInterval(handler, delay) {
+      const scheduled = { handler, delay, cancelled: false };
+      this.intervalHandlers.push(scheduled);
+      return scheduled;
+    },
+    clearInterval(handle) {
+      handle.cancelled = true;
     }
   };
   const context = {
@@ -621,6 +713,7 @@ function createCatalog() {
   return {
     roleId: "default",
     runtimeModel: { provider: "OpenAiCodex", model: "gpt-5-test" },
+    tools: { customAssignable: ["list", "read", "search"], customAuthorityCeiling: "workspaceReadOnly" },
     systemDefault: {
       ...createCustomDefinition({ id: "default-conversation", displayName: "Default conversation", definitionVersion: 1 }),
       description: "System-managed conversation loop.",

@@ -15,8 +15,10 @@ let invokeReturnFocus = null;
 let historicalLoopId = null;
 let selectedRunRefreshTimer = null;
 let activeRunOperationMonitors = 0;
+let mutationInFlight = false;
 
 const signalRRecordSeparator = "\u001e";
+const signalRKeepAliveMilliseconds = 10000;
 
 const elements = {
   addStepButton: document.getElementById("addStepButton"),
@@ -181,7 +183,8 @@ function renderAll() {
 
 function renderTabs() {
   const builderActive = currentView === "builder" && !historicalLoopId;
-  elements.builderTab.disabled = Boolean(historicalLoopId);
+  elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
+  elements.runsTab.disabled = mutationInFlight;
   elements.builderTab.classList.toggle("active", builderActive);
   elements.runsTab.classList.toggle("active", !builderActive);
   elements.builderTab.setAttribute("aria-selected", String(builderActive));
@@ -192,6 +195,7 @@ function renderTabs() {
 }
 
 async function switchView(view) {
+  if (mutationInFlight) return;
   if (view !== "builder" && view !== "runs") return;
   if (view === "builder" && historicalLoopId) return;
   currentView = view;
@@ -577,6 +581,7 @@ function renderList() {
   for (const definition of allDefinitions()) {
     const button = node("button", "loop-list-item");
     button.type = "button";
+    button.disabled = mutationInFlight;
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", definition.id === currentDefinition?.id ? "true" : "false");
     button.classList.toggle("selected", definition.id === currentDefinition?.id);
@@ -596,6 +601,7 @@ function renderList() {
   for (const [loopId, runCount] of archivedGroups) {
     const button = node("button", "loop-list-item");
     button.type = "button";
+    button.disabled = mutationInFlight;
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", loopId === historicalLoopId ? "true" : "false");
     button.classList.toggle("selected", loopId === historicalLoopId);
@@ -609,12 +615,14 @@ function renderList() {
 }
 
 function selectDefinition(definition) {
+  if (mutationInFlight) return;
   if (definition.id === currentDefinition?.id && !historicalLoopId) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   applyDefinition(definition);
 }
 
 async function selectHistoricalLoop(loopId) {
+  if (mutationInFlight) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   historicalLoopId = loopId;
   currentDefinition = null;
@@ -707,7 +715,7 @@ function renderLoopInspector() {
   model.append(node("div", "context-note", `${catalog.runtimeModel?.provider ?? "Provider unavailable"} · ${catalog.runtimeModel?.model || "provider default model"}. Provider and model cannot be overridden per loop in wave one.`));
   const authority = section("Workspace tools");
   authority.append(node("p", "field-hint", "No tools are assigned by default. Exit decisions are always tool-less."));
-  for (const assignment of ["list", "read", "search"]) {
+  for (const assignment of catalog.tools?.customAssignable ?? []) {
     authority.append(checkboxRow(capitalize(assignment), `Allow inference nodes to request the governed ${assignment} command.`, draft.toolAssignments.includes(assignment), checked => {
       draft.toolAssignments = checked ? [...draft.toolAssignments, assignment] : draft.toolAssignments.filter(value => value !== assignment);
       markDirty();
@@ -840,16 +848,16 @@ function evidenceNote() {
 }
 
 function renderToolbar() {
-  const editable = Boolean(draft) && !isSystemLoop();
+  const editable = Boolean(draft) && !isSystemLoop() && !mutationInFlight;
   elements.name.disabled = !editable;
   elements.description.disabled = !editable;
   elements.saveButton.disabled = !editable || !dirty || validateDraft().length > 0;
-  elements.reloadButton.disabled = !draft || !dirty;
+  elements.reloadButton.disabled = mutationInFlight || !draft || !dirty;
   elements.deleteButton.disabled = !editable;
   elements.invokeButton.disabled = !editable || dirty;
   elements.addStepButton.disabled = !editable || draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps;
-  elements.loopSettingsButton.disabled = !draft;
-  elements.createLoopButton.disabled = !catalog || catalog.customDefinitions.length >= catalog.limits.maxDefinitionsPerWorkspace;
+  elements.loopSettingsButton.disabled = mutationInFlight || !draft;
+  elements.createLoopButton.disabled = mutationInFlight || !catalog || catalog.customDefinitions.length >= catalog.limits.maxDefinitionsPerWorkspace;
   elements.saveState.textContent = historicalLoopId ? "Archived evidence" : !draft ? "No loop" : isSystemLoop() ? "System managed" : dirty ? "Unsaved changes" : `Saved · v${draft.definitionVersion}`;
 }
 
@@ -884,7 +892,7 @@ function markDirty() {
 }
 
 function updateDraftValue(fieldName, value) {
-  if (!draft || isSystemLoop()) return;
+  if (mutationInFlight || !draft || isSystemLoop()) return;
   draft[fieldName] = value;
   markDirty();
   renderListDraftName();
@@ -896,6 +904,7 @@ function renderListDraftName() {
 }
 
 async function createLoop() {
+  if (mutationInFlight) return;
   if (dirty && !window.confirm("Discard unsaved loop edits and create a new loop?")) return;
   setBusy(true, "Creating");
   try {
@@ -910,6 +919,7 @@ async function createLoop() {
 }
 
 async function saveLoop() {
+  if (mutationInFlight) return;
   const errors = validateDraft();
   if (errors.length > 0) { showBanner(errors[0]); return; }
   setBusy(true, "Saving");
@@ -933,13 +943,14 @@ async function saveLoop() {
 }
 
 async function deleteLoop() {
+  if (mutationInFlight) return;
   if (!draft || isSystemLoop() || !window.confirm(`Delete “${draft.displayName}”? Historical run evidence will remain available.`)) return;
   setBusy(true, "Deleting");
   try {
-    await requestJson(`/api/loops/${encodeURIComponent(draft.id)}`, { method: "DELETE", body: JSON.stringify({ expectedDefinitionVersion: currentDefinition.definitionVersion, operationId: newOperationId() }) });
+    const response = await requestJson(`/api/loops/${encodeURIComponent(draft.id)}`, { method: "DELETE", body: JSON.stringify({ expectedDefinitionVersion: currentDefinition.definitionVersion, operationId: newOperationId() }) });
     currentDefinition = null;
     await loadCatalog("default-conversation");
-    showToast("Loop deleted. Historical run evidence was preserved.");
+    showToast(response.status === "CommittedWithAuditWarning" ? response.detail ?? "Loop deleted, but its outcome audit has an integrity warning. Historical run evidence was preserved." : "Loop deleted. Historical run evidence was preserved.");
   } catch (error) {
     showResponseError(error);
   } finally {
@@ -1170,7 +1181,7 @@ function promptSourceLabel(value) {
 }
 
 function reloadCurrent() {
-  if (!currentDefinition) return;
+  if (mutationInFlight || !currentDefinition) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   applyDefinition(currentDefinition);
 }
@@ -1200,12 +1211,19 @@ function removeStep(index) {
 }
 
 function setBusy(busy, label) {
-  elements.saveButton.disabled = busy || elements.saveButton.disabled;
-  elements.createLoopButton.disabled = busy || elements.createLoopButton.disabled;
-  elements.deleteButton.disabled = busy || elements.deleteButton.disabled;
-  elements.invokeButton.disabled = busy || elements.invokeButton.disabled;
-  if (busy) elements.saveState.textContent = label;
-  else renderToolbar();
+  mutationInFlight = busy;
+  for (const region of [elements.list, elements.builderView, elements.runsView]) {
+    region.inert = busy;
+    region.setAttribute("aria-busy", String(busy));
+  }
+  if (busy) {
+    renderAll();
+    elements.saveState.textContent = label;
+  } else {
+    renderList();
+    renderTabs();
+    renderToolbar();
+  }
 }
 
 function setInteractive(enabled) {
@@ -1344,6 +1362,7 @@ class JsonSignalRConnection {
     this.isClosed = true;
     this.handshakeReject = null;
     this.handshakeResolve = null;
+    this.keepAliveTimer = null;
     this.onclose = null;
   }
 
@@ -1370,6 +1389,7 @@ class JsonSignalRConnection {
     this.sendRaw({ protocol: "json", version: 1 });
     await handshake;
     this.connected = true;
+    this.startKeepAlive();
   }
 
   async invoke(target, ...args) {
@@ -1382,6 +1402,19 @@ class JsonSignalRConnection {
 
   sendRaw(message) {
     this.socket.send(`${JSON.stringify(message)}${signalRRecordSeparator}`);
+  }
+
+  startKeepAlive() {
+    this.stopKeepAlive();
+    this.keepAliveTimer = window.setInterval(() => {
+      if (this.connected && this.socket?.readyState === WebSocket.OPEN) this.sendRaw({ type: 6 });
+    }, signalRKeepAliveMilliseconds);
+  }
+
+  stopKeepAlive() {
+    if (this.keepAliveTimer == null) return;
+    window.clearInterval(this.keepAliveTimer);
+    this.keepAliveTimer = null;
   }
 
   async receive(data) {
@@ -1421,6 +1454,7 @@ class JsonSignalRConnection {
     if (this.isClosed) return;
     this.isClosed = true;
     this.connected = false;
+    this.stopKeepAlive();
     this.handshakeReject?.(new Error("SignalR connection closed."));
     for (const invocation of this.invocations.values()) invocation.reject(new Error("SignalR connection closed."));
     this.invocations.clear();

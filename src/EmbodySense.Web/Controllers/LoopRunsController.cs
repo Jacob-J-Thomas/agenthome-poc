@@ -174,8 +174,8 @@ public sealed class LoopRunsController : ControllerBase
             return response.Status switch
             {
                 "NotFound" => NotFound(response),
-                "Conflict" or "InvalidState" => Conflict(response),
-                "Failed" => StatusCode(StatusCodes.Status503ServiceUnavailable, response),
+                "Conflict" or "InvalidState" or "WorkspaceExecutionBusy" or "OperationInProgress" => Conflict(response),
+                "Failed" or "WorkspaceHostUnavailable" => StatusCode(StatusCodes.Status503ServiceUnavailable, response),
                 _ => Ok(response)
             };
         }

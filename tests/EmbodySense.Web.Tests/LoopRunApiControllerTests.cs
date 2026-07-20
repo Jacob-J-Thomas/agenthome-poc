@@ -7,6 +7,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
@@ -168,6 +169,34 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(HttpStatusCode.NotFound, cancel.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, unknownField.StatusCode);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_returns_service_unavailable_when_another_process_owns_loop_hosting()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+
+            var cancel = await SendControlAsync(client, "/api/loop-runs/run-missing/cancel", token, new { expectedLifecycleVersion = 1, operationId = "cancel-host-unavailable" });
+            var cancelBody = await cancel.Content.ReadFromJsonAsync<LoopRunControlResponse>(JsonOptions);
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, cancel.StatusCode);
+            Assert.Equal("WorkspaceHostUnavailable", cancelBody!.Status);
         }
         finally
         {
