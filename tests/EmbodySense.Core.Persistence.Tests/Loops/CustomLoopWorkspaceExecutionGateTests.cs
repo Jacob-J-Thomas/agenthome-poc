@@ -30,12 +30,27 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, sameOperation.Status);
         Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, changedOperation.Status);
 
+        var busyReservation = second.TryReserveWorkspaceBusyOutcome("invoke-two", SecondHash);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.BusyOutcomeReserved, busyReservation.Status);
+        Assert.NotNull(busyReservation.Lease);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, first.TryReserveWorkspaceBusyOutcome("invoke-two", SecondHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, first.TryReserveWorkspaceBusyOutcome("invoke-two", FirstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, second.TryReserveWorkspaceBusyOutcome("invoke-one", FirstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, second.TryReserveWorkspaceBusyOutcome("invoke-one", SecondHash).Status);
         acquired.Lease!.Dispose();
         acquired.Lease.Dispose();
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, first.TryAcquire("invoke-two", SecondHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, first.TryAcquire("invoke-two", FirstHash).Status);
+        busyReservation.Lease!.Dispose();
+        busyReservation.Lease.Dispose();
         using var next = second.TryAcquire("invoke-two", SecondHash).Lease;
         Assert.NotNull(next);
+        next.Dispose();
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceAvailable, second.TryReserveWorkspaceBusyOutcome("invoke-three", FirstHash).Status);
         Assert.Throws<ArgumentException>(() => first.TryAcquire("INVALID", FirstHash));
         Assert.Throws<ArgumentException>(() => first.TryAcquire("invoke-three", "bad-hash"));
+        Assert.Throws<ArgumentException>(() => first.TryReserveWorkspaceBusyOutcome("INVALID", FirstHash));
+        Assert.Throws<ArgumentException>(() => first.TryReserveWorkspaceBusyOutcome("invoke-three", "bad-hash"));
     }
 
     [Fact]
@@ -56,6 +71,36 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
         using var ownershipAfterRelease = new FileStream(paths.CustomLoopHostLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
         Assert.True(ownershipAfterRelease.CanWrite);
+    }
+
+    [Fact]
+    public async Task Gate_reports_unavailable_host_without_blocking_construction_when_another_process_owns_the_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.LoopRunsPath);
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
+
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", FirstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryReserveWorkspaceBusyOutcome("invoke-one", FirstHash).Status);
+    }
+
+    [Fact]
+    public async Task Gate_retries_host_ownership_after_the_external_owner_releases_the_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.LoopRunsPath);
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
+
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", FirstHash).Status);
+        ownership.Dispose();
+        using var acquired = gate.TryAcquire("invoke-one", FirstHash).Lease;
+
+        Assert.NotNull(acquired);
     }
 
     [Fact]

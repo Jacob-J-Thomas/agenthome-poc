@@ -5,4 +5,5 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 public sealed record CustomLoopOrderedRunResult(
     CustomLoopOrderedRunStatus Status,
     CustomLoopRunRecord? Run,
-    string Detail);
+    string Detail,
+    bool ProviderWasInvoked = false);

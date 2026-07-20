@@ -343,6 +343,77 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Pending_control_without_an_owned_transition_retries_an_idempotent_outcome()
+    {
+        const string operationId = "pause-already-requested";
+        var run = Run("run-already-requested", CustomLoopRunStatus.PauseRequested);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var audit = new RecordingAuditLog();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
+
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.PauseRequested, result.Status);
+        Assert.Equal(run, store[run.Id]);
+        Assert.Equal(0, store.UpdateCallCount);
+        var completed = await operations.GetAsync(operationId);
+        Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
+        Assert.Equal(CustomLoopControlStatus.PauseRequested, completed.Outcome);
+        Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.Requested);
+    }
+
+    [Fact]
+    public async Task Pending_control_for_a_missing_run_retries_its_not_found_completion()
+    {
+        const string operationId = "pause-missing-retry";
+        const string runId = "run-missing-retry";
+        var store = new MultiRunStore([]);
+        var operations = new InMemoryOperationStore();
+        var pending = Pending(CustomLoopControlKind.Pause, runId, 1, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var audit = new RecordingAuditLog();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
+
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(runId, 1, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.NotFound, result.Status);
+        var completed = await operations.GetAsync(operationId);
+        Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
+        Assert.Equal(CustomLoopControlStatus.NotFound, completed.Outcome);
+        Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.NotFound);
+    }
+
+    [Theory]
+    [InlineData(CustomLoopControlKind.Cancel, CustomLoopRunStatus.Cancelled)]
+    [InlineData(CustomLoopControlKind.Resume, CustomLoopRunStatus.Running)]
+    public async Task Pending_non_mutating_control_for_other_kinds_retries_its_invalid_state_completion(CustomLoopControlKind kind, CustomLoopRunStatus status)
+    {
+        var operationId = $"{kind.ToString().ToLowerInvariant()}-non-mutating-retry";
+        var run = Run($"run-{kind.ToString().ToLowerInvariant()}-non-mutating", status);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var pending = Pending(kind, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var audit = new RecordingAuditLog();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
+
+        var result = kind == CustomLoopControlKind.Cancel
+            ? await service.CancelAsync(new CustomLoopCancelRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor))
+            : await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.InvalidState, result.Status);
+        Assert.Equal(run, store[run.Id]);
+        Assert.Equal(0, store.UpdateCallCount);
+        var completed = await operations.GetAsync(operationId);
+        Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
+        Assert.Equal(CustomLoopControlStatus.InvalidState, completed.Outcome);
+        Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.Denied);
+    }
+
+    [Fact]
     public async Task Pending_control_completes_as_conflict_after_an_unrelated_transition_advances_the_run()
     {
         const string operationId = "pause-overtaken";
@@ -465,6 +536,22 @@ public sealed class CustomLoopLifecycleServiceTests
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, $"resume-{orderedStatus.ToString().ToLowerInvariant()}", AuditSchema.Actors.Web));
 
         Assert.Equal(expected, result.Status);
+    }
+
+    [Fact]
+    public async Task Resume_registers_local_ownership_before_exposing_running_state()
+    {
+        var run = Run("run-resume-owned", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([run]);
+        var cancellation = new RecordingCancellationSignal();
+        var executor = new NoopResumeExecutor(beforeResult: request => Assert.Contains(request.RunId, cancellation.ActiveRunIds));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-owned", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.Completed, result.Status);
+        Assert.True(Assert.Single(executor.Requests).ActiveRunAlreadyRegistered);
+        Assert.Empty(cancellation.ActiveRunIds);
     }
 
     [Fact]
@@ -597,6 +684,31 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Empty(executor.Requests);
         Assert.Equal(1, gate.AcquisitionCount);
         Assert.Equal(0, gate.ReleasedLeaseCount);
+    }
+
+    [Fact]
+    public async Task Resume_host_unavailable_outcome_remains_pending_and_retryable()
+    {
+        var run = Run("run-resume-host-unavailable", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var executor = new NoopResumeExecutor();
+        var gate = new TestExecutionGate(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable);
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var request = new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-host-unavailable", AuditSchema.Actors.Web);
+
+        var unavailable = await service.ResumeAsync(request);
+        var unavailableReceipt = await operations.GetAsync(request.OperationId);
+        gate.Status = CustomLoopExecutionLeaseStatus.Acquired;
+        var retried = await service.ResumeAsync(request);
+
+        Assert.Equal(CustomLoopControlStatus.WorkspaceHostUnavailable, unavailable.Status);
+        Assert.Null(unavailable.Run);
+        Assert.Null(unavailableReceipt);
+        Assert.Equal(CustomLoopControlStatus.Completed, retried.Status);
+        Assert.Single(executor.Requests);
+        Assert.Equal(1, gate.AcquisitionCount);
+        Assert.Equal(1, gate.ReleasedLeaseCount);
     }
 
     [Fact]
@@ -767,7 +879,7 @@ public sealed class CustomLoopLifecycleServiceTests
             status,
             Now,
             updated,
-            null,
+            status == CustomLoopRunStatus.Cancelled ? updated : null,
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
             $"admit-{id}",
@@ -981,7 +1093,19 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public List<string> RunIds { get; } = [];
 
+        public HashSet<string> ActiveRunIds { get; } = new(StringComparer.Ordinal);
+
         public int AttemptCount { get; private set; }
+
+        public IDisposable? TryRegisterActiveRun(string runId)
+        {
+            if (!ActiveRunIds.Add(runId))
+            {
+                return null;
+            }
+
+            return new Registration(() => ActiveRunIds.Remove(runId));
+        }
 
         public void CancelActiveAttempt(string runId)
         {
@@ -993,6 +1117,19 @@ public sealed class CustomLoopLifecycleServiceTests
             }
 
             RunIds.Add(runId);
+        }
+
+        private sealed class Registration(Action release) : IDisposable
+        {
+            private int _disposed;
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                {
+                    release();
+                }
+            }
         }
     }
 

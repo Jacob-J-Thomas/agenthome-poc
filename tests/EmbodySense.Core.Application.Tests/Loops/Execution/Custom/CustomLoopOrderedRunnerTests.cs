@@ -88,6 +88,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
         Assert.True(result.Status == CustomLoopOrderedRunStatus.Completed, string.Join(Environment.NewLine, store.ValidationFailures));
+        Assert.True(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Completed, result.Run!.Status);
         Assert.Equal("final output", result.Run.FinalOutput);
         Assert.Equal(["step-first", "step-second"], executor.Requests.Select(item => item.StepId));
@@ -325,8 +326,37 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.True(result.ProviderWasInvoked);
         Assert.Single(executor.Requests);
         Assert.DoesNotContain(result.Run!.Events, item => item.StepId == "step-second");
+    }
+
+    [Fact]
+    public async Task Failure_before_the_provider_request_starts_is_not_reported_as_dispatched()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(new InvalidOperationException("transport construction failed")) { MarkProviderRequestStarted = false };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.False(result.ProviderWasInvoked);
+        Assert.Single(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Transport_failure_before_provider_dispatch_is_definitive_and_does_not_require_review()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(new IOException("transport construction failed")) { MarkProviderRequestStarted = false };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Failed, result.Run!.Status);
+        Assert.Equal("inference_attempt_failed", result.Run.FailureCode);
+        Assert.Contains("before dispatch", result.Run.FailureDetail, StringComparison.OrdinalIgnoreCase);
+        Assert.False(result.ProviderWasInvoked);
     }
 
     [Theory]
@@ -484,6 +514,33 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Cancellation_while_waiting_before_publication_append_is_not_marked_uncertain()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            maxAdditionalIterations: 0,
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var store = new FakeRunStore(run);
+        CustomLoopOrderedRunner? runner = null;
+        var publisher = new RecordingPublisher
+        {
+            BeforePublish = request =>
+            {
+                runner!.CancelActiveAttempt(request.RunId);
+                return Task.CompletedTask;
+            }
+        };
+        runner = Runner(store, new QueueExecutor(Result("evidence")), publisher);
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("publication_cancelled_before_dispatch", result.Run!.FailureCode);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+    }
+
+    [Fact]
     public async Task Missing_started_audit_blocks_provider_dispatch()
     {
         var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))));
@@ -637,6 +694,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.True(result.ProviderWasInvoked);
         Assert.Contains(result.Run!.Events, item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved);
         Assert.Contains(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.CheckpointCommitted);
     }
@@ -720,13 +778,14 @@ public sealed class CustomLoopOrderedRunnerTests
         var failed = await failedRunner.ResumeAsync(new CustomLoopResumeExecutionRequest(running.Id, running.LifecycleVersion, lifecycle.EventId, AuditSchema.Actors.Web));
         var failedPublicRun = await failedRunner.RunAsync(new CustomLoopOrderedRunRequest(running.Id, AuditSchema.Actors.Web));
         failedRunner.CancelActiveAttempt("INVALID");
-        failedRunner.CancelActiveAttempt(running.Id);
+        var remoteCancellation = Assert.Throws<InvalidOperationException>(() => failedRunner.CancelActiveAttempt(running.Id));
 
         Assert.Equal(CustomLoopOrderedRunStatus.NotFound, missing.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, mismatch.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, invalid.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, failed.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.Failed, failedPublicRun.Status);
+        Assert.Contains("not owned by this runtime", remoteCancellation.Message, StringComparison.Ordinal);
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => mismatchRunner.ResumeAsync(new CustomLoopResumeExecutionRequest(running.Id, 0, lifecycle.EventId, AuditSchema.Actors.Web)));
         Assert.Empty(executor.Requests);
     }
@@ -742,6 +801,50 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
+        Assert.Empty(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Public_execution_registers_local_ownership_before_persisting_running_state()
+    {
+        CustomLoopOrderedRunner? runner = null;
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (candidate.Status == CustomLoopRunStatus.Running)
+                {
+                    runner!.CancelActiveAttempt(candidate.Id);
+                }
+            }
+        };
+        runner = Runner(store, new QueueExecutor(Result("completed")));
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, result.Status);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_admitted_run_load_parks_the_run_before_returning()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeGet = token =>
+            {
+                cancellation.Cancel();
+                token.ThrowIfCancellationRequested();
+            }
+        };
+        var executor = new QueueExecutor(Result("must not run"));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Empty(executor.Requests);
     }
@@ -767,6 +870,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Null(result.Run.FailureCode);
         Assert.DoesNotContain("run_start_audit_failed", result.Detail, StringComparison.Ordinal);
@@ -794,6 +898,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.False(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Null(result.Run.FailureCode);
         Assert.DoesNotContain("attempt_start_audit_failed", result.Detail, StringComparison.Ordinal);
@@ -822,6 +927,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var result = await Runner(store, executor, audit: audit).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Cancelled, result.Status);
+        Assert.True(result.ProviderWasInvoked);
         Assert.Equal(CustomLoopRunStatus.Cancelled, result.Run!.Status);
         Assert.Null(result.Run.FailureCode);
         Assert.DoesNotContain("exit_start_audit_failed", result.Detail, StringComparison.Ordinal);
@@ -1835,6 +1941,8 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Exception? GetException { get; set; }
 
+        public Action<CancellationToken>? BeforeGet { get; init; }
+
         public Exception? AppendTerminalWarningException { get; init; }
 
         public Func<CustomLoopRunRecord, Task>? AfterUpdate { get; init; }
@@ -1868,6 +1976,7 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
         {
+            BeforeGet?.Invoke(cancellationToken);
             if (OutcomeConflictInjected && GetExceptionAfterOutcomeConflict is not null)
             {
                 throw GetExceptionAfterOutcomeConflict;
@@ -2025,16 +2134,23 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Func<CustomLoopInferenceAttemptRequest, Task>? AfterExecute { get; set; }
 
-        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default)
+        public bool MarkProviderRequestStarted { get; set; } = true;
+
+        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
         {
             Requests.Add(request);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (MarkProviderRequestStarted)
+            {
+                providerRequestStarted?.Invoke();
+            }
+
             if (BeforeExecute is not null)
             {
                 await BeforeExecute(request);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-
             var outcome = _outcomes.Dequeue();
             if (outcome is Exception exception)
             {
@@ -2220,6 +2336,7 @@ public sealed class CustomLoopOrderedRunnerTests
             }
 
             cancellationToken.ThrowIfCancellationRequested();
+            request.AppendStarted?.Invoke();
 
             return ReturnNull ? null! : NextResult ?? new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Published, request.OperationId, "Published.");
         }

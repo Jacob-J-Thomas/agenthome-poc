@@ -4,5 +4,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
 public interface ICustomLoopExecutionCancellationSignal
 {
+    IDisposable? TryRegisterActiveRun(string runId);
+
     void CancelActiveAttempt(string runId);
 }

@@ -12,14 +12,15 @@ internal static class LlmInferenceClientFactory
         LlmInferenceClientOptions options,
         IToolBroker? toolBroker = null,
         ICodexAppServerTransport? codexAppServerTransport = null,
-        IAuditLog? auditLog = null)
+        IAuditLog? auditLog = null,
+        Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ValidateSurface(options.Surface);
 
         return options.Surface switch
         {
-            LlmInferenceSurface.OpenAiCodex => new CodexAppServerInferenceClient(options, toolBroker, codexAppServerTransport, auditLog),
+            LlmInferenceSurface.OpenAiCodex => new CodexAppServerInferenceClient(options, toolBroker, codexAppServerTransport, auditLog, providerRequestStarted),
             LlmInferenceSurface.AzureAiFoundry => new NotSupportedInferenceClient(
                 "Azure AI Foundry inferencing is selected, but the Azure adapter has not been wired yet."),
             _ => new NotSupportedInferenceClient("LLM inferencing is not wired for the selected surface.")

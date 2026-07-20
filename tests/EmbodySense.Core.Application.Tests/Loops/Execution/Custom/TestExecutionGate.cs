@@ -4,12 +4,14 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
 internal sealed class TestExecutionGate : ICustomLoopWorkspaceExecutionGate
 {
-    private readonly CustomLoopExecutionLeaseStatus _status;
-
     public TestExecutionGate(CustomLoopExecutionLeaseStatus status = CustomLoopExecutionLeaseStatus.Acquired)
     {
-        _status = status;
+        Status = status;
     }
+
+    public CustomLoopExecutionLeaseStatus Status { get; set; }
+
+    public bool IsWorkspaceHostAvailable => Status != CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
 
     public int AcquisitionCount { get; private set; }
 
@@ -18,8 +20,13 @@ internal sealed class TestExecutionGate : ICustomLoopWorkspaceExecutionGate
     public CustomLoopExecutionLeaseResult TryAcquire(string operationId, string requestHash)
     {
         AcquisitionCount++;
-        var lease = _status == CustomLoopExecutionLeaseStatus.Acquired ? new Lease(operationId, () => ReleasedLeaseCount++) : null;
-        return new CustomLoopExecutionLeaseResult(_status, lease, "Test execution ownership outcome.");
+        var lease = Status == CustomLoopExecutionLeaseStatus.Acquired ? new Lease(operationId, () => ReleasedLeaseCount++) : null;
+        return new CustomLoopExecutionLeaseResult(Status, lease, "Test execution ownership outcome.");
+    }
+
+    public CustomLoopExecutionLeaseResult TryReserveWorkspaceBusyOutcome(string operationId, string requestHash)
+    {
+        throw new NotSupportedException("Lifecycle service tests never persist invocation workspace-busy receipts.");
     }
 
     public ValueTask DisposeAsync()

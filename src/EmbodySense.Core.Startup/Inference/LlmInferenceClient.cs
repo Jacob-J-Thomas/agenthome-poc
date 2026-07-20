@@ -16,13 +16,13 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
     private readonly ILlmInferenceClient _innerClient;
     private readonly IAuditLog? _auditLog;
 
-    public LlmInferenceClient(LlmInferenceClientOptions options, IToolBroker? toolBroker = null, ICodexAppServerTransport? codexAppServerTransport = null)
+    public LlmInferenceClient(LlmInferenceClientOptions options, IToolBroker? toolBroker = null, ICodexAppServerTransport? codexAppServerTransport = null, Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         _options = options;
         _auditLog = AuditLog.TryCreateForExistingWorkspace(options.WorkingDirectory);
-        _innerClient = LlmInferenceClientFactory.CreateProvider(options, toolBroker, codexAppServerTransport, _auditLog);
+        _innerClient = LlmInferenceClientFactory.CreateProvider(options, toolBroker, codexAppServerTransport, _auditLog, providerRequestStarted);
     }
 
     public async Task<LlmInferenceResponse> GenerateAsync(
