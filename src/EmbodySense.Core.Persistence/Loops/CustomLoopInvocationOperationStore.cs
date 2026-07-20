@@ -254,7 +254,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && Enum.IsDefined(operation.State)
             && operation.State != CustomLoopInvocationOperationState.Unknown
             && Enum.IsDefined(operation.Outcome)
-            && operation.Detail.Length is > 0 and <= CustomLoopLimits.MaxRunDetailCharacters;
+            && operation.Detail is { Length: > 0 and <= CustomLoopLimits.MaxRunDetailCharacters };
         if (!valid)
         {
             throw new FormatException("Custom-loop invocation operation failed canonical validation.");
@@ -262,7 +262,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
         if (requirePending && (operation.State != CustomLoopInvocationOperationState.Pending
             || operation.Outcome != CustomLoopInvocationOutcome.Unknown
-            || operation.AdmissionStatus.Length != 0
+            || operation.AdmissionStatus is not { Length: 0 }
             || operation.RunId is not null))
         {
             throw new FormatException("Pending custom-loop invocation operation contains completed outcome fields.");

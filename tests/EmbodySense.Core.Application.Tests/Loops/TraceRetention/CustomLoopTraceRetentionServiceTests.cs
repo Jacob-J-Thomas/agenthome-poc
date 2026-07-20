@@ -111,6 +111,23 @@ public sealed class CustomLoopTraceRetentionServiceTests
     }
 
     [Fact]
+    public async Task Future_outcome_audit_timestamp_is_not_treated_as_an_active_owner()
+    {
+        var request = Request();
+        var tombstone = Tombstone(request, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted);
+        var operation = Operation(request, tombstone, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted);
+        var store = new RecordingStore(null, null) { Operation = operation };
+        var now = operation.UpdatedAtUtc.AddSeconds(-1);
+
+        var result = await new CustomLoopTraceRetentionService(store, new RecordingAuditLog(), new FixedTimeProvider(now)).DeleteAsync(request);
+
+        Assert.Equal(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, result.Status);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning, result.Tombstone!.OutcomeIntegrity);
+        Assert.Equal(new[] { CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning }, store.MarkedIntegrities);
+        Assert.DoesNotContain("still active", result.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Stale_recovery_reports_a_concurrently_completed_outcome_owner()
     {
         var request = Request();

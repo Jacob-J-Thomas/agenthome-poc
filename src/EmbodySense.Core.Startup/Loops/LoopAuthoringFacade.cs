@@ -102,6 +102,11 @@ public sealed class LoopAuthoringFacade
         var definition = await _systemDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken);
         if (definition is not null)
         {
+            if (!string.Equals(definition.Id, BuiltInLoopIds.DefaultConversation, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("The persisted default conversation authority definition has a substituted identity; loop authoring failed closed.");
+            }
+
             return definition;
         }
 

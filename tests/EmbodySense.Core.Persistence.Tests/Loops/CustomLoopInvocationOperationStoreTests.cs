@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
@@ -132,6 +133,24 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Directory.CreateDirectory(paths.CustomLoopInvocationOperationsPath);
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, "invoke-corrupt.json"), "not-json");
         await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("invoke-corrupt"));
+    }
+
+    [Theory]
+    [InlineData("detail")]
+    [InlineData("admissionStatus")]
+    public async Task Null_required_receipt_text_is_reported_as_malformed(string propertyName)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-null-text", "prompt");
+        await store.BeginAsync(pending);
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        root[propertyName] = null;
+        await File.WriteAllTextAsync(path, root.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
     }
 
     [Theory]

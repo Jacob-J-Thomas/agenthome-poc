@@ -221,7 +221,8 @@ public sealed class CustomLoopTraceRetentionService
 
     private async Task<CustomLoopTraceDeletionResult> ResolveInterruptedOutcomeAuditAsync(CustomLoopTraceDeletionRequest request, CustomLoopTraceTombstone tombstone, DateTimeOffset? outcomeAuditStartedAtUtc)
     {
-        if (outcomeAuditStartedAtUtc is not null && outcomeAuditStartedAtUtc.Value > _timeProvider.GetUtcNow().ToUniversalTime() - IntegrityWriteTimeout)
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        if (outcomeAuditStartedAtUtc is not null && outcomeAuditStartedAtUtc.Value <= now && outcomeAuditStartedAtUtc.Value > now - IntegrityWriteTimeout)
         {
             return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, tombstone, "The trace deletion is committed and its existing outcome-audit owner is still active; retry after that bounded integrity window completes.");
         }

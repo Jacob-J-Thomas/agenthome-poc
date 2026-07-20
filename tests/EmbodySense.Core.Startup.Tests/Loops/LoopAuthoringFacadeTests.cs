@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Workspace;
@@ -104,6 +105,24 @@ public sealed class LoopAuthoringFacadeTests
         var mutationException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.CreateAsync("blocked-create"));
 
         Assert.Contains("missing its default conversation authority", catalogException.Message, StringComparison.Ordinal);
+        Assert.Contains("failed closed", mutationException.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Substituted_system_authority_identity_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var path = new WorkspacePaths(workspace.RootPath).DefaultConversationLoopDefinitionPath;
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        root["id"] = "substituted-authority";
+        await File.WriteAllTextAsync(path, root.ToJsonString());
+        var facade = new LoopAuthoringFacade(workspace.RootPath);
+
+        var catalogException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.GetCatalogAsync());
+        var mutationException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.CreateAsync("blocked-create"));
+
+        Assert.Contains("substituted identity", catalogException.Message, StringComparison.Ordinal);
         Assert.Contains("failed closed", mutationException.Message, StringComparison.Ordinal);
     }
 
