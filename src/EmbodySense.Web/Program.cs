@@ -33,7 +33,7 @@ public static class Program
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(options);
 
-        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = ResolveContentRoot() });
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = ResolveContentRoot(), ApplicationName = typeof(Program).Assembly.FullName });
         builder.Logging.ClearProviders();
         builder.Logging.AddSimpleConsole();
         builder.WebHost.UseUrls(options.Url);
@@ -46,7 +46,7 @@ public static class Program
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(options);
 
-        services.AddControllers().AddApplicationPart(typeof(Program).Assembly).AddJsonOptions(options =>
+        services.AddControllers().AddJsonOptions(options =>
         {
             options.JsonSerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
             options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
