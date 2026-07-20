@@ -527,9 +527,10 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
         public List<CustomLoopInferenceAttemptRequest> Requests { get; } = [];
 
-        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default)
+        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
         {
             Requests.Add(request);
+            providerRequestStarted?.Invoke();
             if (request.IsExit)
             {
                 _exitCount++;

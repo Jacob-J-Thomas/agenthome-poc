@@ -10,7 +10,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     private static readonly Dictionary<string, WorkspaceHost> Hosts = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     private readonly string _workspaceKey;
-    private readonly WorkspaceHost _host;
+    private readonly WorkspaceHost? _host;
     private bool _disposed;
 
     public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths)
@@ -39,7 +39,8 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
                 ownership?.Dispose();
-                throw new InvalidOperationException("custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.", exception);
+                _host = null;
+                return;
             }
             catch
             {
@@ -59,6 +60,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         lock (HostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_host is null)
+            {
+                return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
+            }
+
             if (_host.BusyOutcomeReservations.TryGetValue(operationId, out var busyReservation))
             {
                 return SameRequest(busyReservation.RequestHash, requestHash)
@@ -98,6 +104,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         lock (HostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_host is null)
+            {
+                return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
+            }
+
             if (_host.BusyOutcomeReservations.TryGetValue(operationId, out var existingReservation))
             {
                 return SameRequest(existingReservation.RequestHash, requestHash)
@@ -140,7 +151,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             }
 
             _disposed = true;
-            ReleaseReference(_workspaceKey, _host);
+            if (_host is not null)
+            {
+                ReleaseReference(_workspaceKey, _host);
+            }
+
             return ValueTask.CompletedTask;
         }
     }

@@ -251,6 +251,27 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Validate_accepts_a_fresh_authority_snapshot_that_revokes_attempt_start_commands()
+    {
+        var seed = CreateRun();
+        var attemptAuthority = Authority([CustomLoopToolAssignment.Read]);
+        var revokedAuthority = attemptAuthority with
+        {
+            CurrentRoleCeiling = [],
+            EffectiveAssignments = [],
+            RoleCeilingHash = new string('c', CustomLoopLimits.Sha256HexCharacters),
+            Detail = "Read authority was revoked before actuation."
+        };
+        var started = new CustomLoopRunEvent(2, "attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, attemptAuthority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        var evidence = ToolEvidence(revokedAuthority, ToolCommand.Read);
+        var reserved = new CustomLoopRunEvent(3, "tool-revoked", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, revokedAuthority, evidence);
+
+        var validation = CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, reserved] });
+
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors.Select(error => $"{error.Code}: {error.Message}")));
+    }
+
+    [Fact]
     public void Validate_accepts_the_exact_nonterminal_control_limit_with_terminal_and_warning_slots_reserved()
     {
         var run = WithLifecycleControlEvents(CreateRun(), CustomLoopLimits.MaxNonterminalLifecycleControlEventsPerRun);

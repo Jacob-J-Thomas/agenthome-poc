@@ -8,5 +8,6 @@ public enum CustomLoopExecutionLeaseStatus
     OperationInProgress = 3,
     OperationConflict = 4,
     BusyOutcomeReserved = 5,
-    WorkspaceAvailable = 6
+    WorkspaceAvailable = 6,
+    WorkspaceHostUnavailable = 7
 }

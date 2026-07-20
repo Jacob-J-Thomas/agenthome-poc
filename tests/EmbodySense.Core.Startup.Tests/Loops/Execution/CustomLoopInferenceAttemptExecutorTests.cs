@@ -143,6 +143,30 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_reloads_role_authority_before_each_tool_call_and_denies_revoked_commands()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "do not read after revocation");
+        var authorityProvider = new RevokingAuthorityProvider();
+        ToolResult? observed = null;
+        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        {
+            Assert.NotNull(broker);
+            observed = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+            return Response();
+        }, authorityProvider: authorityProvider);
+
+        var result = await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
+
+        Assert.Equal(2, authorityProvider.ResolveCount);
+        Assert.Equal(1, result.ToolRequestsConsumed);
+        Assert.Equal(ToolExecutionOutcome.Denied, Assert.IsType<ToolResult>(observed).Outcome);
+        var authorityEvent = Assert.Single(await new AuditLog(paths).ReadTailAsync(100), item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate);
+        Assert.Equal(AuditSchema.Outcomes.Denied, authorityEvent.Outcome);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_denies_and_audits_the_sixth_tool_request_in_an_attempt()
     {
         using var workspace = new TestWorkspace();
@@ -309,11 +333,25 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var executor = CreateExecutor(workspace, (_, _, _) => throw new IOException("provider exploded"),
             (options, broker, behavior) => client = new AsyncFakeInferenceClient(broker, behavior));
 
-        var exception = await Assert.ThrowsAsync<IOException>(() => executor.ExecuteAsync(CreateRequest()));
+        var providerRequestStarted = false;
+        var exception = await Assert.ThrowsAsync<IOException>(() => executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerRequestStarted = true));
 
         Assert.Equal("provider exploded", exception.Message);
+        Assert.True(providerRequestStarted);
         Assert.NotNull(client);
         Assert.True(client.Disposed);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_does_not_report_dispatch_when_transport_construction_fails()
+    {
+        using var workspace = new TestWorkspace();
+        var providerRequestStarted = false;
+        var executor = CreateInjectedExecutor(CreateOptions(workspace), new RecordingApprovalPrompt(), (_, _) => throw new FileNotFoundException("codex executable missing"));
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => executor.ExecuteAsync(CreateRequest(), providerRequestStarted: () => providerRequestStarted = true));
+
+        Assert.False(providerRequestStarted);
     }
 
     [Fact]
@@ -450,13 +488,14 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Func<IToolBroker?, LlmInferenceRequest, CancellationToken, Task<LlmInferenceResponse>> behavior,
         Func<LlmInferenceClientOptions, IToolBroker?, Func<IToolBroker?, LlmInferenceRequest, CancellationToken, Task<LlmInferenceResponse>>, ILlmInferenceClient>? factory = null,
         RecordingApprovalPrompt? approvalPrompt = null,
-        ICustomLoopToolEvidenceSink? evidenceSink = null)
+        ICustomLoopToolEvidenceSink? evidenceSink = null,
+        ICustomLoopToolAuthorityProvider? authorityProvider = null)
     {
         var effectivePrompt = approvalPrompt ?? new RecordingApprovalPrompt();
         return new CustomLoopInferenceAttemptExecutor(
             CreateOptions(workspace),
             (IToolApprovalPrompt)effectivePrompt,
-            new TestAuthorityProvider(),
+            authorityProvider ?? new TestAuthorityProvider(),
             evidenceSink ?? new NullEvidenceSink(),
             (options, broker) => factory?.Invoke(options, broker, behavior) ?? new AsyncFakeInferenceClient(broker, behavior));
     }
@@ -687,6 +726,30 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         }
     }
 
+    private sealed class RevokingAuthorityProvider : ICustomLoopToolAuthorityProvider
+    {
+        public int ResolveCount { get; private set; }
+
+        public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
+        {
+            ResolveCount++;
+            var admitted = admittedMaximum.ToArray();
+            var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
+            var current = ResolveCount == 1 ? admitted : [];
+            return Task.FromResult(new CustomLoopToolAuthoritySnapshot(
+                roleId,
+                admitted,
+                current,
+                catalog,
+                current,
+                CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', current)),
+                CustomLoopTraceContentHash.Compute(string.Join('\n', catalog)),
+                DateTimeOffset.UtcNow,
+                true,
+                ResolveCount == 1 ? "Initial admitted authority." : "Authority revoked before tool actuation."));
+        }
+    }
+
     private sealed class NullEvidenceSink : ICustomLoopToolEvidenceSink
     {
         public Task RecordAsync(string runId, int iteration, string stepId, int attempt, CustomLoopToolTraceEvidence evidence, CancellationToken cancellationToken = default)
@@ -708,9 +771,9 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
 
     private sealed class RunLimitAttemptExecutor(CustomLoopInferenceAttemptExecutor inner) : ICustomLoopInferenceAttemptExecutor
     {
-        public Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default)
+        public Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
         {
-            return inner.ExecuteAsync(request with { ToolRequestsUsedInRun = CustomLoopLimits.MaxGovernedToolRequestsPerRun }, cancellationToken);
+            return inner.ExecuteAsync(request with { ToolRequestsUsedInRun = CustomLoopLimits.MaxGovernedToolRequestsPerRun }, cancellationToken, providerRequestStarted);
         }
     }
 

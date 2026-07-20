@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
@@ -83,6 +84,24 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(response.Output, assistantEvent.Text);
         Assert.Equal(response.RunIdentity, assistantEvent.RunIdentity);
         Assert.Equal(["runtime guide observed: hello"], chunks);
+    }
+
+    [Fact]
+    public async Task CreateAsync_keeps_ordinary_chat_available_when_another_process_owns_custom_loop_hosting()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.LoopRunsPath);
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var turn = await runtime.RunTurnAsync("hello");
+        var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-one", "prompt"));
+        Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
+        Assert.Equal("WorkspaceExecutionBusy", customLoop.AdmissionStatus);
+        Assert.False(customLoop.WasDispatched);
     }
 
     [Fact]

@@ -88,7 +88,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         return new WorkspacePaths(Path.GetFullPath(options.WorkingDirectory));
     }
 
-    public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default)
+    public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         var authority = request.AuthoritySnapshot ?? await _authorityProvider.ResolveAsync(request.RoleId, request.AdmittedToolAssignments, cancellationToken);
@@ -115,6 +115,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
 
         try
         {
+            providerRequestStarted?.Invoke();
             var response = await client.GenerateAsync(request.InferenceRequest, cancellationToken: cancellationToken);
             return new CustomLoopInferenceAttemptResult(
                 response.OutputText,
@@ -478,7 +479,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                 throw;
             }
 
-            var authority = _attempt.AuthoritySnapshot!;
+            var authority = await _authorityProvider.ResolveAsync(_attempt.RoleId, _attempt.AdmittedToolAssignments, cancellationToken);
             var correlation = CreateAuditCorrelation(authority);
             var correlatedRequest = boundedRequest with { AuditCorrelation = correlation };
             string resolvedTarget;

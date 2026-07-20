@@ -395,9 +395,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             providerToken.Token.ThrowIfCancellationRequested();
-            providerInvoked = true;
-            dispatchState.ProviderWasInvoked = true;
-            result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
+            result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token, () =>
+            {
+                providerInvoked = true;
+                dispatchState.MarkProviderRequestStarted();
+            });
         }
         catch (OperationCanceledException) when (!providerInvoked)
         {
@@ -596,9 +598,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             providerToken.Token.ThrowIfCancellationRequested();
-            providerInvoked = true;
-            dispatchState.ProviderWasInvoked = true;
-            result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token);
+            result = await _inferenceExecutor.ExecuteAsync(attemptRequest, providerToken.Token, () =>
+            {
+                providerInvoked = true;
+                dispatchState.MarkProviderRequestStarted();
+            });
         }
         catch (OperationCanceledException) when (!providerInvoked)
         {
@@ -1480,11 +1484,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             .ToArray();
         if (toolEvents.Any(item => item.ToolAuthority is null
             || item.ToolEvidence is null
-            || !attemptStart.ToolAuthority.Matches(item.ToolAuthority)
-            || !attemptStart.ToolAuthority.Matches(item.ToolEvidence.Authority)
+            || !item.ToolAuthority.IsBoundedRefreshOf(attemptStart.ToolAuthority)
+            || !item.ToolEvidence.Authority.IsBoundedRefreshOf(attemptStart.ToolAuthority)
             || !attemptStart.ToolAuthority.AllowsCommand(item.ToolEvidence.Command)))
         {
-            return "The durable governed tool trace is not bound to the exact attempt-start authority and allowed command set.";
+            return "The durable governed tool trace is not bound to a fresh non-widening authority refresh and the attempt-start allowed command set.";
         }
 
         var reservations = toolEvents.Where(item => item.Kind == CustomLoopRunEventKind.ToolRequestReserved).ToArray();
@@ -1873,7 +1877,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private sealed class ProviderDispatchState
     {
-        public bool ProviderWasInvoked { get; set; }
+        private int _providerWasInvoked;
+
+        public bool ProviderWasInvoked => Volatile.Read(ref _providerWasInvoked) != 0;
+
+        public void MarkProviderRequestStarted() => Interlocked.Exchange(ref _providerWasInvoked, 1);
     }
 
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);

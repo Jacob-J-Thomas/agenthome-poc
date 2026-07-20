@@ -78,18 +78,21 @@ public sealed class AgentRuntimeFactory
             var recovery = new CustomLoopRecoveryService(customRunStore, auditLog);
             var recoveryOperationId = "recovery-" + Guid.NewGuid().ToString("N");
             var recoveryOwnership = customExecutionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
-            if (recoveryOwnership.Status != CustomLoopExecutionLeaseStatus.Acquired || recoveryOwnership.Lease is null)
+            if (recoveryOwnership.Status != CustomLoopExecutionLeaseStatus.Acquired && recoveryOwnership.Status != CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
             {
                 throw new InvalidOperationException("custom_workspace_host_busy: restart recovery could not obtain exclusive custom-loop execution ownership without waiting.");
             }
 
-            IReadOnlyList<CustomLoopRecoveryResult> recoveryResults;
-            using (recoveryOwnership.Lease)
+            IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
+            if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
             {
-                recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
-                if (recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
+                using (recoveryOwnership.Lease!)
                 {
-                    throw new InvalidOperationException("custom_loop_recovery_failed: persisted custom-loop state could not be recovered exactly; no automatic execution was started.");
+                    recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
+                    if (recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
+                    {
+                        throw new InvalidOperationException("custom_loop_recovery_failed: persisted custom-loop state could not be recovered exactly; no automatic execution was started.");
+                    }
                 }
             }
 

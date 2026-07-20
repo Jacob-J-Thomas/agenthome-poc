@@ -49,4 +49,23 @@ public sealed record CustomLoopToolAuthoritySnapshot(
         };
         return assignment != CustomLoopToolAssignment.Unknown && EffectiveAssignments is not null && EffectiveAssignments.Contains(assignment);
     }
+
+    public bool IsBoundedRefreshOf(CustomLoopToolAuthoritySnapshot? attemptStart)
+    {
+        return attemptStart is not null
+            && AdmittedMaximum is not null
+            && CurrentRoleCeiling is not null
+            && ImplementedCatalog is not null
+            && EffectiveAssignments is not null
+            && attemptStart.AdmittedMaximum is not null
+            && attemptStart.ImplementedCatalog is not null
+            && AdmittedMaximum.SequenceEqual(attemptStart.AdmittedMaximum)
+            && ImplementedCatalog.SequenceEqual(attemptStart.ImplementedCatalog)
+            && string.Equals(CatalogHash, attemptStart.CatalogHash, StringComparison.Ordinal)
+            && EvaluatedAtUtc >= attemptStart.EvaluatedAtUtc
+            && (string.Equals(RoleId, attemptStart.RoleId, StringComparison.Ordinal) || !IsValid && EffectiveAssignments.Length == 0)
+            && EffectiveAssignments.All(AdmittedMaximum.Contains)
+            && EffectiveAssignments.All(CurrentRoleCeiling.Contains)
+            && EffectiveAssignments.All(ImplementedCatalog.Contains);
+    }
 }

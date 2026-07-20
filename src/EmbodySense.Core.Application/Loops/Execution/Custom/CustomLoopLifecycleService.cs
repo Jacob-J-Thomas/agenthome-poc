@@ -292,7 +292,7 @@ public sealed class CustomLoopLifecycleService
         }
 
         var gate = _executionGate.TryAcquire(operation.OperationId, operation.RequestHash);
-        if (gate.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
+        if (gate.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
         {
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.WorkspaceExecutionBusy, run, "workspace_execution_busy: another custom-loop run is actively executing; the Paused run and its deadline, checkpoint, and approval binding were not changed.");
         }

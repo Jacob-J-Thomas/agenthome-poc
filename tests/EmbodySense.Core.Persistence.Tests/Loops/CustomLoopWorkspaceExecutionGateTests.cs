@@ -74,6 +74,20 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
+    public async Task Gate_reports_unavailable_host_without_blocking_construction_when_another_process_owns_the_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.LoopRunsPath);
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
+
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", FirstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryReserveWorkspaceBusyOutcome("invoke-one", FirstHash).Status);
+    }
+
+    [Fact]
     public void Gate_rejects_a_reparse_point_run_root_when_the_platform_allows_links()
     {
         using var workspace = new TestWorkspace();

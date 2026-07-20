@@ -331,6 +331,19 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.DoesNotContain(result.Run!.Events, item => item.StepId == "step-second");
     }
 
+    [Fact]
+    public async Task Failure_before_the_provider_request_starts_is_not_reported_as_dispatched()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new QueueExecutor(new InvalidOperationException("transport construction failed")) { MarkProviderRequestStarted = false };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.False(result.ProviderWasInvoked);
+        Assert.Single(executor.Requests);
+    }
+
     [Theory]
     [InlineData("timeout")]
     [InlineData("io")]
@@ -2032,16 +2045,23 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public Func<CustomLoopInferenceAttemptRequest, Task>? AfterExecute { get; set; }
 
-        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default)
+        public bool MarkProviderRequestStarted { get; set; } = true;
+
+        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
         {
             Requests.Add(request);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (MarkProviderRequestStarted)
+            {
+                providerRequestStarted?.Invoke();
+            }
+
             if (BeforeExecute is not null)
             {
                 await BeforeExecute(request);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-
             var outcome = _outcomes.Dequeue();
             if (outcome is Exception exception)
             {

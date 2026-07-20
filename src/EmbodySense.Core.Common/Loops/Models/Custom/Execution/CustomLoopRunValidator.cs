@@ -1166,9 +1166,10 @@ public static class CustomLoopRunValidator
             return;
         }
 
-        if (!attemptStart.ToolAuthority.Matches(item.ToolAuthority) || item.ToolEvidence is { } evidence && !attemptStart.ToolAuthority.Matches(evidence.Authority))
+        if (item.ToolAuthority is null || !item.ToolAuthority.IsBoundedRefreshOf(attemptStart.ToolAuthority)
+            || item.ToolEvidence is { } evidence && !evidence.Authority.IsBoundedRefreshOf(attemptStart.ToolAuthority))
         {
-            Add(errors, "tool_authority_not_attempt_bound", $"{field}.toolAuthority", "Every tool trace phase must retain the exact authority snapshot committed by its matching attempt start.");
+            Add(errors, "tool_authority_not_attempt_bound", $"{field}.toolAuthority", "Every tool trace phase must retain a fresh non-widening authority snapshot bound to the matching attempt-start admission maximum and catalog.");
         }
 
         if (item.ToolEvidence is { } toolEvidence && !attemptStart.ToolAuthority.AllowsCommand(toolEvidence.Command))
