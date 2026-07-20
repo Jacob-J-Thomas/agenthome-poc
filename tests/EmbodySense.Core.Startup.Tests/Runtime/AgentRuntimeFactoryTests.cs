@@ -101,15 +101,21 @@ public sealed class AgentRuntimeFactoryTests
 
         var preserved = await conversationMemory.LoadCurrentConversationAsync();
         var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-one", "prompt"));
+        var blockedResume = await runtime.ResumeCustomLoopAsync(new LoopRunControlInput("run-one", 1, "resume-one"));
         var turn = await runtime.RunTurnAsync("hello");
         ownership.Dispose();
         var afterRelease = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-two", "prompt"));
+        await using var recreatedRuntime = await CreateRuntimeAsync(workspace);
+        var afterRecreate = await recreatedRuntime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-three", "prompt"));
 
         Assert.Collection(preserved, message => Assert.Equal("preserved external-host transcript", message.Content));
         Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
         Assert.Equal("WorkspaceHostUnavailable", customLoop.AdmissionStatus);
         Assert.False(customLoop.WasDispatched);
-        Assert.Equal("NotFound", afterRelease.AdmissionStatus);
+        Assert.Equal("WorkspaceHostUnavailable", blockedResume.Status);
+        Assert.Equal("resume-one", blockedResume.OperationId);
+        Assert.Equal("WorkspaceHostUnavailable", afterRelease.AdmissionStatus);
+        Assert.Equal("NotFound", afterRecreate.AdmissionStatus);
     }
 
     [Fact]

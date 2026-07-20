@@ -600,6 +600,31 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Resume_host_unavailable_outcome_remains_pending_and_retryable()
+    {
+        var run = Run("run-resume-host-unavailable", CustomLoopRunStatus.Paused);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var executor = new NoopResumeExecutor();
+        var gate = new TestExecutionGate(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable);
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var request = new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-host-unavailable", AuditSchema.Actors.Web);
+
+        var unavailable = await service.ResumeAsync(request);
+        var unavailableReceipt = await operations.GetAsync(request.OperationId);
+        gate.Status = CustomLoopExecutionLeaseStatus.Acquired;
+        var retried = await service.ResumeAsync(request);
+
+        Assert.Equal(CustomLoopControlStatus.WorkspaceHostUnavailable, unavailable.Status);
+        Assert.Null(unavailable.Run);
+        Assert.Null(unavailableReceipt);
+        Assert.Equal(CustomLoopControlStatus.Completed, retried.Status);
+        Assert.Single(executor.Requests);
+        Assert.Equal(1, gate.AcquisitionCount);
+        Assert.Equal(1, gate.ReleasedLeaseCount);
+    }
+
+    [Fact]
     public async Task Concurrent_same_resume_operation_reports_in_progress_without_completing_or_dispatching()
     {
         var run = Run("run-resume-in-progress", CustomLoopRunStatus.Paused);

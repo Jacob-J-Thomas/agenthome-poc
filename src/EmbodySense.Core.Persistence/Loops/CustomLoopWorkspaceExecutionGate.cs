@@ -26,6 +26,18 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    public bool IsWorkspaceHostAvailable
+    {
+        get
+        {
+            lock (HostsSync)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                return (_host ??= TryAttachOrAcquireHost()) is not null;
+            }
+        }
+    }
+
     public CustomLoopExecutionLeaseResult TryAcquire(string operationId, string requestHash)
     {
         ValidateRequest(operationId, requestHash);

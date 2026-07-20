@@ -20,6 +20,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private readonly CustomLoopLifecycleService _lifecycleService;
     private readonly CustomLoopOrderedRunner _runner;
     private readonly CustomLoopRuntimeContext _runtimeContext;
+    private readonly bool _customExecutionAvailable;
     private readonly string _surface;
     private readonly string _actor;
     private readonly string _currentRoleId;
@@ -36,6 +37,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         CustomLoopLifecycleService lifecycleService,
         CustomLoopOrderedRunner runner,
         CustomLoopRuntimeContext runtimeContext,
+        bool customExecutionAvailable,
         string surface,
         string actor,
         string currentRoleId,
@@ -51,6 +53,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         _lifecycleService = lifecycleService ?? throw new ArgumentNullException(nameof(lifecycleService));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
+        _customExecutionAvailable = customExecutionAvailable;
         _surface = string.IsNullOrWhiteSpace(surface) ? throw new ArgumentException("Surface is required.", nameof(surface)) : surface;
         _actor = string.IsNullOrWhiteSpace(actor) ? throw new ArgumentException("Actor is required.", nameof(actor)) : actor;
         _currentRoleId = string.IsNullOrWhiteSpace(currentRoleId) ? throw new ArgumentException("Current role is required.", nameof(currentRoleId)) : currentRoleId;
@@ -69,6 +72,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
         {
             return Invalid(exception.Message);
+        }
+
+        if (!_customExecutionAvailable)
+        {
+            return new LoopRunInvocationResponse("WorkspaceHostUnavailable", null, false, null, [], "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can execute custom loops.");
         }
 
         CustomLoopInvocationOperation? existingOperation;
@@ -238,14 +246,28 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             }
 
             var execution = await _runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, _actor), cancellationToken);
-            var executedRun = execution.Run ?? admission.Run;
+            CustomLoopRunRecord? executedRun = execution.Run;
+            var executionDetail = execution.Detail;
+            if (executedRun is null)
+            {
+                using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+                try
+                {
+                    executedRun = await _runStore.GetAsync(admission.Run.Id, integrity.Token);
+                }
+                catch (Exception exception)
+                {
+                    executionDetail = $"{execution.Detail} The durable post-execution run snapshot could not be refreshed safely: {exception.GetType().Name}.";
+                }
+            }
+
             return new LoopRunInvocationResponse(
                 CustomLoopAdmissionStatus.Admitted.ToString(),
                 execution.Status.ToString(),
                 execution.ProviderWasInvoked,
-                Map(executedRun),
+                executedRun is null ? null : Map(executedRun),
                 admission.ValidationErrors.Select(Map).ToArray(),
-                execution.Detail);
+                executionDetail);
         }
     }
 
@@ -276,6 +298,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     public Task<LoopRunControlResponse> ResumeAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
+        if (!_customExecutionAvailable)
+        {
+            return Task.FromResult(new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime started while another process owned custom-loop hosting and must be recreated before it can resume custom loops."));
+        }
+
         return ExecuteControlAsync(awaitable: _lifecycleService.ResumeAsync(new CustomLoopResumeRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
     }
 

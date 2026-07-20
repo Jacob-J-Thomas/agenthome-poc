@@ -140,6 +140,7 @@ public sealed class AgentRuntimeFactory
                 customLifecycle,
                 customRunner,
                 customRuntimeContext,
+                recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired,
                 runtimeSurface.Id,
                 actor,
                 defaultLoop.RoleId,

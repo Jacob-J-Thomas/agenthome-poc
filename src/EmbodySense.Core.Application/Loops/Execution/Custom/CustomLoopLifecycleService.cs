@@ -79,6 +79,11 @@ public sealed class CustomLoopLifecycleService
             false,
             "The custom-loop control operation is durably pending.");
 
+        if (kind == CustomLoopControlKind.Resume && !_executionGate.IsWorkspaceHostAvailable)
+        {
+            return Result(CustomLoopControlStatus.WorkspaceHostUnavailable, null, operationId, "workspace_host_unavailable: another process owns custom-loop hosting; no Resume receipt was created and the operation can be retried after hosting becomes available.");
+        }
+
         CustomLoopControlOperationStoreResult begun;
         try
         {
@@ -292,7 +297,12 @@ public sealed class CustomLoopLifecycleService
         }
 
         var gate = _executionGate.TryAcquire(operation.OperationId, operation.RequestHash);
-        if (gate.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+        if (gate.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+        {
+            return Result(CustomLoopControlStatus.WorkspaceHostUnavailable, run, operation.OperationId, "workspace_host_unavailable: another process owns custom-loop hosting; the Resume receipt remains pending and can be retried after hosting becomes available.");
+        }
+
+        if (gate.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
         {
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.WorkspaceExecutionBusy, run, "workspace_execution_busy: another custom-loop run is actively executing; the Paused run and its deadline, checkpoint, and approval binding were not changed.");
         }

@@ -23,5 +23,6 @@ public enum CustomLoopControlStatus
     NotFound = 12,
     AuditWarning = 13,
     WorkspaceExecutionBusy = 14,
-    OperationInProgress = 15
+    OperationInProgress = 15,
+    WorkspaceHostUnavailable = 16
 }
