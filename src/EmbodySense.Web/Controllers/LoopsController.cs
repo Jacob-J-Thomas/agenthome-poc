@@ -1,4 +1,5 @@
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -112,9 +113,3 @@ public sealed class LoopsController : ControllerBase
 
     private bool IsWorkspaceInitialized() => _host.GetStatus().Initialized;
 }
-
-public sealed record CreateLoopRequest(string OperationId);
-
-public sealed record UpdateLoopRequest(int ExpectedDefinitionVersion, string OperationId, LoopDefinitionInput Definition);
-
-public sealed record DeleteLoopRequest(int ExpectedDefinitionVersion, string OperationId);

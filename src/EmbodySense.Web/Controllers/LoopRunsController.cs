@@ -1,4 +1,5 @@
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -203,7 +204,3 @@ public sealed class LoopRunsController : ControllerBase
         return exception is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException;
     }
 }
-
-public sealed record LoopRunLifecycleRequest(int ExpectedLifecycleVersion, string OperationId);
-
-public sealed record LoopTraceDeletionRequest(string ExpectedTraceHash, string OperationId);

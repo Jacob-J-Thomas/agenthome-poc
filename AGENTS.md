@@ -18,6 +18,9 @@ You are working on EmbodySense.
 - Prefer single-line method calls and argument lists.
 - Do not split method arguments across multiple lines unless there are more than 3 arguments, or keeping one line would make the code genuinely hard to read.
 - When a call must be split, use the smallest readable split and avoid cascading vertical formatting through nearby code.
+- Almost always keep each class, record, struct, interface, and enum in its own file, with the file named after the type. Extract independently meaningful private helper types instead of accumulating several types in one file.
+- Place model and DTO types under an appropriate `Models/` folder, and give each non-private model or DTO its own named file.
+- A small model or DTO that is truly private to one containing class may remain in that class's file when it has no independent meaning and only a limited number of such private types have accumulated. Extract it once it grows, multiplies, or becomes useful outside that class.
 
 ## Implementation discipline
 
