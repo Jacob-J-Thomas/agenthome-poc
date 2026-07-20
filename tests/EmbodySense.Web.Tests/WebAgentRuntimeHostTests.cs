@@ -269,6 +269,41 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task Cancelling_chat_defers_runtime_disposal_until_an_active_custom_loop_remains_controllable()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: 30_000);
+        var approvals = new WebApprovalCoordinator();
+        approvals.RegisterOwnerConnection("connection-1");
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        await using var host = new WebAgentRuntimeHost(options, approvals);
+        await host.InitializeWorkspaceAsync();
+        var definition = await CreateInvocationLoopAsync(workspace);
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-during-chat-cancel", "host-dispose-custom-loop");
+
+        var invocation = host.InvokeLoopAsync(input, "connection-1");
+        await WaitForMarkerAsync(workspace.File("host-dispose-custom-loop.marker"));
+        var running = await WaitForRunAsync(host, input.OperationId);
+        var send = host.SendMessageAsync("hello from web", (_, _) => Task.CompletedTask);
+        var chatCancelled = false;
+        for (var attempt = 0; attempt < 200 && !chatCancelled; attempt++)
+        {
+            chatCancelled = host.CancelCurrentTurn();
+            await Task.Delay(10);
+        }
+
+        Assert.True(chatCancelled);
+        await send;
+        running = Assert.IsType<LoopRunSnapshot>(await host.GetLoopRunAsync(running.Id));
+        var cancellation = await host.CancelLoopAsync(new LoopRunControlInput(running.Id, running.LifecycleVersion, "cancel-after-chat-cancel"));
+        var completed = await invocation.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Contains(cancellation.Status, new[] { "CancelRequested", "Cancelled", "AuditWarning" });
+        Assert.NotNull(cancellation.Run);
+        Assert.Contains(completed.ExecutionStatus, new[] { "Cancelled", "NeedsReview", "Failed" });
+    }
+
+    [Fact]
     public async Task CancelCurrentTurn_returns_false_when_no_turn_is_running()
     {
         using var workspace = new TestWorkspace();
@@ -416,6 +451,22 @@ public sealed class WebAgentRuntimeHostTests
         }
 
         Assert.True(File.Exists(markerPath), "The custom-loop provider attempt did not start within five seconds.");
+    }
+
+    private static async Task<LoopRunSnapshot> WaitForRunAsync(WebAgentRuntimeHost host, string admissionOperationId)
+    {
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            var summary = (await host.GetLoopRunsAsync()).SingleOrDefault(run => string.Equals(run.AdmissionOperationId, admissionOperationId, StringComparison.Ordinal));
+            if (summary is not null && await host.GetLoopRunAsync(summary.Id) is { } run)
+            {
+                return run;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException($"Custom run for admission operation `{admissionOperationId}` was not persisted.");
     }
 
     private static async Task WaitForPendingApprovalAsync(WebApprovalCoordinator approvals, string ownerConnectionId)

@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 
@@ -53,6 +54,7 @@ public static class Program
         });
         services.AddSignalR().AddHubOptions<WebSessionHub>(options =>
         {
+            options.MaximumReceiveMessageSize = LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes;
             options.MaximumParallelInvocationsPerClient = 2;
         });
         services.AddAuthentication(WebSessionAuthenticationDefaults.Scheme).AddScheme<AuthenticationSchemeOptions, WebSessionAuthenticationHandler>(WebSessionAuthenticationDefaults.Scheme, _ => { });

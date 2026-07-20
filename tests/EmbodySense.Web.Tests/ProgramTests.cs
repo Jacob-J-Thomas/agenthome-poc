@@ -1,5 +1,6 @@
 using EmbodySense.Tests.Support;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.SignalR;
@@ -48,7 +49,9 @@ public sealed class ProgramTests
         Assert.Equal(workspace.RootPath, provider.GetRequiredService<WebAgentRuntimeHost>().GetStatus().WorkspaceRoot);
         Assert.NotNull(provider.GetRequiredService<IWebClientNotifier>());
         Assert.NotNull(provider.GetRequiredService<IHubContext<WebSessionHub, IWebSessionClient>>());
-        Assert.Equal(2, provider.GetRequiredService<IOptions<HubOptions<WebSessionHub>>>().Value.MaximumParallelInvocationsPerClient);
+        var hubOptions = provider.GetRequiredService<IOptions<HubOptions<WebSessionHub>>>().Value;
+        Assert.Equal(2, hubOptions.MaximumParallelInvocationsPerClient);
+        Assert.Equal(LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes, hubOptions.MaximumReceiveMessageSize);
         Assert.NotNull(provider.GetRequiredService<LoopAuthoringFacade>());
     }
 

@@ -22,6 +22,9 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly CancellationTokenSource _hostLifetimeCancellation = new();
     private CancellationTokenSource? _turnCancellation;
     private AgentRuntime? _runtime;
+    private TaskCompletionSource<bool>? _runtimeDiscardCompletion;
+    private int _activeCustomRuntimeOperations;
+    private bool _discardRuntimeWhenCustomOperationsComplete;
     private int _disposed;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
@@ -106,22 +109,43 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
         using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
-        var runtime = await GetRuntimeAsync(executionCancellation.Token);
-        return await runtime.InvokeCustomLoopAsync(input, executionCancellation.Token);
+        var runtime = await BeginCustomRuntimeOperationAsync(executionCancellation.Token);
+        try
+        {
+            return await runtime.InvokeCustomLoopAsync(input, executionCancellation.Token);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
     }
 
     public async Task<LoopRunControlResponse> PauseLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var runtime = await GetRuntimeAsync(cancellationToken);
-        return await runtime.PauseCustomLoopAsync(input, cancellationToken);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.PauseCustomLoopAsync(input, cancellationToken);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
     }
 
     public async Task<LoopRunControlResponse> CancelLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var runtime = await GetRuntimeAsync(cancellationToken);
-        return await runtime.CancelCustomLoopAsync(input, cancellationToken);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.CancelCustomLoopAsync(input, cancellationToken);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
     }
 
     public async Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
@@ -131,8 +155,15 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
         using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
-        var runtime = await GetRuntimeAsync(executionCancellation.Token);
-        return await runtime.ResumeCustomLoopAsync(input, executionCancellation.Token);
+        var runtime = await BeginCustomRuntimeOperationAsync(executionCancellation.Token);
+        try
+        {
+            return await runtime.ResumeCustomLoopAsync(input, executionCancellation.Token);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
     }
 
     public async Task SendMessageAsync(
@@ -157,7 +188,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 return;
             }
 
-            var runtime = await GetRuntimeAsync(turnCancellation.Token);
+            var runtime = await GetConversationRuntimeAsync(turnCancellation.Token);
             var turnResult = await runtime.RunTurnAsync(
                 message,
                 (chunk, token) =>
@@ -223,7 +254,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
 
         _hostLifetimeCancellation.Cancel();
-        await DiscardRuntimeAsync();
+        await DiscardRuntimeAsync(waitForCustomOperations: true);
 
         _runtimeGate.Dispose();
         _turnGate.Dispose();
@@ -234,27 +265,90 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         EnsureWorkspaceInitialized("starting a runtime session");
 
-        if (_runtime is not null)
-        {
-            return _runtime;
-        }
-
         await _runtimeGate.WaitAsync(cancellationToken);
         try
         {
-            _runtime ??= await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(
-                _options.Model,
-                _options.WorkingDirectory,
-                _options.CodexExecutablePath,
-                _options.CodexSandbox,
-                AgentRuntimeSurface.Web,
-                cancellationToken);
-            return _runtime;
+            return await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
         }
         finally
         {
             _runtimeGate.Release();
         }
+    }
+
+    private async Task<AgentRuntime> GetConversationRuntimeAsync(CancellationToken cancellationToken)
+    {
+        EnsureWorkspaceInitialized("starting a runtime session");
+
+        while (true)
+        {
+            Task? discardCompletion = null;
+            await _runtimeGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (!_discardRuntimeWhenCustomOperationsComplete)
+                {
+                    return await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+                }
+
+                discardCompletion = _runtimeDiscardCompletion?.Task;
+            }
+            finally
+            {
+                _runtimeGate.Release();
+            }
+
+            if (discardCompletion is not null)
+            {
+                await discardCompletion.WaitAsync(cancellationToken);
+            }
+        }
+    }
+
+    private async Task<AgentRuntime> BeginCustomRuntimeOperationAsync(CancellationToken cancellationToken)
+    {
+        EnsureWorkspaceInitialized("starting a runtime session");
+
+        await _runtimeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var runtime = await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+            _activeCustomRuntimeOperations++;
+            return runtime;
+        }
+        finally
+        {
+            _runtimeGate.Release();
+        }
+    }
+
+    private async Task EndCustomRuntimeOperationAsync()
+    {
+        await _runtimeGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            _activeCustomRuntimeOperations--;
+            if (_activeCustomRuntimeOperations == 0 && _discardRuntimeWhenCustomOperationsComplete)
+            {
+                await DisposeRuntimeUnderGateAsync();
+            }
+        }
+        finally
+        {
+            _runtimeGate.Release();
+        }
+    }
+
+    private async Task<AgentRuntime> GetOrCreateRuntimeUnderGateAsync(CancellationToken cancellationToken)
+    {
+        _runtime ??= await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(
+            _options.Model,
+            _options.WorkingDirectory,
+            _options.CodexExecutablePath,
+            _options.CodexSandbox,
+            AgentRuntimeSurface.Web,
+            cancellationToken);
+        return _runtime;
     }
 
     private void EnsureWorkspaceInitialized(string operation)
@@ -265,23 +359,54 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
-    private async Task DiscardRuntimeAsync()
+    private async Task DiscardRuntimeAsync(bool waitForCustomOperations = false)
     {
-        AgentRuntime? runtime;
+        Task? discardCompletion = null;
         await _runtimeGate.WaitAsync(CancellationToken.None);
         try
         {
-            runtime = _runtime;
-            _runtime = null;
+            if (_activeCustomRuntimeOperations > 0)
+            {
+                _discardRuntimeWhenCustomOperationsComplete = true;
+                _runtimeDiscardCompletion ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                discardCompletion = _runtimeDiscardCompletion.Task;
+            }
+            else
+            {
+                await DisposeRuntimeUnderGateAsync();
+            }
         }
         finally
         {
             _runtimeGate.Release();
         }
 
-        if (runtime is not null)
+        if (waitForCustomOperations && discardCompletion is not null)
         {
-            await runtime.DisposeAsync();
+            await discardCompletion;
+        }
+    }
+
+    private async Task DisposeRuntimeUnderGateAsync()
+    {
+        var runtime = _runtime;
+        var discardCompletion = _runtimeDiscardCompletion;
+        _runtime = null;
+        _runtimeDiscardCompletion = null;
+        _discardRuntimeWhenCustomOperationsComplete = false;
+        try
+        {
+            if (runtime is not null)
+            {
+                await runtime.DisposeAsync();
+            }
+
+            discardCompletion?.TrySetResult(true);
+        }
+        catch (Exception exception)
+        {
+            discardCompletion?.TrySetException(exception);
+            throw;
         }
     }
 

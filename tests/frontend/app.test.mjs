@@ -30,6 +30,38 @@ test("history_loaded replaces the transcript using role labels and text content"
   assert.equal(findByTag(app.elements.transcript, "img").length, 0);
 });
 
+test("boot hydrates the durable current transcript after returning from Loops", async () => {
+  const app = await loadApp({
+    configuration: {
+      status: { initialized: true },
+      runtime: { surface: "web", model: "gpt-test", codexSandbox: "read-only" },
+      audit: { path: "audit/events.ndjson", exists: false, events: [], readProblems: [] },
+      conversationHistory: {
+        directoryPath: ".agent/memory/conversations",
+        currentPath: "current.ndjson",
+        archivePath: "archive",
+        readProblems: [],
+        transcripts: [{
+          conversationId: "current",
+          isCurrent: true,
+          messages: [
+            { role: "user", content: "visible before navigating to Loops" },
+            { role: "assistant", content: "saved while the other page was open" }
+          ]
+        }]
+      },
+      paths: [],
+      concepts: [],
+      documents: [],
+      permissions: { exists: false, parsed: false, version: null, scope: "", defaultAccess: "ask", readProblems: [], approved: [], denied: [], rawJson: "" }
+    }
+  });
+
+  assert.equal(app.elements.transcript.children.length, 2);
+  assert.equal(messageContent(app.elements.transcript.children[0]), "visible before navigating to Loops");
+  assert.equal(messageContent(app.elements.transcript.children[1]), "saved while the other page was open");
+});
+
 test("assistant deltas update one active message and final text resets the active message", async () => {
   const app = await loadApp();
   app.elements.transcript.replaceChildren();
