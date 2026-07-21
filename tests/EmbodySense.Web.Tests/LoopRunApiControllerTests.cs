@@ -115,6 +115,7 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(HttpStatusCode.OK, list.StatusCode);
             Assert.Equal(invocation.Run.Id, Assert.Single(summaries!).Id);
             Assert.Equal(HttpStatusCode.OK, detailResponse.StatusCode);
+            Assert.True(detailResponse.Headers.CacheControl?.NoStore == true);
             Assert.Equal(invocation.Run.Id, detail!.Id);
             Assert.Equal(invocation.Run.Context.ManifestHash, detail.Context.ManifestHash);
             Assert.Equal(HttpStatusCode.OK, quotaResponse.StatusCode);
@@ -122,6 +123,7 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(1, quota.ActiveReservationCount);
             Assert.Equal(CustomLoopLimits.MaxTraceControlEventUtf8Bytes, quota.ReservedCapacityUtf8Bytes);
             Assert.Equal(HttpStatusCode.OK, traceResponse.StatusCode);
+            Assert.True(traceResponse.Headers.CacheControl?.NoStore == true);
             Assert.False(trace!.IsDeleted);
             Assert.True(trace.PersistedArtifactUtf8Bytes > 0);
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedDeletion.StatusCode);

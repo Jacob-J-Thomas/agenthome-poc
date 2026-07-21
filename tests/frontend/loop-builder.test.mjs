@@ -475,7 +475,7 @@ test("live run monitoring binds the exact admission operation instead of another
   assert.match(app.elements.inspectorContent.textContent, /run run-preferred/);
 });
 
-test("a rejected invocation leaves run selection empty instead of selecting unrelated history", async () => {
+test("a rejected invocation with an existing run leaves run selection empty", async () => {
   const server = new FakeFetchServer(createCatalog());
   const existing = createRunSnapshot();
   existing.id = "run-existing";
@@ -485,7 +485,7 @@ test("a rejected invocation leaves run selection empty instead of selecting unre
   await selectCustomLoop(app);
   app.context.testHub = {
     connected: true,
-    invoke: () => Promise.resolve({ admissionStatus: "WorkspaceExecutionBusy", run: null, detail: "Another loop is already running." })
+    invoke: () => Promise.resolve({ admissionStatus: "NonterminalRunExists", run: existing, detail: "This loop already has a nonterminal run." })
   };
   vm.runInContext("hub = testHub", app.context);
 
@@ -495,7 +495,7 @@ test("a rejected invocation leaves run selection empty instead of selecting unre
 
   assert.equal(app.elements.runTitle.textContent, "No run selected");
   assert.equal(app.elements.runList.children.some(item => item.className.includes("selected")), false);
-  assert.match(app.elements.validationBanner.textContent, /Run was not admitted: Another loop is already running/);
+  assert.match(app.elements.validationBanner.textContent, /Run was not admitted: This loop already has a nonterminal run/);
 });
 
 test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {

@@ -1033,7 +1033,7 @@ async function startRun() {
     selectedTrace = null;
     renderAll();
     const response = await waitForRunOperation(invocation, { preferredAdmissionOperationId: operationId, preserveEmptySelection: true });
-    if (!response?.run) {
+    if (response?.admissionStatus !== "Admitted" || !response?.run) {
       await loadRuns({ silent: true, preserveEmptySelection: true });
       renderAll();
       showBanner(`Run was not admitted: ${response?.detail ?? "The runtime rejected the invocation."}`);
