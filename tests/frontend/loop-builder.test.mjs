@@ -467,6 +467,43 @@ test("a rejected invocation leaves run selection empty instead of selecting unre
   assert.match(app.elements.validationBanner.textContent, /Run was not admitted: Another loop is already running/);
 });
 
+test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let invocationOperationId = null;
+  let invocationRunReads = 0;
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => {
+    if (!invocationOperationId) return { status: 200, body: clone(server.runs) };
+    invocationRunReads++;
+    return { status: 200, body: invocationRunReads === 1 ? [] : clone(server.runs) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      invocationOperationId = input.operationId;
+      const admitted = createRunSnapshot();
+      admitted.id = "run-reconciled";
+      admitted.admissionOperationId = invocationOperationId;
+      admitted.status = "Running";
+      admitted.completedAtUtc = null;
+      server.runs = [{ id: admitted.id, loopId: admitted.loopId, admissionOperationId: admitted.admissionOperationId, definitionVersion: 2, status: admitted.status, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+      server.runDetails.set(admitted.id, admitted);
+      return Promise.reject(new Error("WebSocket closed before invocation completion."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Run despite the connection loss.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationRunReads, 2);
+  assert.match(app.elements.runTitle.textContent, /run-reconciled/);
+  assert.match(app.elements.validationBanner.textContent, /live connection was lost after admission/i);
+  assert.ok(app.window.delayedHandlers.some(timer => timer.delay === 1000 && !timer.cancelled));
+});
+
 test("slower run detail responses cannot overwrite a newer run selection", async () => {
   const server = new FakeFetchServer(createCatalog());
   const runA = createRunSnapshot();

@@ -1012,9 +1012,10 @@ async function startRun() {
 
   elements.startRunButton.disabled = true;
   elements.startRunButton.textContent = "Running";
+  let operationId = null;
   try {
     const connection = await getHub();
-    const operationId = newOperationId();
+    operationId = newOperationId();
     const invocation = connection.invoke("InvokeLoop", {
       loopId: draft.id,
       expectedDefinitionVersion: draft.definitionVersion,
@@ -1041,7 +1042,15 @@ async function startRun() {
     renderAll();
     showToast(response?.detail ?? "Run finished. Durable evidence is available in Runs.");
   } catch (error) {
-    showBanner(`Run could not start: ${error.message}`);
+    const reconciled = operationId
+      ? await loadRuns({ silent: true, preferredAdmissionOperationId: operationId, preserveEmptySelection: true })
+      : false;
+    if (reconciled && selectedRun?.admissionOperationId === operationId) {
+      renderAll();
+      showBanner("The live connection was lost after admission. Durable run evidence was recovered; monitoring continues while the run remains active.");
+    } else {
+      showBanner(`Run could not start: ${error.message}`);
+    }
   } finally {
     elements.startRunButton.disabled = false;
     elements.startRunButton.textContent = "Start run";
