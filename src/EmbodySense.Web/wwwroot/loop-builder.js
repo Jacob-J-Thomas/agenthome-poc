@@ -17,6 +17,7 @@ let selectedRunRefreshTimer = null;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
 let pendingCreateOperationId = null;
+let pendingTraceDeletion = null;
 
 const signalRRecordSeparator = "\u001e";
 const signalRKeepAliveMilliseconds = 10000;
@@ -1086,6 +1087,12 @@ async function resumeRun() {
       operationId
     });
     const response = await waitForRunOperation(invocation, { preferredRunId: selectedRun.id });
+    if (!["Resumed", "Completed", "Cancelled", "Paused", "NeedsReview"].includes(response?.status)) {
+      await loadRuns({ silent: true, preferredRunId: selectedRun.id });
+      renderAll();
+      showBanner(`Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}`);
+      return;
+    }
     selectedRun = response?.run ?? selectedRun;
     await loadRuns({ silent: true });
     showToast(response?.detail ?? "Resume completed.");
@@ -1138,16 +1145,22 @@ async function deleteSelectedTrace() {
   if (!confirmed) return;
 
   const runId = selectedRun.id;
+  const expectedTraceHash = selectedTrace.persistedArtifactHash;
+  if (pendingTraceDeletion?.runId !== runId || pendingTraceDeletion.expectedTraceHash !== expectedTraceHash) {
+    pendingTraceDeletion = { runId, expectedTraceHash, operationId: newOperationId() };
+  }
   let deletion;
   try {
     deletion = await requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace/delete`, {
       method: "POST",
-      body: JSON.stringify({ expectedTraceHash: selectedTrace.persistedArtifactHash, operationId: newOperationId() })
+      body: JSON.stringify({ expectedTraceHash, operationId: pendingTraceDeletion.operationId })
     });
   } catch (error) {
     showBanner(`Trace deletion failed: ${error.message}`);
     return;
   }
+
+  pendingTraceDeletion = null;
 
   selectedRun = null;
   selectedTrace = null;

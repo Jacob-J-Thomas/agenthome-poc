@@ -498,6 +498,30 @@ test("a rejected invocation with an existing run leaves run selection empty", as
   assert.match(app.elements.validationBanner.textContent, /Run was not admitted: This loop already has a nonterminal run/);
 });
 
+test("a rejected Resume response is shown as a failure instead of a success toast", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const paused = createRunSnapshot();
+  paused.status = "Paused";
+  paused.completedAtUtc = null;
+  server.runs = [{ id: paused.id, loopId: paused.loopId, admissionOperationId: paused.admissionOperationId, definitionVersion: 2, status: paused.status, createdAtUtc: paused.createdAtUtc, updatedAtUtc: paused.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(paused.id, paused);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  app.context.testHub = {
+    connected: true,
+    invoke: () => Promise.resolve({ status: "WorkspaceExecutionBusy", run: paused, detail: "Another loop is actively executing." })
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  const resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+
+  assert.match(app.elements.validationBanner.textContent, /Resume failed: Another loop is actively executing/);
+  assert.equal(app.elements.toast.textContent, "");
+});
+
 test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {
   const server = new FakeFetchServer(createCatalog());
   let invocationOperationId = null;
@@ -651,17 +675,19 @@ test("deleted loop definitions retain a selectable archived run-history surface"
   assert.match(app.elements.inspectorContent.textContent, /Research pass v2/);
 });
 
-test("terminal trace deletion is explicit, hash-bound, quota-visible, and leaves an inspectable tombstone", async () => {
+test("terminal trace deletion reuses its operation after response loss and leaves an inspectable tombstone", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();
   server.runs = [{ id: run.id, loopId: run.loopId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: run.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null }];
   server.runDetails.set(run.id, run);
   const liveTrace = createTraceSnapshot(run);
   server.traceDetails.set(run.id, liveTrace);
+  const deletionOperationIds = [];
   server.on("POST", `/api/loop-runs/${run.id}/trace/delete`, ({ body }) => {
     assert.equal(body.expectedTraceHash, liveTrace.persistedArtifactHash);
     assert.equal(typeof body.operationId, "string");
     assert.equal(Object.hasOwn(body, "actor"), false);
+    deletionOperationIds.push(body.operationId);
     const tombstone = {
       runId: run.id,
       loopId: run.loopId,
@@ -685,7 +711,8 @@ test("terminal trace deletion is explicit, hash-bound, quota-visible, and leaves
     server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: tombstone.deletedAtUtc, completedAtUtc: run.completedAtUtc, iteration: 0, nextStepIndex: 0, failureCode: null, isDeleted: true }];
     server.runDetails.delete(run.id);
     server.traceQuota = createTraceQuota(0, 1, 1024);
-    return { status: 200, body: { status: "Deleted", isCommitted: true, detail: "Deleted.", tombstone } };
+    if (deletionOperationIds.length === 1) throw new Error("Connection lost after deletion committed.");
+    return { status: 200, body: { status: "Replayed", isCommitted: true, detail: "Deleted.", tombstone } };
   });
   const app = await loadLoopBuilder({ server });
   await selectCustomLoop(app);
@@ -696,7 +723,12 @@ test("terminal trace deletion is explicit, hash-bound, quota-visible, and leaves
   assert.ok(deleteButton);
   await deleteButton.click();
   await flushAsyncWork();
+  assert.match(app.elements.validationBanner.textContent, /Trace deletion failed: Connection lost after deletion committed/);
+  await deleteButton.click();
+  await flushAsyncWork();
 
+  assert.equal(deletionOperationIds.length, 2);
+  assert.equal(deletionOperationIds[0], deletionOperationIds[1]);
   assert.match(app.window.confirmations.at(-1), /Permanently delete the sensitive trace content/);
   assert.match(app.window.confirmations.at(-1), /small audited tombstone will remain/);
   assert.match(app.elements.runTitle.textContent, /Deleted trace run-test/);
