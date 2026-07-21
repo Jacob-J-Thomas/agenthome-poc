@@ -16,6 +16,7 @@ let historicalLoopId = null;
 let selectedRunRefreshTimer = null;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
+let pendingCreateOperationId = null;
 
 const signalRRecordSeparator = "\u001e";
 const signalRKeepAliveMilliseconds = 10000;
@@ -926,10 +927,12 @@ function renderListDraftName() {
 async function createLoop() {
   if (mutationInFlight) return;
   if (dirty && !window.confirm("Discard unsaved loop edits and create a new loop?")) return;
+  pendingCreateOperationId ??= newOperationId();
   setBusy(true, "Creating");
   try {
-    const response = await requestJson("/api/loops", { method: "POST", body: JSON.stringify({ operationId: newOperationId() }) });
+    const response = await requestJson("/api/loops", { method: "POST", body: JSON.stringify({ operationId: pendingCreateOperationId }) });
     await loadCatalog(response.definition.id);
+    pendingCreateOperationId = null;
     showToast("Loop created. Add instructions, review context, then Save.");
   } catch (error) {
     showResponseError(error);

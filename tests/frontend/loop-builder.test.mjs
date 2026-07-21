@@ -246,6 +246,37 @@ test("create and save send versioned server-owned definition shapes", async () =
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
 });
 
+test("create retries reuse the operation id after an ambiguous committed response", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const created = createCustomDefinition({ id: "loop-replayed", definitionVersion: 1, displayName: "Recovered loop" });
+  let committedOperationId = null;
+  let attempts = 0;
+  server.on("POST", "/api/loops", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      committedOperationId = body.operationId;
+      server.catalog.customDefinitions.push(clone(created));
+      throw new TypeError("Create response was lost.");
+    }
+
+    assert.equal(body.operationId, committedOperationId);
+    return { status: 200, body: authoringResponse("Replayed", created) };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.createLoopButton.click();
+  assert.match(app.elements.validationBanner.textContent, /Create response was lost/);
+
+  await app.elements.createLoopButton.click();
+
+  const createCalls = server.calls.filter(call => call.method === "POST" && call.url === "/api/loops");
+  assert.equal(createCalls.length, 2);
+  assert.equal(createCalls[0].body.operationId, createCalls[1].body.operationId);
+  assert.equal(server.catalog.customDefinitions.filter(definition => definition.id === created.id).length, 1);
+  assert.equal(app.elements.loopName.value, "Recovered loop");
+  assert.equal(app.elements.toast.textContent, "Loop created. Add instructions, review context, then Save.");
+});
+
 test("client validation blocks incomplete definitions before save", async () => {
   const app = await loadLoopBuilder();
   await selectCustomLoop(app);
