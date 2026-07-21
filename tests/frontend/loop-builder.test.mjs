@@ -337,16 +337,19 @@ test("client validation blocks incomplete definitions before save", async () => 
 
 test("a stale save conflict stays visible with the current server version and reload guidance", async () => {
   const server = new FakeFetchServer(createCatalog());
-  server.on("PUT", "/api/loops/loop-research", () => ({
-    status: 409,
-    body: {
-      status: "Conflict",
-      isCommitted: false,
-      validationErrors: [],
-      conflict: { loopId: "loop-research", expectedDefinitionVersion: 2, actualDefinitionVersion: 4 },
-      detail: "The loop changed after this editor loaded it."
-    }
-  }));
+  server.on("PUT", "/api/loops/loop-research", () => {
+    server.catalog.customDefinitions[0] = createCustomDefinition({ definitionVersion: 4, description: "Updated by another editor." });
+    return {
+      status: 409,
+      body: {
+        status: "Conflict",
+        isCommitted: false,
+        validationErrors: [],
+        conflict: { loopId: "loop-research", expectedDefinitionVersion: 2, actualDefinitionVersion: 4 },
+        detail: "The loop changed after this editor loaded it."
+      }
+    };
+  });
   const app = await loadLoopBuilder({ server });
   await selectCustomLoop(app);
   app.elements.loopDescription.value = "A locally edited description.";
@@ -358,6 +361,12 @@ test("a stale save conflict stays visible with the current server version and re
   assert.match(app.elements.validationBanner.textContent, /server version 4/i);
   assert.match(app.elements.validationBanner.textContent, /Reload/i);
   assert.equal(app.elements.reloadButton.disabled, false);
+
+  await app.elements.reloadButton.click();
+
+  assert.equal(app.elements.loopDescription.value, "Updated by another editor.");
+  assert.match(app.elements.saveState.textContent, /Saved.*v4/);
+  assert.equal(app.elements.toast.textContent, "Latest loop definition loaded.");
 });
 
 test("definition mutation locks editing, navigation, and reload until the response is applied", async () => {
@@ -427,6 +436,34 @@ test("delete surfaces committed audit warnings returned by the server", async ()
   await app.elements.deleteButton.click();
 
   assert.equal(app.elements.toast.textContent, "Loop deletion committed, but the outcome audit needs review.");
+});
+
+test("delete retries reuse the exact request after an ambiguous committed response", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let committedRequest = null;
+  let attempts = 0;
+  server.on("DELETE", "/api/loops/loop-research", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      committedRequest = clone(body);
+      server.catalog.customDefinitions = [];
+      throw new TypeError("Delete response was lost.");
+    }
+
+    assert.deepEqual(body, committedRequest);
+    return { status: 200, body: authoringResponse("Replayed", null) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.deleteButton.click();
+  assert.match(app.elements.validationBanner.textContent, /Delete response was lost/);
+  await app.elements.deleteButton.click();
+
+  const deletions = server.calls.filter(call => call.method === "DELETE" && call.url === "/api/loops/loop-research");
+  assert.equal(deletions.length, 2);
+  assert.deepEqual(deletions[0].body, deletions[1].body);
+  assert.equal(app.elements.loopName.value, "Default conversation");
 });
 
 test("Runs projects durable timeline and context evidence from the authenticated API", async () => {
@@ -554,6 +591,36 @@ test("a rejected Resume response is shown as a failure instead of a success toas
 
   assert.match(app.elements.validationBanner.textContent, /Resume failed: Another loop is actively executing/);
   assert.equal(app.elements.toast.textContent, "");
+});
+
+test("a committed Resume audit warning refreshes the durable run instead of reporting failure", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const paused = createRunSnapshot();
+  paused.status = "Paused";
+  paused.completedAtUtc = null;
+  const resumed = { ...paused, status: "Running", lifecycleVersion: paused.lifecycleVersion + 1 };
+  server.runs = [{ id: paused.id, loopId: paused.loopId, admissionOperationId: paused.admissionOperationId, definitionVersion: 2, status: paused.status, createdAtUtc: paused.createdAtUtc, updatedAtUtc: paused.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(paused.id, paused);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      server.runs[0] = { ...server.runs[0], status: resumed.status, updatedAtUtc: resumed.updatedAtUtc };
+      server.runDetails.set(resumed.id, resumed);
+      return Promise.resolve({ status: "AuditWarning", run: resumed, detail: "Resume committed, but its outcome audit needs review." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  const resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+
+  assert.equal(app.elements.toast.textContent, "Resume committed, but its outcome audit needs review.");
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Resume failed/);
+  assert.match(app.elements.runSubtitle.textContent, /Running/);
 });
 
 test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {

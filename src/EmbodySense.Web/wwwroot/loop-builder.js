@@ -18,6 +18,7 @@ let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
 let pendingCreateOperationId = null;
 let pendingUpdateRequest = null;
+let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
 
 const signalRRecordSeparator = "\u001e";
@@ -978,7 +979,12 @@ async function deleteLoop() {
   if (!draft || isSystemLoop() || !window.confirm(`Delete “${draft.displayName}”? Historical run evidence will remain available.`)) return;
   setBusy(true, "Deleting");
   try {
-    const response = await requestJson(`/api/loops/${encodeURIComponent(draft.id)}`, { method: "DELETE", body: JSON.stringify({ expectedDefinitionVersion: currentDefinition.definitionVersion, operationId: newOperationId() }) });
+    const requestKey = JSON.stringify({ loopId: draft.id, expectedDefinitionVersion: currentDefinition.definitionVersion });
+    if (pendingDeleteRequest?.key !== requestKey) {
+      pendingDeleteRequest = { key: requestKey, body: { expectedDefinitionVersion: currentDefinition.definitionVersion, operationId: newOperationId() } };
+    }
+    const response = await requestJson(`/api/loops/${encodeURIComponent(draft.id)}`, { method: "DELETE", body: JSON.stringify(pendingDeleteRequest.body) });
+    pendingDeleteRequest = null;
     currentDefinition = null;
     await loadCatalog("default-conversation");
     showToast(response.status === "CommittedWithAuditWarning" ? response.detail ?? "Loop deleted, but its outcome audit has an integrity warning. Historical run evidence was preserved." : "Loop deleted. Historical run evidence was preserved.");
@@ -1094,7 +1100,7 @@ async function resumeRun() {
       operationId
     });
     const response = await waitForRunOperation(invocation, { preferredRunId: selectedRun.id });
-    if (!["Resumed", "Completed", "Cancelled", "Paused", "NeedsReview"].includes(response?.status)) {
+    if (!["Resumed", "Completed", "Cancelled", "Paused", "NeedsReview", "AuditWarning"].includes(response?.status)) {
       await loadRuns({ silent: true, preferredRunId: selectedRun.id });
       renderAll();
       showBanner(`Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}`);
@@ -1241,10 +1247,19 @@ function promptSourceLabel(value) {
   return value === "invocation" ? "initial user prompt" : value === "preset" ? "saved preset prompt" : "no prompt";
 }
 
-function reloadCurrent() {
+async function reloadCurrent() {
   if (mutationInFlight || !currentDefinition) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
-  applyDefinition(currentDefinition);
+  const loopId = currentDefinition.id;
+  setBusy(true, "Reloading");
+  try {
+    await loadCatalog(loopId);
+    showToast("Latest loop definition loaded.");
+  } catch (error) {
+    showBanner(`Reload failed: ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function addInferenceStep() {

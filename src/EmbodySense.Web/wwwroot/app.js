@@ -92,7 +92,7 @@ async function connectHub() {
   await hub.start();
   try {
     const currentTranscript = await hub.invoke("GetCurrentTranscript");
-    replaceTranscript(Array.isArray(currentTranscript) ? currentTranscript : []);
+    if (Array.isArray(currentTranscript)) replaceTranscript(currentTranscript);
   } catch (error) {
     appendMessage("error", `Transcript unavailable: ${error.message}`);
   }

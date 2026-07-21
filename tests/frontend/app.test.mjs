@@ -71,6 +71,17 @@ test("boot hydrates the complete active runtime transcript instead of the bounde
   assert.equal(messageContent(app.elements.transcript.children[200]).length, 5000);
 });
 
+test("reconnect preserves the visible transcript while runtime hydration is temporarily unavailable", async () => {
+  const app = await loadApp({ activeTranscript: [{ role: "user", content: "Visible conversation" }] });
+  assert.equal(messageContent(app.elements.transcript.children[0]), "Visible conversation");
+  FakeWebSocket.currentTranscript = null;
+
+  await vm.runInContext("connectHub()", app.context);
+
+  assert.equal(app.elements.transcript.children.length, 1);
+  assert.equal(messageContent(app.elements.transcript.children[0]), "Visible conversation");
+});
+
 test("assistant deltas update one active message and final text resets the active message", async () => {
   const app = await loadApp();
   app.elements.transcript.replaceChildren();
@@ -182,7 +193,7 @@ async function loadApp(overrides = {}) {
   vm.runInNewContext(appSource, context, { filename: "app.js" });
   for (let attempt = 0; attempt < 4; attempt++) await flushAsyncWork();
   assert.equal(FakeWebSocket.instances.length, 1);
-  return { elements: document.elementsObject, configTabs: document.configTabs, socket: FakeWebSocket.instances[0] };
+  return { context, elements: document.elementsObject, configTabs: document.configTabs, socket: FakeWebSocket.instances[0] };
 }
 
 function createFetch(overrides) {
