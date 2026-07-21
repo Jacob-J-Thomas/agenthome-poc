@@ -277,6 +277,37 @@ test("create retries reuse the operation id after an ambiguous committed respons
   assert.equal(app.elements.toast.textContent, "Loop created. Add instructions, review context, then Save.");
 });
 
+test("save retries reuse the exact request after an ambiguous committed response", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let committedRequest = null;
+  let attempts = 0;
+  server.on("PUT", "/api/loops/loop-research", ({ body }) => {
+    attempts++;
+    const updated = { ...server.catalog.customDefinitions[0], ...clone(body.definition), definitionVersion: 3 };
+    if (attempts === 1) {
+      committedRequest = clone(body);
+      server.catalog.customDefinitions = [updated];
+      throw new TypeError("Save response was lost.");
+    }
+
+    assert.deepEqual(body, committedRequest);
+    return { status: 200, body: authoringResponse("Replayed", updated) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Updated exactly once.";
+  await app.elements.loopDescription.input();
+
+  await app.elements.saveButton.click();
+  assert.match(app.elements.validationBanner.textContent, /Save response was lost/);
+  await app.elements.saveButton.click();
+
+  const saves = server.calls.filter(call => call.method === "PUT" && call.url === "/api/loops/loop-research");
+  assert.equal(saves.length, 2);
+  assert.deepEqual(saves[0].body, saves[1].body);
+  assert.match(app.elements.saveState.textContent, /Saved.*v3/);
+});
+
 test("client validation blocks incomplete definitions before save", async () => {
   const app = await loadLoopBuilder();
   await selectCustomLoop(app);
@@ -430,6 +461,9 @@ test("Runs projects durable timeline and context evidence from the authenticated
   assert.match(app.elements.inspectorContent.textContent, /last committed sequence 4 · latest event 4 Node Outcome Observed/);
   assert.match(app.elements.inspectorContent.textContent, /pending approvals visible to this connection 0/);
   assert.match(app.elements.inspectorContent.textContent, /Provider and modelcodex · test-model/);
+  assert.match(app.elements.inspectorContent.textContent, /Admission identityembodysense\.web/);
+  assert.match(app.elements.inspectorContent.textContent, /Operation op-run-test/);
+  assert.match(app.elements.inspectorContent.textContent, /Request hash a{64}/);
   assert.match(app.elements.inspectorContent.textContent, /source id trigger/);
   assert.match(app.elements.inspectorContent.textContent, /hash hash-trigger/);
   assert.match(app.elements.inspectorContent.textContent, /event 2 · iteration 1 · node step-research · attempt 1/);
@@ -982,6 +1016,7 @@ function createRunSnapshot() {
     surface: "web",
     model: { provider: "codex", model: "test-model" },
     admissionOperationId: "op-run-test",
+    admissionActor: "embodysense.web",
     admissionRequestHash: "a".repeat(64),
     admittedDefinition: definition,
     triggerPrompt: "Inspect this issue.",

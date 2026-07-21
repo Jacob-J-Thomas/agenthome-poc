@@ -17,6 +17,7 @@ let selectedRunRefreshTimer = null;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
 let pendingCreateOperationId = null;
+let pendingUpdateRequest = null;
 let pendingTraceDeletion = null;
 
 const signalRRecordSeparator = "\u001e";
@@ -472,6 +473,7 @@ function renderRunEvidence() {
   const definition = selectedRun.admittedDefinition;
   appendEvidenceSection("Admitted definition", `${definition.displayName} v${definition.definitionVersion}`, `${definition.contentHash}\n${definition.inferenceSteps.length} inference step${definition.inferenceSteps.length === 1 ? "" : "s"} · ${definition.exitPolicy.maxAdditionalIterations > 0 ? `LLM-gated continuation, ceiling ${definition.exitPolicy.maxAdditionalIterations} additional` : "one deterministic iteration"}`);
   appendEvidenceSection("Invocation", selectedRun.triggerPrompt || "No prompt admitted", `${selectedRun.surface} surface · conversation ${selectedRun.invokingConversation ? "bound" : "not bound"}`);
+  appendEvidenceSection("Admission identity", selectedRun.admissionActor, `Operation ${selectedRun.admissionOperationId}\nRequest hash ${selectedRun.admissionRequestHash}`);
   appendRunProgressEvidence(selectedRun, definition);
   appendEvidenceSection("Provider and model", `${selectedRun.model.provider} · ${selectedRun.model.model || "provider default"}`, (selectedRun.events ?? []).filter(event => event.provider || event.providerResponseId).map(event => `event ${event.sequence}: ${event.provider ?? selectedRun.model.provider} · ${event.model ?? selectedRun.model.model ?? "provider default"}${event.providerResponseId ? ` · response ${event.providerResponseId}` : ""}`).join("\n") || "No provider attempt has been persisted yet.");
   appendEvidenceSection("Provider usage and cost", "Unavailable", "The current provider response does not report token usage or cost; no estimate is fabricated.");
@@ -956,8 +958,13 @@ async function saveLoop() {
       toolAssignments: [...draft.toolAssignments],
       exitPolicy: clone(draft.exitPolicy)
     };
-    const response = await requestJson(`/api/loops/${encodeURIComponent(draft.id)}`, { method: "PUT", body: JSON.stringify({ expectedDefinitionVersion: currentDefinition.definitionVersion, operationId: newOperationId(), definition }) });
+    const requestKey = JSON.stringify({ loopId: draft.id, expectedDefinitionVersion: currentDefinition.definitionVersion, definition });
+    if (pendingUpdateRequest?.key !== requestKey) {
+      pendingUpdateRequest = { key: requestKey, body: { expectedDefinitionVersion: currentDefinition.definitionVersion, operationId: newOperationId(), definition } };
+    }
+    const response = await requestJson(`/api/loops/${encodeURIComponent(draft.id)}`, { method: "PUT", body: JSON.stringify(pendingUpdateRequest.body) });
     await loadCatalog(response.definition.id);
+    pendingUpdateRequest = null;
     showToast(response.status === "CommittedWithAuditWarning" ? response.detail : "Loop saved.");
   } catch (error) {
     showResponseError(error);
