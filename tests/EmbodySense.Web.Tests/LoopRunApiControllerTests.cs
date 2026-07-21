@@ -186,9 +186,14 @@ public sealed class LoopRunApiControllerTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var interrupted = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths));
-        await File.WriteAllTextAsync(paths.CurrentConversationPath, "conversation must not be initialized by evidence recovery");
-        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        var interrupted = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths), bindConversation: true);
+        const string transcriptEvidence = """
+            {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","role":"user","content":"recovered user prompt"}
+            {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-07-20T11:59:00+00:00","role":"assistant","content":"recovered assistant response"}
+            """;
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, transcriptEvidence);
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
         await app.StartAsync();
 
         try
@@ -199,12 +204,25 @@ public sealed class LoopRunApiControllerTests
             var response = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
             var recovered = Assert.Single((await response.Content.ReadFromJsonAsync<LoopRunSummarySnapshot[]>(JsonOptions))!);
             var detail = await (await SendAsync(client, $"/api/loop-runs/{interrupted.Id}", token)).Content.ReadFromJsonAsync<LoopRunSnapshot>(JsonOptions);
+            var transcript = await app.Services.GetRequiredService<WebAgentRuntimeHost>().GetCurrentTranscriptAsync();
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.Equal(interrupted.Id, recovered.Id);
             Assert.Equal("Paused", recovered.Status);
             Assert.Equal(interrupted.LifecycleVersion + 1, detail!.LifecycleVersion);
-            Assert.Equal("conversation must not be initialized by evidence recovery", await File.ReadAllTextAsync(paths.CurrentConversationPath));
+            Assert.Collection(
+                transcript!,
+                message =>
+                {
+                    Assert.Equal("User", message.Role);
+                    Assert.Equal("recovered user prompt", message.Content);
+                },
+                message =>
+                {
+                    Assert.Equal("Assistant", message.Role);
+                    Assert.Equal("recovered assistant response", message.Content);
+                });
+            Assert.Equal(transcriptEvidence, await File.ReadAllTextAsync(paths.CurrentConversationPath));
             Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
         }
         finally
@@ -256,11 +274,12 @@ public sealed class LoopRunApiControllerTests
         return Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
     }
 
-    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store)
+    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, bool bindConversation = false)
     {
         var definition = CustomLoopDefinition.CreateSeed("loop-web-recovery", "default-role", "step-1", "create-web-recovery", Timestamp);
         var admittedEvent = RunEvent(1, "web-recovery-admitted", CustomLoopRunEventKind.Admitted);
-        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        var conversation = bindConversation ? new CustomLoopConversationReference("current", new string('c', CustomLoopLimits.Sha256HexCharacters), Timestamp) : null;
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);

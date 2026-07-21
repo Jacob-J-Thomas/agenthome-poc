@@ -16,7 +16,7 @@ public sealed class LoopRunInspectionFacadeTests
     public async Task Read_only_facade_exposes_empty_quota_but_cannot_delete()
     {
         using var workspace = new TestWorkspace();
-        var facade = new LoopRunInspectionFacade(workspace.RootPath);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath);
 
         Assert.Null(await facade.GetTraceAsync("run-missing"));
         var quota = await facade.GetTraceQuotaAsync();
@@ -35,12 +35,14 @@ public sealed class LoopRunInspectionFacadeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
         var interrupted = await CreateInterruptedRunAsync(store);
-        var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
 
         Assert.Equal("Admitted", (await facade.GetAsync(interrupted.Id))!.Status);
-        Assert.True(await facade.RecoverInterruptedRunsAsync());
+        var recovery = await facade.RecoverInterruptedRunsAsync();
         var recovered = await facade.GetAsync(interrupted.Id);
 
+        Assert.True(recovery.Completed);
+        Assert.False(recovery.PreserveCurrentConversation);
         Assert.Equal("Paused", recovered!.Status);
         Assert.Equal(interrupted.LifecycleVersion + 1, recovered.LifecycleVersion);
         Assert.Contains("Restart recovery parked the admitted run", await File.ReadAllTextAsync(paths.EventsLogPath), StringComparison.Ordinal);
@@ -53,7 +55,7 @@ public sealed class LoopRunInspectionFacadeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
         var terminal = await CreateTerminalRunAsync(store);
-        var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
         var trace = await facade.GetTraceAsync(terminal.Id);
         Assert.NotNull(trace);
         Assert.False(trace.IsDeleted);
@@ -93,7 +95,7 @@ public sealed class LoopRunInspectionFacadeTests
         using var workspace = new TestWorkspace();
         var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
         var terminal = await CreateTerminalRunAsync(store);
-        var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
 
         var result = await facade.DeleteTraceAsync(terminal.Id, new string('a', 64), "delete-trace");
 

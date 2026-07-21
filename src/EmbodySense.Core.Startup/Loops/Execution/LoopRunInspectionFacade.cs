@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -8,7 +9,7 @@ using EmbodySense.Core.Persistence.Loops;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
-public sealed class LoopRunInspectionFacade
+public sealed class LoopRunInspectionFacade : IAsyncDisposable
 {
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopRunStore _runStore;
@@ -16,6 +17,8 @@ public sealed class LoopRunInspectionFacade
     private readonly CustomLoopTraceRetentionService? _retention;
     private readonly string? _actor;
     private readonly string? _surface;
+    private CustomLoopWorkspaceExecutionGate? _executionGate;
+    private int _disposed;
 
     public LoopRunInspectionFacade(string workingDirectory, string? authenticatedActor = null, string? authenticatedSurface = null)
     {
@@ -34,18 +37,19 @@ public sealed class LoopRunInspectionFacade
         _retention = audit is null ? null : new CustomLoopTraceRetentionService(_runStore, audit);
     }
 
-    public async Task<bool> RecoverInterruptedRunsAsync(CancellationToken cancellationToken = default)
+    public async Task<LoopRunRecoverySnapshot> RecoverInterruptedRunsAsync(CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_recovery is null || _actor is null)
         {
             throw new InvalidOperationException("This read-only facade was not constructed with an authenticated recovery identity.");
         }
 
-        await using var executionGate = new CustomLoopWorkspaceExecutionGate(_paths);
-        var ownership = executionGate.TryAcquire($"inspection-recovery-{Guid.NewGuid():N}", new string('0', CustomLoopLimits.Sha256HexCharacters));
+        _executionGate ??= new CustomLoopWorkspaceExecutionGate(_paths);
+        var ownership = _executionGate.TryAcquire($"inspection-recovery-{Guid.NewGuid():N}", new string('0', CustomLoopLimits.Sha256HexCharacters));
         if (ownership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
         {
-            return false;
+            return new LoopRunRecoverySnapshot(false, false);
         }
 
         if (ownership.Status != CustomLoopExecutionLeaseStatus.Acquired || ownership.Lease is null)
@@ -60,9 +64,17 @@ public sealed class LoopRunInspectionFacade
             {
                 throw new InvalidOperationException("custom_loop_recovery_failed: one or more interrupted runs could not be parked safely.");
             }
-        }
 
-        return true;
+            return new LoopRunRecoverySnapshot(true, results.Any(result => result.Run is { Status: CustomLoopRunStatus.Paused, InvokingConversation: not null }));
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0 && _executionGate is not null)
+        {
+            await _executionGate.DisposeAsync();
+        }
     }
 
     public async Task<LoopRunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken = default)
