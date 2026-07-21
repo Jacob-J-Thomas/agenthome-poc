@@ -25,6 +25,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private TaskCompletionSource<bool>? _runtimeDiscardCompletion;
     private int _activeCustomRuntimeOperations;
     private bool _discardRuntimeWhenCustomOperationsComplete;
+    private bool _loopRecoveryCompleted;
     private int _disposed;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
@@ -93,30 +94,35 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> GetLoopRunsAsync(int maximumCount = 50, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop run evidence");
+        await EnsureLoopRecoveryAsync(cancellationToken);
         return await _loopRuns.ListRecentAsync(maximumCount, cancellationToken);
     }
 
     public async Task<LoopRunSnapshot?> GetLoopRunAsync(string runId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop run evidence");
+        await EnsureLoopRecoveryAsync(cancellationToken);
         return await _loopRuns.GetAsync(runId, cancellationToken);
     }
 
     public async Task<LoopTraceInspectionSnapshot?> GetLoopTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop trace evidence");
+        await EnsureLoopRecoveryAsync(cancellationToken);
         return await _loopRuns.GetTraceAsync(runId, cancellationToken);
     }
 
     public async Task<LoopTraceQuotaSnapshot> GetLoopTraceQuotaAsync(CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop trace quota");
+        await EnsureLoopRecoveryAsync(cancellationToken);
         return await _loopRuns.GetTraceQuotaAsync(cancellationToken);
     }
 
     public async Task<LoopTraceDeletionResponse> DeleteLoopTraceAsync(string runId, string expectedTraceHash, string operationId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("deleting custom-loop trace content");
+        await EnsureLoopRecoveryAsync(cancellationToken);
         return await _loopRuns.DeleteTraceAsync(runId, expectedTraceHash, operationId, cancellationToken);
     }
 
@@ -359,14 +365,37 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
     private async Task<AgentRuntime> GetOrCreateRuntimeUnderGateAsync(CancellationToken cancellationToken)
     {
-        _runtime ??= await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(
-            _options.Model,
-            _options.WorkingDirectory,
-            _options.CodexExecutablePath,
-            _options.CodexSandbox,
-            AgentRuntimeSurface.Web,
-            cancellationToken);
+        if (_runtime is null)
+        {
+            _runtime = await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(
+                _options.Model,
+                _options.WorkingDirectory,
+                _options.CodexExecutablePath,
+                _options.CodexSandbox,
+                AgentRuntimeSurface.Web,
+                cancellationToken);
+            _loopRecoveryCompleted = true;
+        }
+
         return _runtime;
+    }
+
+    private async Task EnsureLoopRecoveryAsync(CancellationToken cancellationToken)
+    {
+        await _runtimeGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_loopRecoveryCompleted)
+            {
+                return;
+            }
+
+            _loopRecoveryCompleted = _runtime is not null || await _loopRuns.RecoverInterruptedRunsAsync(cancellationToken);
+        }
+        finally
+        {
+            _runtimeGate.Release();
+        }
     }
 
     private void EnsureWorkspaceInitialized(string operation)

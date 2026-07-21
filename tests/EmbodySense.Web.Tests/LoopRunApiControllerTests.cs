@@ -3,8 +3,11 @@ using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Workspace;
@@ -19,6 +22,7 @@ namespace EmbodySense.Web.Tests;
 public sealed class LoopRunApiControllerTests
 {
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-20T12:00:00+00:00");
 
     [Fact]
     public async Task Run_evidence_api_enforces_auth_initialization_bounds_and_safe_read_failures_without_starting_runtime()
@@ -177,6 +181,39 @@ public sealed class LoopRunApiControllerTests
     }
 
     [Fact]
+    public async Task Run_evidence_api_recovers_interrupted_runs_before_exposing_lifecycle_state()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var interrupted = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths));
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, "conversation must not be initialized by evidence recovery");
+        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+
+            var response = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
+            var recovered = Assert.Single((await response.Content.ReadFromJsonAsync<LoopRunSummarySnapshot[]>(JsonOptions))!);
+            var detail = await (await SendAsync(client, $"/api/loop-runs/{interrupted.Id}", token)).Content.ReadFromJsonAsync<LoopRunSnapshot>(JsonOptions);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(interrupted.Id, recovered.Id);
+            Assert.Equal("Paused", recovered.Status);
+            Assert.Equal(interrupted.LifecycleVersion + 1, detail!.LifecycleVersion);
+            Assert.Equal("conversation must not be initialized by evidence recovery", await File.ReadAllTextAsync(paths.CurrentConversationPath));
+            Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Cancel_returns_service_unavailable_when_another_process_owns_loop_hosting()
     {
         using var workspace = new TestWorkspace();
@@ -218,6 +255,26 @@ public sealed class LoopRunApiControllerTests
         var updated = await facade.UpdateAsync(created.Id, created.DefinitionVersion, "update-web-run-api", input);
         return Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
     }
+
+    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store)
+    {
+        var definition = CustomLoopDefinition.CreateSeed("loop-web-recovery", "default-role", "step-1", "create-web-recovery", Timestamp);
+        var admittedEvent = RunEvent(1, "web-recovery-admitted", CustomLoopRunEventKind.Admitted);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
+        Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var audited = admitted with
+        {
+            LifecycleVersion = 2,
+            Events = [admittedEvent, RunEvent(2, "web-recovery-admission-audit", CustomLoopRunEventKind.AdmissionAuditCompleted)]
+        };
+        Assert.True(CustomLoopRunValidator.Validate(audited).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(audited, admitted.LifecycleVersion)).Status);
+        return audited;
+    }
+
+    private static CustomLoopRunEvent RunEvent(long sequence, string id, CustomLoopRunEventKind kind) => new(sequence, id, Timestamp, kind, null, null, null, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null);
 
     private static async Task<HttpResponseMessage> SendAsync(HttpClient client, string path, string token, HttpMethod? method = null)
     {
