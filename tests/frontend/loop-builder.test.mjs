@@ -569,6 +569,33 @@ test("a rejected invocation with an existing run leaves run selection empty", as
   assert.match(app.elements.validationBanner.textContent, /Run was not admitted: This loop already has a nonterminal run/);
 });
 
+test("an admission audit failure selects the durable parked run and surfaces its integrity warning", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const parked = createRunSnapshot();
+  parked.id = "run-parked";
+  parked.status = "NeedsReview";
+  parked.failureCode = "InvocationReceiptAuditUnavailable";
+  parked.failureDetail = "Admission was parked because the invocation receipt could not be completed.";
+  server.runs = [{ id: parked.id, loopId: parked.loopId, admissionOperationId: parked.admissionOperationId, definitionVersion: 2, status: parked.status, createdAtUtc: parked.createdAtUtc, updatedAtUtc: parked.updatedAtUtc, completedAtUtc: null, iteration: 0, nextStepIndex: 0, failureCode: parked.failureCode, isDeleted: false }];
+  server.runDetails.set(parked.id, parked);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.context.testHub = {
+    connected: true,
+    invoke: () => Promise.resolve({ admissionStatus: "AuditUnavailable", run: parked, detail: "Run admission was parked because its invocation audit needs review." })
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Inspect this run.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.runTitle.textContent, /run-parked/);
+  assert.match(app.elements.runSubtitle.textContent, /Needs Review/);
+  assert.match(app.elements.validationBanner.textContent, /admission was parked.*audit needs review/i);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Run was not admitted/);
+});
+
 test("a rejected Resume response is shown as a failure instead of a success toast", async () => {
   const server = new FakeFetchServer(createCatalog());
   const paused = createRunSnapshot();

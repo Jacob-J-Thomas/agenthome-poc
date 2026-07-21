@@ -1047,6 +1047,14 @@ async function startRun() {
     selectedTrace = null;
     renderAll();
     const response = await waitForRunOperation(invocation, { preferredAdmissionOperationId: operationId, preserveEmptySelection: true });
+    if (response?.admissionStatus === "AuditUnavailable" && response?.run) {
+      selectedRunId = response.run.id;
+      selectedRun = response.run;
+      await loadRuns({ silent: true, preferredRunId: response.run.id });
+      renderAll();
+      showBanner(response.detail ?? "Run admission was parked because its invocation audit could not be completed. Inspect the durable run evidence before resuming.");
+      return;
+    }
     if (response?.admissionStatus !== "Admitted" || !response?.run) {
       await loadRuns({ silent: true, preserveEmptySelection: true });
       renderAll();
