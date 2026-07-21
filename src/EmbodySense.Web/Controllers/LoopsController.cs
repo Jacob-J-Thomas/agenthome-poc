@@ -8,6 +8,7 @@ namespace EmbodySense.Web.Controllers;
 
 [ApiController]
 [Authorize(Policy = WebAuthPolicies.LocalSession)]
+[ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [Route("api/loops")]
 public sealed class LoopsController : ControllerBase
 {

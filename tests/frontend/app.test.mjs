@@ -30,6 +30,15 @@ test("history_loaded replaces the transcript using role labels and text content"
   assert.equal(findByTag(app.elements.transcript, "img").length, 0);
 });
 
+test("transcript hydration failure leaves the connected chat usable", async () => {
+  const app = await loadApp({ transcriptError: "Corrupt retained loop evidence." });
+
+  assert.equal(app.elements.clientStatus.textContent, "Web primary");
+  assert.equal(app.elements.sendButton.disabled, false);
+  assert.equal(app.elements.verboseToggle.disabled, false);
+  assert.match(app.elements.transcript.textContent, /Transcript unavailable: Corrupt retained loop evidence/);
+});
+
 test("boot hydrates the complete active runtime transcript instead of the bounded configuration snapshot", async () => {
   const activeTranscript = Array.from({ length: 201 }, (_, index) => ({ role: index % 2 === 0 ? "user" : "assistant", content: `active message ${index}` }));
   activeTranscript[200].content = "x".repeat(5000);
@@ -157,6 +166,7 @@ test("approval panel renders pending requests and dispatches approve and reject 
 async function loadApp(overrides = {}) {
   FakeWebSocket.instances = [];
   FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
+  FakeWebSocket.transcriptError = overrides.transcriptError ?? null;
   const document = new FakeDocument(indexSource);
   const context = {
     URL,
@@ -241,6 +251,7 @@ class FakeWebSocket {
   static OPEN = 1;
   static instances = [];
   static currentTranscript = null;
+  static transcriptError = null;
 
   constructor(url) {
     this.url = url;
@@ -259,6 +270,10 @@ class FakeWebSocket {
     }
 
     if (payload.type === 1 && payload.invocationId !== undefined) {
+      if (payload.target === "GetCurrentTranscript" && FakeWebSocket.transcriptError) {
+        setTimeout(() => this.serverSend({ type: 3, invocationId: payload.invocationId, error: FakeWebSocket.transcriptError }), 0);
+        return;
+      }
       const result = payload.target === "DecideApproval"
         ? { accepted: true }
         : payload.target === "GetCurrentTranscript"

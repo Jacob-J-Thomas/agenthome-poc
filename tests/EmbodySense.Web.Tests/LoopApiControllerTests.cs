@@ -44,6 +44,7 @@ public sealed class LoopApiControllerTests
             Assert.Equal(HttpStatusCode.Conflict, uninitializedCreate.StatusCode);
             Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
             Assert.Equal(HttpStatusCode.OK, catalogResponse.StatusCode);
+            Assert.True(catalogResponse.Headers.CacheControl?.NoStore == true);
             Assert.Equal("default-conversation", catalog.SystemDefault.Id);
             Assert.Empty(catalog.CustomDefinitions);
             Assert.Equal(
@@ -54,6 +55,7 @@ public sealed class LoopApiControllerTests
             Assert.Equal("OpenAiCodex", catalog.RuntimeModel!.Provider);
             Assert.Null(catalog.RuntimeModel.Model);
             Assert.Equal(HttpStatusCode.OK, systemGet.StatusCode);
+            Assert.True(systemGet.Headers.CacheControl?.NoStore == true);
             Assert.Equal(HttpStatusCode.BadRequest, malformedGet.StatusCode);
             Assert.Contains("invalid_loop_id", await malformedGet.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Equal(HttpStatusCode.Conflict, systemUpdate.StatusCode);
