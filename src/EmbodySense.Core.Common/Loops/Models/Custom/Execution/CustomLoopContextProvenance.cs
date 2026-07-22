@@ -10,5 +10,6 @@ public enum CustomLoopContextProvenance
     AuthoredDefinition = 5,
     ManualInvocation = 6,
     LogicalConversation = 7,
-    ModelOutput = 8
+    ModelOutput = 8,
+    AgentIdentityFile = 9
 }

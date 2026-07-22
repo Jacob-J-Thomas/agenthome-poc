@@ -462,9 +462,9 @@ public sealed class CustomLoopContextResolverTests
         var manifest = new List<CustomLoopContextManifestSource>
         {
             roleInstruction,
-            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "agent", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "role", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
             contextualState,
             OmittedSource(6, CustomLoopContextSource.ContextualState, "memory", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             OmittedSource(7, CustomLoopContextSource.ContextualState, "models", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User)

@@ -127,6 +127,7 @@ public static class CustomLoopContextSnapshotHash
             CustomLoopContextProvenance.ManualInvocation => "manual-invocation",
             CustomLoopContextProvenance.LogicalConversation => "logical-conversation",
             CustomLoopContextProvenance.ModelOutput => "model-output",
+            CustomLoopContextProvenance.AgentIdentityFile => "agent-identity-file",
             _ => $"unknown:{(int)provenance}"
         };
     }

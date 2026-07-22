@@ -6,12 +6,10 @@ namespace EmbodySense.Core.Persistence.Workspace;
 
 public sealed class WorkspaceContextStore : IWorkspaceContextStore
 {
-    // TODO(#12): Reclassify SOUL.md as durable agent identity and replace or remove the ambiguous AGENT.md role file once the agent-versus-role contract is settled; update loading, provenance, migrations, docs, and tests together. See https://github.com/Jacob-J-Thomas/agenthome-poc/issues/12.
     private static readonly (string SourceId, string FileName, WorkspaceContextDocumentKind Kind)[] AgentContextFiles =
     [
-        ("agent", "AGENT.md", WorkspaceContextDocumentKind.RoleInstruction),
-        ("soul", "SOUL.md", WorkspaceContextDocumentKind.RoleInstruction),
-        ("personality", "PERSONALITY.md", WorkspaceContextDocumentKind.RoleInstruction),
+        ("soul", "SOUL.md", WorkspaceContextDocumentKind.IdentityInstruction),
+        ("personality", "PERSONALITY.md", WorkspaceContextDocumentKind.IdentityInstruction),
         ("context", "CONTEXT.md", WorkspaceContextDocumentKind.ContextualState),
         ("memory", "MEMORY.md", WorkspaceContextDocumentKind.ContextualState),
         ("models", "models.json", WorkspaceContextDocumentKind.ContextualState)
@@ -28,6 +26,14 @@ public sealed class WorkspaceContextStore : IWorkspaceContextStore
             "nearest-agents",
             workspaceInstructionsPath is null ? "AGENTS.md" : WorkspaceInstructionLocator.GetDisplayPath(paths.RootPath, workspaceInstructionsPath),
             workspaceInstructionsPath ?? expectedWorkspaceInstructionsPath,
+            WorkspaceContextDocumentKind.RoleInstruction,
+            cancellationToken));
+
+        var rolePath = WorkspaceRoleInstructionLocator.ResolvePath(paths);
+        documents.Add(await ReadDocumentAsync(
+            "role",
+            WorkspaceRoleInstructionLocator.GetDisplayPath(rolePath),
+            rolePath,
             WorkspaceContextDocumentKind.RoleInstruction,
             cancellationToken));
 

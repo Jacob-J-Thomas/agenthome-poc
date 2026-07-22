@@ -306,9 +306,9 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         var workspace = new[]
         {
             ("nearest-agents", "root/AGENTS.md", CustomLoopContextSource.RoleInstruction, CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            ("agent", "root/.agent/AGENT.md", CustomLoopContextSource.RoleInstruction, CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            ("soul", "root/.agent/SOUL.md", CustomLoopContextSource.RoleInstruction, CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            ("personality", "root/.agent/PERSONALITY.md", CustomLoopContextSource.RoleInstruction, CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            ("role", "root/.agent/ROLE.md", CustomLoopContextSource.RoleInstruction, CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            ("soul", "root/.agent/SOUL.md", CustomLoopContextSource.RoleInstruction, CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            ("personality", "root/.agent/PERSONALITY.md", CustomLoopContextSource.RoleInstruction, CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
             ("context", "root/.agent/CONTEXT.md", CustomLoopContextSource.ContextualState, CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             ("memory", "root/.agent/MEMORY.md", CustomLoopContextSource.ContextualState, CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             ("models", "root/.agent/models.json", CustomLoopContextSource.ContextualState, CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User)

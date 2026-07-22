@@ -56,6 +56,20 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Validate_accepts_the_legacy_agent_path_for_the_workspace_role_source()
+    {
+        var seed = CreateRun();
+        var sources = seed.ContextSnapshot.SourceManifest.ToArray();
+        sources[1] = sources[1] with { SourcePath = "C:/workspace/.agent/AGENT.md" };
+        var snapshot = CustomLoopContextSnapshotHash.Apply(seed.ContextSnapshot with { SourceManifest = sources });
+        var run = CustomLoopAdmissionRequestHash.Apply(seed with { ContextSnapshot = snapshot });
+
+        var validation = CustomLoopRunValidator.Validate(run);
+
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+    }
+
+    [Fact]
     public void Validate_rejects_unsupported_schema_with_pre_1_0_cleanup_guidance()
     {
         var validation = CustomLoopRunValidator.Validate(CreateRun() with { SchemaVersion = 99 });
@@ -554,9 +568,9 @@ public sealed class CustomLoopRunValidatorTests
         return
         [
             Source(1, CustomLoopContextSource.RoleInstruction, "nearest-agents", "C:/workspace/AGENTS.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, roleContent),
-            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "agent", "C:/workspace/.agent/AGENT.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", "C:/workspace/.agent/SOUL.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", "C:/workspace/.agent/PERSONALITY.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "role", "C:/workspace/.agent/ROLE.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", "C:/workspace/.agent/SOUL.md", CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", "C:/workspace/.agent/PERSONALITY.md", CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
             OmittedSource(5, CustomLoopContextSource.ContextualState, "context", "C:/workspace/.agent/CONTEXT.md", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             OmittedSource(6, CustomLoopContextSource.ContextualState, "memory", "C:/workspace/.agent/MEMORY.md", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             OmittedSource(7, CustomLoopContextSource.ContextualState, "models", "C:/workspace/.agent/models.json", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User)

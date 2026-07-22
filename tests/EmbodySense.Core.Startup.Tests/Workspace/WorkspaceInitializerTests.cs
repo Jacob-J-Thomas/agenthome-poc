@@ -16,15 +16,16 @@ public sealed class WorkspaceInitializerTests
 
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
 
-        var agentGuide = await File.ReadAllTextAsync(workspace.File(".agent", "AGENT.md"));
-        Assert.Contains("Keep agent documents current when durable identity, purpose, operating context, or user preferences change.", agentGuide);
-        Assert.Contains("Use `.agent/SOUL.md` for stable purpose and values.", agentGuide);
-        Assert.Contains("Use `.agent/PERSONALITY.md` for durable interaction style and behavioral defaults.", agentGuide);
-        Assert.Contains("Treat `.agent/MEMORY.md` as the primary durable memory registry.", agentGuide);
-        Assert.Contains("Store, update, create, and retrieve most long-lived memories in `.agent/MEMORY.md`.", agentGuide);
-        Assert.Contains("Query conversation history only for transcript-specific evidence", agentGuide);
-        Assert.Contains("## Emergent capability growth", agentGuide);
-        Assert.Contains("Do not claim hooks, cron jobs, subagents, planners, MCP integrations, model routing, or other advanced capabilities are live", agentGuide);
+        var roleGuide = await File.ReadAllTextAsync(workspace.File(".agent", "ROLE.md"));
+        Assert.Contains("defines the agent's contextual role in this workspace", roleGuide);
+        Assert.Contains("durable identity belongs in `.agent/SOUL.md` and `.agent/PERSONALITY.md`", roleGuide);
+        Assert.Contains("Keep agent documents current when durable identity, purpose, operating context, or user preferences change.", roleGuide);
+        Assert.Contains("Use `.agent/ROLE.md` for this workspace's contextual role", roleGuide);
+        Assert.Contains("Treat `.agent/MEMORY.md` as the primary durable memory registry.", roleGuide);
+        Assert.Contains("Query conversation history only for transcript-specific evidence", roleGuide);
+        Assert.Contains("## Emergent capability growth", roleGuide);
+        Assert.Contains("Do not claim hooks, cron jobs, subagents, planners, MCP integrations, model routing, or other advanced capabilities are live", roleGuide);
+        Assert.False(File.Exists(workspace.File(".agent", "AGENT.md")));
 
         var soulGuide = await File.ReadAllTextAsync(workspace.File(".agent", "SOUL.md"));
         Assert.Contains("stable purpose and values", soulGuide);
@@ -56,7 +57,7 @@ public sealed class WorkspaceInitializerTests
         Assert.Contains("Search `.agent/MEMORY.md` first.", memoryReadme);
 
         var permissionsReadme = await File.ReadAllTextAsync(workspace.File(".agent", "PERMISSIONS.md"));
-        Assert.Contains("Agent document writes such as `.agent/MEMORY.md`", permissionsReadme);
+        Assert.Contains("Agent document writes such as `.agent/ROLE.md`", permissionsReadme);
 
         var auditReadme = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "README.md"));
         Assert.Contains("## How agents should reason about audit", auditReadme);
@@ -72,6 +73,33 @@ public sealed class WorkspaceInitializerTests
         Assert.True(Directory.Exists(workspace.File(".agent", "loops")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "definitions")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "runs")));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_copies_legacy_agent_role_without_deleting_it()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File(".agent"));
+        await File.WriteAllTextAsync(workspace.File(".agent", "AGENT.md"), "legacy workspace role");
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        Assert.Equal("legacy workspace role", await File.ReadAllTextAsync(workspace.File(".agent", "ROLE.md")));
+        Assert.Equal("legacy workspace role", await File.ReadAllTextAsync(workspace.File(".agent", "AGENT.md")));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_preserves_existing_role_when_legacy_agent_file_also_exists()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.CreateDirectory(workspace.File(".agent"));
+        await File.WriteAllTextAsync(workspace.File(".agent", "ROLE.md"), "current workspace role");
+        await File.WriteAllTextAsync(workspace.File(".agent", "AGENT.md"), "legacy workspace role");
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        Assert.Equal("current workspace role", await File.ReadAllTextAsync(workspace.File(".agent", "ROLE.md")));
+        Assert.Equal("legacy workspace role", await File.ReadAllTextAsync(workspace.File(".agent", "AGENT.md")));
     }
 
     [Fact]

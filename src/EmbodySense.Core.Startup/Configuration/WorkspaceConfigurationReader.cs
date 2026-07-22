@@ -161,12 +161,13 @@ public sealed class WorkspaceConfigurationReader
 
     private static async Task<IReadOnlyList<WorkspaceConfigurationDocument>> ReadDocumentsAsync(WorkspacePaths paths, CancellationToken cancellationToken)
     {
+        var rolePath = WorkspaceRoleInstructionLocator.ResolvePath(paths);
         var documentPaths = new[]
         {
             DocumentPath("Nearest AGENTS", "Repository", WorkspaceInstructionLocator.FindNearest(paths.RootPath) ?? Path.Combine(paths.RootPath, WorkspaceInstructionLocator.FileName)),
-            DocumentPath("Agent guide", "Agent", paths.AgentFile("AGENT.md")),
-            DocumentPath("Soul", "Agent", paths.AgentFile("SOUL.md")),
-            DocumentPath("Personality", "Agent", paths.AgentFile("PERSONALITY.md")),
+            DocumentPath("Role instructions", "Role", rolePath),
+            DocumentPath("Soul", "Identity", paths.AgentFile("SOUL.md")),
+            DocumentPath("Personality", "Identity", paths.AgentFile("PERSONALITY.md")),
             DocumentPath("Context", "Agent", paths.AgentFile("CONTEXT.md")),
             DocumentPath("Memory", "Agent", paths.AgentFile("MEMORY.md")),
             DocumentPath("Models", "Agent", paths.AgentFile("models.json")),

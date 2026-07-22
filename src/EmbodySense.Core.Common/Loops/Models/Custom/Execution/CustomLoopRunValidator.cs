@@ -342,9 +342,9 @@ public static class CustomLoopRunValidator
         var expectedWorkspaceSources = new[]
         {
             (Id: "nearest-agents", PathSuffix: "AGENTS.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
-            (Id: "agent", PathSuffix: ".agent/AGENT.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
-            (Id: "soul", PathSuffix: ".agent/SOUL.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
-            (Id: "personality", PathSuffix: ".agent/PERSONALITY.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "role", PathSuffix: ".agent/ROLE.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "soul", PathSuffix: ".agent/SOUL.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.AgentIdentityFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "personality", PathSuffix: ".agent/PERSONALITY.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.AgentIdentityFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
             (Id: "context", PathSuffix: ".agent/CONTEXT.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
             (Id: "memory", PathSuffix: ".agent/MEMORY.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
             (Id: "models", PathSuffix: ".agent/models.json", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User)
@@ -413,9 +413,9 @@ public static class CustomLoopRunValidator
             if (index < expectedWorkspaceSources.Length)
             {
                 var expected = expectedWorkspaceSources[index];
-                if (!string.Equals(source.SourceId, expected.Id, StringComparison.Ordinal) || !HasPathSuffix(source.SourcePath, expected.PathSuffix) || source.SourceType != expected.Source || source.Provenance != expected.Provenance || source.TrustClass != expected.Trust || source.Role != expected.Role)
+                if (!string.Equals(source.SourceId, expected.Id, StringComparison.Ordinal) || !HasExpectedWorkspacePath(source.SourcePath, expected.Id, expected.PathSuffix) || source.SourceType != expected.Source || source.Provenance != expected.Provenance || source.TrustClass != expected.Trust || source.Role != expected.Role)
                 {
-                    Add(errors, "invalid_workspace_context_classification", field, "Workspace sources must preserve the designated AGENTS, role-instruction, and contextual-state order and trust classes.");
+                    Add(errors, "invalid_workspace_context_classification", field, "Workspace sources must preserve the designated repository-role, workspace-role, agent-identity, and contextual-state order and trust classes.");
                 }
             }
             else if (source.SourceType != CustomLoopContextSource.InvokingConversation || source.Provenance != CustomLoopContextProvenance.LogicalConversation || source.TrustClass != CustomLoopContextTrustClass.UntrustedData || source.Role != LlmMessageRole.User)
@@ -482,6 +482,12 @@ public static class CustomLoopRunValidator
     private static bool HasPathSuffix(string? path, string expectedSuffix)
     {
         return path?.Replace('\\', '/').EndsWith(expectedSuffix, StringComparison.Ordinal) == true;
+    }
+
+    private static bool HasExpectedWorkspacePath(string? path, string sourceId, string expectedSuffix)
+    {
+        return HasPathSuffix(path, expectedSuffix)
+            || string.Equals(sourceId, "role", StringComparison.Ordinal) && HasPathSuffix(path, ".agent/AGENT.md");
     }
 
     private static void ValidateEvents(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)

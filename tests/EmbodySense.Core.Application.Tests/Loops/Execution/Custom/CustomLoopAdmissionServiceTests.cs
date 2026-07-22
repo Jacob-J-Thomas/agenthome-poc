@@ -992,9 +992,9 @@ public sealed class CustomLoopAdmissionServiceTests
         var manifest = new List<CustomLoopContextManifestSource>
         {
             IncludedSource(1, CustomLoopContextSource.RoleInstruction, "nearest-agents", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, directoryRoleContent, capturedAtUtc),
-            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "agent", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
-            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
-            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
+            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "role", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
+            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
+            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", CustomLoopContextProvenance.AgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
             OmittedSource(5, CustomLoopContextSource.ContextualState, "context", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User, capturedAtUtc),
             OmittedSource(6, CustomLoopContextSource.ContextualState, "memory", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User, capturedAtUtc),
             OmittedSource(7, CustomLoopContextSource.ContextualState, "models", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User, capturedAtUtc)
@@ -1022,7 +1022,7 @@ public sealed class CustomLoopAdmissionServiceTests
         return sourceId switch
         {
             "nearest-agents" => "test/AGENTS.md",
-            "agent" => "test/.agent/AGENT.md",
+            "role" => "test/.agent/ROLE.md",
             "soul" => "test/.agent/SOUL.md",
             "personality" => "test/.agent/PERSONALITY.md",
             "context" => "test/.agent/CONTEXT.md",

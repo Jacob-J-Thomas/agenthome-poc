@@ -46,7 +46,7 @@ internal static class WorkspaceDefaults
 
         return
         [
-            new WorkspaceSeedFile(paths.AgentFile("AGENT.md"), DefaultAgentMd(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AgentFile(WorkspaceRoleInstructionLocator.FileName), DefaultRoleMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("SOUL.md"), DefaultSoulMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("PERSONALITY.md"), DefaultPersonalityMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), Overwrite: false),
@@ -66,12 +66,14 @@ internal static class WorkspaceDefaults
         return JsonSerializer.Serialize(LoopDefinition.CreateDefaultConversation(), JsonOptions) + Environment.NewLine;
     }
 
-    private static string DefaultAgentMd() => """
-            # Agent operating guide
+    private static string DefaultRoleMd() => """
+            # Workspace role
 
             This workspace is managed by EmbodySense Agent Harness.
 
-            This file is the operational front door for the local agent. It should help each run behave like the same embodied assistant: aware of its home, honest about its tools, able to preserve lessons, and willing to grow the workspace when the user and policy allow it.
+            This file defines the agent's contextual role in this workspace. Repository or ecosystem instructions belong in `AGENTS.md`; durable identity belongs in `.agent/SOUL.md` and `.agent/PERSONALITY.md`. Keep this role focused on how the same durable agent should operate here.
+
+            This file is the operational front door for the local workspace role. It should help each run stay aware of its home, honest about its tools, able to preserve lessons, and willing to grow the workspace when the user and policy allow it.
 
             Treat `.agent/` as the durable environment and the workspace root as the working area. The provider model is only one part of the agent. The local files, memory, skills, governed tools, audit log, permissions, and user-approved habits are also part of the agent's body.
 
@@ -98,6 +100,7 @@ internal static class WorkspaceDefaults
 
             Keep agent documents current when durable identity, purpose, operating context, or user preferences change.
 
+            - Use `.agent/ROLE.md` for this workspace's contextual role and operating responsibilities.
             - Use `.agent/SOUL.md` for stable purpose and values.
             - Use `.agent/PERSONALITY.md` for durable interaction style and behavioral defaults.
             - Use `.agent/CONTEXT.md` for project, environment, human preferences, boundaries, and current operating context.
@@ -434,7 +437,7 @@ internal static class WorkspaceDefaults
 
             Default denied directories include `private`, `.agent/audit`, `.agent/logs`, and `.agent/hooks`. Use `embodysense audit` to inspect audit events instead of reading raw audit files.
 
-            Agent document writes such as `.agent/MEMORY.md`, `.agent/CONTEXT.md`, `.agent/SOUL.md`, and `.agent/PERSONALITY.md` are not broadly pre-approved by the default directory-level policy. If an agent needs to update them through governed workspace tools, missing policy should route to human approval unless a future dedicated memory or document command exists.
+            Agent document writes such as `.agent/ROLE.md`, `.agent/MEMORY.md`, `.agent/CONTEXT.md`, `.agent/SOUL.md`, and `.agent/PERSONALITY.md` are not broadly pre-approved by the default directory-level policy. If an agent needs to update them through governed workspace tools, missing policy should route to human approval unless a future dedicated memory or document command exists.
 
             Use this file to understand the default policy, not to bypass it. If behavior differs from this explanation, trust the live `permissions.json`, source code, and audit trail, then update the explanation or implementation so they match.
 
