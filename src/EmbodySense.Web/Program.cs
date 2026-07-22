@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Loops;
@@ -34,7 +35,7 @@ public static class Program
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(options);
 
-        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = ResolveContentRoot(), ApplicationName = typeof(Program).Assembly.FullName });
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = ResolveContentRoot(), ApplicationName = Assembly.GetExecutingAssembly().GetName().Name });
         builder.Logging.ClearProviders();
         builder.Logging.AddSimpleConsole();
         builder.WebHost.UseUrls(options.Url);
