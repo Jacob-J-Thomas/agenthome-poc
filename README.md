@@ -1,19 +1,6 @@
 # EmbodySense
 
-EmbodySense is a C#/.NET agent harness project, evolved from the original AgentHome proof of concept. It explores how a local AI agent runtime can move beyond a plain chat loop into a governed product surface: localhost Web UI, persisted workspace state, graph-authored custom loops, model-accessible tools, permissions, approvals, audit trails, and repeatable verification.
-
-## Project Framing
-
-This repository is both an implementation and an architecture lab for applied agent systems. The practical question behind the project is: what does it take to let an LLM operate inside a real local workspace while keeping the human in control of scope, authority, evidence, and recovery?
-
-The current implementation is not packaged as an end-user product. It is a working prototype and design record for:
-
-- a localhost browser client as the primary interaction surface;
-- a reusable C# runtime layer that keeps Web and CLI clients behind the same startup facade;
-- graph-authored custom loops with persisted definitions, validation, invocation, run records, and timeline/audit evidence;
-- governed model-accessible workspace tools with explicit loop authority, permission checks, human approvals, and auditable outcomes;
-- durable workspace context and memory files under `.agent/`;
-- public-boundary tests for Core, Web, integration, and frontend behavior.
+EmbodySense is a C# agent harness project. The repository is still small, but the project scope is not defined by the current command surface.
 
 ## Scope Vs Status
 
@@ -34,11 +21,11 @@ This section is descriptive only. Verify it against source before relying on it,
 The source is organized around project-enforced Core, Web, and CLI boundaries:
 
 - `src/EmbodySense.Core.Common` owns dependency-free shared primitives and value types for inference, memory, loops, context, audit, permissions, tools, local workspace execution, workspace paths, workspace seed records, and filesystem path comparison.
-- `src/EmbodySense.Core.Application` owns reusable ports plus orchestration and behavior, including the default conversation loop runner, runtime conversation state, runtime command helpers, context formatting, inference abstractions, and governance services.
+- `src/EmbodySense.Core.Application` owns reusable ports plus orchestration and behavior, including the default conversation loop runner, custom-loop authoring/admission/ordered execution, lifecycle and recovery services, trace retention, runtime conversation state, runtime command helpers, context formatting, inference abstractions, and governance services.
 - `src/EmbodySense.Core.Clients` owns edge adapters for provider protocols and local workspace interaction. `CodexAppServer` contains the Codex app-server JSON-RPC adapter; `LocalWorkspace` contains governed local filesystem execution used by model tool requests. It depends on Application ports and Common value types.
-- `src/EmbodySense.Core.Persistence` owns long-lived `.agent/` and workspace state access, including audit events, conversation transcripts, loop definitions and runs, permissions loading, workspace context document reads, and scaffold file writes. It depends on Application storage ports and Common value types.
-- `src/EmbodySense.Core.Startup` owns concrete composition. It wires Application abstractions to Clients and Persistence, owns the runtime factory/facade, startup inference wrapper, workspace initializer, interface-client status/audit readers, tool-approval adapter contracts, and default workspace seed content.
-- `src/EmbodySense.Web` owns the primary localhost browser client. It serves the static Web UI, binds only to localhost hosts, exposes session/status/workspace/approval REST endpoints plus a SignalR session hub for browser turns, cancellation, status pushes, and approval pushes, and consumes Core only through the `Core.Startup` API.
+- `src/EmbodySense.Core.Persistence` owns long-lived `.agent/` and workspace state access, including audit events, conversation transcripts, system and custom loop definitions, custom run traces and tombstones, idempotent invocation/control receipts, the custom-loop execution gate and single-host lock, permissions loading, workspace context document reads, and scaffold file writes. It depends on Application storage ports and Common value types.
+- `src/EmbodySense.Core.Startup` owns concrete composition. It wires Application abstractions to Clients and Persistence, owns the runtime and loop-authoring/inspection facades, run-scoped custom inference composition, startup inference wrapper, workspace initializer, interface-client status/audit readers, tool-approval adapter contracts, and default workspace seed content.
+- `src/EmbodySense.Web` owns the primary localhost browser client. It serves the chat and Loops surfaces, binds only to localhost hosts, exposes authenticated session/status/workspace/approval/loop/run endpoints plus a SignalR session hub for browser turns and synchronous custom-loop control, and consumes Core only through the `Core.Startup` API.
 - `src/EmbodySense.Cli.Command` owns human-facing CLI commands, the CLI runtime host, console adapters, and human approval prompts. It consumes Core only through the `Core.Startup` API for runtime, status, audit, workspace, and approval contracts.
 - `src/EmbodySense.Cli` is the executable startup shell. It references `Cli.Command` and dispatches process arguments.
 - `tests/EmbodySense.*.Tests` projects mirror production project boundaries where practical. `tests/EmbodySense.IntegrationTests` covers behavior that intentionally crosses project boundaries, and `tests/EmbodySense.Tests.Support` contains shared test fixtures.
@@ -47,12 +34,12 @@ Dependency height is enforced by explicit project references and architecture gu
 
 Project and namespace separation are ownership and compile-time dependency boundaries, not security boundaries by themselves. Security-sensitive behavior must be enforced by runtime policy checks, explicit approvals, and auditable actions.
 
-The primary implemented client is now the localhost Web UI in `src/EmbodySense.Web`. It hosts a browser client on `127.0.0.1` by default, serves static files from `wwwroot`, requires a same-origin session token for protected REST and SignalR calls, lets the user explicitly initialize an uninitialized workspace, handles supported harness slash commands, exposes a Verbose toggle for visible-context debug output, streams assistant output through the `/hubs/session` SignalR hub, supports browser turn cancellation, and pushes governed tool approval requests to connected browsers. The Web Loops surface can create, graph-edit, save, reload, archive/delete, and synchronously invoke supported editable custom loops with server-side validation and run/audit/timeline recording. The `/api/approvals/*` endpoints remain as a token-guarded fallback for approval inspection and decisions.
+The primary implemented client is now the localhost Web UI in `src/EmbodySense.Web`. It hosts a browser client on `127.0.0.1` by default, serves static files from `wwwroot`, requires a same-origin session token for protected REST and SignalR calls, lets the user explicitly initialize an uninitialized workspace, handles supported harness slash commands, exposes a Verbose toggle for visible-context debug output, streams assistant output through the `/hubs/session` SignalR hub, supports browser turn cancellation, and pushes governed tool approval requests to connected browsers. Its linked `/loops.html` surface provides Builder and Runs views for the first-wave custom-loop workflow. Governed approval inspection and decisions are bound to the owning SignalR connection; the token-guarded legacy `/api/approvals/*` routes cannot inspect or decide connection-owned requests.
 
 The CLI `run` path remains supported as a verification and conformance client. It prompts before initializing an uninitialized workspace, loads workspace instructions and seeded agent documents as runtime context, exposes governed file commands to the model through Codex app-server dynamic tools, streams app-server events into the console, and can run with explicit visible-context debug output:
 
 1. `Cli.Command.RunCommand` checks whether `--workdir` is initialized, asks the user to confirm workspace scaffolding when it is not, and then hands reusable service composition to `Core.Startup.Runtime.AgentRuntimeFactory` and `AgentRuntime`.
-2. `AgentRuntimeFactory` wires `Common.Workspace.WorkspacePaths`, `PermissionPolicyStore`, `ToolPermissionService`, `ToolBroker`, `LocalWorkspaceClient`, `AuditLog`, `ConversationMemoryStore`, `LoopDefinitionStore`, `LoopRunStore`, `WorkspaceContextStore`, `AgentContextProvider`, `Startup.Inference.LlmInferenceClient`, `ConversationRuntimeState`, and `DefaultConversationLoopRunner` behind the `AgentRuntime` facade.
+2. `AgentRuntimeFactory` wires the shared workspace, permission, audit, conversation, context, and provider adapters behind `AgentRuntime`. It composes `DefaultConversationLoopRunner` for chat plus the custom definition/run/operation stores, admission gate, immutable context capture, ordered runner, lifecycle/recovery services, run-scoped inference/tool broker, and conversation publisher for synchronous custom execution.
 3. `Startup.Inference.LlmInferenceClient` selects `Clients.CodexAppServer.CodexAppServerInferenceClient` for the OpenAI Codex surface.
 4. `WorkspaceContextStore` reads the nearest `AGENTS.md` found by walking upward from `--workdir`, plus `.agent/AGENT.md`, `.agent/SOUL.md`, `.agent/PERSONALITY.md`, `.agent/CONTEXT.md`, `.agent/MEMORY.md`, and `.agent/models.json` under `--workdir` when those files exist and are non-empty. `AgentContextProvider` formats that context into the seeded runtime system message.
 5. `CodexAppServerInferenceClient` owns the Codex app-server JSON-RPC flow. `CodexAppServerContextBuilder` builds thread developer instructions from restored runtime context, `CodexAppServerRequestHandler` declines and audits unsupported native app-server requests, and `CodexAppServerToolBridge` exposes the `embodysense.command` dynamic tool.
@@ -66,7 +53,7 @@ Native Codex app-server command, file-change, permission, MCP elicitation, and u
 
 The older provider-neutral fenced-JSON tool protocol has been removed. Dynamic app-server tools are the only supported governed tool integration.
 
-Implemented governed commands:
+Default conversation/runtime governed commands:
 
 - `list`: list a directory.
 - `read`: read a file.
@@ -81,7 +68,25 @@ Current app-server dynamic tool calls use `embodysense.command` with structured 
 {"namespace":"embodysense","tool":"command","arguments":{"command":"read","path":"shared/notes.md"}}
 ```
 
-Human-facing transcript controls are available from the CLI runtime host and the localhost Web UI. `/history`, `/conversations`, and `/load` load a saved transcript before the first model turn in the current session, replace the visible conversation transcript, and keep the restored messages in conversation runtime state. In the Web UI, `/history` lists stored conversations and the next submitted number loads that selection; successful loads emit a `history_loaded` stream event that replaces the browser transcript before the confirmation message is appended. `/cancel` cancels the pending selection. `/new` and `/new-session` start another fresh transcript without leaving the session. Verbose mode can be changed from the Web UI toggle or with `/verbose`, `/verbose on`, and `/verbose off`; it prints the visible inference context EmbodySense is about to send for the next model turn and labels it as visible context, not private model reasoning or hidden chain-of-thought. Persisted default-loop definitions and run records are implemented. Durable planning commands, custom-loop authoring or invocation, capability-registry configuration, automatic hooks, agent-facing conversation-history query tooling, non-obfuscated compaction artifacts, structured memory directories beyond the transcript store, MCP execution, scheduled jobs, subagents, and multi-provider orchestration are not implemented in this status snapshot.
+Human-facing transcript controls are available from the CLI runtime host and the localhost Web UI. `/history`, `/conversations`, and `/load` load a saved transcript before the first model turn in the current session, replace the visible conversation transcript, and keep the restored messages in conversation runtime state. In the Web UI, `/history` lists stored conversations and the next submitted number loads that selection; successful loads emit a `history_loaded` stream event that replaces the browser transcript before the confirmation message is appended. `/cancel` cancels the pending selection. `/new` and `/new-session` start another fresh transcript without leaving the session. Verbose mode can be changed from the Web UI toggle or with `/verbose`, `/verbose on`, and `/verbose off`; it prints the visible inference context EmbodySense is about to send for the next model turn and labels it as visible context, not private model reasoning or hidden chain-of-thought.
+
+### Custom Loop MVP (Web)
+
+The Web Loops surface supports multiple role-bound custom definitions whose persisted shape is Manual Trigger -> one to five ordered Inference steps -> Exit. Trigger, Exit, connectors, and layout are system projections rather than persisted arbitrary graph topology. The system default conversation loop is shown separately and remains read-only.
+
+Custom loops can be created, server-validated, versioned, deleted, manually invoked from an exact saved version and content hash, paused at a proved checkpoint boundary, cancelled, explicitly resumed, and inspected through durable run evidence. Invoke switches to the Runs view while execution is active; the view refreshes any selected nonterminal run even after reload or reconnect. Deleted definitions remain available as archived run-history groups, and explicit trace-deletion tombstones remain selectable after reload without restoring deleted content. At most one nonterminal run exists per loop and one custom loop actively executes in the workspace; a busy request is rejected rather than hidden in a queue. Startup recovery never dispatches work automatically: a safely interrupted run is parked as Paused, an uncertain open attempt becomes Needs Review, and a safely pending cancellation may be completed.
+
+Trigger admission selects exactly one prompt source: the invocation prompt, a saved preset, or no prompt. It may also bind a bounded snapshot of the invoking logical conversation. Provider-thread history is transport state, not product context. Inference and Exit independently inherit the loop defaults or use typed context overrides. There is no free-form "Additional fixed context" field: authored text belongs in a trigger preset, an Inference instruction, or the Exit decision instruction.
+
+Context output is explicit. `retainForLoopReasoning` controls whether canonical node output can inform later loop attempts. `publishToInvokingConversation` performs an idempotent expected-prefix append to the bound conversation transcript; it does not write `.agent/MEMORY.md` or another durable agent-memory artifact. Evidence retention is independent of both choices. Exit context-output controls apply to the canonical iteration result, not to the decision token itself.
+
+A repeat ceiling never causes repetition. With continuation disabled, or after the ceiling is exhausted, Exit completes deterministically without an Exit model call. Otherwise Exit makes a tool-less decision call and repeats only for the recognized trimmed `Repeat` token. `Complete` terminates; an invalid or uncertain decision enters Needs Review and never repeats.
+
+Custom loops expose only the server-advertised `list`, `read`, and `search` assignments; Exit is always tool-less, and filesystem permission plus browser approval rules still govern each request. The inherited provider and model are shown in Loop settings and again before Invoke; wave one has no per-loop override. Browser approvals belong to the invoking connection, expire after five minutes, and fail closed when the owner disconnects or is unavailable. The loop hub permits the approval decision to run concurrently with the long-lived invocation that is waiting for it.
+
+Runs expose the admitted definition, immutable context-source manifest, resolved per-attempt context, canonical outputs, checkpoints, lifecycle/failure state, exact trace size/hash, and workspace quota accounting. The canonical compact trace envelope stores exact UTF-8 content once with hash and length metadata, then references shared content, context, authority, and tool-request entries. The production maximum-bounded-shape runner/codec proof includes 30 allowed governed requests plus the visible 31st over-limit denial and encodes to 15,225,475 bytes, leaving 503,165 bytes beneath the 15 MiB reservation target and 1,551,741 bytes beneath the 16 MiB hard cap. A terminal trace without an integrity warning continues accounting its reserved 8,192-byte warning slot, for 15,233,667 accounted bytes and 494,973 bytes of remaining 15 MiB headroom at that maximum shape. The store rejects a write that cannot retain its required evidence and reserves. Provider usage and cost are currently labeled unavailable because the provider-response contract carries neither; the UI never fabricates an estimate. Terminal trace deletion requires the currently inspected hash and an idempotent operation ID. It replaces sensitive trace content with an audited metadata tombstone, never reuses the run identity, and is never performed automatically. Quotas may reject a new admission rather than silently pruning evidence.
+
+The first wave does not implement CLI/chat custom-loop invocation, automatic scheduling or background resumption, arbitrary graph topology, mutating custom-loop commands, durable planning, hooks, MCP execution, subagents, or multi-provider orchestration.
 
 Runtime agent context currently comes from the nearest `AGENTS.md` found by walking upward from `--workdir` when that file is non-empty, plus these workspace files under `--workdir` when present:
 
@@ -146,7 +151,7 @@ From there, run the Web UI through the project path relative to `scratch/`. The 
 dotnet run --project ..\src\EmbodySense.Web -- --workdir .
 ```
 
-The browser UI can initialize the scratch workspace explicitly when `.agent/permissions.json` is missing. It then handles supported slash commands such as `/help`, `/history`, `/verbose`, and `/new`, shows visible role labels on transcript messages, exposes a Verbose toggle for visible-context debug output, replaces the session view with restored transcript messages after a successful history load, streams assistant responses over SignalR, and pushes governed tool approval requests into the approvals panel.
+The browser UI can initialize the scratch workspace explicitly when `.agent/permissions.json` is missing. It then handles supported slash commands such as `/help`, `/history`, `/verbose`, and `/new`, shows visible role labels on transcript messages, exposes a Verbose toggle for visible-context debug output, replaces the session view with restored transcript messages after a successful history load, streams assistant responses over SignalR, and pushes governed tool approval requests into the approvals panel. Follow the Loops link to open `/loops.html`, where Builder creates and saves custom definitions and Runs inspects or controls their durable executions.
 
 Run the CLI help from scratch when checking the non-primary client surface:
 
@@ -174,7 +179,7 @@ dotnet run --project ..\src\EmbodySense.Cli -- run --workdir .
 
 Add `--verbose` to print the visible inference context before each model turn. Inside the CLI runtime, type a message at the `User: ` prompt and press Enter. Assistant output streams under an `Assistant:` header as provider chunks arrive. Type `/help` to list commands. Type `/verbose`, `/verbose on`, or `/verbose off` to inspect or change visible-context debug output. Type `/history`, `/conversations`, or `/load` before the first model turn to list saved `.agent/memory/conversations/*.ndjson` and `.agent/memory/conversations/archive/*.ndjson` transcripts by first-prompt preview and select one to load; a successful load clears the interactive console and prints the restored transcript before the confirmation. Type `/new` or `/new-session` to start another fresh conversation without leaving the session. Type `/exit`, `/quit`, `exit`, or `quit` to leave.
 
-The harness reads the seeded `.agent/` documents when `run` starts. Restart the loop after editing those documents if you want the active provider thread to receive the new context.
+The default conversation loop reads the seeded `.agent/` documents when the runtime starts, so restart that runtime after editing them if you want later chat turns to receive the new startup context. Each custom-loop invocation instead captures a fresh immutable source manifest at admission; provider threads remain transport and are not reused as hidden product context.
 
 ## Web UI Options
 
@@ -199,7 +204,7 @@ Available Web options:
 
 The `run` command routes inference through local `codex app-server --stdio` and streams Codex app-server `item/agentMessage/delta` events into the console loop.
 
-The implementation flow is documented in the draw.io-compatible source diagram at [`docs/AGENT_LOOP.drawio`](docs/AGENT_LOOP.drawio). Keep that diagram aligned with implemented loop behavior when the real CLI loop, inference, workspace, permission, or audit behavior changes. The diagram is also a status artifact, not scope authority.
+The default-conversation and custom-loop implementation flows are documented in the draw.io-compatible source diagram at [`docs/AGENT_LOOP.drawio`](docs/AGENT_LOOP.drawio). Keep both pages aligned with implemented inference, lifecycle, context, workspace, permission, audit, and trace behavior. The diagram is also a status artifact, not scope authority.
 
 From `scratch/`:
 

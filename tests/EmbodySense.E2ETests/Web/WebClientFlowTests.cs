@@ -6,10 +6,14 @@ using System.Net.WebSockets;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web;
 using EmbodySense.Web.Models;
+using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace EmbodySense.E2ETests.Web;
 
@@ -100,6 +104,39 @@ public sealed class WebClientFlowTests
     }
 
     [Fact]
+    public async Task Signalr_connection_can_decide_an_approval_while_its_loop_invocation_is_waiting()
+    {
+        using var workspace = new TestWorkspace();
+        await using var app = CreateApp(workspace.RootPath, out var options, services =>
+        {
+            services.AddSingleton<ApprovalBlockingLoopRuntimeInvoker>();
+            services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<ApprovalBlockingLoopRuntimeInvoker>());
+        });
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
+            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
+            var input = new LoopRunInvocationInput("loop-approval", 1, new string('a', 64), "invoke-concurrent-approval", "prompt");
+
+            var (invocationCompletion, decisionCompletion) = await signalr.InvokeLoopAndApproveAsync(input);
+            var invoker = app.Services.GetRequiredService<ApprovalBlockingLoopRuntimeInvoker>();
+
+            Assert.False(invocationCompletion.TryGetProperty("error", out _));
+            Assert.False(decisionCompletion.TryGetProperty("error", out _));
+            Assert.Equal("Completed", invocationCompletion.GetProperty("result").GetProperty("executionStatus").GetString());
+            Assert.True(decisionCompletion.GetProperty("result").GetProperty("accepted").GetBoolean());
+            Assert.True(invoker.Approved);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Direct_websocket_rejects_missing_or_invalid_session_token()
     {
         using var workspace = new TestWorkspace();
@@ -138,13 +175,14 @@ public sealed class WebClientFlowTests
         }
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options)
+    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, Action<IServiceCollection>? configureServices = null)
     {
         var port = GetFreePort();
         var portText = port.ToString(CultureInfo.InvariantCulture);
         var args = new[] { "--workdir", rootPath, "--port", portText };
         options = WebRunOptions.FromArguments(args);
         var builder = Program.CreateBuilder(args, options);
+        configureServices?.Invoke(builder.Services);
         var app = builder.Build();
         Program.ConfigurePipeline(app);
         return app;
@@ -316,6 +354,25 @@ public sealed class WebClientFlowTests
         }
     }
 
+    private sealed class ApprovalBlockingLoopRuntimeInvoker(WebApprovalCoordinator approvals) : IWebLoopRuntimeInvoker
+    {
+        public bool Approved { get; private set; }
+
+        public async Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            using var scope = approvals.BeginApprovalScope(ownerConnectionId);
+            var request = new AgentToolApprovalRequest("req-concurrent-loop", "read", "shared/example.txt", @"C:\workspace\shared\example.txt", "read", "shared/**", "Concurrent loop approval test.");
+            var decision = await approvals.RequestApprovalAsync(request, cancellationToken);
+            Approved = decision.Approved;
+            return new LoopRunInvocationResponse("Admitted", "Completed", true, null, [], "Approval decision completed the invocation.");
+        }
+
+        public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+    }
+
     private sealed class SignalRTestClient : IAsyncDisposable
     {
         private const char RecordSeparator = '\u001e';
@@ -350,6 +407,40 @@ public sealed class WebClientFlowTests
                     return messages;
                 }
             }
+        }
+
+        public async Task<(JsonElement InvocationCompletion, JsonElement DecisionCompletion)> InvokeLoopAndApproveAsync(LoopRunInvocationInput input)
+        {
+            var invocationId = (_nextInvocationId++).ToString(CultureInfo.InvariantCulture);
+            await SendRawAsync(new { type = 1, invocationId, target = "InvokeLoop", arguments = new object?[] { input } }, CancellationToken.None);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            string? requestId = null;
+            while (requestId is null)
+            {
+                var message = await ReadMessageAsync(timeout.Token);
+                if (message.TryGetProperty("type", out var type) && type.GetInt32() == 1
+                    && message.TryGetProperty("target", out var target) && target.GetString() == "ApprovalsChanged")
+                {
+                    var pending = message.GetProperty("arguments")[0];
+                    if (pending.GetArrayLength() > 0)
+                    {
+                        requestId = pending[0].GetProperty("requestId").GetString();
+                    }
+                }
+            }
+
+            var decisionId = (_nextInvocationId++).ToString(CultureInfo.InvariantCulture);
+            await SendRawAsync(new { type = 1, invocationId = decisionId, target = "DecideApproval", arguments = new object?[] { requestId, new WebApprovalDecision(true, null) } }, timeout.Token);
+            JsonElement? invocationCompletion = null;
+            JsonElement? decisionCompletion = null;
+            while (invocationCompletion is null || decisionCompletion is null)
+            {
+                var message = await ReadMessageAsync(timeout.Token);
+                if (IsCompletionFor(message, invocationId)) invocationCompletion = message.Clone();
+                if (IsCompletionFor(message, decisionId)) decisionCompletion = message.Clone();
+            }
+
+            return (invocationCompletion.Value, decisionCompletion.Value);
         }
 
         public async ValueTask DisposeAsync()

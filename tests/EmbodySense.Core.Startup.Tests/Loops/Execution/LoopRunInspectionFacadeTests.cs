@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
@@ -15,7 +16,7 @@ public sealed class LoopRunInspectionFacadeTests
     public async Task Read_only_facade_exposes_empty_quota_but_cannot_delete()
     {
         using var workspace = new TestWorkspace();
-        var facade = new LoopRunInspectionFacade(workspace.RootPath);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath);
 
         Assert.Null(await facade.GetTraceAsync("run-missing"));
         var quota = await facade.GetTraceQuotaAsync();
@@ -23,7 +24,28 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Equal(0, quota.TombstoneCount);
         Assert.Equal(CustomLoopLimits.MaxRunTracesPerWorkspace, quota.MaximumLiveTraceCount);
         await Assert.ThrowsAsync<InvalidOperationException>(() => facade.DeleteTraceAsync("run-alpha", new string('a', 64), "delete-trace"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => facade.RecoverInterruptedRunsAsync());
         Assert.Throws<ArgumentException>(() => new LoopRunInspectionFacade(workspace.RootPath, "actor-user"));
+    }
+
+    [Fact]
+    public async Task Authenticated_facade_recovers_interrupted_runs_before_inspection()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var interrupted = await CreateInterruptedRunAsync(store);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+
+        Assert.Equal("Admitted", (await facade.GetAsync(interrupted.Id))!.Status);
+        var recovery = await facade.RecoverInterruptedRunsAsync();
+        var recovered = await facade.GetAsync(interrupted.Id);
+
+        Assert.True(recovery.Completed);
+        Assert.False(recovery.PreserveCurrentConversation);
+        Assert.Equal("Paused", recovered!.Status);
+        Assert.Equal(interrupted.LifecycleVersion + 1, recovered.LifecycleVersion);
+        Assert.Contains("Restart recovery parked the admitted run", await File.ReadAllTextAsync(paths.EventsLogPath), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -33,7 +55,7 @@ public sealed class LoopRunInspectionFacadeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
         var terminal = await CreateTerminalRunAsync(store);
-        var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
         var trace = await facade.GetTraceAsync(terminal.Id);
         Assert.NotNull(trace);
         Assert.False(trace.IsDeleted);
@@ -73,7 +95,7 @@ public sealed class LoopRunInspectionFacadeTests
         using var workspace = new TestWorkspace();
         var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
         var terminal = await CreateTerminalRunAsync(store);
-        var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
 
         var result = await facade.DeleteTraceAsync(terminal.Id, new string('a', 64), "delete-trace");
 
@@ -94,6 +116,24 @@ public sealed class LoopRunInspectionFacadeTests
         var completed = Advance(running, CustomLoopRunStatus.Completed);
         await store.UpdateAsync(completed, running.LifecycleVersion);
         return completed;
+    }
+
+    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store)
+    {
+        var definition = CustomLoopDefinition.CreateSeed("loop-interrupted", "default-role", "step-1", "create-interrupted-loop", Timestamp);
+        var admittedEvent = Event(1, "interrupted-admitted", CustomLoopRunEventKind.Admitted, Timestamp);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-interrupted", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-interrupted", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
+        Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var audited = admitted with
+        {
+            LifecycleVersion = 2,
+            Events = [admittedEvent, Event(2, "interrupted-admission-audit", CustomLoopRunEventKind.AdmissionAuditCompleted, Timestamp)]
+        };
+        Assert.True(CustomLoopRunValidator.Validate(audited).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(audited, admitted.LifecycleVersion)).Status);
+        return audited;
     }
 
     private static CustomLoopRunRecord Advance(CustomLoopRunRecord run, CustomLoopRunStatus status)

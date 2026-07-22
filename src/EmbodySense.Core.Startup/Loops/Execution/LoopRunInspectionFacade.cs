@@ -1,17 +1,24 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
-public sealed class LoopRunInspectionFacade
+public sealed class LoopRunInspectionFacade : IAsyncDisposable
 {
+    private readonly WorkspacePaths _paths;
     private readonly CustomLoopRunStore _runStore;
+    private readonly CustomLoopRecoveryService? _recovery;
     private readonly CustomLoopTraceRetentionService? _retention;
     private readonly string? _actor;
     private readonly string? _surface;
+    private CustomLoopWorkspaceExecutionGate? _executionGate;
+    private int _disposed;
 
     public LoopRunInspectionFacade(string workingDirectory, string? authenticatedActor = null, string? authenticatedSurface = null)
     {
@@ -21,11 +28,53 @@ public sealed class LoopRunInspectionFacade
             throw new ArgumentException("Authenticated trace management requires both a server-owned actor and surface.");
         }
 
-        var paths = new WorkspacePaths(workingDirectory);
-        _runStore = new CustomLoopRunStore(paths);
+        _paths = new WorkspacePaths(workingDirectory);
+        _runStore = new CustomLoopRunStore(_paths);
         _actor = authenticatedActor;
         _surface = authenticatedSurface;
-        _retention = authenticatedActor is null ? null : new CustomLoopTraceRetentionService(_runStore, new AuditLog(paths));
+        var audit = authenticatedActor is null ? null : new AuditLog(_paths);
+        _recovery = audit is null ? null : new CustomLoopRecoveryService(_runStore, audit);
+        _retention = audit is null ? null : new CustomLoopTraceRetentionService(_runStore, audit);
+    }
+
+    public async Task<LoopRunRecoverySnapshot> RecoverInterruptedRunsAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_recovery is null || _actor is null)
+        {
+            throw new InvalidOperationException("This read-only facade was not constructed with an authenticated recovery identity.");
+        }
+
+        _executionGate ??= new CustomLoopWorkspaceExecutionGate(_paths);
+        var ownership = _executionGate.TryAcquire($"inspection-recovery-{Guid.NewGuid():N}", new string('0', CustomLoopLimits.Sha256HexCharacters));
+        if (ownership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+        {
+            return new LoopRunRecoverySnapshot(false, false);
+        }
+
+        if (ownership.Status != CustomLoopExecutionLeaseStatus.Acquired || ownership.Lease is null)
+        {
+            throw new InvalidOperationException($"custom_loop_recovery_unavailable: recovery ownership returned {ownership.Status}.");
+        }
+
+        using (ownership.Lease)
+        {
+            var results = await _recovery.RecoverAsync(_actor, cancellationToken);
+            if (results.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
+            {
+                throw new InvalidOperationException("custom_loop_recovery_failed: one or more interrupted runs could not be parked safely.");
+            }
+
+            return new LoopRunRecoverySnapshot(true, results.Any(result => result.Run is { Status: CustomLoopRunStatus.Paused, InvokingConversation: not null }));
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0 && _executionGate is not null)
+        {
+            await _executionGate.DisposeAsync();
+        }
     }
 
     public async Task<LoopRunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken = default)

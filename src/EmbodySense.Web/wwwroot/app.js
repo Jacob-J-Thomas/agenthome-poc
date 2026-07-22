@@ -90,6 +90,12 @@ async function connectHub() {
   hub.on("StreamEvent", handleStreamEvent);
   hub.onclose = scheduleReconnect;
   await hub.start();
+  try {
+    const currentTranscript = await hub.invoke("GetCurrentTranscript");
+    if (Array.isArray(currentTranscript)) replaceTranscript(currentTranscript);
+  } catch (error) {
+    appendMessage("error", `Transcript unavailable: ${error.message}`);
+  }
   applyStatus(status);
 }
 

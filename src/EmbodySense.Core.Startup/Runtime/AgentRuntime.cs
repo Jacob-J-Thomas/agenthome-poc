@@ -60,6 +60,14 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     internal IReadOnlyList<LlmMessage> Messages => _conversationState.Messages;
 
+    public IReadOnlyList<AgentRuntimeTranscriptMessage> GetActiveConversationTranscript()
+    {
+        return _conversationState.ContextMessages
+            .Where(message => message.Source is RuntimeContextSource.RestoredConversationHistory or RuntimeContextSource.SessionTranscript)
+            .Select(message => new AgentRuntimeTranscriptMessage(message.Message.Role.ToString(), message.Message.Content))
+            .ToArray();
+    }
+
     public async Task<AgentRuntimeTurnResult> RunTurnAsync(
         string input,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,

@@ -30,6 +30,58 @@ test("history_loaded replaces the transcript using role labels and text content"
   assert.equal(findByTag(app.elements.transcript, "img").length, 0);
 });
 
+test("transcript hydration failure leaves the connected chat usable", async () => {
+  const app = await loadApp({ transcriptError: "Corrupt retained loop evidence." });
+
+  assert.equal(app.elements.clientStatus.textContent, "Web primary");
+  assert.equal(app.elements.sendButton.disabled, false);
+  assert.equal(app.elements.verboseToggle.disabled, false);
+  assert.match(app.elements.transcript.textContent, /Transcript unavailable: Corrupt retained loop evidence/);
+});
+
+test("boot hydrates the complete active runtime transcript instead of the bounded configuration snapshot", async () => {
+  const activeTranscript = Array.from({ length: 201 }, (_, index) => ({ role: index % 2 === 0 ? "user" : "assistant", content: `active message ${index}` }));
+  activeTranscript[200].content = "x".repeat(5000);
+  const app = await loadApp({
+    activeTranscript,
+    configuration: {
+      status: { initialized: true },
+      runtime: { surface: "web", model: "gpt-test", codexSandbox: "read-only" },
+      audit: { path: "audit/events.ndjson", exists: false, events: [], readProblems: [] },
+      conversationHistory: {
+        directoryPath: ".agent/memory/conversations",
+        currentPath: "current.ndjson",
+        archivePath: "archive",
+        readProblems: [],
+        transcripts: [{
+          conversationId: "current",
+          isCurrent: true,
+          messages: [{ role: "user", content: "bounded inspection copy that must not hydrate Chat" }]
+        }]
+      },
+      paths: [],
+      concepts: [],
+      documents: [],
+      permissions: { exists: false, parsed: false, version: null, scope: "", defaultAccess: "ask", readProblems: [], approved: [], denied: [], rawJson: "" }
+    }
+  });
+
+  assert.equal(app.elements.transcript.children.length, 201);
+  assert.equal(messageContent(app.elements.transcript.children[0]), "active message 0");
+  assert.equal(messageContent(app.elements.transcript.children[200]).length, 5000);
+});
+
+test("reconnect preserves the visible transcript while runtime hydration is temporarily unavailable", async () => {
+  const app = await loadApp({ activeTranscript: [{ role: "user", content: "Visible conversation" }] });
+  assert.equal(messageContent(app.elements.transcript.children[0]), "Visible conversation");
+  FakeWebSocket.currentTranscript = null;
+
+  await vm.runInContext("connectHub()", app.context);
+
+  assert.equal(app.elements.transcript.children.length, 1);
+  assert.equal(messageContent(app.elements.transcript.children[0]), "Visible conversation");
+});
+
 test("assistant deltas update one active message and final text resets the active message", async () => {
   const app = await loadApp();
   app.elements.transcript.replaceChildren();
@@ -124,6 +176,8 @@ test("approval panel renders pending requests and dispatches approve and reject 
 
 async function loadApp(overrides = {}) {
   FakeWebSocket.instances = [];
+  FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
+  FakeWebSocket.transcriptError = overrides.transcriptError ?? null;
   const document = new FakeDocument(indexSource);
   const context = {
     URL,
@@ -137,9 +191,9 @@ async function loadApp(overrides = {}) {
   };
   context.globalThis = context;
   vm.runInNewContext(appSource, context, { filename: "app.js" });
-  await flushAsyncWork();
+  for (let attempt = 0; attempt < 4; attempt++) await flushAsyncWork();
   assert.equal(FakeWebSocket.instances.length, 1);
-  return { elements: document.elementsObject, configTabs: document.configTabs, socket: FakeWebSocket.instances[0] };
+  return { context, elements: document.elementsObject, configTabs: document.configTabs, socket: FakeWebSocket.instances[0] };
 }
 
 function createFetch(overrides) {
@@ -207,6 +261,8 @@ function findByTag(root, tagName) {
 class FakeWebSocket {
   static OPEN = 1;
   static instances = [];
+  static currentTranscript = null;
+  static transcriptError = null;
 
   constructor(url) {
     this.url = url;
@@ -225,7 +281,16 @@ class FakeWebSocket {
     }
 
     if (payload.type === 1 && payload.invocationId !== undefined) {
-      setTimeout(() => this.serverSend({ type: 3, invocationId: payload.invocationId, result: payload.target === "DecideApproval" ? { accepted: true } : true }), 0);
+      if (payload.target === "GetCurrentTranscript" && FakeWebSocket.transcriptError) {
+        setTimeout(() => this.serverSend({ type: 3, invocationId: payload.invocationId, error: FakeWebSocket.transcriptError }), 0);
+        return;
+      }
+      const result = payload.target === "DecideApproval"
+        ? { accepted: true }
+        : payload.target === "GetCurrentTranscript"
+          ? FakeWebSocket.currentTranscript
+          : true;
+      setTimeout(() => this.serverSend({ type: 3, invocationId: payload.invocationId, result }), 0);
     }
   }
 
