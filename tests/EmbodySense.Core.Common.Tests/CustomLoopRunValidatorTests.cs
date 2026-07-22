@@ -47,14 +47,22 @@ public sealed class CustomLoopRunValidatorTests
     public void Validate_requires_pinned_model_admission_hash_and_consistent_execution_clock()
     {
         var seed = CreateRun();
-        var legacy = seed with { SchemaVersion = 2, AdmissionActor = null! };
-        Assert.Contains(CustomLoopRunValidator.Validate(legacy).Errors, error => error.Code == "unsupported_run_schema");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ModelSnapshot = null! }), "model_snapshot_required", "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { AdmissionRequestHash = new string('0', 64) }), "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = null! }), "execution_clock_required");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = new CustomLoopExecutionClock(-1, Timestamp) }), "execution_clock_out_of_range", "unexpected_active_execution_clock");
         var running = Advance(seed, CustomLoopRunStatus.Running) with { ExecutionClock = CustomLoopExecutionClock.NotStarted() };
         AssertCodes(CustomLoopRunValidator.Validate(running), "active_execution_clock_required");
+    }
+
+    [Fact]
+    public void Validate_rejects_unsupported_schema_with_pre_1_0_cleanup_guidance()
+    {
+        var validation = CustomLoopRunValidator.Validate(CreateRun() with { SchemaVersion = 99 });
+
+        var error = Assert.Single(validation.Errors, error => error.Code == "unsupported_run_schema");
+        Assert.Contains("Pre-1.0 artifacts from another schema are unsupported", error.Message, StringComparison.Ordinal);
+        Assert.Contains("remove and recreate", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -144,7 +152,6 @@ public sealed class CustomLoopRunValidatorTests
         var invalidDefinition = seed.AdmittedDefinition with { ContentHash = new string('0', 64) };
         var invalid = seed with
         {
-            SchemaVersion = 99,
             Id = "../escape",
             LoopId = "other-loop",
             LifecycleVersion = 0,
@@ -161,7 +168,7 @@ public sealed class CustomLoopRunValidatorTests
 
         var validation = CustomLoopRunValidator.Validate(invalid);
 
-        AssertCodes(validation, "unsupported_run_schema", "invalid_artifact_id", "invalid_lifecycle_version", "unsupported_run_status", "invalid_surface", "invalid_admission_operation_id", "invalid_created_timestamp", "invalid_timestamp_order", "unexpected_completed_timestamp", "content_hash_mismatch", "admitted_loop_mismatch", "text_too_long", "text_required", "invalid_conversation_capture_timestamp");
+        AssertCodes(validation, "invalid_artifact_id", "invalid_lifecycle_version", "unsupported_run_status", "invalid_surface", "invalid_admission_operation_id", "invalid_created_timestamp", "invalid_timestamp_order", "unexpected_completed_timestamp", "content_hash_mismatch", "admitted_loop_mismatch", "text_too_long", "text_required", "invalid_conversation_capture_timestamp");
     }
 
     [Fact]

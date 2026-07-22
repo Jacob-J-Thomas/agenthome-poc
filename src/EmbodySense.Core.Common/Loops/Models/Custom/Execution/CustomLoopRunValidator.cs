@@ -169,7 +169,7 @@ public static class CustomLoopRunValidator
     {
         if (run.SchemaVersion != CustomLoopRunRecord.CurrentSchemaVersion)
         {
-            Add(errors, "unsupported_run_schema", "schemaVersion", $"Run schema version must be {CustomLoopRunRecord.CurrentSchemaVersion}.");
+            Add(errors, "unsupported_run_schema", "schemaVersion", $"Run schema version must be {CustomLoopRunRecord.CurrentSchemaVersion}. Pre-1.0 artifacts from another schema are unsupported; remove and recreate the affected development artifact.");
         }
 
         ValidateArtifactId(run.Id, "id", errors);
