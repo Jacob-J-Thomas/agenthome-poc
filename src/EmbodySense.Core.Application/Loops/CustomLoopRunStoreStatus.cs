@@ -2,7 +2,6 @@ namespace EmbodySense.Core.Application.Loops;
 
 public enum CustomLoopRunStoreStatus
 {
-    Unknown = 0,
     Created = 1,
     Updated = 2,
     AlreadyCreated = 3,

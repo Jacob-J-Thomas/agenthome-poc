@@ -2,7 +2,6 @@ namespace EmbodySense.Core.Application.Loops.Authoring;
 
 public enum CustomLoopAuthoringStatus
 {
-    Unknown = 0,
     Created = 1,
     Updated = 2,
     Deleted = 3,

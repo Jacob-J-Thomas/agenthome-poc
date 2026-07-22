@@ -2,7 +2,6 @@ namespace EmbodySense.Core.Application.Loops.TraceRetention;
 
 public enum CustomLoopTraceDeletionStatus
 {
-    Unknown = 0,
     Deleted = 1,
     Replayed = 2,
     NotFound = 3,

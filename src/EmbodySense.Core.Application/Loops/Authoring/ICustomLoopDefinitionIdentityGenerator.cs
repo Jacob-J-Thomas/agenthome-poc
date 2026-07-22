@@ -1,6 +1,6 @@
 namespace EmbodySense.Core.Application.Loops.Authoring;
 
-public interface ICustomLoopIdentityGenerator
+public interface ICustomLoopDefinitionIdentityGenerator
 {
     string NewLoopId();
 

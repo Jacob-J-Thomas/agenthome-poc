@@ -494,7 +494,7 @@ public sealed class CustomLoopOrderedRunnerTests
     [Theory]
     [InlineData(CustomLoopConversationPublicationOutcome.DefinitelyFailed, CustomLoopOrderedRunStatus.Failed)]
     [InlineData(CustomLoopConversationPublicationOutcome.Uncertain, CustomLoopOrderedRunStatus.NeedsReview)]
-    [InlineData(CustomLoopConversationPublicationOutcome.Unknown, CustomLoopOrderedRunStatus.NeedsReview)]
+    [InlineData((CustomLoopConversationPublicationOutcome)0, CustomLoopOrderedRunStatus.NeedsReview)]
     public async Task Publication_failure_is_durable_and_never_reported_as_success(CustomLoopConversationPublicationOutcome outcome, CustomLoopOrderedRunStatus expected)
     {
         var definition = Definition(

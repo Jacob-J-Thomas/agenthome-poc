@@ -22,7 +22,7 @@ public sealed class CustomLoopAuthoringServiceTests
     [Fact]
     public void Default_identity_generator_creates_filename_safe_unique_artifact_ids()
     {
-        var identity = new CustomLoopIdentityGenerator();
+        var identity = new CustomLoopDefinitionIdentityGenerator();
 
         var firstLoop = identity.NewLoopId();
         var secondLoop = identity.NewLoopId();
@@ -850,7 +850,7 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.Contains("Unsupported", exception.Message, StringComparison.Ordinal);
     }
 
-    private static CustomLoopAuthoringService Service(FakeStore store, RecordingAuditLog? audit = null, ICustomLoopIdentityGenerator? identity = null, ICustomLoopRunStore? runStore = null)
+    private static CustomLoopAuthoringService Service(FakeStore store, RecordingAuditLog? audit = null, ICustomLoopDefinitionIdentityGenerator? identity = null, ICustomLoopRunStore? runStore = null)
     {
         return new CustomLoopAuthoringService(store, audit ?? new RecordingAuditLog(), identity ?? new QueueIdentityGenerator(["loop-created"], ["step-created", "step-new"]), new FixedTimeProvider(Now), runStore);
     }
@@ -906,7 +906,7 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.Equal(rejectionCode, auditEvent.Metadata["rejection_code"]);
     }
 
-    private sealed class QueueIdentityGenerator : ICustomLoopIdentityGenerator
+    private sealed class QueueIdentityGenerator : ICustomLoopDefinitionIdentityGenerator
     {
         private readonly Queue<string> _loopIds;
         private readonly Queue<string> _stepIds;
