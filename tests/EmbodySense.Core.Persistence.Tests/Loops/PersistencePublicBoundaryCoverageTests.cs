@@ -259,7 +259,10 @@ public sealed class PersistencePublicBoundaryCoverageTests
     public void Artifact_deserializer_rejects_unknown_or_semantically_invalid_hydrated_runs()
     {
         Reject(root => root["run"]!["unknownField"] = true);
-        Reject(root => root["run"]!["schemaVersion"] = 99);
+        var unsupportedSchema = Parse(Artifact());
+        unsupportedSchema["run"]!["schemaVersion"] = 99;
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(unsupportedSchema.ToJsonString())));
+        Assert.Contains("Pre-1.0 artifacts from another schema are unsupported", exception.Message, StringComparison.Ordinal);
         Reject(root => root["run"]!["events"]![0] = true);
         Reject(root => FirstEvent(root)["contextBlocks"] = new JsonArray(true));
     }

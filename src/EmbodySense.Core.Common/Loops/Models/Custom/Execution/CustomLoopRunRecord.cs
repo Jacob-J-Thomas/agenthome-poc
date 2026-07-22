@@ -27,7 +27,7 @@ public sealed record CustomLoopRunRecord(
     string? FailureCode,
     string? FailureDetail)
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 1;
 
     [JsonIgnore]
     public bool IsTerminal => Status is CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview;

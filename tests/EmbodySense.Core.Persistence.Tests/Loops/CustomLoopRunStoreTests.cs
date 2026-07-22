@@ -532,7 +532,7 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
-    public async Task Strict_reader_rejects_duplicate_properties_invalid_json_and_unsupported_schema()
+    public async Task Strict_reader_rejects_duplicate_properties_and_invalid_json()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -544,12 +544,6 @@ public sealed class CustomLoopRunStoreTests
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id));
 
         await WriteRawAsync(paths, run.LoopId, run.Id, "{invalid");
-        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id));
-
-        await WriteRawAsync(paths, run.LoopId, run.Id, JsonSerializer.Serialize(run with { SchemaVersion = 99 }, ArtifactJsonOptions));
-        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id));
-
-        await WriteRawAsync(paths, run.LoopId, run.Id, JsonSerializer.Serialize(run with { SchemaVersion = 1 }, ArtifactJsonOptions));
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id));
     }
 
