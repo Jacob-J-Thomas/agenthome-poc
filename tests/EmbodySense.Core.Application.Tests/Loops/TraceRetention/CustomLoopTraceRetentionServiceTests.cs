@@ -258,7 +258,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var operation = Operation(request, Tombstone(request, CustomLoopTraceDeletionIntegrity.Unknown), CustomLoopTraceDeletionIntegrity.Unknown);
         var store = new RecordingStore(null, null)
         {
-            LookupOverride = new CustomLoopTraceDeletionLookupResult(CustomLoopTraceDeletionLookupStatus.Unknown, operation)
+            LookupOverride = new CustomLoopTraceDeletionLookupResult((CustomLoopTraceDeletionLookupStatus)0, operation)
         };
 
         var result = await new CustomLoopTraceRetentionService(store, new RecordingAuditLog()).DeleteAsync(request);

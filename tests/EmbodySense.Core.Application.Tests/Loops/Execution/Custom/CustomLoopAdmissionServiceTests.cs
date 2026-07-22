@@ -636,7 +636,7 @@ public sealed class CustomLoopAdmissionServiceTests
             (CustomLoopRunStoreResult.NonterminalRunExists(existing), CustomLoopAdmissionStatus.NonterminalRunExists, "nonterminal_run_exists", AuditSchema.Outcomes.Conflict),
             (CustomLoopRunStoreResult.LimitExceeded(), CustomLoopAdmissionStatus.LimitExceeded, "limit_exceeded", AuditSchema.Outcomes.Rejected),
             (CustomLoopRunStoreResult.NotFound(), CustomLoopAdmissionStatus.Invalid, "invalid", AuditSchema.Outcomes.Rejected),
-            (new CustomLoopRunStoreResult(CustomLoopRunStoreStatus.Unknown, null, null), CustomLoopAdmissionStatus.Invalid, "invalid", AuditSchema.Outcomes.Rejected),
+            (new CustomLoopRunStoreResult((CustomLoopRunStoreStatus)0, null, null), CustomLoopAdmissionStatus.Invalid, "invalid", AuditSchema.Outcomes.Rejected),
             (new CustomLoopRunStoreResult(CustomLoopRunStoreStatus.AlreadyCreated, null, null), CustomLoopAdmissionStatus.Invalid, "invalid", AuditSchema.Outcomes.Rejected)
         };
 

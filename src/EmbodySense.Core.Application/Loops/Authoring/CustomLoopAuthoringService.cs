@@ -12,18 +12,18 @@ public sealed class CustomLoopAuthoringService
 {
     private readonly ICustomLoopDefinitionStore _store;
     private readonly IAuditLog _auditLog;
-    private readonly ICustomLoopIdentityGenerator _identityGenerator;
+    private readonly ICustomLoopDefinitionIdentityGenerator _identityGenerator;
     private readonly TimeProvider _timeProvider;
     private readonly ICustomLoopRunStore? _runStore;
 
-    public CustomLoopAuthoringService(ICustomLoopDefinitionStore store, IAuditLog auditLog, ICustomLoopIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null, ICustomLoopRunStore? runStore = null)
+    public CustomLoopAuthoringService(ICustomLoopDefinitionStore store, IAuditLog auditLog, ICustomLoopDefinitionIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null, ICustomLoopRunStore? runStore = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(auditLog);
 
         _store = store;
         _auditLog = auditLog;
-        _identityGenerator = identityGenerator ?? new CustomLoopIdentityGenerator();
+        _identityGenerator = identityGenerator ?? new CustomLoopDefinitionIdentityGenerator();
         _timeProvider = timeProvider ?? TimeProvider.System;
         _runStore = runStore;
     }
