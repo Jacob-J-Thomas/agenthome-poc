@@ -268,6 +268,17 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     [Fact]
+    public void Artifact_deserializer_reports_canonical_run_depth_as_artifact_nesting()
+    {
+        var nested = NestedJson(65);
+
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(nested)));
+
+        Assert.Contains("maximum persisted JSON nesting depth of 64", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("not a loop-iteration, traversal, or run-duration limit", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Artifact_deserializer_requires_the_single_canonical_byte_encoding()
     {
         var artifact = Artifact();
@@ -581,6 +592,8 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     private static string Hash(byte[] value) => Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant();
+
+    private static string NestedJson(int depth) => string.Concat(Enumerable.Repeat("{\"nested\":", depth)) + "null" + new string('}', depth);
 
     private static string IndexedId(string prefix, int index)
     {
