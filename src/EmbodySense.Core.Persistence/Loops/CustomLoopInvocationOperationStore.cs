@@ -16,7 +16,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = true,
-        MaxDepth = 32,
+        MaxDepth = CustomLoopJsonDepthPolicy.ShallowReceiptMaximumDepth,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
 
@@ -134,6 +134,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
 
         var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, CustomLoopLimits.MaxInvocationOperationUtf8Bytes, "Custom-loop invocation operation", cancellationToken);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, JsonOptions.MaxDepth, "Custom-loop invocation operation", path);
         CustomLoopInvocationOperation? operation;
         try
         {
@@ -161,7 +162,16 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
     private static string SerializeBounded(CustomLoopInvocationOperation operation)
     {
-        var json = JsonSerializer.Serialize(operation, JsonOptions);
+        string json;
+        try
+        {
+            json = JsonSerializer.Serialize(operation, JsonOptions);
+        }
+        catch (JsonException exception)
+        {
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop invocation operation", JsonOptions.MaxDepth, exception);
+        }
+
         if (Encoding.UTF8.GetByteCount(json) > CustomLoopLimits.MaxInvocationOperationUtf8Bytes)
         {
             throw new ArgumentException($"Custom-loop invocation operation exceeds {CustomLoopLimits.MaxInvocationOperationUtf8Bytes} UTF-8 bytes.", nameof(operation));

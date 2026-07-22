@@ -20,7 +20,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = true,
-        MaxDepth = 64,
+        MaxDepth = CustomLoopJsonDepthPolicy.CanonicalRunArtifactMaximumDepth,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
 
@@ -790,6 +790,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
         var utf8Json = await ReadBoundedArtifactAsync(location.Path, cancellationToken);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom loop run artifact", location.Path);
         try
         {
             using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
@@ -822,7 +823,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
                 if (CustomLoopRunArtifactCodec.IsEnvelope(document.RootElement))
                 {
-                    var run = CustomLoopRunArtifactCodec.Decode(utf8Json);
+                    var run = CustomLoopRunArtifactCodec.DecodeDepthValidated(utf8Json, location.Path);
                     ValidateCanonicalRun(run);
                     if (!string.Equals(run.Id, location.RunId, StringComparison.Ordinal) || !string.Equals(run.LoopId, location.LoopId, StringComparison.Ordinal))
                     {
@@ -1079,7 +1080,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private static byte[] SerializeTombstoneBounded(CustomLoopTraceTombstone tombstone)
     {
-        var content = JsonSerializer.SerializeToUtf8Bytes(tombstone, JsonOptions);
+        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(tombstone, JsonOptions, $"Custom loop trace tombstone `{tombstone.RunId}`");
         if (content.Length + 1 > CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes)
         {
             throw new FormatException($"Custom loop trace tombstone `{tombstone.RunId}` exceeds the {CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes}-byte limit.");
@@ -1120,6 +1121,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var utf8Json = await ReadBoundedJsonArtifactAsync(_traceDeletionOperationsRoot, path, CustomLoopLimits.MaxRunTraceDeletionOperationUtf8Bytes, "Custom loop trace-deletion operation", cancellationToken);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom loop trace-deletion operation", path);
         try
         {
             using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
@@ -1202,7 +1204,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private async Task WriteTraceDeletionOperationAsync(CustomLoopTraceDeletionOperation operation, bool overwrite, CancellationToken cancellationToken)
     {
         ValidateDeletionOperation(operation);
-        var content = JsonSerializer.SerializeToUtf8Bytes(operation, JsonOptions);
+        var path = GetTraceDeletionOperationPath(operation.OperationId);
+        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(operation, JsonOptions, "Custom loop trace-deletion operation", path);
         if (content.Length + 1 > CustomLoopLimits.MaxRunTraceDeletionOperationUtf8Bytes)
         {
             throw new FormatException($"Custom loop trace-deletion operation `{operation.OperationId}` exceeds the {CustomLoopLimits.MaxRunTraceDeletionOperationUtf8Bytes}-byte limit.");
@@ -1211,7 +1214,6 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         var terminated = new byte[content.Length + 1];
         content.CopyTo(terminated, 0);
         terminated[^1] = (byte)'\n';
-        var path = GetTraceDeletionOperationPath(operation.OperationId);
         await WriteBoundedJsonArtifactAsync(_traceDeletionOperationsRoot, path, terminated, overwrite, cancellationToken);
     }
 

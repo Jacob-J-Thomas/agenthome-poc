@@ -17,8 +17,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = true,
-        // TODO(#18): Re-evaluate this JSON nesting ceiling against real control-operation artifacts and make any limit failure clearly observable before deeper persisted shapes are introduced. See https://github.com/Jacob-J-Thomas/agenthome-poc/issues/18.
-        MaxDepth = 32,
+        MaxDepth = CustomLoopJsonDepthPolicy.ShallowReceiptMaximumDepth,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
 
@@ -125,6 +124,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
 
         var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, MaximumArtifactBytes, "Custom-loop control operation", cancellationToken);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, JsonOptions.MaxDepth, "Custom-loop control operation", path);
         CustomLoopControlOperation? operation;
         try
         {
@@ -146,13 +146,22 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
 
     private async Task WriteAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.Serialize(operation, JsonOptions);
+        var path = _pathGuard.GetFilePath(_root, operation.OperationId + ".json");
+        string json;
+        try
+        {
+            json = JsonSerializer.Serialize(operation, JsonOptions);
+        }
+        catch (JsonException exception)
+        {
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop control operation", JsonOptions.MaxDepth, exception, path);
+        }
+
         if (Encoding.UTF8.GetByteCount(json) > MaximumArtifactBytes)
         {
             throw new ArgumentException($"Custom-loop control operation exceeds {MaximumArtifactBytes} UTF-8 bytes.", nameof(operation));
         }
 
-        var path = _pathGuard.GetFilePath(_root, operation.OperationId + ".json");
         await _pathGuard.WriteTextAtomicallyAsync(_root, path, json, cancellationToken);
     }
 

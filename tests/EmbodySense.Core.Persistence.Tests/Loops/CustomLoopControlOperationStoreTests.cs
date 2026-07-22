@@ -73,6 +73,29 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Equal(failed, replay.Operation);
     }
 
+    [Fact]
+    public async Task Persisted_json_depth_failure_is_distinct_from_malformed_json()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopControlOperationsPath);
+        var path = Path.Combine(paths.CustomLoopControlOperationsPath, "depth-operation.json");
+        await File.WriteAllTextAsync(path, NestedJson(33));
+        var store = new CustomLoopControlOperationStore(paths);
+
+        var depth = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("depth-operation"));
+
+        Assert.Contains(path, depth.Message, StringComparison.Ordinal);
+        Assert.Contains("maximum persisted JSON nesting depth of 32", depth.Message, StringComparison.Ordinal);
+        Assert.Contains("not a loop-iteration, traversal, or run-duration limit", depth.Message, StringComparison.Ordinal);
+        Assert.Contains("remove the malformed pre-1.0 artifact", depth.Message, StringComparison.Ordinal);
+
+        await File.WriteAllTextAsync(path, "{invalid");
+        var malformed = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("depth-operation"));
+        Assert.Contains("contains invalid JSON or UTF-8", malformed.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("nesting depth", malformed.Message, StringComparison.Ordinal);
+    }
+
     private static CustomLoopControlOperation Pending(string operationId, string actor)
     {
         var kind = CustomLoopControlKind.Pause;
@@ -95,4 +118,6 @@ public sealed class CustomLoopControlOperationStoreTests
             false,
             "The operation is pending.");
     }
+
+    private static string NestedJson(int depth) => string.Concat(Enumerable.Repeat("{\"nested\":", depth)) + "null" + new string('}', depth);
 }

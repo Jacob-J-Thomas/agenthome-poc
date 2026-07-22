@@ -23,7 +23,7 @@ internal static class CustomLoopRunArtifactCodec
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = false,
-        MaxDepth = 64,
+        MaxDepth = CustomLoopJsonDepthPolicy.CanonicalRunArtifactMaximumDepth,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
 
@@ -48,10 +48,17 @@ internal static class CustomLoopRunArtifactCodec
         return encoded;
     }
 
-    internal static CustomLoopRunRecord Decode(byte[] utf8Json)
+    internal static CustomLoopRunRecord Decode(byte[] utf8Json, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(utf8Json);
-        return Parse(utf8Json, requireCanonical: true).Run;
+        return Parse(utf8Json, requireCanonical: true, validateDepth: true, path: path).Run;
+    }
+
+    internal static CustomLoopRunRecord DecodeDepthValidated(byte[] utf8Json, string path)
+    {
+        ArgumentNullException.ThrowIfNull(utf8Json);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return Parse(utf8Json, requireCanonical: true, validateDepth: false, path: path).Run;
     }
 
     internal static bool IsEnvelope(JsonElement root)
@@ -62,8 +69,13 @@ internal static class CustomLoopRunArtifactCodec
             && string.Equals(kind.GetString(), ArtifactKind, StringComparison.Ordinal);
     }
 
-    private static ParsedEnvelope Parse(byte[] utf8Json, bool requireCanonical)
+    private static ParsedEnvelope Parse(byte[] utf8Json, bool requireCanonical, bool validateDepth = true, string? path = null)
     {
+        if (validateDepth)
+        {
+            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom-loop run artifact", path);
+        }
+
         JsonObject root;
         try
         {
@@ -163,8 +175,17 @@ internal static class CustomLoopRunArtifactCodec
 
     private static JsonObject Project(CustomLoopRunRecord run, ContentRegistry contents, StructuralRegistry blocks, StructuralRegistry authorities, StructuralRegistry requests)
     {
-        var projection = JsonSerializer.SerializeToNode(run, JsonOptions)?.AsObject()
-            ?? throw new InvalidOperationException("The custom-loop run could not be projected.");
+        JsonObject projection;
+        try
+        {
+            projection = JsonSerializer.SerializeToNode(run, JsonOptions)?.AsObject()
+                ?? throw new InvalidOperationException("The custom-loop run could not be projected.");
+        }
+        catch (JsonException exception)
+        {
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop run artifact", JsonOptions.MaxDepth, exception);
+        }
+
         ProjectDefinition(RequireObject(projection, "admittedDefinition"), contents);
         ReferenceProperty(projection, "triggerPrompt", contents);
         ProjectContextSnapshot(RequireObject(projection, "contextSnapshot"), contents);
@@ -967,7 +988,7 @@ internal static class CustomLoopRunArtifactCodec
 
     private static byte[] SerializeNode(JsonNode node)
     {
-        return JsonSerializer.SerializeToUtf8Bytes(node, JsonOptions);
+        return CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(node, JsonOptions, "Custom-loop run artifact");
     }
 
     private static JsonNode? Clone(JsonObject owner, string propertyName)
