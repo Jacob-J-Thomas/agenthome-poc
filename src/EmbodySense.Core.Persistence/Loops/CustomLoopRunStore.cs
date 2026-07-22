@@ -823,7 +823,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
                 if (CustomLoopRunArtifactCodec.IsEnvelope(document.RootElement))
                 {
-                    var run = CustomLoopRunArtifactCodec.Decode(utf8Json, location.Path);
+                    var run = CustomLoopRunArtifactCodec.DecodeDepthValidated(utf8Json, location.Path);
                     ValidateCanonicalRun(run);
                     if (!string.Equals(run.Id, location.RunId, StringComparison.Ordinal) || !string.Equals(run.LoopId, location.LoopId, StringComparison.Ordinal))
                     {

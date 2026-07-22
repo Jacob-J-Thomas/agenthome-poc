@@ -51,7 +51,14 @@ internal static class CustomLoopRunArtifactCodec
     internal static CustomLoopRunRecord Decode(byte[] utf8Json, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(utf8Json);
-        return Parse(utf8Json, requireCanonical: true, path).Run;
+        return Parse(utf8Json, requireCanonical: true, validateDepth: true, path: path).Run;
+    }
+
+    internal static CustomLoopRunRecord DecodeDepthValidated(byte[] utf8Json, string path)
+    {
+        ArgumentNullException.ThrowIfNull(utf8Json);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return Parse(utf8Json, requireCanonical: true, validateDepth: false, path: path).Run;
     }
 
     internal static bool IsEnvelope(JsonElement root)
@@ -62,9 +69,13 @@ internal static class CustomLoopRunArtifactCodec
             && string.Equals(kind.GetString(), ArtifactKind, StringComparison.Ordinal);
     }
 
-    private static ParsedEnvelope Parse(byte[] utf8Json, bool requireCanonical, string? path = null)
+    private static ParsedEnvelope Parse(byte[] utf8Json, bool requireCanonical, bool validateDepth = true, string? path = null)
     {
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom-loop run artifact", path);
+        if (validateDepth)
+        {
+            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom-loop run artifact", path);
+        }
+
         JsonObject root;
         try
         {
