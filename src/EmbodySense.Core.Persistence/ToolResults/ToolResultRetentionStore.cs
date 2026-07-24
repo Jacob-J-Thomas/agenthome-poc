@@ -51,8 +51,9 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             var existing = existingArtifacts.SingleOrDefault(artifact => !artifact.Evicted && string.Equals(artifact.Manifest.RequestId, result.RequestId, StringComparison.Ordinal));
             if (existing is not null)
             {
-                return SameArtifact(existing.Manifest, prepared.Manifest)
-                    ? CreateReference(existing.Manifest, recoveredEvictions)
+                var revalidated = await RevalidateArtifactAsync(existing, cancellationToken);
+                return SameArtifact(revalidated.Manifest, prepared.Manifest)
+                    ? CreateReference(revalidated.Manifest, recoveredEvictions)
                     : Unavailable(result, "The broker request id is already bound to different retained response evidence.");
             }
 
@@ -186,6 +187,15 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         }
 
         return artifacts;
+    }
+
+    private async Task<RetainedArtifact> RevalidateArtifactAsync(RetainedArtifact artifact, CancellationToken cancellationToken)
+    {
+        var requestId = artifact.Manifest.RequestId;
+        var manifest = await ReadManifestAsync(Path.Combine(artifact.Directory, ManifestFileName), cancellationToken);
+        var totalUtf8Bytes = await ValidateArtifactAsync(artifact.Directory, requestId, manifest, cancellationToken);
+        _validatedArtifacts[requestId] = CaptureValidatedArtifact(artifact.Directory, manifest, totalUtf8Bytes);
+        return new RetainedArtifact(artifact.Directory, manifest, totalUtf8Bytes);
     }
 
     private static async Task<ToolResultArtifactManifest> ReadManifestAsync(string manifestPath, CancellationToken cancellationToken)

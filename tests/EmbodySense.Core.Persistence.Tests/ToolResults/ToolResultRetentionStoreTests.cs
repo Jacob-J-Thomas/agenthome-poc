@@ -190,6 +190,27 @@ public sealed class ToolResultRetentionStoreTests
         Assert.Contains("already bound", conflicting.Detail, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RetainAsync_rehashes_a_cached_artifact_before_readvertising_a_repeated_request()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ToolResultRetentionStore(paths);
+        var requestId = new string('a', 32);
+        var result = Result(requestId, "original");
+        var retained = await store.RetainAsync(result, LoopDefinition.CreateDefaultConversation());
+        var artifactDirectory = Path.GetDirectoryName(workspace.File(retained.ManifestPath!.Replace('/', Path.DirectorySeparatorChar)))!;
+        var chunkPath = Path.Combine(artifactDirectory, "0001.txt");
+        var originalTimestamp = File.GetLastWriteTimeUtc(chunkPath);
+        await File.WriteAllTextAsync(chunkPath, "tampered");
+        File.SetLastWriteTimeUtc(chunkPath, originalTimestamp);
+
+        var repeated = await store.RetainAsync(result, LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, repeated.Status);
+        Assert.Contains("InvalidDataException", repeated.Detail, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("staging")]
     [InlineData("root-file")]
