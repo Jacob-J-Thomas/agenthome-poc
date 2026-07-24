@@ -387,10 +387,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 {
                     return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: runtime host reacquisition found interrupted work that could not be parked safely.");
                 }
-
-                Volatile.Write(ref _customExecutionAvailable, true);
-                return CustomExecutionAvailability.AvailableNow;
             }
+
+            Volatile.Write(ref _customExecutionAvailable, true);
+            return CustomExecutionAvailability.AvailableNow;
         }
         finally
         {
