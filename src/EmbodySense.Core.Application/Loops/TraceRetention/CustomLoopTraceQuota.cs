@@ -12,7 +12,9 @@ public sealed record CustomLoopTraceQuota(
     int MaximumPerTraceUtf8Bytes,
     int TombstoneCount = 0,
     long TombstoneUtf8Bytes = 0,
-    int MaximumTombstoneCount = CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
+    int MaximumTombstoneCount = CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace,
+    int DeletionOperationCount = 0,
+    int MaximumDeletionOperationCount = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace)
 {
     public long ReservedCapacityUtf8Bytes => Math.Max(0, AccountedTraceUtf8Bytes - ActualTraceUtf8Bytes - TombstoneUtf8Bytes);
 
@@ -20,7 +22,7 @@ public sealed record CustomLoopTraceQuota(
 
     public long AvailableAccountedUtf8Bytes => Math.Max(0, MaximumWorkspaceUtf8Bytes - AccountedTraceUtf8Bytes);
 
-    public bool IsOverLimit => RetainedTraceCount > MaximumTraceCount || TombstoneCount > MaximumTombstoneCount || AccountedTraceUtf8Bytes > MaximumWorkspaceUtf8Bytes;
+    public bool IsOverLimit => RetainedTraceCount > MaximumTraceCount || TombstoneCount > MaximumTombstoneCount || DeletionOperationCount > MaximumDeletionOperationCount || AccountedTraceUtf8Bytes > MaximumWorkspaceUtf8Bytes;
 
     public static CustomLoopTraceQuota Empty() => new(
         0,
@@ -32,5 +34,7 @@ public sealed record CustomLoopTraceQuota(
         CustomLoopLimits.MaxRunTraceUtf8Bytes,
         0,
         0,
-        CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace);
+        CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace,
+        0,
+        CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace);
 }

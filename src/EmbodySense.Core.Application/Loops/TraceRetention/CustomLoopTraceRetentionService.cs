@@ -254,6 +254,7 @@ public sealed class CustomLoopTraceRetentionService
             CustomLoopTraceDeletionStoreStatus.HashMismatch => Result(CustomLoopTraceDeletionStatus.HashMismatch, null, "The persisted trace changed; inspect it again before deleting sensitive content."),
             CustomLoopTraceDeletionStoreStatus.OperationConflict => Result(CustomLoopTraceDeletionStatus.Conflict, stored.Tombstone, "The deletion operation id was reused for a different authenticated request."),
             CustomLoopTraceDeletionStoreStatus.TombstoneLimitExceeded => Result(CustomLoopTraceDeletionStatus.LimitExceeded, null, "The explicit terminal-trace tombstone limit was reached; no trace content was deleted."),
+            CustomLoopTraceDeletionStoreStatus.DeletionOperationLimitExceeded => Result(CustomLoopTraceDeletionStatus.OperationLimitExceeded, null, "The explicit trace-deletion operation receipt limit was reached; no trace content was deleted."),
             _ => Result(CustomLoopTraceDeletionStatus.Invalid, stored.Tombstone, $"The trace store rejected deletion with status `{stored.Status}`.")
         };
     }

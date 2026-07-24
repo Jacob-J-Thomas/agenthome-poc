@@ -374,7 +374,7 @@ function renderTraceQuota() {
     return;
   }
 
-  elements.traceQuota.textContent = `${traceQuota.liveTraceCount}/${traceQuota.maximumLiveTraceCount} live · ${formatBytes(traceQuota.actualStoredUtf8Bytes)} stored · ${formatBytes(traceQuota.reservedCapacityUtf8Bytes)} reserved · ${formatBytes(traceQuota.availableAccountedUtf8Bytes)} available`;
+  elements.traceQuota.textContent = `${traceQuota.liveTraceCount}/${traceQuota.maximumLiveTraceCount} live · ${traceQuota.deletionOperationCount}/${traceQuota.maximumDeletionOperationCount} deletion receipts · ${formatBytes(traceQuota.actualStoredUtf8Bytes)} stored · ${formatBytes(traceQuota.reservedCapacityUtf8Bytes)} reserved · ${formatBytes(traceQuota.availableAccountedUtf8Bytes)} available`;
 }
 
 function renderRunEvent(event) {
@@ -591,7 +591,7 @@ function yesNo(value) {
 
 function appendQuotaEvidence() {
   if (!traceQuota) return;
-  appendEvidenceSection("Workspace trace quota", `${traceQuota.liveTraceCount}/${traceQuota.maximumLiveTraceCount} live · ${traceQuota.tombstoneCount}/${traceQuota.maximumTombstoneCount} tombstones`, `${formatBytes(traceQuota.actualStoredUtf8Bytes)} physically stored\n${formatBytes(traceQuota.reservedCapacityUtf8Bytes)} reserved across ${traceQuota.activeReservationCount} trace reservation${traceQuota.activeReservationCount === 1 ? "" : "s"}\n${formatBytes(traceQuota.accountedUtf8Bytes)} accounted of ${formatBytes(traceQuota.maximumWorkspaceUtf8Bytes)} · no automatic pruning`);
+  appendEvidenceSection("Workspace trace quota", `${traceQuota.liveTraceCount}/${traceQuota.maximumLiveTraceCount} live · ${traceQuota.tombstoneCount}/${traceQuota.maximumTombstoneCount} tombstones · ${traceQuota.deletionOperationCount}/${traceQuota.maximumDeletionOperationCount} deletion receipts`, `${formatBytes(traceQuota.actualStoredUtf8Bytes)} physically stored\n${formatBytes(traceQuota.reservedCapacityUtf8Bytes)} reserved across ${traceQuota.activeReservationCount} trace reservation${traceQuota.activeReservationCount === 1 ? "" : "s"}\n${formatBytes(traceQuota.accountedUtf8Bytes)} accounted of ${formatBytes(traceQuota.maximumWorkspaceUtf8Bytes)} · no automatic pruning`);
 }
 
 function appendEvidenceSection(label, value, code) {

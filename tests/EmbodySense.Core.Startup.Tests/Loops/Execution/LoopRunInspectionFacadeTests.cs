@@ -23,7 +23,9 @@ public sealed class LoopRunInspectionFacadeTests
         var quota = await facade.GetTraceQuotaAsync();
         Assert.Equal(0, quota.LiveTraceCount);
         Assert.Equal(0, quota.TombstoneCount);
+        Assert.Equal(0, quota.DeletionOperationCount);
         Assert.Equal(CustomLoopLimits.MaxRunTracesPerWorkspace, quota.MaximumLiveTraceCount);
+        Assert.Equal(CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace, quota.MaximumDeletionOperationCount);
         await Assert.ThrowsAsync<InvalidOperationException>(() => facade.DeleteTraceAsync("run-alpha", new string('a', 64), "delete-trace"));
         await Assert.ThrowsAsync<InvalidOperationException>(() => facade.RecoverInterruptedRunsAsync());
         Assert.Throws<ArgumentException>(() => new LoopRunInspectionFacade(workspace.RootPath, "actor-user"));
@@ -119,6 +121,7 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Equal(trace.PersistedArtifactHash, tombstone.OriginalTraceHash);
         Assert.Equal(0, quota.LiveTraceCount);
         Assert.Equal(1, quota.TombstoneCount);
+        Assert.Equal(1, quota.DeletionOperationCount);
         Assert.Equal(quota.TombstoneUtf8Bytes, quota.AccountedUtf8Bytes);
         var audit = await File.ReadAllTextAsync(paths.EventsLogPath);
         Assert.Contains("loop.trace.deletion.intent", audit, StringComparison.Ordinal);

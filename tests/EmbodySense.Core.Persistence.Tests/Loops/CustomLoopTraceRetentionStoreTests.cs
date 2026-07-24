@@ -61,6 +61,8 @@ public sealed class CustomLoopTraceRetentionStoreTests
         Assert.Equal(originalBytes.LongLength, deleted.OriginalTraceUtf8Bytes);
         Assert.Equal(0, quota.RetainedTraceCount);
         Assert.Equal(1, quota.TombstoneCount);
+        Assert.Equal(1, quota.DeletionOperationCount);
+        Assert.Equal(CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace, quota.MaximumDeletionOperationCount);
         Assert.Equal(0, quota.ActualTraceUtf8Bytes);
         Assert.Equal(deleted.PersistedArtifactUtf8Bytes, quota.TombstoneUtf8Bytes);
         Assert.Equal(quota.TombstoneUtf8Bytes, quota.AccountedTraceUtf8Bytes);
@@ -74,6 +76,44 @@ public sealed class CustomLoopTraceRetentionStoreTests
         Assert.Equal(CustomLoopTraceDeletionIntegrity.Complete, replay.Integrity);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.OperationConflict, conflict.Status);
         Assert.Equal(CustomLoopRunStoreStatus.DeletedIdentityConflict, (await restarted.CreateAsync(CreateAdmittedRun())).Status);
+    }
+
+    [Fact]
+    public async Task Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;
+        Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
+        await Parallel.ForEachAsync(Enumerable.Range(0, generalOperationCapacity), new ParallelOptions { MaxDegreeOfParallelism = 32 }, async (index, cancellationToken) =>
+        {
+            var request = Request($"missing-{index:D5}", new string('a', CustomLoopLimits.Sha256HexCharacters), $"reject-{index:D5}");
+            var mutation = Mutation(request);
+            var operation = PendingOperation(mutation) with
+            {
+                State = CustomLoopTraceDeletionOperationState.OutcomeCommitted,
+                Outcome = CustomLoopTraceDeletionStoreStatus.NotFound,
+                Integrity = CustomLoopTraceDeletionIntegrity.Complete
+            };
+            await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, operation.OperationId + ".json"), JsonSerializer.Serialize(operation, JsonOptions) + "\n", cancellationToken);
+        });
+
+        var quotaBefore = await store.GetTraceQuotaAsync();
+        var deletionRequest = Request(terminal.Id, inspection.PersistedArtifactHash, "delete-reserved-trace");
+        var deleted = await store.DeleteTerminalTraceAsync(Mutation(deletionRequest));
+        var blockedRejection = await store.DeleteTerminalTraceAsync(Mutation(Request("missing-after-capacity", new string('a', CustomLoopLimits.Sha256HexCharacters), "reject-after-capacity")));
+        var replay = await store.DeleteTerminalTraceAsync(Mutation(deletionRequest));
+        var quotaAfter = await store.GetTraceQuotaAsync();
+
+        Assert.Equal(generalOperationCapacity, quotaBefore.DeletionOperationCount);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, deleted.Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.DeletionOperationLimitExceeded, blockedRejection.Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.AlreadyDeleted, replay.Status);
+        Assert.Equal(generalOperationCapacity + 1, quotaAfter.DeletionOperationCount);
+        Assert.Equal(1, quotaAfter.TombstoneCount);
     }
 
     [Fact]
