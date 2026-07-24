@@ -743,7 +743,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 run.ContextSnapshot.CapturedAtUtc,
                 run.ContextSnapshot.ManifestHash,
                 run.ContextSnapshot.SourceManifest.Select(Map).ToArray(),
-                run.ContextSnapshot.DirectoryRoleMessages.Select(Map).ToArray(),
+                run.ContextSnapshot.WorkspaceContextMessages.Select(Map).ToArray(),
                 run.ContextSnapshot.InvokingConversationMessages.Select(Map).ToArray()),
             new LoopRunExecutionClockSnapshot(run.ExecutionClock.AccumulatedRunningMilliseconds, run.ExecutionClock.ActiveSinceUtc),
             Map(run.Checkpoint),

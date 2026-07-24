@@ -16,15 +16,18 @@ public sealed class WorkspaceInitializerTests
 
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
 
-        var agentGuide = await File.ReadAllTextAsync(workspace.File(".agent", "AGENT.md"));
-        Assert.Contains("Keep agent documents current when durable identity, purpose, operating context, or user preferences change.", agentGuide);
-        Assert.Contains("Use `.agent/SOUL.md` for stable purpose and values.", agentGuide);
-        Assert.Contains("Use `.agent/PERSONALITY.md` for durable interaction style and behavioral defaults.", agentGuide);
-        Assert.Contains("Treat `.agent/MEMORY.md` as the primary durable memory registry.", agentGuide);
-        Assert.Contains("Store, update, create, and retrieve most long-lived memories in `.agent/MEMORY.md`.", agentGuide);
-        Assert.Contains("Query conversation history only for transcript-specific evidence", agentGuide);
-        Assert.Contains("## Emergent capability growth", agentGuide);
-        Assert.Contains("Do not claim hooks, cron jobs, subagents, planners, MCP integrations, model routing, or other advanced capabilities are live", agentGuide);
+        var roleGuide = await File.ReadAllTextAsync(workspace.File(".agent", "ROLE.md"));
+        Assert.Contains("contextual role the durable agent occupies in this workspace", roleGuide);
+        Assert.Contains("does not create a separate identity", roleGuide);
+        Assert.Contains("Use `.agent/ROLE.md` for this workspace's contextual role", roleGuide);
+        Assert.Contains("Use `.agent/SOUL.md` for stable purpose and values.", roleGuide);
+        Assert.Contains("Use `.agent/PERSONALITY.md` for durable interaction style and behavioral defaults.", roleGuide);
+        Assert.Contains("Treat `.agent/MEMORY.md` as the primary durable memory registry.", roleGuide);
+        Assert.Contains("Store, update, create, and retrieve most long-lived memories in `.agent/MEMORY.md`.", roleGuide);
+        Assert.Contains("Query conversation history only for transcript-specific evidence", roleGuide);
+        Assert.Contains("## Emergent capability growth", roleGuide);
+        Assert.Contains("Do not claim hooks, cron jobs, subagents, planners, MCP integrations, model routing, or other advanced capabilities are live", roleGuide);
+        Assert.False(File.Exists(workspace.File(".agent", "AGENT.md")));
 
         var soulGuide = await File.ReadAllTextAsync(workspace.File(".agent", "SOUL.md"));
         Assert.Contains("stable purpose and values", soulGuide);

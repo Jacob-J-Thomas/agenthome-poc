@@ -24,10 +24,10 @@ public sealed class CustomLoopRuntimeTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        var roleLabel = $"[EmbodySense role instruction source: .agent/AGENT.md]{Environment.NewLine}";
+        var roleLabel = $"[EmbodySense role instruction source: .agent/ROLE.md]{Environment.NewLine}";
         var roleMarker = $"{Environment.NewLine}[source truncated to fit the 12000-character admitted source limit]";
         var rolePrefixCharacters = 12_000 - roleLabel.Length - roleMarker.Length;
-        await File.WriteAllTextAsync(workspace.File(".agent", "AGENT.md"), new string('r', rolePrefixCharacters - 1) + "😀" + new string('r', 500));
+        await File.WriteAllTextAsync(workspace.File(".agent", "ROLE.md"), new string('r', rolePrefixCharacters - 1) + "😀" + new string('r', 500));
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-unicode-context", "update-runtime-unicode-context");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var conversationMarker = $"{Environment.NewLine}[truncated to {CustomLoopLimits.MaxInvokingConversationCharacters} characters for invoking-conversation admission]{Environment.NewLine}";
@@ -47,7 +47,7 @@ public sealed class CustomLoopRuntimeTests
         var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-unicode-context", "capture Unicode safely"));
 
         Assert.Equal("Completed", response.ExecutionStatus);
-        var roleSource = Assert.Single(response.Run!.Context.SourceManifest, source => source.SourceId == "agent");
+        var roleSource = Assert.Single(response.Run!.Context.SourceManifest, source => source.SourceId == "role");
         var conversationSource = Assert.Single(response.Run.Context.SourceManifest, source => source.SourceType == "InvokingConversation" && source.OmissionReason is null);
         Assert.True(roleSource.Truncated);
         Assert.True(conversationSource.Truncated);
@@ -127,7 +127,7 @@ public sealed class CustomLoopRuntimeTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await File.WriteAllTextAsync(workspace.File(".agent", "AGENT.md"), "role context evidence");
+        await File.WriteAllTextAsync(workspace.File(".agent", "ROLE.md"), "role context evidence");
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-success", "update-runtime-success");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var prior = await runtime.RunTurnAsync("prior logical prompt");
@@ -150,10 +150,14 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(definition.ContentHash, response.Run.AdmittedDefinition.ContentHash);
         Assert.Equal(persistedConversationAfterReplay.Version, response.Run.InvokingConversation!.ConversationId);
         Assert.Empty(response.Run.Context.InvokingConversationMessages);
-        var agentSource = Assert.Single(response.Run.Context.SourceManifest, source => source.SourceId == "agent");
-        Assert.Equal("RoleInstruction", agentSource.SourceType);
-        Assert.Equal("TrustedInstruction", agentSource.TrustClass);
-        Assert.Contains("role context evidence", agentSource.Content, StringComparison.Ordinal);
+        var roleSource = Assert.Single(response.Run.Context.SourceManifest, source => source.SourceId == "role");
+        Assert.Equal("RoleInstruction", roleSource.SourceType);
+        Assert.Equal("TrustedInstruction", roleSource.TrustClass);
+        Assert.Contains("role context evidence", roleSource.Content, StringComparison.Ordinal);
+        var identitySource = Assert.Single(response.Run.Context.SourceManifest, source => source.SourceId == "soul");
+        Assert.Equal("AgentIdentity", identitySource.SourceType);
+        Assert.Equal("WorkspaceAgentIdentityFile", identitySource.Provenance);
+        Assert.Equal("TrustedInstruction", identitySource.TrustClass);
         var startedAttempt = Assert.Single(response.Run.Events, runEvent => runEvent.Kind == "NodeAttemptStarted");
         Assert.NotEmpty(startedAttempt.ContextBlocks);
         Assert.NotNull(startedAttempt.ToolAuthority);
@@ -284,7 +288,7 @@ public sealed class CustomLoopRuntimeTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var roleSource = new string('R', 12_050);
-        await File.WriteAllTextAsync(workspace.File(".agent", "AGENT.md"), roleSource);
+        await File.WriteAllTextAsync(workspace.File(".agent", "ROLE.md"), roleSource);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-context", "update-runtime-context");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var oversizedPrompt = "prompt-head-" + new string('x', CustomLoopLimits.MaxInvokingConversationCharacters + 500) + "-prompt-tail";
@@ -294,26 +298,31 @@ public sealed class CustomLoopRuntimeTests
         var second = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-context-2", "second custom task"));
 
         var manifest = first.Run!.Context.SourceManifest;
-        Assert.Equal(["nearest-agents", "agent", "soul", "personality", "context", "memory", "models"], manifest.Take(7).Select(source => source.SourceId));
+        Assert.Equal(["nearest-agents", "role", "soul", "personality", "context", "memory", "models"], manifest.Take(7).Select(source => source.SourceId));
         Assert.Equal(Enumerable.Range(1, manifest.Count), manifest.Select(source => source.Order));
         var missingAgents = manifest[0];
         Assert.False(string.IsNullOrWhiteSpace(missingAgents.OmissionReason));
         Assert.Equal(string.Empty, missingAgents.Content);
         Assert.Equal(0, missingAgents.UsedCharacterCount);
         Assert.False(missingAgents.Truncated);
-        var agentManifestSource = Assert.Single(manifest, source => source.SourceId == "agent");
-        Assert.Equal("RoleInstruction", agentManifestSource.SourceType);
-        Assert.Equal("WorkspaceRoleFile", agentManifestSource.Provenance);
-        Assert.Equal("TrustedInstruction", agentManifestSource.TrustClass);
-        Assert.Equal("system", agentManifestSource.Role);
-        Assert.EndsWith(".agent/AGENT.md", agentManifestSource.SourcePath.Replace('\\', '/'), StringComparison.Ordinal);
-        Assert.Equal(CustomLoopLimits.MaxInstructionCharacters, agentManifestSource.UsedCharacterCount);
-        Assert.Equal(agentManifestSource.UsedCharacterCount, agentManifestSource.Content.Length);
-        Assert.True(agentManifestSource.OriginalCharacterCount > agentManifestSource.UsedCharacterCount);
-        Assert.True(agentManifestSource.Truncated);
-        Assert.NotNull(agentManifestSource.TruncationReason);
-        Assert.Null(agentManifestSource.OmissionReason);
-        Assert.Contains("[source truncated to fit the 12000-character admitted source limit]", agentManifestSource.Content, StringComparison.Ordinal);
+        var roleManifestSource = Assert.Single(manifest, source => source.SourceId == "role");
+        Assert.Equal("RoleInstruction", roleManifestSource.SourceType);
+        Assert.Equal("WorkspaceRoleFile", roleManifestSource.Provenance);
+        Assert.Equal("TrustedInstruction", roleManifestSource.TrustClass);
+        Assert.Equal("system", roleManifestSource.Role);
+        Assert.EndsWith(".agent/ROLE.md", roleManifestSource.SourcePath.Replace('\\', '/'), StringComparison.Ordinal);
+        Assert.Equal(CustomLoopLimits.MaxInstructionCharacters, roleManifestSource.UsedCharacterCount);
+        Assert.Equal(roleManifestSource.UsedCharacterCount, roleManifestSource.Content.Length);
+        Assert.True(roleManifestSource.OriginalCharacterCount > roleManifestSource.UsedCharacterCount);
+        Assert.True(roleManifestSource.Truncated);
+        Assert.NotNull(roleManifestSource.TruncationReason);
+        Assert.Null(roleManifestSource.OmissionReason);
+        Assert.Contains("[source truncated to fit the 12000-character admitted source limit]", roleManifestSource.Content, StringComparison.Ordinal);
+        var soulManifestSource = Assert.Single(manifest, source => source.SourceId == "soul");
+        Assert.Equal("AgentIdentity", soulManifestSource.SourceType);
+        Assert.Equal("WorkspaceAgentIdentityFile", soulManifestSource.Provenance);
+        Assert.Equal("TrustedInstruction", soulManifestSource.TrustClass);
+        Assert.Equal("system", soulManifestSource.Role);
         var contextualState = Assert.Single(manifest, source => source.SourceId == "memory");
         Assert.Equal("ContextualState", contextualState.SourceType);
         Assert.Equal("WorkspaceContextFile", contextualState.Provenance);
@@ -679,7 +688,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.NotNull(run.InvokingConversation);
         Assert.Equal(run.Context.CapturedAtUtc, run.InvokingConversation!.CapturedAtUtc);
         Assert.Equal(CustomLoopLimits.Sha256HexCharacters, run.Context.ManifestHash.Length);
-        Assert.NotEmpty(run.Context.DirectoryRoleMessages);
+        Assert.NotEmpty(run.Context.WorkspaceContextMessages);
         Assert.Empty(run.Context.InvokingConversationMessages);
         Assert.True(run.ExecutionClock.AccumulatedRunningMilliseconds >= 0);
         Assert.Null(run.ExecutionClock.ActiveSinceUtc);

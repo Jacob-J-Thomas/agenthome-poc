@@ -1120,7 +1120,7 @@ function createRunSnapshot() {
       capturedAtUtc: "2026-07-16T12:00:00Z",
       manifestHash: "manifest-test",
       sourceManifest: [{ order: 1, sourceType: "RoleInstruction", sourceId: "nearest-agents", sourcePath: "C:/workspace/AGENTS.md", provenance: "WorkspaceRoleFile", trustClass: "TrustedInstruction", role: "system", content: "Role context", contentHash: "hash-role", originalCharacterCount: 12, usedCharacterCount: 12, truncated: false, truncationReason: null, omissionReason: null, capturedAtUtc: "2026-07-16T12:00:00Z" }],
-      directoryRoleMessages: [{ role: "system", content: "Role context" }],
+      workspaceContextMessages: [{ role: "system", content: "Role context" }],
       invokingConversationMessages: []
     },
     executionClock: { accumulatedRunningMilliseconds: 1800, activeSinceUtc: null },

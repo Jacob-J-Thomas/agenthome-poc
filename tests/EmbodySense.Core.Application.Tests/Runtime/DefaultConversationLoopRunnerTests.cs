@@ -4,6 +4,8 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Loops.Models;
@@ -44,10 +46,14 @@ public sealed class DefaultConversationLoopRunnerTests
         Assert.Equal("default-conversation", result.RunIdentity.LoopId);
         Assert.Equal("completed response", result.AssistantOutput);
         Assert.Equal(["completed response"], chunks);
-        Assert.Collection(
-            Assert.Single(client.Requests),
-            message => Assert.Equal("startup context", message.Content),
-            message => Assert.Equal("hello", message.Content));
+        var inferenceRequest = Assert.Single(client.Requests);
+        Assert.Collection(inferenceRequest.Messages, message => Assert.Equal("hello", message.Content));
+        var instructionContext = Assert.IsType<LlmInferenceInstructionContext>(inferenceRequest.InstructionContext);
+        Assert.True(EmbodySenseDeveloperInstructions.Matches(instructionContext.Governance, Enum.GetValues<ToolCommand>()));
+        var startupInstruction = Assert.Single(instructionContext.TrustedInstructions);
+        Assert.Equal("startup-context-1", startupInstruction.SourceId);
+        Assert.Equal("startup context", startupInstruction.Content);
+        Assert.False(instructionContext.PreserveExactLogicalContext);
         Assert.Collection(
             state.Messages,
             message => Assert.Equal("startup context", message.Content),
@@ -459,12 +465,13 @@ public sealed class DefaultConversationLoopRunnerTests
         firstClient.Release.TrySetResult();
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await firstTurn).Status);
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await secondTurn).Status);
+        var secondRequest = Assert.Single(secondClient.Requests);
         Assert.Collection(
-            Assert.Single(secondClient.Requests),
-            message => Assert.Equal("startup context", message.Content),
+            secondRequest.Messages,
             message => Assert.Equal("first prompt", message.Content),
             message => Assert.Equal("first response", message.Content),
             message => Assert.Equal("second prompt", message.Content));
+        Assert.Equal("startup context", Assert.Single(secondRequest.InstructionContext!.TrustedInstructions).Content);
         Assert.Collection(
             memory.Messages,
             message => Assert.Equal("first prompt", message.Content),
@@ -590,7 +597,7 @@ public sealed class DefaultConversationLoopRunnerTests
 
     private sealed class RecordingInferenceClient(string output) : ILlmInferenceClient
     {
-        public List<IReadOnlyList<LlmMessage>> Requests { get; } = [];
+        public List<LlmInferenceRequest> Requests { get; } = [];
 
         public Exception? Failure { get; init; }
 
@@ -601,7 +608,7 @@ public sealed class DefaultConversationLoopRunnerTests
             Func<string, CancellationToken, Task>? responseChunkHandler = null,
             CancellationToken cancellationToken = default)
         {
-            Requests.Add(request.Messages.ToArray());
+            Requests.Add(request);
             if (Failure is not null)
             {
                 throw Failure;

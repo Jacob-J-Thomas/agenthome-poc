@@ -12,8 +12,8 @@ public sealed record CustomLoopContextSnapshot(
     public const int CurrentSchemaVersion = 1;
 
     [JsonIgnore]
-    public CustomLoopMessageSnapshot[] DirectoryRoleMessages => (SourceManifest ?? [])
-            .Where(source => source is not null && source.Included && (source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.ContextualState))
+    public CustomLoopMessageSnapshot[] WorkspaceContextMessages => (SourceManifest ?? [])
+            .Where(source => source is not null && source.Included && (source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity or CustomLoopContextSource.ContextualState))
             .Select(source => new CustomLoopMessageSnapshot(source.Role, source.Content))
             .ToArray();
 
@@ -30,9 +30,9 @@ public sealed record CustomLoopContextSnapshot(
             capturedAtUtc,
             [
                 OmittedWorkspaceSource(1, CustomLoopContextSource.RoleInstruction, "nearest-agents", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
-                OmittedWorkspaceSource(2, CustomLoopContextSource.RoleInstruction, "agent", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
-                OmittedWorkspaceSource(3, CustomLoopContextSource.RoleInstruction, "soul", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
-                OmittedWorkspaceSource(4, CustomLoopContextSource.RoleInstruction, "personality", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
+                OmittedWorkspaceSource(2, CustomLoopContextSource.RoleInstruction, "role", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
+                OmittedWorkspaceSource(3, CustomLoopContextSource.AgentIdentity, "soul", CustomLoopContextProvenance.WorkspaceAgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
+                OmittedWorkspaceSource(4, CustomLoopContextSource.AgentIdentity, "personality", CustomLoopContextProvenance.WorkspaceAgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, capturedAtUtc),
                 OmittedWorkspaceSource(5, CustomLoopContextSource.ContextualState, "context", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User, capturedAtUtc),
                 OmittedWorkspaceSource(6, CustomLoopContextSource.ContextualState, "memory", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User, capturedAtUtc),
                 OmittedWorkspaceSource(7, CustomLoopContextSource.ContextualState, "models", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User, capturedAtUtc)
@@ -53,7 +53,7 @@ public sealed record CustomLoopContextSnapshot(
         var sourcePath = sourceId switch
         {
             "nearest-agents" => "unavailable/AGENTS.md",
-            "agent" => "unavailable/.agent/AGENT.md",
+            "role" => "unavailable/.agent/ROLE.md",
             "soul" => "unavailable/.agent/SOUL.md",
             "personality" => "unavailable/.agent/PERSONALITY.md",
             "context" => "unavailable/.agent/CONTEXT.md",

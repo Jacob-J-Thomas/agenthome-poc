@@ -104,6 +104,7 @@ public static class CustomLoopContextSnapshotHash
         {
             CustomLoopContextSource.HarnessGovernance => "harness-governance",
             CustomLoopContextSource.RoleInstruction => "role-instruction",
+            CustomLoopContextSource.AgentIdentity => "agent-identity",
             CustomLoopContextSource.ContextualState => "contextual-state",
             CustomLoopContextSource.RunMetadata => "run-metadata",
             CustomLoopContextSource.NodeInstruction => "node-instruction",
@@ -121,6 +122,7 @@ public static class CustomLoopContextSnapshotHash
         {
             CustomLoopContextProvenance.HarnessRuntime => "harness-runtime",
             CustomLoopContextProvenance.WorkspaceRoleFile => "workspace-role-file",
+            CustomLoopContextProvenance.WorkspaceAgentIdentityFile => "workspace-agent-identity-file",
             CustomLoopContextProvenance.WorkspaceContextFile => "workspace-context-file",
             CustomLoopContextProvenance.ServerRunState => "server-run-state",
             CustomLoopContextProvenance.AuthoredDefinition => "authored-definition",
