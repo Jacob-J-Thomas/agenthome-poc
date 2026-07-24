@@ -89,6 +89,36 @@ public sealed class ToolResultRetentionStoreTests
     }
 
     [Fact]
+    public async Task RetainAsync_does_not_evict_source_evidence_to_retain_an_inspection_response()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ToolResultRetentionStore(paths);
+        for (var index = 0; index < ToolResultRetentionLimits.MaxArtifactsPerWorkspace; index++)
+        {
+            var retained = await store.RetainAsync(Result(index.ToString("x32"), $"result-{index}"), LoopDefinition.CreateDefaultConversation());
+            Assert.Equal(ToolResultRetentionStatus.Retained, retained.Status);
+        }
+
+        var sourceRequestId = new string('0', 32);
+        var inspectionRequestId = new string('f', 32);
+        var inspectionResult = Result(
+            inspectionRequestId,
+            "manifest.json",
+            command: ToolCommand.List,
+            targetPath: ".agent/logs/tool-responses",
+            resolvedPath: paths.ToolResponsesPath);
+
+        var inspection = await store.RetainAsync(inspectionResult, LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, inspection.Status);
+        Assert.Contains("would evict tool-response evidence being inspected", inspection.Detail, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(Path.Combine(paths.ToolResponsesPath, sourceRequestId)));
+        Assert.False(Directory.Exists(Path.Combine(paths.ToolResponsesPath, inspectionRequestId)));
+        Assert.Equal(ToolResultRetentionLimits.MaxArtifactsPerWorkspace, Directory.EnumerateDirectories(paths.ToolResponsesPath).Count());
+    }
+
+    [Fact]
     public async Task RetainAsync_cleans_an_orphaned_exact_staging_directory_under_the_workspace_lease()
     {
         using var workspace = new TestWorkspace();
@@ -263,14 +293,20 @@ public sealed class ToolResultRetentionStoreTests
         }
     }
 
-    private static ToolResult Result(string requestId, string output, ToolAuditCorrelation? correlation = null)
+    private static ToolResult Result(
+        string requestId,
+        string output,
+        ToolAuditCorrelation? correlation = null,
+        ToolCommand command = ToolCommand.Read,
+        string targetPath = "shared/note.txt",
+        string resolvedPath = "C:\\workspace\\shared\\note.txt")
     {
         return new ToolResult(
             ToolExecutionOutcome.Succeeded,
             output,
             requestId,
-            "C:\\workspace\\shared\\note.txt",
-            new ToolRequest(ToolCommand.Read, "shared/note.txt", CorrelationId: "provider-call-1", AuditCorrelation: correlation));
+            resolvedPath,
+            new ToolRequest(command, targetPath, CorrelationId: "provider-call-1", AuditCorrelation: correlation));
     }
 
     private static ToolAuditCorrelation Correlation()
