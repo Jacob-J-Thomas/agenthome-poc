@@ -65,7 +65,7 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
                 throw new InvalidOperationException("custom_loop_recovery_failed: one or more interrupted runs could not be parked safely.");
             }
 
-            return new LoopRunRecoverySnapshot(true, results.Any(result => result.Run is { Status: CustomLoopRunStatus.Paused, InvokingConversation: not null }));
+            return new LoopRunRecoverySnapshot(true, results.Any(result => CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(result.Run)));
         }
     }
 

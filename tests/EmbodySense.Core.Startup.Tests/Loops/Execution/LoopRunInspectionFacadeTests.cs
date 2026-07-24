@@ -48,6 +48,22 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Contains("Restart recovery parked the admitted run", await File.ReadAllTextAsync(paths.EventsLogPath), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task Recovery_preserves_chat_only_when_the_parked_checkpoint_can_still_publish(bool publishToConversation, bool expectedPreservation)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        _ = await CreateInterruptedRunAsync(store, publishToConversation);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+
+        var recovery = await facade.RecoverInterruptedRunsAsync();
+
+        Assert.True(recovery.Completed);
+        Assert.Equal(expectedPreservation, recovery.PreserveCurrentConversation);
+    }
+
     [Fact]
     public async Task Authenticated_facade_projects_exact_trace_quota_and_audited_tombstone_deletion()
     {
@@ -118,11 +134,32 @@ public sealed class LoopRunInspectionFacadeTests
         return completed;
     }
 
-    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store)
+    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, bool? publishToConversation = null)
     {
         var definition = CustomLoopDefinition.CreateSeed("loop-interrupted", "default-role", "step-1", "create-interrupted-loop", Timestamp);
+        CustomLoopConversationReference? conversation = null;
+        if (publishToConversation is { } publish)
+        {
+            var input = new CustomLoopContextInputPolicy(true, true, false, true, true);
+            var noPublication = new CustomLoopContextPolicy(input, new CustomLoopContextOutputPolicy(false, false));
+            var inference = new CustomLoopContextPolicy(input, new CustomLoopContextOutputPolicy(false, publish));
+            definition = CustomLoopDefinitionContentHash.Apply(definition with
+            {
+                ContentHash = string.Empty,
+                ContextDefaults = new CustomLoopContextDefaults(noPublication, noPublication),
+                InferenceSteps =
+                [
+                    definition.InferenceSteps[0] with
+                    {
+                        ContextPolicy = CustomLoopNodeContextPolicy.Override(inference)
+                    }
+                ]
+            });
+            conversation = new CustomLoopConversationReference("conversation-interrupted", new string('a', CustomLoopLimits.Sha256HexCharacters), Timestamp);
+        }
+
         var admittedEvent = Event(1, "interrupted-admitted", CustomLoopRunEventKind.Admitted, Timestamp);
-        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-interrupted", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-interrupted", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-interrupted", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-interrupted", "test-user", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
