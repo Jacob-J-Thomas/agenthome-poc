@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Memory;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
@@ -65,7 +66,8 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
                 throw new InvalidOperationException("custom_loop_recovery_failed: one or more interrupted runs could not be parked safely.");
             }
 
-            return new LoopRunRecoverySnapshot(true, results.Any(result => CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(result.Run)));
+            var currentConversation = await new ConversationMemoryStore(_paths).LoadCurrentConversationSnapshotAsync(cancellationToken);
+            return new LoopRunRecoverySnapshot(true, results.Any(result => CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(result.Run, currentConversation.Version)));
         }
     }
 

@@ -114,9 +114,10 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults))
+                var currentConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults, currentConversation.Version))
                 {
-                    conversationState.SynchronizeConversationTranscript(await conversationMemory.LoadCurrentConversationAsync(cancellationToken));
+                    conversationState.SynchronizeConversationTranscript(currentConversation.Messages);
                 }
                 else
                 {
@@ -186,8 +187,8 @@ public sealed class AgentRuntimeFactory
         return WorkspaceActors.ForSurface(surface.SurfaceId);
     }
 
-    private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults)
+    private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults, string currentConversationIdentity)
     {
-        return recoveryResults.Any(result => CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(result.Run));
+        return recoveryResults.Any(result => CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(result.Run, currentConversationIdentity));
     }
 }

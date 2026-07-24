@@ -8,6 +8,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 public sealed class CustomLoopConversationRecoveryPolicyTests
 {
     private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-23T12:00:00+00:00");
+    private const string CurrentConversationIdentity = "conversation-current";
 
     [Fact]
     public void Requires_current_conversation_only_for_possible_remaining_publication()
@@ -30,11 +31,12 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
         };
         var exitPublishes = Definition([Step("first", publish: false)], exitPublishes: true, maxAdditionalIterations: 0);
 
-        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(noPublication, nextStepIndex: 0, bindConversation: false)));
-        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(noPublication, nextStepIndex: 0)));
-        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(laterStepPublishes, nextStepIndex: 1)));
-        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(earlierStepPublishesOnPossibleRepeat, nextStepIndex: 1)));
-        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(exitPublishes, nextStepIndex: 1)));
+        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(noPublication, nextStepIndex: 0, bindConversation: false), CurrentConversationIdentity));
+        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(noPublication, nextStepIndex: 0), CurrentConversationIdentity));
+        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(laterStepPublishes, nextStepIndex: 1), CurrentConversationIdentity));
+        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(earlierStepPublishesOnPossibleRepeat, nextStepIndex: 1), CurrentConversationIdentity));
+        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(exitPublishes, nextStepIndex: 1), CurrentConversationIdentity));
+        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(Run(exitPublishes, nextStepIndex: 1), new string('f', 64)));
     }
 
     [Fact]
@@ -51,7 +53,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
         var priorPublication = Event(1, CustomLoopRunEventKind.ConversationPublished, iteration: 1, stepId: "first", published: true);
         run = run with { Events = [priorPublication] };
 
-        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run));
+        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run, CurrentConversationIdentity));
     }
 
     [Fact]
@@ -74,7 +76,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
                 completedExit.Sequence)
         };
 
-        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run));
+        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run, CurrentConversationIdentity));
     }
 
     [Fact]
@@ -97,7 +99,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
                 repeatedExit.Sequence)
         };
 
-        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run));
+        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run, CurrentConversationIdentity));
     }
 
     [Fact]
@@ -106,7 +108,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
         var definition = Definition([Step("first", publish: true)], exitPublishes: true, maxAdditionalIterations: 1);
         var run = Run(definition, nextStepIndex: 0) with { Status = CustomLoopRunStatus.NeedsReview };
 
-        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run));
+        Assert.False(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run, CurrentConversationIdentity));
     }
 
     private static CustomLoopDefinition Definition(CustomLoopInferenceStep[] steps, bool exitPublishes, int maxAdditionalIterations)
@@ -136,7 +138,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
     private static CustomLoopRunRecord Run(CustomLoopDefinition definition, int nextStepIndex, bool bindConversation = true)
     {
         var conversation = bindConversation
-            ? new CustomLoopConversationReference("conversation-current", new string('b', 64), Timestamp)
+            ? new CustomLoopConversationReference(CurrentConversationIdentity, new string('b', 64), Timestamp)
             : null;
         return new CustomLoopRunRecord(
             CustomLoopRunRecord.CurrentSchemaVersion,

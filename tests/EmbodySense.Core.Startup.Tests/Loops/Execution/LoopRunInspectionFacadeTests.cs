@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 
@@ -54,14 +55,34 @@ public sealed class LoopRunInspectionFacadeTests
     public async Task Recovery_preserves_chat_only_when_the_parked_checkpoint_can_still_publish(bool publishToConversation, bool expectedPreservation)
     {
         using var workspace = new TestWorkspace();
-        var store = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
-        _ = await CreateInterruptedRunAsync(store, publishToConversation);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var currentConversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var store = new CustomLoopRunStore(paths);
+        _ = await CreateInterruptedRunAsync(store, publishToConversation, currentConversationIdentity);
         await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
 
         var recovery = await facade.RecoverInterruptedRunsAsync();
 
         Assert.True(recovery.Completed);
         Assert.Equal(expectedPreservation, recovery.PreserveCurrentConversation);
+    }
+
+    [Fact]
+    public async Task Recovery_does_not_preserve_a_replacement_current_conversation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        var originalIdentity = (await conversationMemory.LoadCurrentConversationSnapshotAsync()).Version;
+        var store = new CustomLoopRunStore(paths);
+        _ = await CreateInterruptedRunAsync(store, publishToConversation: true, conversationIdentity: originalIdentity);
+        await conversationMemory.StartFreshConversationAsync();
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+
+        var recovery = await facade.RecoverInterruptedRunsAsync();
+
+        Assert.True(recovery.Completed);
+        Assert.False(recovery.PreserveCurrentConversation);
     }
 
     [Fact]
@@ -134,7 +155,7 @@ public sealed class LoopRunInspectionFacadeTests
         return completed;
     }
 
-    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, bool? publishToConversation = null)
+    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, bool? publishToConversation = null, string? conversationIdentity = null)
     {
         var definition = CustomLoopDefinition.CreateSeed("loop-interrupted", "default-role", "step-1", "create-interrupted-loop", Timestamp);
         CustomLoopConversationReference? conversation = null;
@@ -155,7 +176,7 @@ public sealed class LoopRunInspectionFacadeTests
                     }
                 ]
             });
-            conversation = new CustomLoopConversationReference("conversation-interrupted", new string('a', CustomLoopLimits.Sha256HexCharacters), Timestamp);
+            conversation = new CustomLoopConversationReference(conversationIdentity ?? "conversation-interrupted", new string('a', CustomLoopLimits.Sha256HexCharacters), Timestamp);
         }
 
         var admittedEvent = Event(1, "interrupted-admitted", CustomLoopRunEventKind.Admitted, Timestamp);

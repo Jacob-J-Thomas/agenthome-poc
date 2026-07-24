@@ -5,9 +5,15 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
 public static class CustomLoopConversationRecoveryPolicy
 {
-    public static bool RequiresCurrentConversation(CustomLoopRunRecord? run)
+    public static bool RequiresCurrentConversation(CustomLoopRunRecord? run, string? currentConversationIdentity)
     {
         if (run is not { Status: CustomLoopRunStatus.Paused, InvokingConversation: not null })
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(currentConversationIdentity)
+            || !string.Equals(run.InvokingConversation.ConversationId, currentConversationIdentity, StringComparison.Ordinal))
         {
             return false;
         }
