@@ -78,6 +78,29 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
     }
 
     [Fact]
+    public void Committed_repeat_decision_retains_chat_when_the_next_iteration_can_publish()
+    {
+        var definition = Definition([Step("first", publish: true)], exitPublishes: false, maxAdditionalIterations: 1);
+        var repeatedExit = Event(1, CustomLoopRunEventKind.ExitDecisionCompleted, iteration: 1, stepId: "exit", exitDecision: CustomLoopExitDecision.Repeat);
+        var run = Run(definition, nextStepIndex: definition.InferenceSteps.Length) with
+        {
+            Events = [repeatedExit],
+            Checkpoint = new CustomLoopRunCheckpoint(
+                1,
+                definition.InferenceSteps.Length,
+                0,
+                PendingExitDecision: false,
+                [],
+                null,
+                new CustomLoopRetainedOutput("first", 1, "result", new string('a', 64)),
+                0,
+                repeatedExit.Sequence)
+        };
+
+        Assert.True(CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(run));
+    }
+
+    [Fact]
     public void Nonpaused_runs_never_drive_startup_chat_preservation()
     {
         var definition = Definition([Step("first", publish: true)], exitPublishes: true, maxAdditionalIterations: 1);

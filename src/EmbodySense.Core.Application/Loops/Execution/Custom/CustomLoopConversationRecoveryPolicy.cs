@@ -63,6 +63,8 @@ public static class CustomLoopConversationRecoveryPolicy
             && run.Checkpoint.CurrentIterationResult is not null
             && run.Events.Any(item => item.Sequence <= run.Checkpoint.LastCommittedSequence
                 && item.Kind == CustomLoopRunEventKind.ExitDecisionCompleted
-                && item.Iteration == run.Checkpoint.Iteration);
+                && item.Iteration == run.Checkpoint.Iteration
+                && string.Equals(item.StepId, "exit", StringComparison.Ordinal)
+                && item.ExitDecision == CustomLoopExitDecision.Complete);
     }
 }

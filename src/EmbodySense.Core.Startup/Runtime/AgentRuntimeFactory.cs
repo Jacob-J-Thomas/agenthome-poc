@@ -86,22 +86,20 @@ public sealed class AgentRuntimeFactory
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
             var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
             var preserveCurrentConversation = !customExecutionAvailable;
+            using var recoveryLease = recoveryOwnership.Lease;
             if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
             {
-                using (recoveryOwnership.Lease!)
+                try
                 {
-                    try
-                    {
-                        recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
-                        var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
-                        customExecutionAvailable &= !recoveryFailed;
-                        preserveCurrentConversation |= recoveryFailed;
-                    }
-                    catch (Exception exception) when (exception is not OperationCanceledException)
-                    {
-                        customExecutionAvailable = false;
-                        preserveCurrentConversation = true;
-                    }
+                    recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
+                    var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
+                    customExecutionAvailable &= !recoveryFailed;
+                    preserveCurrentConversation |= recoveryFailed;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    customExecutionAvailable = false;
+                    preserveCurrentConversation = true;
                 }
             }
 
