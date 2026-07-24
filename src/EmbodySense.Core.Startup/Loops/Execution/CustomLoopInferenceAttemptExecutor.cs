@@ -16,6 +16,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Permissions;
+using EmbodySense.Core.Persistence.ToolResults;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
 
@@ -101,8 +102,10 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var loopDefinition = CreateRunScopedToolDefinition(request);
             var permissionService = new ReloadingToolPermissionService(_paths, new PermissionPolicyStore());
             var observer = new CorrelatedToolEvidenceObserver(_evidenceSink, request);
-            var broker = new ToolBroker(_paths, permissionService, _approvalPrompt, new LocalWorkspaceClient(_paths), _auditLog, loopDefinition, observer);
-            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, observer, _paths, request);
+            var retentionStore = new ToolResultRetentionStore(_paths);
+            var retention = new ToolResultRetentionService(_auditLog, loopDefinition, retentionStore);
+            var broker = new ToolBroker(_paths, permissionService, _approvalPrompt, new LocalWorkspaceClient(_paths), _auditLog, loopDefinition, retentionStore, observer);
+            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, retention, observer, _paths, request);
             toolBroker = boundedBroker;
         }
 

@@ -60,6 +60,7 @@ public sealed class WorkspaceInitializerTests
 
         var permissionsReadme = await File.ReadAllTextAsync(workspace.File(".agent", "PERMISSIONS.md"));
         Assert.Contains("Agent document writes such as `.agent/MEMORY.md`", permissionsReadme);
+        Assert.Contains("tool-response manifests and chunks", permissionsReadme);
 
         var auditReadme = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "README.md"));
         Assert.Contains("## How agents should reason about audit", auditReadme);
@@ -75,6 +76,7 @@ public sealed class WorkspaceInitializerTests
         Assert.True(Directory.Exists(workspace.File(".agent", "loops")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "definitions")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "runs")));
+        Assert.True(Directory.Exists(workspace.File(".agent", "logs", "tool-responses")));
     }
 
     [Fact]

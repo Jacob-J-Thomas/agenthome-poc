@@ -173,6 +173,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var paths = await InitializeWorkspaceAsync(workspace);
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
         var outcomes = new List<ToolExecutionOutcome>();
+        ToolResult? denied = null;
         var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
         {
             Assert.NotNull(broker);
@@ -182,7 +183,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             }
 
             Assert.Empty(broker.AvailableCommands);
-            outcomes.Add((await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken)).Outcome);
+            denied = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+            outcomes.Add(denied.Outcome);
 
             return Response();
         });
@@ -192,12 +194,15 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(6, result.ToolRequestsConsumed);
         Assert.Equal(5, outcomes.Count(item => item == ToolExecutionOutcome.Succeeded));
         Assert.Equal(ToolExecutionOutcome.Denied, outcomes[^1]);
+        Assert.Equal(ToolResultRetentionStatus.Retained, Assert.IsType<ToolResult>(denied).Retention?.Status);
+        Assert.True(File.Exists(workspace.File(denied.Retention!.ManifestPath!.Replace('/', Path.DirectorySeparatorChar))));
         var events = await new AuditLog(paths).ReadTailAsync(100);
         var limitEvent = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "limit_scope") == "attempt");
         Assert.Equal(AuditSchema.Outcomes.Denied, limitEvent.Outcome);
         Assert.Equal("6", Metadata(limitEvent, "tool_request_ordinal"));
         Assert.Equal("5", Metadata(limitEvent, "limit"));
         AssertCorrelation(limitEvent);
+        Assert.Equal(6, events.Count(item => item.Action == AuditSchema.Actions.ToolResponseRetain && item.Outcome == AuditSchema.Outcomes.Succeeded));
     }
 
     [Theory]
