@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
@@ -64,6 +65,9 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model",
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
             now,
             now,
             CustomLoopInvocationOperationState.Pending,
@@ -73,6 +77,16 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             [],
             "Invocation receipt persisted before the simulated interruption.");
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
+        var context = CustomLoopContextSnapshot.CreateEmpty(now);
+        var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var conversation = new CustomLoopConversationReference(conversationIdentity, new string('d', CustomLoopLimits.Sha256HexCharacters), now);
+        pending = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = conversationIdentity,
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
         var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
@@ -84,8 +98,8 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 definition.RoleId,
                 prompt,
                 new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
-                null,
-                CustomLoopContextSnapshot.CreateEmpty(now)));
+                conversation,
+                context));
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
 
         await using var competingGate = new CustomLoopWorkspaceExecutionGate(paths);
@@ -174,6 +188,9 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model",
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
             now,
             now,
             CustomLoopInvocationOperationState.Pending,
@@ -183,6 +200,16 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             [],
             "Invocation receipt persisted before the simulated interruption.");
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
+        var context = CustomLoopContextSnapshot.CreateEmpty(now);
+        var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var conversation = new CustomLoopConversationReference(conversationIdentity, new string('d', CustomLoopLimits.Sha256HexCharacters), now);
+        pending = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = conversationIdentity,
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
         var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
@@ -194,8 +221,8 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 definition.RoleId,
                 prompt,
                 new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
-                null,
-                CustomLoopContextSnapshot.CreateEmpty(now)));
+                conversation,
+                context));
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
         return (Assert.IsType<CustomLoopRunRecord>(admission.Run), receiptStore);
     }

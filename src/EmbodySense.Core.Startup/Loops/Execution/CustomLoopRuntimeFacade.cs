@@ -98,6 +98,12 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
             }
 
+            if (existingOperation.BindingState != CustomLoopInvocationBindingState.Unbound
+                && !string.Equals(existingOperation.InvokingConversationId, await _runtimeContext.CaptureConversationIdentityAsync(cancellationToken), StringComparison.Ordinal))
+            {
+                return Conflict("The invocation operation id is already bound to a different logical conversation.");
+            }
+
             if (existingOperation.State == CustomLoopInvocationOperationState.Complete)
             {
                 return await ReplayOperationAsync(existingOperation, cancellationToken);
@@ -176,6 +182,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 operation = begun.Operation ?? pending;
                 if (operation.State == CustomLoopInvocationOperationState.Complete)
                 {
+                    if (!await InvocationConversationMatchesCurrentAsync(operation, cancellationToken))
+                    {
+                        return Conflict("The invocation operation id is already bound to a different logical conversation.");
+                    }
+
                     return await ReplayOperationAsync(operation, cancellationToken);
                 }
             }
@@ -198,6 +209,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             CustomLoopConversationReference? conversationReference;
             if (admittedByInterruptedOwner is not null)
             {
+                if (!InvocationMatchesRun(operation, admittedByInterruptedOwner))
+                {
+                    return Conflict("The pending invocation receipt and its prior run do not describe the same bound conversation and captured context.");
+                }
+
                 contextSnapshot = admittedByInterruptedOwner.ContextSnapshot;
                 conversationReference = admittedByInterruptedOwner.InvokingConversation;
             }
@@ -215,12 +231,26 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
                 if (definition is null)
                 {
+                    var conversationBinding = await BindOperationAsync(operation, await _runtimeContext.CaptureConversationIdentityAsync(cancellationToken), contextIdentityHash: null, cancellationToken);
+                    if (conversationBinding.Failure is not null)
+                    {
+                        return conversationBinding.Failure;
+                    }
+
+                    operation = conversationBinding.Operation!;
                     return await CompleteRejectedAsync(operation, CustomLoopAdmissionStatus.NotFound.ToString(), null, "The custom-loop definition does not exist.");
                 }
 
                 var capture = await _runtimeContext.CaptureAsync(definition.TriggerPolicy.IncludeInvokingConversation, cancellationToken);
                 contextSnapshot = capture.Snapshot;
                 conversationReference = capture.ConversationReference;
+                var contextBinding = await BindOperationAsync(operation, conversationReference.ConversationId, CustomLoopContextSnapshotHash.ComputeIdentity(contextSnapshot), cancellationToken);
+                if (contextBinding.Failure is not null)
+                {
+                    return contextBinding.Failure;
+                }
+
+                operation = contextBinding.Operation!;
             }
 
             var request = new CustomLoopAdmissionRequest(
@@ -483,6 +513,9 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             CustomLoopInvocationRequestHash.ComputePromptHash(invocationPrompt),
             _modelSnapshot.Provider,
             _modelSnapshot.Model,
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
             now,
             now,
             CustomLoopInvocationOperationState.Pending,
@@ -490,23 +523,44 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             string.Empty,
             null,
             [],
-            "The canonical custom-loop invocation is durably pending before context capture or admission.");
+            "The canonical custom-loop invocation is durably pending before conversation and context binding.");
     }
 
     private async Task<LoopRunInvocationResponse> RecordWorkspaceBusyAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)
     {
         try
         {
-            var begun = await _invocationOperationStore.BeginAsync(operation, cancellationToken);
-            if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
+            var durable = operation;
+            if (operation.BindingState == CustomLoopInvocationBindingState.Unbound)
             {
-                return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
+                var begun = await _invocationOperationStore.BeginAsync(operation, cancellationToken);
+                if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
+                {
+                    return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
+                }
+
+                durable = begun.Operation ?? operation;
             }
 
-            var durable = begun.Operation ?? operation;
             if (durable.State == CustomLoopInvocationOperationState.Complete)
             {
+                if (!await InvocationConversationMatchesCurrentAsync(durable, cancellationToken))
+                {
+                    return Conflict("The invocation operation id is already bound to a different logical conversation.");
+                }
+
                 return await ReplayOperationAsync(durable, cancellationToken);
+            }
+
+            if (durable.BindingState == CustomLoopInvocationBindingState.Unbound)
+            {
+                var binding = await BindOperationAsync(durable, await _runtimeContext.CaptureConversationIdentityAsync(cancellationToken), contextIdentityHash: null, cancellationToken);
+                if (binding.Failure is not null)
+                {
+                    return binding.Failure;
+                }
+
+                durable = binding.Operation!;
             }
 
             var completed = durable with
@@ -533,6 +587,48 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         {
             return Invalid($"The workspace busy receipt could not be persisted safely: {exception.GetType().Name}; no provider request was dispatched.");
         }
+    }
+
+    private async Task<InvocationBindingResult> BindOperationAsync(CustomLoopInvocationOperation operation, string conversationId, string? contextIdentityHash, CancellationToken cancellationToken)
+    {
+        var bindingState = contextIdentityHash is null ? CustomLoopInvocationBindingState.Conversation : CustomLoopInvocationBindingState.CapturedContext;
+        var bound = operation with
+        {
+            BindingState = bindingState,
+            InvokingConversationId = conversationId,
+            ContextIdentityHash = contextIdentityHash,
+            UpdatedAtUtc = UtcNow(operation.UpdatedAtUtc),
+            Detail = contextIdentityHash is null
+                ? "The canonical custom-loop invocation is durably bound to its logical conversation before a no-context terminal outcome."
+                : "The canonical custom-loop invocation is durably bound to its logical conversation and captured-context identity before admission."
+        };
+
+        CustomLoopInvocationOperationStoreResult stored;
+        try
+        {
+            stored = await _invocationOperationStore.BindAsync(bound, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return new InvocationBindingResult(null, Invalid($"The invocation context binding could not be persisted safely: {exception.GetType().Name}."));
+        }
+
+        if (stored.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
+        {
+            return new InvocationBindingResult(null, Conflict("The invocation operation id is already bound to a different logical conversation or captured-context identity."));
+        }
+
+        if (stored.Status == CustomLoopInvocationOperationStoreStatus.NotFound || stored.Operation is null)
+        {
+            return new InvocationBindingResult(null, Invalid("The pending invocation receipt disappeared before its conversation and context binding could be persisted."));
+        }
+
+        if (stored.Operation.State == CustomLoopInvocationOperationState.Complete)
+        {
+            return new InvocationBindingResult(null, await ReplayOperationAsync(stored.Operation, cancellationToken));
+        }
+
+        return new InvocationBindingResult(stored.Operation, null);
     }
 
     private async Task<LoopRunInvocationResponse?> ReconcilePendingAdmissionBeforeBusyAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)
@@ -668,6 +764,9 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             _ => false
         };
         return promptMatches
+            && operation.BindingState == CustomLoopInvocationBindingState.CapturedContext
+            && string.Equals(operation.InvokingConversationId, run.InvokingConversation?.ConversationId, StringComparison.Ordinal)
+            && string.Equals(operation.ContextIdentityHash, CustomLoopContextSnapshotHash.ComputeIdentity(run.ContextSnapshot), StringComparison.Ordinal)
             && string.Equals(operation.OperationId, run.AdmissionOperationId, StringComparison.Ordinal)
             && string.Equals(operation.LoopId, run.LoopId, StringComparison.Ordinal)
             && operation.ExpectedDefinitionVersion == run.AdmittedDefinition.DefinitionVersion
@@ -676,6 +775,12 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             && string.Equals(operation.CurrentRoleId, run.AdmittedDefinition.RoleId, StringComparison.Ordinal)
             && string.Equals(operation.Provider, run.ModelSnapshot.Provider, StringComparison.Ordinal)
             && string.Equals(operation.Model, run.ModelSnapshot.Model, StringComparison.Ordinal);
+    }
+
+    private async Task<bool> InvocationConversationMatchesCurrentAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)
+    {
+        return operation.BindingState != CustomLoopInvocationBindingState.Unbound
+            && string.Equals(operation.InvokingConversationId, await _runtimeContext.CaptureConversationIdentityAsync(cancellationToken), StringComparison.Ordinal);
     }
 
     private async Task<LoopRunInvocationResponse> CompleteRejectedAsync(
@@ -747,6 +852,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return Invalid("The durable admitted invocation receipt refers to a missing run; no provider request was dispatched.");
         }
 
+        if (durableRun is not null && !InvocationMatchesRun(operation, durableRun))
+        {
+            return Conflict("The durable invocation receipt does not match its run's bound conversation and captured-context identity; no provider request was dispatched.");
+        }
+
         return new LoopRunInvocationResponse(
             operation.AdmissionStatus,
             durableRun?.Status.ToString(),
@@ -780,6 +890,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     }
 
     private sealed record UndispatchedParkingResult(CustomLoopRunRecord Run, bool IsParked, string Detail);
+
+    private sealed record InvocationBindingResult(CustomLoopInvocationOperation? Operation, LoopRunInvocationResponse? Failure);
 
     private static LoopRunInvocationResponse MapAdmission(CustomLoopAdmissionResult result, string? executionStatus, bool wasDispatched)
     {

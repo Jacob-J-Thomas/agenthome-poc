@@ -12,6 +12,24 @@ public sealed class CustomLoopInvocationOperationStoreTests
     private static readonly DateTimeOffset Timestamp = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public async Task Pending_receipt_binds_context_once_and_conflicts_on_a_different_conversation()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var pending = Pending("invoke-context-binding", "secret prompt");
+        var bound = ContextBound(pending);
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await store.BindAsync(bound)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(bound with { InvokingConversationId = new string('d', CustomLoopLimits.Sha256HexCharacters) })).Status);
+        var loaded = Assert.IsType<CustomLoopInvocationOperation>(await store.GetAsync(pending.OperationId));
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, loaded.BindingState);
+        Assert.Equal(bound.InvokingConversationId, loaded.InvokingConversationId);
+        Assert.Equal(bound.ContextIdentityHash, loaded.ContextIdentityHash);
+    }
+
+    [Fact]
     public async Task Invocation_receipt_replays_exact_busy_outcome_across_restart_and_conflicts_on_changed_content()
     {
         using var workspace = new TestWorkspace();
@@ -22,7 +40,8 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var created = await first.BeginAsync(pending);
         var replayedPending = await new CustomLoopInvocationOperationStore(paths).BeginAsync(pending);
         var conflict = await new CustomLoopInvocationOperationStore(paths).BeginAsync(Pending(pending.OperationId, "changed prompt"));
-        var completed = pending with
+        var bound = await BindConversationAsync(first, pending);
+        var completed = bound with
         {
             UpdatedAtUtc = Timestamp.AddSeconds(1),
             State = CustomLoopInvocationOperationState.Complete,
@@ -60,6 +79,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(paths);
         var pending = Pending("invoke-chronology", "prompt") with { UpdatedAtUtc = Timestamp.AddSeconds(5) };
         await store.BeginAsync(pending);
+        pending = await BindContextAsync(store, pending);
 
         var regressed = CompletedAdmitted(pending) with { CreatedAtUtc = Timestamp.AddMinutes(-1), UpdatedAtUtc = Timestamp.AddSeconds(4) };
         var conflict = await store.CompleteAsync(regressed);
@@ -101,6 +121,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(paths);
         var pending = Pending("invoke-completion-quota", "prompt");
         await store.BeginAsync(pending);
+        pending = await BindContextAsync(store, pending);
         var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
         var quotaPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, "existing-quota.json");
         await using (var quota = new FileStream(quotaPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
@@ -125,7 +146,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var pending = Pending("invoke-concurrent", "prompt");
 
         var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => store.BeginAsync(pending)));
-        var missingCompletion = await store.CompleteAsync(CompletedAdmitted(Pending("invoke-missing", "prompt")));
+        var missingCompletion = await store.CompleteAsync(CompletedAdmitted(ContextBound(Pending("invoke-missing", "prompt"))));
 
         Assert.Single(outcomes, item => item.Status == CustomLoopInvocationOperationStoreStatus.Created);
         Assert.Equal(7, outcomes.Count(item => item.Status == CustomLoopInvocationOperationStoreStatus.Replayed));
@@ -169,6 +190,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
         var pending = Pending("invoke-rejected-shape", "prompt");
         await store.BeginAsync(pending);
+        pending = await BindContextAsync(store, pending);
         var contradictory = pending with
         {
             UpdatedAtUtc = Timestamp.AddSeconds(1),
@@ -195,6 +217,9 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
         var pending = Pending("invoke-rejected-valid", "prompt");
         await store.BeginAsync(pending);
+        pending = admissionStatus == "NotFound"
+            ? await BindConversationAsync(store, pending)
+            : await BindContextAsync(store, pending);
         var rejected = pending with
         {
             UpdatedAtUtc = Timestamp.AddSeconds(1),
@@ -216,6 +241,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(paths);
         var pending = Pending("invoke-validation-errors", "prompt");
         await store.BeginAsync(pending);
+        pending = await BindContextAsync(store, pending);
         var errors = Enumerable.Range(0, CustomLoopLimits.MaxInvocationValidationErrors)
             .Select(index => new CustomLoopValidationError(
                 new string('c', CustomLoopLimits.MaxInvocationValidationErrorCodeCharacters - 2) + index.ToString("D2"),
@@ -262,6 +288,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
         var pending = Pending("invoke-invalid-errors", "prompt");
         await store.BeginAsync(pending);
+        pending = await BindContextAsync(store, pending);
         var rejected = pending with
         {
             UpdatedAtUtc = Timestamp.AddSeconds(1),
@@ -274,6 +301,39 @@ public sealed class CustomLoopInvocationOperationStoreTests
 
         await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(rejected));
         await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(rejected with { ValidationErrors = [new CustomLoopValidationError("code", "field", "unsafe\nmessage")] }));
+    }
+
+    private static async Task<CustomLoopInvocationOperation> BindConversationAsync(CustomLoopInvocationOperationStore store, CustomLoopInvocationOperation pending)
+    {
+        var result = await store.BindAsync(ConversationBound(pending));
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, result.Status);
+        return Assert.IsType<CustomLoopInvocationOperation>(result.Operation);
+    }
+
+    private static async Task<CustomLoopInvocationOperation> BindContextAsync(CustomLoopInvocationOperationStore store, CustomLoopInvocationOperation pending)
+    {
+        var result = await store.BindAsync(ContextBound(pending));
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, result.Status);
+        return Assert.IsType<CustomLoopInvocationOperation>(result.Operation);
+    }
+
+    private static CustomLoopInvocationOperation ConversationBound(CustomLoopInvocationOperation pending)
+    {
+        return pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.Conversation,
+            InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
+            ContextIdentityHash = null
+        };
+    }
+
+    private static CustomLoopInvocationOperation ContextBound(CustomLoopInvocationOperation pending)
+    {
+        return ConversationBound(pending) with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            ContextIdentityHash = new string('c', CustomLoopLimits.Sha256HexCharacters)
+        };
     }
 
     private static CustomLoopInvocationOperation Pending(string operationId, string prompt)
@@ -296,6 +356,9 @@ public sealed class CustomLoopInvocationOperationStoreTests
             promptHash,
             "OpenAiCodex",
             "test-model",
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
             Timestamp,
             Timestamp,
             CustomLoopInvocationOperationState.Pending,

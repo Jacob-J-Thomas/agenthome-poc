@@ -60,7 +60,7 @@ public sealed class CustomLoopRuntimeTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await using var runtime = await CreateRuntimeAsync(workspace);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var validHash = new string('a', CustomLoopLimits.Sha256HexCharacters);
         var invalidInputs = new[]
         {
@@ -101,12 +101,33 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task Completed_invocation_receipt_cannot_replay_after_the_logical_conversation_is_replaced()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-cross-conversation", "private prompt");
+
+        var missing = await runtime.InvokeCustomLoopAsync(input);
+        var fresh = await runtime.RunTurnAsync("/new");
+        var conflict = await runtime.InvokeCustomLoopAsync(input);
+        var receipt = await new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath)).GetAsync(input.OperationId);
+
+        Assert.Equal("NotFound", missing.AdmissionStatus);
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, fresh.Status);
+        Assert.Equal("Conflict", conflict.AdmissionStatus);
+        Assert.Contains("different logical conversation", conflict.Detail, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopInvocationBindingState.Conversation, receipt!.BindingState);
+        Assert.DoesNotContain("private prompt", await File.ReadAllTextAsync(Path.Combine(new WorkspacePaths(workspace.RootPath).CustomLoopInvocationOperationsPath, input.OperationId + ".json")), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Rejected_invocation_replay_preserves_structured_validation_errors()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-validation-replay", "update-validation-replay");
-        await using var runtime = await CreateRuntimeAsync(workspace);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, new string('0', CustomLoopLimits.Sha256HexCharacters), "invoke-validation-replay", "validate replay");
 
         var rejected = await runtime.InvokeCustomLoopAsync(input);
@@ -815,6 +836,12 @@ public sealed class CustomLoopRuntimeTests
             await CreateFakeCodexExecutableAsync(workspace),
             "read-only",
             AgentRuntimeSurface.Cli);
+    }
+
+    private static async Task<AgentRuntime> CreateRuntimeWithoutProviderAsync(TestWorkspace workspace)
+    {
+        var executable = OperatingSystem.IsWindows() ? await CreateFakeCodexExecutableAsync(workspace) : "/usr/bin/false";
+        return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync("test-model", workspace.RootPath, executable, "read-only", AgentRuntimeSurface.Cli);
     }
 
     private static async Task WaitForAttemptStartAsync(TestWorkspace workspace)

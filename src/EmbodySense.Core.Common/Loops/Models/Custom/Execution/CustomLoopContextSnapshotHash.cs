@@ -11,13 +11,27 @@ public static class CustomLoopContextSnapshotHash
 {
     public static string Compute(CustomLoopContextSnapshot snapshot)
     {
+        return Compute(snapshot, includeCapturedAtUtc: true);
+    }
+
+    public static string ComputeIdentity(CustomLoopContextSnapshot snapshot)
+    {
+        return Compute(snapshot, includeCapturedAtUtc: false);
+    }
+
+    private static string Compute(CustomLoopContextSnapshot snapshot, bool includeCapturedAtUtc)
+    {
         ArgumentNullException.ThrowIfNull(snapshot);
         var buffer = new ArrayBufferWriter<byte>();
         using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
             writer.WriteNumber("schemaVersion", snapshot.SchemaVersion);
-            writer.WriteString("capturedAtUtc", ToCanonicalTimestamp(snapshot.CapturedAtUtc));
+            if (includeCapturedAtUtc)
+            {
+                writer.WriteString("capturedAtUtc", ToCanonicalTimestamp(snapshot.CapturedAtUtc));
+            }
+
             writer.WritePropertyName("sourceManifest");
             if (snapshot.SourceManifest is null)
             {
@@ -28,7 +42,7 @@ public static class CustomLoopContextSnapshotHash
                 writer.WriteStartArray();
                 foreach (var source in snapshot.SourceManifest)
                 {
-                    WriteSource(writer, source);
+                    WriteSource(writer, source, includeCapturedAtUtc);
                 }
 
                 writer.WriteEndArray();
@@ -54,7 +68,7 @@ public static class CustomLoopContextSnapshotHash
         return expected.Length == actual.Length && CryptographicOperations.FixedTimeEquals(expected, actual);
     }
 
-    private static void WriteSource(Utf8JsonWriter writer, CustomLoopContextManifestSource? source)
+    private static void WriteSource(Utf8JsonWriter writer, CustomLoopContextManifestSource? source, bool includeCapturedAtUtc)
     {
         if (source is null)
         {
@@ -77,7 +91,11 @@ public static class CustomLoopContextSnapshotHash
         writer.WriteBoolean("truncated", source.Truncated);
         WriteNullableString(writer, "truncationReason", source.TruncationReason);
         WriteNullableString(writer, "omissionReason", source.OmissionReason);
-        writer.WriteString("capturedAtUtc", ToCanonicalTimestamp(source.CapturedAtUtc));
+        if (includeCapturedAtUtc)
+        {
+            writer.WriteString("capturedAtUtc", ToCanonicalTimestamp(source.CapturedAtUtc));
+        }
+
         writer.WriteEndObject();
     }
 

@@ -35,6 +35,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
     public async Task<CustomLoopInvocationOperationStoreResult> BeginAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default)
     {
         Validate(operation, requirePending: true);
+        if (operation.BindingState != CustomLoopInvocationBindingState.Unbound)
+        {
+            throw new ArgumentException("New invocation operation must begin without a conversation or context binding.", nameof(operation));
+        }
+
         await _processGate.WaitAsync(cancellationToken);
         try
         {
@@ -42,7 +47,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             var existing = await ReadIfExistsAsync(operation.OperationId, cancellationToken);
             if (existing is not null)
             {
-                return SameRequest(existing, operation)
+                return SameEnvelope(existing, operation)
                     ? new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Replayed, existing)
                     : new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
@@ -51,6 +56,64 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             EnsureCapacityForNewOperation(Encoding.UTF8.GetByteCount(json));
             await WriteAsync(operation, json, cancellationToken);
             return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Created, operation);
+        }
+        finally
+        {
+            _processGate.Release();
+        }
+    }
+
+    public async Task<CustomLoopInvocationOperationStoreResult> BindAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default)
+    {
+        Validate(operation, requirePending: true);
+        if (operation.BindingState is not (CustomLoopInvocationBindingState.Conversation or CustomLoopInvocationBindingState.CapturedContext))
+        {
+            throw new ArgumentException("Invocation binding must identify its conversation and optional captured context.", nameof(operation));
+        }
+
+        await _processGate.WaitAsync(cancellationToken);
+        try
+        {
+            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_root);
+            var existing = await ReadIfExistsAsync(operation.OperationId, cancellationToken);
+            if (existing is null)
+            {
+                return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.NotFound, null);
+            }
+
+            if (!SameEnvelope(existing, operation))
+            {
+                return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+            }
+
+            if (existing.BindingState != CustomLoopInvocationBindingState.Unbound)
+            {
+                if (SameBinding(existing, operation))
+                {
+                    return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Replayed, existing);
+                }
+
+                var canUpgradeConversationBinding = existing.State == CustomLoopInvocationOperationState.Pending
+                    && existing.BindingState == CustomLoopInvocationBindingState.Conversation
+                    && operation.BindingState == CustomLoopInvocationBindingState.CapturedContext
+                    && string.Equals(existing.InvokingConversationId, operation.InvokingConversationId, StringComparison.Ordinal);
+                if (!canUpgradeConversationBinding)
+                {
+                    return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+                }
+            }
+
+            if (existing.State != CustomLoopInvocationOperationState.Pending || operation.UpdatedAtUtc < existing.UpdatedAtUtc)
+            {
+                return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+            }
+
+            var normalized = operation with { CreatedAtUtc = existing.CreatedAtUtc };
+            Validate(normalized, requirePending: true);
+            var json = SerializeBounded(normalized);
+            EnsureCapacity(Encoding.UTF8.GetByteCount(json), normalized.OperationId);
+            await WriteAsync(normalized, json, cancellationToken);
+            return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Bound, normalized);
         }
         finally
         {
@@ -90,7 +153,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.NotFound, null);
             }
 
-            if (!SameRequest(existing, operation))
+            if (!SameEnvelope(existing, operation) || !SameBinding(existing, operation))
             {
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
@@ -220,7 +283,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             .ToArray();
     }
 
-    private static bool SameRequest(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right)
+    private static bool SameEnvelope(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right)
     {
         return string.Equals(left.RequestHash, right.RequestHash, StringComparison.Ordinal)
             && string.Equals(left.OperationId, right.OperationId, StringComparison.Ordinal)
@@ -235,9 +298,17 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && string.Equals(left.Model, right.Model, StringComparison.Ordinal);
     }
 
+    private static bool SameBinding(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right)
+    {
+        return left.BindingState == right.BindingState
+            && string.Equals(left.InvokingConversationId, right.InvokingConversationId, StringComparison.Ordinal)
+            && string.Equals(left.ContextIdentityHash, right.ContextIdentityHash, StringComparison.Ordinal);
+    }
+
     private static bool SameCompletedOperation(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right)
     {
-        return SameRequest(left, right)
+        return SameEnvelope(left, right)
+            && SameBinding(left, right)
             && left.SchemaVersion == right.SchemaVersion
             && left.CreatedAtUtc == right.CreatedAtUtc
             && left.UpdatedAtUtc == right.UpdatedAtUtc
@@ -267,6 +338,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && IsHash(operation.InvocationPromptHash)
             && IsBoundedText(operation.Provider, CustomLoopLimits.MaxTraceReferenceCharacters)
             && (operation.Model is null || IsBoundedText(operation.Model, CustomLoopLimits.MaxTraceReferenceCharacters))
+            && ValidBinding(operation)
             && IsHash(operation.RequestHash)
             && CustomLoopInvocationRequestHash.Matches(operation)
             && operation.CreatedAtUtc != default
@@ -310,8 +382,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
         return operation.Outcome switch
         {
-            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.RunId is null && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
-            CustomLoopInvocationOutcome.Admitted => CustomLoopArtifactIdentifier.IsValid(operation.RunId) && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.BindingState is CustomLoopInvocationBindingState.Conversation or CustomLoopInvocationBindingState.CapturedContext && operation.RunId is null && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.Admitted => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && CustomLoopArtifactIdentifier.IsValid(operation.RunId) && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
             CustomLoopInvocationOutcome.Rejected => ValidRejectedOutcome(operation),
             _ => false
         };
@@ -319,15 +391,31 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
     private static bool ValidRejectedOutcome(CustomLoopInvocationOperation operation)
     {
+        if (operation.BindingState == CustomLoopInvocationBindingState.Unbound)
+        {
+            return false;
+        }
+
         var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
         return operation.AdmissionStatus switch
         {
-            CustomLoopAdmissionStatusNames.Invalid => hasValidOptionalRun,
-            CustomLoopAdmissionStatusNames.Conflict => hasValidOptionalRun,
-            CustomLoopAdmissionStatusNames.NonterminalRunExists => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
-            CustomLoopAdmissionStatusNames.LimitExceeded => operation.RunId is null,
-            CustomLoopAdmissionStatusNames.NotFound => operation.RunId is null,
-            CustomLoopAdmissionStatusNames.AuditUnavailable => hasValidOptionalRun,
+            CustomLoopAdmissionStatusNames.Invalid => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && hasValidOptionalRun,
+            CustomLoopAdmissionStatusNames.Conflict => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && hasValidOptionalRun,
+            CustomLoopAdmissionStatusNames.NonterminalRunExists => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && CustomLoopArtifactIdentifier.IsValid(operation.RunId),
+            CustomLoopAdmissionStatusNames.LimitExceeded => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && operation.RunId is null,
+            CustomLoopAdmissionStatusNames.NotFound => operation.BindingState == CustomLoopInvocationBindingState.Conversation && operation.RunId is null,
+            CustomLoopAdmissionStatusNames.AuditUnavailable => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && hasValidOptionalRun,
+            _ => false
+        };
+    }
+
+    private static bool ValidBinding(CustomLoopInvocationOperation operation)
+    {
+        return operation.BindingState switch
+        {
+            CustomLoopInvocationBindingState.Unbound => operation.InvokingConversationId is null && operation.ContextIdentityHash is null,
+            CustomLoopInvocationBindingState.Conversation => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
+            CustomLoopInvocationBindingState.CapturedContext => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
             _ => false
         };
     }

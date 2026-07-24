@@ -248,6 +248,7 @@ If any required admission persistence or audit action fails, no inference or too
 | RUN-016 | Once the accepted-repeat count reaches `maxAdditionalIterations`, Exit completes deterministically after the final allowed iteration without another model call. A decision that cannot affect traversal is not requested; the ceiling is enforcement, not a synthetic `Repeat` decision. |
 | RUN-017 | Conversation publication is an idempotent, checkpointed context-out effect. Output evidence must be durable before append and the publication outcome/correlation must be durable before committing the checkpoint. A definite append failure is recorded and never reported as success; an uncertain append outcome becomes `NeedsReview`. Resume never appends the same node or terminal result twice. |
 | RUN-018 | Exit parsing trims surrounding whitespace and accepts only one case-insensitive ASCII token, `Complete` or `Repeat`. Markdown fences, prose, punctuation, JSON, multiple tokens, or an empty response are invalid. The raw bounded response remains evidence. |
+| RUN-019 | An invocation receipt begins with only the bounded caller envelope, then atomically binds the stable logical-conversation identity and a timestamp-independent hash of the captured context before admission. Completed replay requires the same logical conversation and verifies any referenced run against that binding. Receipts retain hashes and identifiers, never the invocation prompt or captured context content. |
 
 ## 8. Context, Memory, And Prompt Trust
 
