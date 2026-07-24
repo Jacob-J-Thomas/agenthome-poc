@@ -6,7 +6,6 @@ namespace EmbodySense.Core.Common.Governance.Tools;
 public static class ToolResultFormatter
 {
     public const int MaxFormattedCharacters = 64_000;
-    // TODO(#13): Persist or reference the complete governed tool response before applying this model-context limit once retention, sensitive-data, cleanup, and audit-correlation policy are defined. See https://github.com/Jacob-J-Thomas/agenthome-poc/issues/13.
     private static readonly string FinalTruncationMarker = $"[formatted tool results truncated to the {MaxFormattedCharacters}-character limit]";
 
     public static string FormatResults(IReadOnlyList<ToolResult> results)
@@ -23,6 +22,7 @@ public static class ToolResultFormatter
             builder.AppendLine($"  target_path: {result.Request.TargetPath}");
             builder.AppendLine($"  resolved_path: {result.ResolvedPath}");
             builder.AppendLine($"  outcome: {FormatOutcome(result.Outcome)}");
+            AppendRetention(builder, result.Retention);
             builder.AppendLine("  output:");
             builder.AppendLine(Indent(result.OutputText));
         }
@@ -60,5 +60,20 @@ public static class ToolResultFormatter
     private static string FormatOutcome(ToolExecutionOutcome outcome)
     {
         return outcome.ToString().ToLowerInvariant();
+    }
+
+    private static void AppendRetention(StringBuilder builder, ToolResultRetentionReference? retention)
+    {
+        if (retention?.Status == ToolResultRetentionStatus.Retained)
+        {
+            builder.AppendLine($"  full_response_manifest: {retention.ManifestPath}");
+            builder.AppendLine($"  full_response_sha256: {retention.ContentSha256}");
+            builder.AppendLine($"  full_response_size: {retention.CharacterCount} characters / {retention.Utf8ByteCount} UTF-8 bytes / {retention.ChunkCount} chunks");
+            builder.AppendLine($"  full_response_retention: {retention.Detail}");
+            return;
+        }
+
+        builder.AppendLine("  full_response_manifest: unavailable");
+        builder.AppendLine($"  full_response_retention: {retention?.Detail ?? "The caller did not provide a durable full-response reference."}");
     }
 }

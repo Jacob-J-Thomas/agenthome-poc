@@ -23,6 +23,10 @@ public sealed class ToolResultFormatterTests
             "  target_path: shared/note.txt",
             "  resolved_path: C:\\workspace\\shared\\note.txt",
             "  outcome: succeeded",
+            "  full_response_manifest: .agent/logs/tool-responses/request-1/manifest.json",
+            "  full_response_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "  full_response_size: 22 characters / 22 UTF-8 bytes / 1 chunks",
+            "  full_response_retention: retained for test",
             "  output:",
             "    first line",
             "    second line",
@@ -69,17 +73,40 @@ public sealed class ToolResultFormatterTests
             "  target_path: shared/note.txt",
             "  resolved_path: C:\\workspace\\shared\\note.txt",
             "  outcome: succeeded",
+            "  full_response_manifest: .agent/logs/tool-responses/request-1/manifest.json",
+            "  full_response_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "  full_response_size: 0 characters / 0 UTF-8 bytes / 1 chunks",
+            "  full_response_retention: retained for test",
             "  output:",
             "    "
         ]);
         var fillerLength = retainedCharacterCount - outputPrefix.Length - 1;
         var output = new string('a', fillerLength) + "\U0001F600" + new string('b', 1_000);
 
-        var formatted = ToolResultFormatter.FormatResults([CreateResult(output)]);
+        var result = CreateResult(output) with
+        {
+            Retention = CreateRetention(characterCount: 0, utf8ByteCount: 0)
+        };
+        var formatted = ToolResultFormatter.FormatResults([result]);
 
         Assert.Equal(ToolResultFormatter.MaxFormattedCharacters - 1, formatted.Length);
         Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
         _ = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetBytes(formatted);
+    }
+
+    [Fact]
+    public void FormatResults_surfaces_an_unavailable_full_response_before_truncated_content()
+    {
+        var result = CreateResult(new string('x', ToolResultFormatter.MaxFormattedCharacters * 2)) with
+        {
+            Retention = new ToolResultRetentionReference(ToolResultRetentionStatus.Unavailable, null, null, null, null, null, null, 0, "retention failed closed")
+        };
+
+        var formatted = ToolResultFormatter.FormatResults([result]);
+
+        Assert.Contains("full_response_manifest: unavailable", formatted, StringComparison.Ordinal);
+        Assert.Contains("retention failed closed", formatted, StringComparison.Ordinal);
+        Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
     }
 
     private static ToolResult CreateResult(string output)
@@ -89,6 +116,21 @@ public sealed class ToolResultFormatterTests
             output,
             "request-1",
             "C:\\workspace\\shared\\note.txt",
-            new ToolRequest(ToolCommand.Read, "shared/note.txt"));
+            new ToolRequest(ToolCommand.Read, "shared/note.txt"),
+            Retention: CreateRetention(output.Length, Encoding.UTF8.GetByteCount(output)));
+    }
+
+    private static ToolResultRetentionReference CreateRetention(int characterCount, long utf8ByteCount)
+    {
+        return new ToolResultRetentionReference(
+            ToolResultRetentionStatus.Retained,
+            ".agent/logs/tool-responses/request-1/manifest.json",
+            new string('a', 64),
+            characterCount,
+            utf8ByteCount,
+            1,
+            DateTimeOffset.UnixEpoch,
+            0,
+            "retained for test");
     }
 }

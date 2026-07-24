@@ -8,6 +8,7 @@ namespace EmbodySense.Core.Clients.LocalWorkspace;
 public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 {
     // TODO: revisit what an appropriate figures should actually be.
+    private const int MaxListEntries = 500;
     private const int MaxReadCharacters = 120_000;
     private const int MaxSearchFiles = 500;
     private const int MaxSearchMatches = 200;
@@ -31,13 +32,33 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             throw new DirectoryNotFoundException($"Directory not found: {resolvedPath}");
         }
 
-        var entries = Directory.EnumerateFileSystemEntries(resolvedPath)
-            .OrderBy(path => Directory.Exists(path) ? 0 : 1)
-            .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .Select(path => Directory.Exists(path) ? Path.GetFileName(path) + Path.DirectorySeparatorChar : Path.GetFileName(path))
-            .ToList();
-        var text = entries.Count == 0 ? "(empty)" : string.Join(Environment.NewLine, entries);
-        return Task.FromResult(new LocalWorkspaceResult(text, new Dictionary<string, object?> { ["entry_count"] = entries.Count }));
+        var entries = new SortedSet<ListEntry>(ListEntryComparer.Instance);
+        var entryCount = 0;
+        foreach (var path in Directory.EnumerateFileSystemEntries(resolvedPath))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            entryCount++;
+            entries.Add(new ListEntry(path, Path.GetFileName(path), Directory.Exists(path)));
+            if (entries.Count > MaxListEntries)
+            {
+                entries.Remove(entries.Max!);
+            }
+        }
+
+        var rendered = entries.Select(entry => entry.IsDirectory ? entry.Name + Path.DirectorySeparatorChar : entry.Name).ToList();
+        var text = rendered.Count == 0 ? "(empty)" : string.Join(Environment.NewLine, rendered);
+        var truncated = entryCount > MaxListEntries;
+        if (truncated)
+        {
+            text += Environment.NewLine + $"[truncated to the first {MaxListEntries} of {entryCount} entries]";
+        }
+
+        return Task.FromResult(new LocalWorkspaceResult(text, new Dictionary<string, object?>
+        {
+            ["entry_count"] = entryCount,
+            ["returned_entry_count"] = rendered.Count,
+            ["truncated"] = truncated
+        }));
     }
 
     public async Task<LocalWorkspaceResult> ReadAsync(string resolvedPath, CancellationToken cancellationToken = default)
@@ -244,5 +265,45 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         public int SkippedLargeFiles { get; set; }
 
         public bool Truncated { get; set; }
+    }
+
+    private sealed record ListEntry(string Path, string Name, bool IsDirectory);
+
+    private sealed class ListEntryComparer : IComparer<ListEntry>
+    {
+        public static ListEntryComparer Instance { get; } = new();
+
+        public int Compare(ListEntry? left, ListEntry? right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return 0;
+            }
+
+            if (left is null)
+            {
+                return -1;
+            }
+
+            if (right is null)
+            {
+                return 1;
+            }
+
+            var kind = right.IsDirectory.CompareTo(left.IsDirectory);
+            if (kind != 0)
+            {
+                return kind;
+            }
+
+            var name = StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
+            if (name != 0)
+            {
+                return name;
+            }
+
+            name = StringComparer.Ordinal.Compare(left.Name, right.Name);
+            return name != 0 ? name : StringComparer.Ordinal.Compare(left.Path, right.Path);
+        }
     }
 }

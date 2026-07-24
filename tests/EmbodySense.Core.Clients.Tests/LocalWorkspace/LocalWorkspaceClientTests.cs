@@ -22,6 +22,29 @@ public sealed class LocalWorkspaceClientTests
     }
 
     [Fact]
+    public async Task ListAsync_keeps_a_deterministic_bounded_prefix_and_reports_omissions()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var target = workspace.File("workspace", "shared");
+        Directory.CreateDirectory(target);
+        foreach (var index in Enumerable.Range(1, 505).Reverse())
+        {
+            await File.WriteAllTextAsync(Path.Combine(target, $"note-{index:000}.txt"), "file");
+        }
+
+        var result = await new LocalWorkspaceClient(paths).ListAsync(target);
+
+        Assert.Contains("note-001.txt", result.Text, StringComparison.Ordinal);
+        Assert.Contains("note-500.txt", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("note-501.txt", result.Text, StringComparison.Ordinal);
+        Assert.EndsWith("[truncated to the first 500 of 505 entries]", result.Text, StringComparison.Ordinal);
+        Assert.Equal(505, result.Metadata["entry_count"]);
+        Assert.Equal(500, result.Metadata["returned_entry_count"]);
+        Assert.Equal(true, result.Metadata["truncated"]);
+    }
+
+    [Fact]
     public async Task SearchAsync_returns_workspace_relative_matches()
     {
         using var workspace = new TestWorkspace();

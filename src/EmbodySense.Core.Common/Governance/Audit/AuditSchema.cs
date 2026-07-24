@@ -49,6 +49,8 @@ public static class AuditSchema
 
         public const string ToolExecutionIntent = "tool.execution.intent";
 
+        public const string ToolResponseRetain = "tool.response.retain";
+
         public const string ToolExecute = "tool.execute";
     }
 

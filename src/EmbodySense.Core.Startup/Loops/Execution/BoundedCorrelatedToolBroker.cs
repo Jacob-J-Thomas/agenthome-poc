@@ -26,6 +26,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     private readonly IToolBroker _inner;
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
+    private readonly ToolResultRetentionService _toolResultRetention;
     private readonly CorrelatedToolEvidenceObserver _observer;
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopInferenceAttemptRequest _attempt;
@@ -39,6 +40,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         IToolBroker inner,
         IAuditLog auditLog,
         ICustomLoopToolAuthorityProvider authorityProvider,
+        ToolResultRetentionService toolResultRetention,
         CorrelatedToolEvidenceObserver observer,
         WorkspacePaths paths,
         CustomLoopInferenceAttemptRequest request)
@@ -46,6 +48,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         _inner = inner;
         _auditLog = auditLog;
         _authorityProvider = authorityProvider;
+        _toolResultRetention = toolResultRetention;
         _observer = observer;
         _paths = paths;
         _attempt = request;
@@ -185,6 +188,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         var governance = new ToolGovernanceEvidence(ToolAuthorityDecision.Denied, detail, null, null, null, null, ToolApprovalDecision.NotEvaluated, null, null);
         await _observer.ObserveDecisionAsync(requestId, request, resolvedTarget, governance, cancellationToken);
         var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: governed {scope} tool-request limit reached.", requestId, resolvedTarget, request, governance);
+        result = await RetainAsync(result, requestOrdinal, cancellationToken);
         await _observer.ObserveOutcomeAsync(result, cancellationToken);
         await _observer.RecordReturnedAsync(result, cancellationToken);
         return result;
@@ -200,6 +204,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         var governance = new ToolGovernanceEvidence(ToolAuthorityDecision.Denied, detail, null, null, null, null, ToolApprovalDecision.NotEvaluated, null, null);
         await _observer.ObserveDecisionAsync(requestId, request, resolvedTarget, governance, cancellationToken);
         var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {detail}", requestId, resolvedTarget, request, governance);
+        result = await RetainAsync(result, requestOrdinal, cancellationToken);
         await _observer.ObserveOutcomeAsync(result, cancellationToken);
         await _observer.RecordReturnedAsync(result, cancellationToken);
         return result;
@@ -240,6 +245,14 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             outcome,
             detail,
             metadata), cancellationToken);
+    }
+
+    private async Task<ToolResult> RetainAsync(ToolResult result, int requestOrdinal, CancellationToken cancellationToken)
+    {
+        return await _toolResultRetention.RetainAsync(
+            result,
+            new Dictionary<string, object?> { ["tool_request_ordinal"] = requestOrdinal },
+            cancellationToken);
     }
 
     private ToolAuditCorrelation CreateAuditCorrelation(CustomLoopToolAuthoritySnapshot authority)

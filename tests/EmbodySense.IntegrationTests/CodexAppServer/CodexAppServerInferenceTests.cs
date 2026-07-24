@@ -11,6 +11,7 @@ using EmbodySense.Core.Clients.CodexAppServer;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Permissions;
+using EmbodySense.Core.Persistence.ToolResults;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Inference;
@@ -482,7 +483,7 @@ public sealed class CodexAppServerInferenceTests
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation());
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), new ToolResultRetentionStore(paths));
     }
 
     private static string Response(int id, string result)

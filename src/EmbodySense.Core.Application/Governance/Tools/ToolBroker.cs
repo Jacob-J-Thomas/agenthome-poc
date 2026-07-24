@@ -21,6 +21,7 @@ public sealed class ToolBroker : IToolBroker
     private readonly IWorkspaceToolExecutor _workspaceToolExecutor;
     private readonly IAuditLog _auditLog;
     private readonly LoopDefinition _loopDefinition;
+    private readonly ToolResultRetentionService _toolResultRetention;
     private readonly IToolGovernanceObserver? _governanceObserver;
     private readonly ToolAuditMetadataFactory _auditMetadataFactory;
 
@@ -31,6 +32,7 @@ public sealed class ToolBroker : IToolBroker
         IWorkspaceToolExecutor workspaceToolExecutor,
         IAuditLog auditLog,
         LoopDefinition loopDefinition,
+        IToolResultRetentionStore toolResultRetentionStore,
         IToolGovernanceObserver? governanceObserver = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -39,6 +41,7 @@ public sealed class ToolBroker : IToolBroker
         ArgumentNullException.ThrowIfNull(workspaceToolExecutor);
         ArgumentNullException.ThrowIfNull(auditLog);
         ArgumentNullException.ThrowIfNull(loopDefinition);
+        ArgumentNullException.ThrowIfNull(toolResultRetentionStore);
 
         _paths = paths;
         _permissionService = permissionService;
@@ -46,6 +49,7 @@ public sealed class ToolBroker : IToolBroker
         _workspaceToolExecutor = workspaceToolExecutor;
         _auditLog = auditLog;
         _loopDefinition = loopDefinition;
+        _toolResultRetention = new ToolResultRetentionService(auditLog, loopDefinition, toolResultRetentionStore);
         _governanceObserver = governanceObserver;
         AvailableCommands = GetAvailableCommands(_loopDefinition);
         _auditMetadataFactory = new ToolAuditMetadataFactory(_paths, _loopDefinition, AvailableCommands);
@@ -64,8 +68,7 @@ public sealed class ToolBroker : IToolBroker
             var evidence = AuthorityDenied(detail);
             await ObserveDecisionAsync(requestId, request, request.TargetPath, evidence, cancellationToken);
             var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {detail}", requestId, request.TargetPath, request, evidence);
-            await ObserveOutcomeAsync(result, cancellationToken);
-            return result;
+            return await RetainAndObserveOutcomeAsync(result, cancellationToken);
         }
 
         var check = _permissionService.Evaluate(request);
@@ -78,7 +81,7 @@ public sealed class ToolBroker : IToolBroker
             var evidence = DecisionEvidence(check, ToolApprovalDecision.NotEvaluated, null);
             await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
             var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {check.Evaluation.Detail}", requestId, check.ResolvedPath, request, evidence);
-            await ObserveOutcomeAsync(result, cancellationToken);
+            result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
             await RecordExecutionAsync(requestId, request, check, false, AuditSchema.Outcomes.Denied, new Dictionary<string, object?>(), cancellationToken);
             return result;
         }
@@ -99,7 +102,7 @@ public sealed class ToolBroker : IToolBroker
                 var evidence = DecisionEvidence(check, ToolApprovalDecision.Rejected, approvalResponse);
                 await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
                 var result = new ToolResult(ToolExecutionOutcome.ApprovalRejected, $"rejected: {approvalResponse.Detail}", requestId, check.ResolvedPath, request, evidence);
-                await ObserveOutcomeAsync(result, cancellationToken);
+                result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
                 await RecordExecutionAsync(requestId, request, check, false, AuditSchema.Outcomes.ApprovalRejected, new Dictionary<string, object?>(), cancellationToken);
                 return result;
             }
@@ -130,14 +133,14 @@ public sealed class ToolBroker : IToolBroker
             };
 
             var result = new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance);
-            await ObserveOutcomeAsync(result, cancellationToken);
+            result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
             await RecordExecutionAsync(requestId, request, check, approvedByHuman, AuditSchema.Outcomes.Succeeded, output.Metadata, cancellationToken);
             return result;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
         {
             var result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {exception.Message}", requestId, check.ResolvedPath, request, governance);
-            await ObserveOutcomeAsync(result, cancellationToken);
+            result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
             await RecordExecutionAsync(
                 requestId,
                 request,
@@ -176,6 +179,13 @@ public sealed class ToolBroker : IToolBroker
     private Task ObserveOutcomeAsync(ToolResult result, CancellationToken cancellationToken)
     {
         return _governanceObserver?.ObserveOutcomeAsync(result, cancellationToken) ?? Task.CompletedTask;
+    }
+
+    private async Task<ToolResult> RetainAndObserveOutcomeAsync(ToolResult result, CancellationToken cancellationToken)
+    {
+        result = await _toolResultRetention.RetainAsync(result, cancellationToken: cancellationToken);
+        await ObserveOutcomeAsync(result, cancellationToken);
+        return result;
     }
 
     private static ToolGovernanceEvidence AuthorityDenied(string detail)

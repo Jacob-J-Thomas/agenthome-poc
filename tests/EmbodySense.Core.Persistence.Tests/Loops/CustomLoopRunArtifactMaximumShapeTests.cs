@@ -580,7 +580,18 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
                     MaxText($"decision-by-{toolIndex}", CustomLoopLimits.MaxToolGovernanceDetailCharacters),
                     MaxText($"approval-detail-{toolIndex}", CustomLoopLimits.MaxToolGovernanceDetailCharacters));
             var outcomeValue = denied ? ToolExecutionOutcome.Denied : ToolExecutionOutcome.Succeeded;
-            var formatted = ToolResultFormatter.FormatResults([new ToolResult(outcomeValue, MaxText($"tool-result-{toolIndex}", CustomLoopLimits.MaxCanonicalToolResultCharacters * 2), brokerId, resolved, request, governance)]);
+            var completeResult = MaxText($"tool-result-{toolIndex}", CustomLoopLimits.MaxCanonicalToolResultCharacters * 2);
+            var retention = new ToolResultRetentionReference(
+                ToolResultRetentionStatus.Retained,
+                $".agent/logs/tool-responses/{brokerId}/manifest.json",
+                CustomLoopTraceContentHash.Compute(completeResult),
+                completeResult.Length,
+                Encoding.UTF8.GetByteCount(completeResult),
+                4,
+                Now,
+                0,
+                "Retained under the oldest-first 256-artifact and 64 MiB sensitive local workspace evidence policy.");
+            var formatted = ToolResultFormatter.FormatResults([new ToolResult(outcomeValue, completeResult, brokerId, resolved, request, governance, retention)]);
             Assert.Equal(CustomLoopLimits.MaxCanonicalToolResultCharacters, formatted.Length);
             var hash = CustomLoopTraceContentHash.Compute(formatted);
             var reservation = Evidence(CustomLoopToolEvidencePhase.RequestReserved, null, null, null, false);
