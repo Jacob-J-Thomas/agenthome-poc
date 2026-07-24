@@ -4,6 +4,8 @@ public enum CustomLoopInvocationBindingState
 {
     Unknown = 0,
     Unbound = 1,
-    Conversation = 2,
-    CapturedContext = 3
+    ConversationNotFound = 2,
+    ConversationWorkspaceExecutionBusy = 3,
+    ConversationInvalid = 4,
+    CapturedContext = 5
 }

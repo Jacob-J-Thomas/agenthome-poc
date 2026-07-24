@@ -297,7 +297,7 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
         pending = pending with
         {
-            BindingState = CustomLoopInvocationBindingState.Conversation,
+            BindingState = CustomLoopInvocationBindingState.ConversationNotFound,
             InvokingConversationId = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version
         };
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(pending)).Status);

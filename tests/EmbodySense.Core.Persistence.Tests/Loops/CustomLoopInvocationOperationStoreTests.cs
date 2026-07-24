@@ -27,6 +27,12 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, loaded.BindingState);
         Assert.Equal(bound.InvokingConversationId, loaded.InvokingConversationId);
         Assert.Equal(bound.ContextIdentityHash, loaded.ContextIdentityHash);
+
+        var terminalPending = Pending("invoke-terminal-binding", "secret prompt");
+        var terminal = ConversationBound(terminalPending, CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(terminalPending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(terminal)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(ContextBound(terminalPending))).Status);
     }
 
     [Fact]
@@ -40,7 +46,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var created = await first.BeginAsync(pending);
         var replayedPending = await new CustomLoopInvocationOperationStore(paths).BeginAsync(pending);
         var conflict = await new CustomLoopInvocationOperationStore(paths).BeginAsync(Pending(pending.OperationId, "changed prompt"));
-        var bound = await BindConversationAsync(first, pending);
+        var bound = await BindConversationAsync(first, pending, CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy);
         var completed = bound with
         {
             UpdatedAtUtc = Timestamp.AddSeconds(1),
@@ -218,7 +224,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var pending = Pending("invoke-rejected-valid", "prompt");
         await store.BeginAsync(pending);
         pending = admissionStatus == "NotFound"
-            ? await BindConversationAsync(store, pending)
+            ? await BindConversationAsync(store, pending, CustomLoopInvocationBindingState.ConversationNotFound)
             : await BindContextAsync(store, pending);
         var rejected = pending with
         {
@@ -303,9 +309,9 @@ public sealed class CustomLoopInvocationOperationStoreTests
         await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(rejected with { ValidationErrors = [new CustomLoopValidationError("code", "field", "unsafe\nmessage")] }));
     }
 
-    private static async Task<CustomLoopInvocationOperation> BindConversationAsync(CustomLoopInvocationOperationStore store, CustomLoopInvocationOperation pending)
+    private static async Task<CustomLoopInvocationOperation> BindConversationAsync(CustomLoopInvocationOperationStore store, CustomLoopInvocationOperation pending, CustomLoopInvocationBindingState bindingState)
     {
-        var result = await store.BindAsync(ConversationBound(pending));
+        var result = await store.BindAsync(ConversationBound(pending, bindingState));
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, result.Status);
         return Assert.IsType<CustomLoopInvocationOperation>(result.Operation);
     }
@@ -317,11 +323,11 @@ public sealed class CustomLoopInvocationOperationStoreTests
         return Assert.IsType<CustomLoopInvocationOperation>(result.Operation);
     }
 
-    private static CustomLoopInvocationOperation ConversationBound(CustomLoopInvocationOperation pending)
+    private static CustomLoopInvocationOperation ConversationBound(CustomLoopInvocationOperation pending, CustomLoopInvocationBindingState bindingState)
     {
         return pending with
         {
-            BindingState = CustomLoopInvocationBindingState.Conversation,
+            BindingState = bindingState,
             InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
             ContextIdentityHash = null
         };
@@ -329,9 +335,10 @@ public sealed class CustomLoopInvocationOperationStoreTests
 
     private static CustomLoopInvocationOperation ContextBound(CustomLoopInvocationOperation pending)
     {
-        return ConversationBound(pending) with
+        return pending with
         {
             BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = new string('b', CustomLoopLimits.Sha256HexCharacters),
             ContextIdentityHash = new string('c', CustomLoopLimits.Sha256HexCharacters)
         };
     }
