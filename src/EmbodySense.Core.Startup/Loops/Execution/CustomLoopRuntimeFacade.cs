@@ -294,10 +294,18 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         return summaries.Select(Map).ToArray();
     }
 
-    public Task<LoopRunControlResponse> PauseAsync(LoopRunControlInput input, CancellationToken cancellationToken)
+    public async Task<LoopRunControlResponse> PauseAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
-        return ExecuteControlAsync(awaitable: _lifecycleService.PauseAsync(new CustomLoopPauseRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
+        await _executionAvailabilityGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await ExecuteControlAsync(awaitable: _lifecycleService.PauseAsync(new CustomLoopPauseRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
+        }
+        finally
+        {
+            _executionAvailabilityGate.Release();
+        }
     }
 
     public async Task<LoopRunControlResponse> CancelAsync(LoopRunControlInput input, CancellationToken cancellationToken)

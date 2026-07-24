@@ -135,6 +135,20 @@ public sealed class ConversationRuntimeStateTests
     }
 
     [Fact]
+    public void Durable_conversation_version_is_explicit_and_replaced_only_by_the_runtime_owner()
+    {
+        var state = new ConversationRuntimeState();
+
+        Assert.Null(state.DurableConversationVersion);
+        Assert.Throws<ArgumentException>(() => state.SetDurableConversationVersion(" "));
+
+        state.SetDurableConversationVersion("version-one");
+        state.SetDurableConversationVersion("version-two");
+
+        Assert.Equal("version-two", state.DurableConversationVersion);
+    }
+
+    [Fact]
     public void Replace_messages_validates_the_startup_boundary_and_describes_each_remaining_context_source()
     {
         var state = new ConversationRuntimeState();

@@ -82,7 +82,7 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
-    public async Task Custom_control_releases_reacquired_hosting_when_the_durable_conversation_diverges()
+    public async Task Custom_control_releases_reacquired_hosting_when_the_durable_conversation_identity_changes_with_the_same_transcript()
     {
         using var workspace = new TestWorkspace();
         await using var host = CreateHost(workspace.RootPath);
@@ -95,7 +95,7 @@ public sealed class WebAgentRuntimeHostTests
 
         Assert.Equal("WorkspaceHostUnavailable", (await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-before-divergence"))).Status);
         await conversationMemory.StartFreshConversationAsync();
-        await conversationMemory.AppendMessageAsync(LlmMessage.User("replacement durable conversation"));
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved local conversation"));
         ownership.Dispose();
         await competingHost.DisposeAsync();
         var failed = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-after-divergence"));

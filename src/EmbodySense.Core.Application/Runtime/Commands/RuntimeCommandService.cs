@@ -123,6 +123,7 @@ public sealed class RuntimeCommandService
             if (_conversationMemoryStore is not null)
             {
                 await _conversationMemoryStore.StartFreshConversationAsync(cancellationToken);
+                conversationState.SetDurableConversationVersion((await _conversationMemoryStore.LoadCurrentConversationSnapshotAsync(cancellationToken)).Version);
             }
 
             conversationState.ReplaceMessages(_startupMessages, _startupMessages.Count);
@@ -183,6 +184,7 @@ public sealed class RuntimeCommandService
             {
                 conversationMessages = await _conversationMemoryStore!.LoadConversationAsync(selectedConversation.ConversationId, cancellationToken);
                 await _conversationMemoryStore.ResumeConversationAsync(selectedConversation.ConversationId, cancellationToken);
+                conversationState.SetDurableConversationVersion((await _conversationMemoryStore.LoadCurrentConversationSnapshotAsync(cancellationToken)).Version);
                 conversationState.ReplaceMessages(
                     _startupMessages.Concat(conversationMessages).ToArray(),
                     _startupMessages.Count,

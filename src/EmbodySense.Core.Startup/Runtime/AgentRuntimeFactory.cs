@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -121,15 +122,18 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                var currentConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
-                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults, currentConversation.Version))
+                var activeConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults, activeConversation.Version))
                 {
-                    conversationState.SynchronizeConversationTranscript(currentConversation.Messages);
+                    conversationState.SynchronizeConversationTranscript(activeConversation.Messages);
                 }
                 else
                 {
                     await conversationMemory.StartFreshConversationAsync(cancellationToken);
+                    activeConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
                 }
+
+                conversationState.SetDurableConversationVersion(activeConversation.Version);
             }
 
             var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId);

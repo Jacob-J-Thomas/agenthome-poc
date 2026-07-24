@@ -43,7 +43,8 @@ internal sealed class CustomLoopRuntimeContext
         using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))
         {
             persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
-            if (!_conversationState.TrySynchronizeConversationTranscript(persistedConversation.Messages))
+            if (!string.Equals(_conversationState.DurableConversationVersion, persistedConversation.Version, StringComparison.Ordinal)
+                || !_conversationState.TrySynchronizeConversationTranscript(persistedConversation.Messages))
             {
                 throw new InvalidOperationException("The active logical conversation diverged from durable workspace state; custom-loop context was not captured.");
             }
@@ -67,7 +68,8 @@ internal sealed class CustomLoopRuntimeContext
         using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))
         {
             var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
-            return _conversationState.TrySynchronizeConversationTranscript(persistedConversation.Messages);
+            return string.Equals(_conversationState.DurableConversationVersion, persistedConversation.Version, StringComparison.Ordinal)
+                && _conversationState.TrySynchronizeConversationTranscript(persistedConversation.Messages);
         }
     }
 

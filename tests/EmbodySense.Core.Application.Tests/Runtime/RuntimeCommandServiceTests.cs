@@ -96,6 +96,7 @@ public sealed class RuntimeCommandServiceTests
         Assert.False(runtimeState.ModelTurnStarted);
         Assert.Equal(1, memory.StartFreshConversationCallCount);
         Assert.Equal(1, resettableClient.ResetCount);
+        Assert.Equal("runtime-command-version", conversationState.DurableConversationVersion);
         var message = Assert.Single(conversationState.Messages);
         Assert.Equal(LlmMessageRole.System, message.Role);
         Assert.Equal("startup", message.Content);
@@ -140,6 +141,7 @@ public sealed class RuntimeCommandServiceTests
         Assert.True(loaded.ReplaceTranscript);
         Assert.Equal("conv-1", memory.LoadedConversationId);
         Assert.Equal("conv-1", memory.ResumedConversationId);
+        Assert.Equal("runtime-command-version", conversationState.DurableConversationVersion);
         Assert.Collection(
             conversationState.Messages,
             message => Assert.Equal("startup", message.Content),
