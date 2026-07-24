@@ -19,10 +19,10 @@ public static class ToolResultFormatter
         {
             builder.AppendLine($"- request_id: {result.RequestId}");
             builder.AppendLine($"  tool: {ToolCommandFormatter.Format(result.Request.Command)}");
-            builder.AppendLine($"  target_path: {result.Request.TargetPath}");
-            builder.AppendLine($"  resolved_path: {result.ResolvedPath}");
             builder.AppendLine($"  outcome: {FormatOutcome(result.Outcome)}");
             AppendRetention(builder, result.Retention);
+            builder.AppendLine($"  target_path: {result.Request.TargetPath}");
+            builder.AppendLine($"  resolved_path: {result.ResolvedPath}");
             builder.AppendLine("  output:");
             builder.AppendLine(Indent(result.OutputText));
         }

@@ -13,6 +13,7 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
     private const int MaxSearchFiles = 500;
     private const int MaxSearchMatches = 200;
     private const int MaxMatchLineCharacters = 500;
+    private const int MaxSearchOutputCharacters = 120_000;
     private const long MaxSearchFileBytes = 1_048_576;
     private readonly WorkspacePaths _paths;
 
@@ -130,6 +131,7 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             text += Environment.NewLine + $"[truncated after {state.FilesScanned} files and {matches.Count} matches]";
         }
 
+        text = ApplySearchOutputLimit(text, state);
         return new LocalWorkspaceResult(text, new Dictionary<string, object?>
         {
             ["match_count"] = matches.Count,
@@ -256,6 +258,24 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         return line.Length <= MaxMatchLineCharacters
             ? line
             : line[..MaxMatchLineCharacters] + " [line truncated]";
+    }
+
+    private static string ApplySearchOutputLimit(string text, SearchState state)
+    {
+        if (text.Length <= MaxSearchOutputCharacters)
+        {
+            return text;
+        }
+
+        state.Truncated = true;
+        var marker = Environment.NewLine + $"[search output truncated to {MaxSearchOutputCharacters} characters]";
+        var retainedCharacterCount = MaxSearchOutputCharacters - marker.Length;
+        if (char.IsHighSurrogate(text[retainedCharacterCount - 1]))
+        {
+            retainedCharacterCount--;
+        }
+
+        return text[..retainedCharacterCount] + marker;
     }
 
     private sealed class SearchState
