@@ -30,8 +30,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private readonly string _traceDeletionOperationsRoot;
     private readonly string _mutationLockPath;
     private readonly SemaphoreSlim _processMutationGate;
+    private readonly TimeProvider _timeProvider;
 
-    public CustomLoopRunStore(WorkspacePaths paths)
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
@@ -43,6 +44,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         EnsureContained(_workspaceRoot, _traceDeletionOperationsRoot);
         _mutationLockPath = Path.Combine(_runsRoot, MutationLockFileName);
         _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
@@ -273,18 +275,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
-        var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, safeRunId, StringComparison.Ordinal)).ToArray();
-        if (matches.Length > 1)
-        {
-            throw new FormatException($"Custom loop run id `{safeRunId}` exists in more than one loop directory. The persisted state requires review.");
-        }
-
-        if (matches.Length == 0)
+        var artifact = await ReadArtifactByRunIdAsync(safeRunId, cancellationToken);
+        if (artifact is null)
         {
             return null;
         }
 
-        var artifact = await ReadArtifactAsync(matches[0], cancellationToken);
         if (artifact.Run is not null)
         {
             var run = artifact.Run;
@@ -352,14 +348,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return new CustomLoopTraceDeletionReservationResult(existingStatus, existingOperation);
         }
 
-        RunArtifact? artifact = null;
-        await ScanArtifactsAsync(candidate =>
-        {
-            if (string.Equals(candidate.Location.RunId, mutation.Request.RunId, StringComparison.Ordinal))
-            {
-                artifact = candidate;
-            }
-        }, cancellationToken);
+        var artifact = await ReadArtifactByRunIdAsync(mutation.Request.RunId, cancellationToken);
         var deletionOperationCount = EnumerateTraceDeletionOperationPaths().Count;
         var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;
         if (deletionOperationCount >= CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace
@@ -368,13 +357,14 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.DeletionOperationLimitExceeded, null);
         }
 
+        var reservedAtUtc = Max(mutation.RequestedAtUtc, _timeProvider.GetUtcNow().ToUniversalTime());
         var operation = new CustomLoopTraceDeletionOperation(
             CustomLoopTraceDeletionOperation.CurrentSchemaVersion,
             mutation.Request.OperationId,
             mutation.RequestHash,
             mutation.Request,
             mutation.RequestedAtUtc,
-            mutation.RequestedAtUtc,
+            reservedAtUtc,
             CustomLoopTraceDeletionOperationState.PendingMutation,
             CustomLoopTraceDeletionStoreStatus.Unknown,
             null,
@@ -898,6 +888,17 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         {
             throw new FormatException($"Custom loop run `{location.Path}` contains invalid JSON, unknown fields, missing fields, or unsupported enum values.", exception);
         }
+    }
+
+    private async Task<RunArtifact?> ReadArtifactByRunIdAsync(string runId, CancellationToken cancellationToken)
+    {
+        var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, runId, StringComparison.Ordinal)).ToArray();
+        if (matches.Length > 1)
+        {
+            throw new FormatException($"Custom loop run id `{runId}` exists in more than one loop directory. The persisted state requires review.");
+        }
+
+        return matches.Length == 0 ? null : await ReadArtifactAsync(matches[0], cancellationToken);
     }
 
     private async Task<byte[]> ReadBoundedArtifactAsync(string path, CancellationToken cancellationToken)

@@ -105,6 +105,26 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Reservation_uses_acquisition_time_and_does_not_decode_unrelated_run_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var reservedAtUtc = Timestamp.AddHours(1);
+        var store = new CustomLoopRunStore(paths, new FixedTimeProvider(reservedAtUtc));
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var unrelatedLoopRoot = Path.Combine(paths.CustomLoopRunsPath, "loop-unrelated");
+        Directory.CreateDirectory(unrelatedLoopRoot);
+        await File.WriteAllTextAsync(Path.Combine(unrelatedLoopRoot, "run-unrelated.json"), "not-json");
+
+        var reservation = await store.ReserveTraceDeletionOperationAsync(Mutation(Request(terminal.Id, inspection.PersistedArtifactHash)));
+
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, reservation.Status);
+        Assert.Equal(Timestamp.AddMinutes(3), reservation.Operation!.RequestedAtUtc);
+        Assert.Equal(reservedAtUtc, reservation.Operation.UpdatedAtUtc);
+    }
+
+    [Fact]
     public async Task Intent_audit_failure_completion_is_durable_and_does_not_replace_trace_content()
     {
         using var workspace = new TestWorkspace();
@@ -426,6 +446,11 @@ public sealed class CustomLoopTraceRetentionStoreTests
     {
         Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, operation.OperationId + ".json"), JsonSerializer.Serialize(operation, JsonOptions) + "\n");
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => timestamp;
     }
 
     private static string Hash(byte[] content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
