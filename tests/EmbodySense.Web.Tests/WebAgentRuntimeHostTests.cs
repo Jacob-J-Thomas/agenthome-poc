@@ -71,7 +71,7 @@ public sealed class WebAgentRuntimeHostTests
         var retried = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-host-reacquired"));
         var transcript = await host.GetCurrentTranscriptAsync();
 
-        Assert.Equal("WorkspaceExecutionBusy", unavailable.Status);
+        Assert.Equal("WorkspaceHostUnavailable", unavailable.Status);
         Assert.Equal("NotFound", retried.Status);
         Assert.Collection(transcript!, message => Assert.Equal("preserved while custom execution is active", message.Content));
         Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));

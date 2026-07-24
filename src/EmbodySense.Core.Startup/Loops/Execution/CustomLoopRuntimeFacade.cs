@@ -363,7 +363,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
             if (ownership.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
             {
-                return new CustomExecutionAvailability(false, "WorkspaceExecutionBusy", "workspace_execution_busy: custom-loop hosting is available, but recovery must wait for the active custom-loop operation to reach a safe boundary.");
+                return new CustomExecutionAvailability(false, "WorkspaceHostUnavailable", "workspace_host_unavailable: this retained runtime cannot finish host recovery until the active custom-loop operation reaches a safe boundary; no durable busy outcome was recorded and the request may be retried.");
             }
 
             if (ownership.Status != CustomLoopExecutionLeaseStatus.Acquired || ownership.Lease is null)
