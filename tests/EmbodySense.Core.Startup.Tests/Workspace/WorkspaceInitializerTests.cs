@@ -161,6 +161,65 @@ public sealed class WorkspaceInitializerTests
     }
 
     [Fact]
+    public async Task InitializeAsync_inspects_a_current_read_only_policy_without_requiring_write_access()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var original = await File.ReadAllTextAsync(paths.PermissionsPath);
+        var originalAttributes = File.GetAttributes(paths.PermissionsPath);
+        UnixFileMode? originalMode = OperatingSystem.IsWindows() ? null : File.GetUnixFileMode(paths.PermissionsPath);
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                File.SetAttributes(paths.PermissionsPath, originalAttributes | FileAttributes.ReadOnly);
+            }
+            else
+            {
+                File.SetUnixFileMode(paths.PermissionsPath, UnixFileMode.UserRead);
+            }
+
+            await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+            Assert.Equal(original, await File.ReadAllTextAsync(paths.PermissionsPath));
+        }
+        finally
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                File.SetAttributes(paths.PermissionsPath, originalAttributes);
+            }
+            else
+            {
+                File.SetUnixFileMode(paths.PermissionsPath, originalMode!.Value);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task InitializeAsync_preserves_unix_protection_bits_during_version_two_migration()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        await File.WriteAllTextAsync(paths.PermissionsPath, VersionTwoPermissions(paths).ToJson());
+        var protectedMode = UnixFileMode.UserRead;
+        File.SetUnixFileMode(paths.PermissionsPath, protectedMode);
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        Assert.Equal(protectedMode, File.GetUnixFileMode(paths.PermissionsPath));
+        var migrated = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        Assert.Equal(PermissionsDocument.CurrentVersion, migrated.Version);
+    }
+
+    [Fact]
     public async Task InitializeAsync_cancellation_leaves_the_original_version_two_policy_intact()
     {
         using var workspace = new TestWorkspace();

@@ -3,8 +3,10 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.LocalWorkspace;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
@@ -35,6 +37,46 @@ public sealed class ToolBrokerTests
         Assert.True(File.Exists(workspace.File(result.Retention!.ManifestPath!.Replace('/', Path.DirectorySeparatorChar))));
         var events = await ReadAuditAsync(workspace);
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.permission.evaluate" && auditEvent.Outcome == "allowed");
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.response.retain" && auditEvent.Outcome == "succeeded");
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "succeeded");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_bounds_an_untrusted_correlation_before_actuation_and_retention()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "bounded");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt", CorrelationId: new string('x', 70_000)));
+
+        Assert.True(result.Succeeded);
+        Assert.StartsWith("sha256:", result.Request.CorrelationId, StringComparison.Ordinal);
+        Assert.Equal(71, result.Request.CorrelationId!.Length);
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(workspace.File(result.Retention!.ManifestPath!.Replace('/', Path.DirectorySeparatorChar))));
+        Assert.Equal(result.Request.CorrelationId, manifest.RootElement.GetProperty("toolRequestCorrelationId").GetString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_finishes_mutation_evidence_after_the_caller_is_cancelled_post_actuation()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var executor = new CancellingWorkspaceToolExecutor(new LocalWorkspaceClient(paths), cancellation);
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), workspaceToolExecutor: executor);
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"), cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.True(result.Succeeded);
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        var events = await ReadAuditAsync(workspace);
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.response.retain" && auditEvent.Outcome == "succeeded");
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "succeeded");
     }
@@ -324,11 +366,36 @@ public sealed class ToolBrokerTests
         Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), new LocalWorkspaceClient(paths), new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), null!));
     }
 
-    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null, IToolResultRetentionStore? retentionStore = null)
+    private static ToolBroker CreateBroker(
+        TestWorkspace workspace,
+        IToolApprovalPrompt prompt,
+        LoopDefinition? loopDefinition = null,
+        IToolResultRetentionStore? retentionStore = null,
+        IWorkspaceToolExecutor? workspaceToolExecutor = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths));
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths));
+    }
+
+    private sealed class CancellingWorkspaceToolExecutor(IWorkspaceToolExecutor inner, CancellationTokenSource cancellation) : IWorkspaceToolExecutor
+    {
+        public Task<LocalWorkspaceResult> ListAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.ListAsync(resolvedPath, cancellationToken);
+
+        public Task<LocalWorkspaceResult> ReadAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.ReadAsync(resolvedPath, cancellationToken);
+
+        public Task<LocalWorkspaceResult> SearchAsync(string resolvedPath, string? pattern, CancellationToken cancellationToken = default) => inner.SearchAsync(resolvedPath, pattern, cancellationToken);
+
+        public async Task<LocalWorkspaceResult> AppendAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default)
+        {
+            var result = await inner.AppendAsync(resolvedPath, content, cancellationToken);
+            cancellation.Cancel();
+            return result;
+        }
+
+        public Task<LocalWorkspaceResult> WriteAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default) => inner.WriteAsync(resolvedPath, content, cancellationToken);
+
+        public Task<LocalWorkspaceResult> DeleteAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.DeleteAsync(resolvedPath, cancellationToken);
     }
 
     private sealed class ThrowingRetentionStore : IToolResultRetentionStore

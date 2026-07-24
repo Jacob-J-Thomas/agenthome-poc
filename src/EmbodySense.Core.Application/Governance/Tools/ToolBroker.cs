@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
@@ -14,7 +16,9 @@ namespace EmbodySense.Core.Application.Governance.Tools;
 
 public sealed class ToolBroker : IToolBroker
 {
+    private const int MaxCorrelationCharacters = 512;
     private static readonly ToolCommand[] AllCommands = Enum.GetValues<ToolCommand>();
+    private static readonly TimeSpan PostActuationIntegrityTimeout = TimeSpan.FromSeconds(30);
     private readonly WorkspacePaths _paths;
     private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
@@ -60,6 +64,7 @@ public sealed class ToolBroker : IToolBroker
     public async Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        request = BoundCorrelation(request);
         var requestId = Guid.NewGuid().ToString("N");
         if (!IsCommandAvailable(request.Command))
         {
@@ -119,6 +124,9 @@ public sealed class ToolBroker : IToolBroker
 
     private async Task<ToolResult> ExecuteAuthorizedAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, ToolGovernanceEvidence governance, CancellationToken cancellationToken)
     {
+        ToolResult result;
+        IReadOnlyDictionary<string, object?> executionMetadata;
+        string executionOutcome;
         try
         {
             var output = request.Command switch
@@ -132,25 +140,21 @@ public sealed class ToolBroker : IToolBroker
                 _ => throw new ArgumentOutOfRangeException(nameof(request), request.Command, "Unsupported tool command.")
             };
 
-            var result = new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance);
-            result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
-            await RecordExecutionAsync(requestId, request, check, approvedByHuman, AuditSchema.Outcomes.Succeeded, output.Metadata, cancellationToken);
-            return result;
+            result = new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance);
+            executionMetadata = output.Metadata;
+            executionOutcome = AuditSchema.Outcomes.Succeeded;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
         {
-            var result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {exception.Message}", requestId, check.ResolvedPath, request, governance);
-            result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
-            await RecordExecutionAsync(
-                requestId,
-                request,
-                check,
-                approvedByHuman,
-                AuditSchema.Outcomes.Failed,
-                ToolAuditMetadataFactory.ForError(exception),
-                cancellationToken);
-            return result;
+            result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {exception.Message}", requestId, check.ResolvedPath, request, governance);
+            executionMetadata = ToolAuditMetadataFactory.ForError(exception);
+            executionOutcome = AuditSchema.Outcomes.Failed;
         }
+
+        using var integrity = new CancellationTokenSource(PostActuationIntegrityTimeout);
+        result = await RetainAndObserveOutcomeAsync(result, integrity.Token);
+        await RecordExecutionAsync(requestId, request, check, approvedByHuman, executionOutcome, executionMetadata, integrity.Token);
+        return result;
     }
 
     private Task RecordExecutionIntentAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, CancellationToken cancellationToken)
@@ -191,6 +195,17 @@ public sealed class ToolBroker : IToolBroker
     private static ToolGovernanceEvidence AuthorityDenied(string detail)
     {
         return new ToolGovernanceEvidence(ToolAuthorityDecision.Denied, detail, null, null, null, null, ToolApprovalDecision.NotEvaluated, null, null);
+    }
+
+    private static ToolRequest BoundCorrelation(ToolRequest request)
+    {
+        if (request.CorrelationId is null || request.CorrelationId.Length <= MaxCorrelationCharacters)
+        {
+            return request;
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.CorrelationId))).ToLowerInvariant();
+        return request with { CorrelationId = $"sha256:{hash}" };
     }
 
     private static ToolGovernanceEvidence DecisionEvidence(ToolPermissionCheck check, ToolApprovalDecision approvalDecision, ToolApprovalResponse? approval)

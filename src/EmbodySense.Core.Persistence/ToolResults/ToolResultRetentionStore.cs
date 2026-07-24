@@ -17,6 +17,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private const int CurrentSchemaVersion = 1;
     private const string ManifestFileName = "manifest.json";
     private const string StagingPrefix = ".staging-";
+    private const string EvictionStagingPrefix = ".evicting-";
     private const string RetentionPolicy = "oldest-first within 256 artifacts and 64 MiB; full response chunks are sensitive local workspace evidence";
     private static readonly TimeSpan LockRetryDelay = TimeSpan.FromMilliseconds(25);
     private static readonly TimeSpan MaxLockWait = TimeSpan.FromSeconds(5);
@@ -24,7 +25,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
     private readonly WorkspacePaths _paths;
     private readonly TimeProvider _timeProvider;
-    private readonly Dictionary<string, ValidatedArtifactSnapshot> _validatedArtifacts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, AccountedArtifactSnapshot> _accountedArtifacts = new(StringComparer.Ordinal);
 
     public ToolResultRetentionStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
@@ -45,7 +46,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             await using var lease = await AcquireLeaseAsync(cancellationToken);
             CleanupStagingDirectories();
             var existingArtifacts = await LoadArtifactsAsync(cancellationToken);
-            var recoveredEvictions = EvictToLimits(existingArtifacts);
+            var recoveredEvictions = await EvictToLimitsAsync(existingArtifacts, cancellationToken);
             var retainedAtUtc = NextRetainedAtUtc(existingArtifacts);
             var prepared = PrepareArtifact(result, loopDefinition, retainedAtUtc);
             var existing = existingArtifacts.SingleOrDefault(artifact => !artifact.Evicted && string.Equals(artifact.Manifest.RequestId, result.RequestId, StringComparison.Ordinal));
@@ -69,11 +70,12 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
                 return Unavailable(result, "The inspection response was not self-retained because doing so would evict tool-response evidence being inspected.");
             }
 
+            await ValidateRequiredEvictionsAsync(existingArtifacts, prepared.TotalUtf8Bytes, cancellationToken);
             await WriteArtifactAsync(prepared, cancellationToken);
-            var retainedArtifact = new RetainedArtifact(Path.Combine(_paths.ToolResponsesPath, prepared.Manifest.RequestId), prepared.Manifest, prepared.TotalUtf8Bytes);
-            _validatedArtifacts[prepared.Manifest.RequestId] = CaptureValidatedArtifact(retainedArtifact.Directory, prepared.Manifest, prepared.TotalUtf8Bytes);
+            var retainedArtifact = new RetainedArtifact(Path.Combine(_paths.ToolResponsesPath, prepared.Manifest.RequestId), prepared.Manifest, prepared.TotalUtf8Bytes, contentValidated: true);
+            _accountedArtifacts[prepared.Manifest.RequestId] = CaptureAccountedArtifact(retainedArtifact.Directory, prepared.Manifest, prepared.TotalUtf8Bytes);
             existingArtifacts.Add(retainedArtifact);
-            var evicted = recoveredEvictions + EvictToLimits(existingArtifacts);
+            var evicted = recoveredEvictions + await EvictToLimitsAsync(existingArtifacts, cancellationToken);
             if (retainedArtifact.Evicted || !Directory.Exists(retainedArtifact.Directory))
             {
                 return Unavailable(result, "The newly written full-response artifact did not survive bounded quota enforcement.");
@@ -131,16 +133,19 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
     private void CleanupStagingDirectories()
     {
-        foreach (var directory in Directory.EnumerateDirectories(_paths.ToolResponsesPath, StagingPrefix + "*", SearchOption.TopDirectoryOnly))
+        foreach (var prefix in new[] { StagingPrefix, EvictionStagingPrefix })
         {
-            var stagingId = Path.GetFileName(directory)[StagingPrefix.Length..];
-            if (!IsRequestId(stagingId))
+            foreach (var directory in Directory.EnumerateDirectories(_paths.ToolResponsesPath, prefix + "*", SearchOption.TopDirectoryOnly))
             {
-                throw new InvalidDataException("The tool-response retention root contains an unrecognized staging directory.");
-            }
+                var stagingId = Path.GetFileName(directory)[prefix.Length..];
+                if (!IsRequestId(stagingId))
+                {
+                    throw new InvalidDataException("The tool-response retention root contains an unrecognized staging directory.");
+                }
 
-            EnsurePlainDirectory(directory);
-            Directory.Delete(directory, recursive: true);
+                EnsurePlainDirectory(directory);
+                Directory.Delete(directory, recursive: true);
+            }
         }
     }
 
@@ -167,23 +172,25 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             }
 
             presentRequestIds.Add(requestId);
-            if (_validatedArtifacts.TryGetValue(requestId, out var cached)
-                && MatchesValidatedArtifact(directory, cached))
+            if (_accountedArtifacts.TryGetValue(requestId, out var cached)
+                && MatchesAccountedArtifact(directory, cached))
             {
-                artifacts.Add(new RetainedArtifact(directory, cached.Manifest, cached.TotalUtf8Bytes));
+                // Stable stamps are an accounting optimization only. Any operation that re-advertises or evicts
+                // this evidence performs full manifest and chunk hash validation first.
+                artifacts.Add(new RetainedArtifact(directory, cached.Manifest, cached.TotalUtf8Bytes, contentValidated: false));
                 continue;
             }
 
             var manifestPath = Path.Combine(directory, ManifestFileName);
             var manifest = await ReadManifestAsync(manifestPath, cancellationToken);
             var totalUtf8Bytes = await ValidateArtifactAsync(directory, requestId, manifest, cancellationToken);
-            _validatedArtifacts[requestId] = CaptureValidatedArtifact(directory, manifest, totalUtf8Bytes);
-            artifacts.Add(new RetainedArtifact(directory, manifest, totalUtf8Bytes));
+            _accountedArtifacts[requestId] = CaptureAccountedArtifact(directory, manifest, totalUtf8Bytes);
+            artifacts.Add(new RetainedArtifact(directory, manifest, totalUtf8Bytes, contentValidated: true));
         }
 
-        foreach (var staleRequestId in _validatedArtifacts.Keys.Where(requestId => !presentRequestIds.Contains(requestId)).ToArray())
+        foreach (var staleRequestId in _accountedArtifacts.Keys.Where(requestId => !presentRequestIds.Contains(requestId)).ToArray())
         {
-            _validatedArtifacts.Remove(staleRequestId);
+            _accountedArtifacts.Remove(staleRequestId);
         }
 
         return artifacts;
@@ -194,8 +201,9 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         var requestId = artifact.Manifest.RequestId;
         var manifest = await ReadManifestAsync(Path.Combine(artifact.Directory, ManifestFileName), cancellationToken);
         var totalUtf8Bytes = await ValidateArtifactAsync(artifact.Directory, requestId, manifest, cancellationToken);
-        _validatedArtifacts[requestId] = CaptureValidatedArtifact(artifact.Directory, manifest, totalUtf8Bytes);
-        return new RetainedArtifact(artifact.Directory, manifest, totalUtf8Bytes);
+        _accountedArtifacts[requestId] = CaptureAccountedArtifact(artifact.Directory, manifest, totalUtf8Bytes);
+        artifact.ContentValidated = true;
+        return new RetainedArtifact(artifact.Directory, manifest, totalUtf8Bytes, contentValidated: true);
     }
 
     private static async Task<ToolResultArtifactManifest> ReadManifestAsync(string manifestPath, CancellationToken cancellationToken)
@@ -373,7 +381,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         return new PreparedArtifact(manifest, manifestBytes, chunks, manifestBytes.LongLength + chunks.Sum(chunk => chunk.Bytes.LongLength));
     }
 
-    private int EvictToLimits(List<RetainedArtifact> artifacts)
+    private async Task<int> EvictToLimitsAsync(List<RetainedArtifact> artifacts, CancellationToken cancellationToken)
     {
         var retainedCount = artifacts.Count(artifact => !artifact.Evicted);
         var retainedBytes = artifacts.Where(artifact => !artifact.Evicted).Sum(artifact => artifact.TotalUtf8Bytes);
@@ -390,12 +398,24 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
                 continue;
             }
 
-            Directory.Delete(artifact.Directory, recursive: true);
-            _validatedArtifacts.Remove(artifact.Manifest.RequestId);
+            if (!artifact.ContentValidated)
+            {
+                await RevalidateArtifactAsync(artifact, cancellationToken);
+            }
+
+            var evictionPath = Path.Combine(_paths.ToolResponsesPath, EvictionStagingPrefix + artifact.Manifest.RequestId);
+            if (Directory.Exists(evictionPath))
+            {
+                throw new InvalidDataException("A retained tool-response eviction staging path already exists.");
+            }
+
+            Directory.Move(artifact.Directory, evictionPath);
+            _accountedArtifacts.Remove(artifact.Manifest.RequestId);
             artifact.Evicted = true;
             retainedCount--;
             retainedBytes -= artifact.TotalUtf8Bytes;
             evictedCount++;
+            Directory.Delete(evictionPath, recursive: true);
         }
 
         if (retainedCount > ToolResultRetentionLimits.MaxArtifactsPerWorkspace || retainedBytes > ToolResultRetentionLimits.MaxWorkspaceUtf8Bytes)
@@ -404,6 +424,27 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         }
 
         return evictedCount;
+    }
+
+    private async Task ValidateRequiredEvictionsAsync(IReadOnlyList<RetainedArtifact> artifacts, long additionalUtf8Bytes, CancellationToken cancellationToken)
+    {
+        var retainedCount = artifacts.Count(artifact => !artifact.Evicted) + 1;
+        var retainedBytes = artifacts.Where(artifact => !artifact.Evicted).Sum(artifact => artifact.TotalUtf8Bytes) + additionalUtf8Bytes;
+        foreach (var artifact in artifacts.Where(artifact => !artifact.Evicted).OrderBy(artifact => artifact.Manifest.RetainedAtUtc).ThenBy(artifact => artifact.Manifest.RequestId, StringComparer.Ordinal))
+        {
+            if (retainedCount <= ToolResultRetentionLimits.MaxArtifactsPerWorkspace && retainedBytes <= ToolResultRetentionLimits.MaxWorkspaceUtf8Bytes)
+            {
+                return;
+            }
+
+            if (!artifact.ContentValidated)
+            {
+                await RevalidateArtifactAsync(artifact, cancellationToken);
+            }
+
+            retainedCount--;
+            retainedBytes -= artifact.TotalUtf8Bytes;
+        }
     }
 
     private async Task WriteArtifactAsync(PreparedArtifact artifact, CancellationToken cancellationToken)
@@ -502,7 +543,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             || retained.Sum(artifact => artifact.TotalUtf8Bytes) + additionalUtf8Bytes > ToolResultRetentionLimits.MaxWorkspaceUtf8Bytes;
     }
 
-    private static ValidatedArtifactSnapshot CaptureValidatedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes)
+    private static AccountedArtifactSnapshot CaptureAccountedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes)
     {
         if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any())
         {
@@ -523,10 +564,10 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
                     return new ArtifactFileStamp(file.Length, file.LastWriteTimeUtc.Ticks);
                 },
                 StringComparer.Ordinal);
-        return new ValidatedArtifactSnapshot(manifest, totalUtf8Bytes, files);
+        return new AccountedArtifactSnapshot(manifest, totalUtf8Bytes, files);
     }
 
-    private static bool MatchesValidatedArtifact(string directory, ValidatedArtifactSnapshot cached)
+    private static bool MatchesAccountedArtifact(string directory, AccountedArtifactSnapshot cached)
     {
         if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any())
         {
@@ -595,15 +636,17 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
     private sealed record ArtifactFileStamp(long Length, long LastWriteTimeUtcTicks);
 
-    private sealed record ValidatedArtifactSnapshot(ToolResultArtifactManifest Manifest, long TotalUtf8Bytes, IReadOnlyDictionary<string, ArtifactFileStamp> Files);
+    private sealed record AccountedArtifactSnapshot(ToolResultArtifactManifest Manifest, long TotalUtf8Bytes, IReadOnlyDictionary<string, ArtifactFileStamp> Files);
 
-    private sealed class RetainedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes)
+    private sealed class RetainedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes, bool contentValidated)
     {
         public string Directory { get; } = directory;
 
         public ToolResultArtifactManifest Manifest { get; } = manifest;
 
         public long TotalUtf8Bytes { get; } = totalUtf8Bytes;
+
+        public bool ContentValidated { get; set; } = contentValidated;
 
         public bool Evicted { get; set; }
     }

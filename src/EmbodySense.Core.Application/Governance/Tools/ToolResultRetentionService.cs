@@ -56,14 +56,22 @@ public sealed class ToolResultRetentionService
             }
         }
 
-        await _auditLog.AppendAsync(AuditEvent.Create(
-            AuditSchema.Actors.Tool,
-            AuditSchema.Actions.ToolResponseRetain,
-            result.ResolvedPath,
-            retention.Status == ToolResultRetentionStatus.Retained ? AuditSchema.Outcomes.Succeeded : AuditSchema.Outcomes.Failed,
-            retention.Detail,
-            metadata), cancellationToken);
-        return result;
+        try
+        {
+            await _auditLog.AppendAsync(AuditEvent.Create(
+                AuditSchema.Actors.Tool,
+                AuditSchema.Actions.ToolResponseRetain,
+                result.ResolvedPath,
+                retention.Status == ToolResultRetentionStatus.Retained ? AuditSchema.Outcomes.Succeeded : AuditSchema.Outcomes.Failed,
+                retention.Detail,
+                metadata), cancellationToken);
+            return result;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            var warning = $"The retained tool outcome is unchanged, but its retention audit could not be appended ({exception.GetType().Name}).";
+            return result with { Retention = retention with { Detail = $"{retention.Detail} {warning}" } };
+        }
     }
 
     private Dictionary<string, object?> CreateAuditMetadata(ToolResult result, ToolResultRetentionReference retention)

@@ -134,6 +134,21 @@ public sealed class ToolResultRetentionStoreTests
     }
 
     [Fact]
+    public async Task RetainAsync_finishes_an_orphaned_atomic_eviction_under_the_workspace_lease()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var orphan = Path.Combine(paths.ToolResponsesPath, ".evicting-" + new string('a', 32));
+        Directory.CreateDirectory(orphan);
+        await File.WriteAllTextAsync(Path.Combine(orphan, "manifest.json"), "interrupted eviction");
+
+        var retained = await new ToolResultRetentionStore(paths).RetainAsync(Result(new string('1', 32), "complete"), LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Retained, retained.Status);
+        Assert.False(Directory.Exists(orphan));
+    }
+
+    [Fact]
     public async Task RetainAsync_fails_closed_without_advertising_partial_evidence_for_unrecognized_or_oversize_content()
     {
         using var workspace = new TestWorkspace();
@@ -209,6 +224,32 @@ public sealed class ToolResultRetentionStoreTests
 
         Assert.Equal(ToolResultRetentionStatus.Unavailable, repeated.Status);
         Assert.Contains("InvalidDataException", repeated.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetainAsync_rehashes_a_cached_eviction_candidate_before_removing_it()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ToolResultRetentionStore(paths);
+        for (var index = 0; index < ToolResultRetentionLimits.MaxArtifactsPerWorkspace; index++)
+        {
+            var retained = await store.RetainAsync(Result(index.ToString("x32"), $"result-{index:D3}"), LoopDefinition.CreateDefaultConversation());
+            Assert.Equal(ToolResultRetentionStatus.Retained, retained.Status);
+        }
+
+        var oldestDirectory = Path.Combine(paths.ToolResponsesPath, new string('0', 32));
+        var chunkPath = Path.Combine(oldestDirectory, "0001.txt");
+        var originalTimestamp = File.GetLastWriteTimeUtc(chunkPath);
+        await File.WriteAllTextAsync(chunkPath, "tampered-0");
+        File.SetLastWriteTimeUtc(chunkPath, originalTimestamp);
+
+        var unavailable = await store.RetainAsync(Result(new string('f', 32), "newest"), LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, unavailable.Status);
+        Assert.Contains("InvalidDataException", unavailable.Detail, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(oldestDirectory));
+        Assert.False(Directory.Exists(Path.Combine(paths.ToolResponsesPath, new string('f', 32))));
     }
 
     [Theory]

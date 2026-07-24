@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Startup.Configuration;
@@ -35,7 +36,7 @@ public sealed class WorkspaceConfigurationReaderTests
         Assert.True(snapshot.Permissions.Parsed);
         Assert.NotEmpty(snapshot.Permissions.Approved);
         Assert.NotEmpty(snapshot.Permissions.Denied);
-        Assert.Contains("\"version\": 2", snapshot.Permissions.RawJson);
+        Assert.Contains($"\"version\": {PermissionsDocument.CurrentVersion}", snapshot.Permissions.RawJson);
         Assert.Contains(snapshot.Documents, document => document.Name == "Role guide" && document.Category == "Role" && document.Exists && document.Content.Contains("Workspace role guide", StringComparison.Ordinal));
         Assert.Contains(snapshot.Documents, document => document.Name == "Soul" && document.Exists);
         Assert.Contains(snapshot.Documents, document => document.Name == "Personality" && document.Exists);
