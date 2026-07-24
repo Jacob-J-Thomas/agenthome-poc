@@ -7,6 +7,7 @@ public sealed record CustomLoopInvocationReceiptRetentionOperation(
     string Surface,
     DateTimeOffset RequestedAtUtc,
     DateTimeOffset ReplayCutoffUtc,
+    DateTimeOffset OwnershipStartedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     CustomLoopInvocationReceiptRetentionCandidate[] Candidates,
     CustomLoopInvocationReceiptRetentionOperationState State,

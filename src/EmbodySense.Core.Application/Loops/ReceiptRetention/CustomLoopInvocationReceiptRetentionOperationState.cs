@@ -5,5 +5,7 @@ public enum CustomLoopInvocationReceiptRetentionOperationState
     Reserved = 1,
     IntentAuditRecorded = 2,
     OutcomeCommitted = 3,
-    OutcomeAuditRecorded = 4
+    OutcomeAuditStarted = 4,
+    OutcomeAuditRecorded = 5,
+    CommittedWithAuditWarning = 6
 }

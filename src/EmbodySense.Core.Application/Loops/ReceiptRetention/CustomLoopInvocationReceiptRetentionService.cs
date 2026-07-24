@@ -58,27 +58,29 @@ public sealed class CustomLoopInvocationReceiptRetentionService
             return Result(CustomLoopInvocationReceiptRetentionStatus.Invalid, null, "Receipt retention did not retain its durable operation journal.");
         }
 
+        using var ownerWindow = CreateOwnerWindow(operation.OwnershipStartedAtUtc, cancellationToken);
+        var ownerToken = ownerWindow.Token;
         var isReplay = reserved.Status != CustomLoopInvocationReceiptRetentionReservationStatus.Reserved;
         if (reserved.Status == CustomLoopInvocationReceiptRetentionReservationStatus.Reserved)
         {
-            if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopInvocationReceiptRetentionIntent, AuditSchema.Outcomes.Requested, operation, "Expired completed invocation receipts were selected for governed retention cleanup."), cancellationToken))
+            if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopInvocationReceiptRetentionIntent, AuditSchema.Outcomes.Requested, operation, "Expired completed invocation receipts were selected for governed retention cleanup."), ownerToken, cancellationToken))
             {
                 return Result(CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable, operation, "No receipt was deleted because the retention-intent audit could not be recorded.");
             }
 
             try
             {
-                operation = await _store.MarkReceiptRetentionIntentAuditedAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), cancellationToken);
+                operation = await _store.MarkReceiptRetentionIntentAuditedAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
-                    operation = await _store.CommitCompletedReceiptRetentionAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), cancellationToken);
+                    operation = await _store.CommitCompletedReceiptRetentionAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
                 }
                 catch (Exception)
                 {
-                    return Result(CustomLoopInvocationReceiptRetentionStatus.Invalid, operation, $"The retention intent may be durable, but its operation journal could not be advanced safely: {exception.GetType().Name}.");
+                    return Result(CustomLoopInvocationReceiptRetentionStatus.OperationInProgress, operation, $"The retention intent may be durable, but its bounded owner could not advance the operation journal safely: {exception.GetType().Name}.");
                 }
             }
         }
@@ -87,13 +89,18 @@ public sealed class CustomLoopInvocationReceiptRetentionService
         {
             try
             {
-                operation = await _store.CommitCompletedReceiptRetentionAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), cancellationToken);
+                operation = await _store.CommitCompletedReceiptRetentionAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
                     var recovered = await _store.ReserveCompletedReceiptRetentionAsync(request, cancellationToken);
+                    if (recovered.Status == CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress)
+                    {
+                        return Result(CustomLoopInvocationReceiptRetentionStatus.OperationInProgress, recovered.Operation ?? operation, "The bounded retention owner is still committing or reconciling the selected receipt batch.");
+                    }
+
                     if (recovered.Status != CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted || recovered.Operation is null)
                     {
                         return Result(CustomLoopInvocationReceiptRetentionStatus.Invalid, operation, $"Receipt retention could not be committed or reconciled safely: {exception.GetType().Name}.");
@@ -109,9 +116,28 @@ public sealed class CustomLoopInvocationReceiptRetentionService
             }
         }
 
+        if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning)
+        {
+            return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "Expired completed invocation receipts were deleted, but the original bounded outcome-audit attempt requires review and was not duplicated.");
+        }
+
         if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded)
         {
             return Result(CustomLoopInvocationReceiptRetentionStatus.Replayed, operation, "The completed-receipt retention operation and its audits were already committed.");
+        }
+
+        if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted)
+        {
+            try
+            {
+                operation = await _store.MarkReceiptRetentionOutcomeAuditWarningAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
+            }
+            catch (Exception)
+            {
+                return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "Expired completed invocation receipts were deleted; an interrupted outcome-audit attempt and its warning marker require review.");
+            }
+
+            return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "Expired completed invocation receipts were deleted; the interrupted outcome audit was not duplicated.");
         }
 
         if (operation.State != CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted)
@@ -119,16 +145,33 @@ public sealed class CustomLoopInvocationReceiptRetentionService
             return Result(CustomLoopInvocationReceiptRetentionStatus.Invalid, operation, "Receipt retention stopped in an unsupported durable operation state.");
         }
 
-        if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome, AuditSchema.Outcomes.Succeeded, operation, "Expired completed invocation receipts were deleted after the replay boundary."), cancellationToken))
+        try
         {
-            return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "Expired completed invocation receipts were deleted, but the retention-outcome audit remains incomplete and will be retried before another cleanup batch.");
+            operation = await _store.MarkReceiptRetentionOutcomeAuditStartedAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
+        }
+        catch (Exception)
+        {
+            return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "Expired completed invocation receipts were deleted, but the bounded outcome-audit attempt could not be durably started.");
+        }
+
+        if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome, AuditSchema.Outcomes.Succeeded, operation, "Expired completed invocation receipts were deleted after the replay boundary."), ownerToken, cancellationToken))
+        {
+            try
+            {
+                operation = await _store.MarkReceiptRetentionOutcomeAuditWarningAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
+            }
+            catch (Exception)
+            {
+            }
+
+            return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "Expired completed invocation receipts were deleted, but the bounded outcome-audit attempt failed and will not be duplicated.");
         }
 
         try
         {
-            operation = await _store.MarkReceiptRetentionOutcomeAuditedAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), cancellationToken);
+            operation = await _store.MarkReceiptRetentionOutcomeAuditedAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
         }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception)
         {
             return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, $"Expired completed invocation receipts were deleted and the outcome audit was appended, but its durable completion marker failed: {exception.GetType().Name}.");
         }
@@ -142,12 +185,25 @@ public sealed class CustomLoopInvocationReceiptRetentionService
         return now < minimum ? minimum : now;
     }
 
-    private async Task<bool> TryAppendAuditAsync(AuditEvent auditEvent, CancellationToken cancellationToken)
+    private CancellationTokenSource CreateOwnerWindow(DateTimeOffset ownershipStartedAtUtc, CancellationToken cancellationToken)
+    {
+        var ownerWindow = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        var remaining = ownershipStartedAtUtc + CustomLoopInvocationReceiptRetentionPolicy.OperationOwnershipWindow - now;
+        ownerWindow.CancelAfter(remaining <= TimeSpan.Zero ? TimeSpan.FromMilliseconds(1) : remaining);
+        return ownerWindow;
+    }
+
+    private async Task<bool> TryAppendAuditAsync(AuditEvent auditEvent, CancellationToken ownerToken, CancellationToken callerToken)
     {
         try
         {
-            await _auditLog.AppendAsync(auditEvent, cancellationToken);
+            await _auditLog.AppendAsync(auditEvent, ownerToken);
             return true;
+        }
+        catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+        {
+            return false;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -169,6 +225,7 @@ public sealed class CustomLoopInvocationReceiptRetentionService
                 ["surface"] = operation.Surface,
                 ["minimum_replay_days"] = CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration.TotalDays,
                 ["replay_cutoff_utc"] = operation.ReplayCutoffUtc,
+                ["ownership_started_at_utc"] = operation.OwnershipStartedAtUtc,
                 ["selected_receipt_count"] = operation.Candidates.Length,
                 ["selected_receipt_utf8_bytes"] = operation.Candidates.Sum(candidate => candidate.ArtifactUtf8Bytes),
                 ["deleted_receipt_count"] = operation.DeletedReceiptCount,

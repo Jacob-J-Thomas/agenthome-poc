@@ -24,6 +24,9 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         Assert.Equal([AuditSchema.Actions.LoopInvocationReceiptRetentionIntent, AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome], audit.Events.Select(item => item.Action));
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded, store.Current!.State);
         Assert.Equal(1, store.CommitCalls);
+        Assert.NotEmpty(store.MutationTokens);
+        Assert.All(store.MutationTokens, token => Assert.Equal(audit.AppendTokens[0], token));
+        Assert.All(audit.AppendTokens, token => Assert.Equal(audit.AppendTokens[0], token));
     }
 
     [Fact]
@@ -41,7 +44,7 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
     }
 
     [Fact]
-    public async Task Outcome_audit_failure_reports_a_committed_warning_and_a_later_retry_completes_it()
+    public async Task Outcome_audit_failure_reports_a_committed_warning_without_duplicating_the_attempt()
     {
         var store = new FakeStore(Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved));
         var audit = new FakeAuditLog { FailingAction = AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome };
@@ -53,9 +56,9 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 
         Assert.Equal(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, warning.Status);
         Assert.True(warning.AllowsReceiptWrite);
-        Assert.Equal(CustomLoopInvocationReceiptRetentionStatus.Replayed, replay.Status);
-        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded, store.Current!.State);
-        Assert.Equal(2, audit.Events.Count(item => item.Action == AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome));
+        Assert.Equal(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, replay.Status);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, store.Current!.State);
+        Assert.Single(audit.Events, item => item.Action == AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome);
     }
 
     [Theory]
@@ -85,27 +88,46 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         Assert.Empty(audit.Events);
     }
 
+    [Fact]
+    public async Task Owner_window_is_capped_from_the_durable_reservation_timestamp()
+    {
+        var ownershipStartedAtUtc = Now - CustomLoopInvocationReceiptRetentionPolicy.OperationOwnershipWindow;
+        var store = new FakeStore(Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved, ownershipStartedAtUtc));
+        var audit = new FakeAuditLog { BlockingAction = AuditSchema.Actions.LoopInvocationReceiptRetentionIntent };
+
+        var result = await Service(store, audit).PruneForCapacityAsync("embodysense.web", "web");
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable, result.Status);
+        Assert.Equal(0, store.CommitCalls);
+        Assert.True(Assert.Single(audit.AppendTokens).IsCancellationRequested);
+    }
+
     private static CustomLoopInvocationReceiptRetentionService Service(FakeStore store, FakeAuditLog audit)
     {
         return new CustomLoopInvocationReceiptRetentionService(store, audit, new FixedTimeProvider(Now));
     }
 
-    private static CustomLoopInvocationReceiptRetentionOperation Operation(CustomLoopInvocationReceiptRetentionOperationState state)
+    private static CustomLoopInvocationReceiptRetentionOperation Operation(CustomLoopInvocationReceiptRetentionOperationState state, DateTimeOffset? ownershipStartedAtUtc = null)
     {
+        var startedAtUtc = ownershipStartedAtUtc ?? Now;
         var candidates = new[]
         {
             new CustomLoopInvocationReceiptRetentionCandidate("invoke-old-a", Now.AddDays(-31), new string('a', 64), 100),
             new CustomLoopInvocationReceiptRetentionCandidate("invoke-old-b", Now.AddDays(-30), new string('b', 64), 200)
         };
-        var committed = state is CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded;
+        var committed = state is CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted
+            or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted
+            or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded
+            or CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning;
         return new CustomLoopInvocationReceiptRetentionOperation(
             CustomLoopInvocationReceiptRetentionOperation.CurrentSchemaVersion,
             "receipt-retention-existing",
             "embodysense.web",
             "web",
-            Now,
-            Now.AddDays(-30),
-            Now,
+            startedAtUtc,
+            startedAtUtc - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration,
+            startedAtUtc,
+            startedAtUtc,
             candidates,
             state,
             committed ? candidates.Length : 0,
@@ -121,17 +143,25 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
     {
         public List<AuditEvent> Events { get; } = [];
 
+        public List<CancellationToken> AppendTokens { get; } = [];
+
         public string? FailingAction { get; set; }
 
-        public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+        public string? BlockingAction { get; init; }
+
+        public async Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
         {
             Events.Add(auditEvent);
+            AppendTokens.Add(cancellationToken);
+            if (string.Equals(auditEvent.Action, BlockingAction, StringComparison.Ordinal))
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
             if (string.Equals(auditEvent.Action, FailingAction, StringComparison.Ordinal))
             {
                 throw new IOException("audit unavailable");
             }
-
-            return Task.CompletedTask;
         }
 
         public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<AuditEvent>>(Events.TakeLast(limit).ToArray());
@@ -147,6 +177,8 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 
         public int CommitCalls { get; private set; }
 
+        public List<CancellationToken> MutationTokens { get; } = [];
+
         public Task<CustomLoopInvocationReceiptRetentionReservationResult> ReserveCompletedReceiptRetentionAsync(CustomLoopInvocationReceiptRetentionRequest request, CancellationToken cancellationToken = default)
         {
             if (ReserveException is not null)
@@ -159,7 +191,9 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
                 CustomLoopInvocationReceiptRetentionOperationState.Reserved => CustomLoopInvocationReceiptRetentionReservationStatus.Reserved,
                 CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded => CustomLoopInvocationReceiptRetentionReservationStatus.ReadyToCommit,
                 CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted => CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted,
+                CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted => CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted,
                 CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded => CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted,
+                CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning => CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted,
                 _ => throw new InvalidOperationException()
             };
             return Task.FromResult(new CustomLoopInvocationReceiptRetentionReservationResult(status, status == CustomLoopInvocationReceiptRetentionReservationStatus.NothingEligible ? null : Current));
@@ -167,12 +201,14 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 
         public Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionIntentAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
         {
+            MutationTokens.Add(cancellationToken);
             Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded, UpdatedAtUtc = updatedAtUtc };
             return Task.FromResult(Current);
         }
 
         public Task<CustomLoopInvocationReceiptRetentionOperation> CommitCompletedReceiptRetentionAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
         {
+            MutationTokens.Add(cancellationToken);
             CommitCalls++;
             Current = Current! with
             {
@@ -186,7 +222,22 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 
         public Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
         {
+            MutationTokens.Add(cancellationToken);
             Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded, UpdatedAtUtc = updatedAtUtc };
+            return Task.FromResult(Current);
+        }
+
+        public Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            MutationTokens.Add(cancellationToken);
+            Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, UpdatedAtUtc = updatedAtUtc };
+            return Task.FromResult(Current);
+        }
+
+        public Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            MutationTokens.Add(cancellationToken);
+            Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, UpdatedAtUtc = updatedAtUtc };
             return Task.FromResult(Current);
         }
 

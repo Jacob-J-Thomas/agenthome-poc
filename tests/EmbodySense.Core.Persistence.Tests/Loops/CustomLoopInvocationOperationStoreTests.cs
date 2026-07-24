@@ -177,12 +177,14 @@ public sealed class CustomLoopInvocationOperationStoreTests
 
         var intent = await store.MarkReceiptRetentionIntentAuditedAsync(request.OperationId, now.AddSeconds(1));
         var committed = await store.CommitCompletedReceiptRetentionAsync(request.OperationId, now.AddSeconds(2));
-        var audited = await store.MarkReceiptRetentionOutcomeAuditedAsync(request.OperationId, now.AddSeconds(3));
+        var auditStarted = await store.MarkReceiptRetentionOutcomeAuditStartedAsync(request.OperationId, now.AddSeconds(3));
+        var audited = await store.MarkReceiptRetentionOutcomeAuditedAsync(request.OperationId, now.AddSeconds(4));
 
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded, intent.State);
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted, committed.State);
         Assert.Equal(1, committed.DeletedReceiptCount);
         Assert.Equal(candidate.ArtifactUtf8Bytes, committed.DeletedReceiptUtf8Bytes);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, auditStarted.State);
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded, audited.State);
         Assert.Null(await store.GetAsync("invoke-expired"));
         Assert.NotNull(await store.GetAsync("invoke-newer"));
@@ -222,13 +224,71 @@ public sealed class CustomLoopInvocationOperationStoreTests
 
         await first.MarkReceiptRetentionIntentAuditedAsync(request.OperationId, now.AddSeconds(1));
         File.Delete(Path.Combine(paths.CustomLoopInvocationOperationsPath, "invoke-crash-recovery.json"));
-        time.UtcNow = now + CustomLoopInvocationReceiptRetentionPolicy.OperationOwnershipWindow + TimeSpan.FromSeconds(1);
+        time.UtcNow = now + CustomLoopInvocationReceiptRetentionPolicy.StaleRecoveryWindow + TimeSpan.FromSeconds(1);
         var resumed = await second.ReserveCompletedReceiptRetentionAsync(RetentionRequest(time.UtcNow));
         var committed = await second.CommitCompletedReceiptRetentionAsync(request.OperationId, time.UtcNow.AddSeconds(1));
 
         Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.ReadyToCommit, resumed.Status);
+        Assert.Equal(time.UtcNow, resumed.Operation!.OwnershipStartedAtUtc);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, (await first.ReserveCompletedReceiptRetentionAsync(RetentionRequest(time.UtcNow))).Status);
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted, committed.State);
         Assert.Equal(1, committed.DeletedReceiptCount);
+    }
+
+    [Fact]
+    public async Task Retention_timestamps_new_ownership_when_the_reservation_is_persisted()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var requestedAtUtc = Timestamp.AddDays(31);
+        var time = new MutableTimeProvider(requestedAtUtc.AddSeconds(12));
+        var store = new CustomLoopInvocationOperationStore(paths, time);
+        await PersistCompletedAsync(store, "invoke-reservation-clock", Timestamp.AddSeconds(1));
+
+        var reserved = await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(requestedAtUtc));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.Reserved, reserved.Status);
+        Assert.Equal(requestedAtUtc, reserved.Operation!.RequestedAtUtc);
+        Assert.Equal(time.UtcNow, reserved.Operation.OwnershipStartedAtUtc);
+        Assert.Equal(time.UtcNow, reserved.Operation.UpdatedAtUtc);
+    }
+
+    [Fact]
+    public async Task Interrupted_outcome_audit_becomes_a_durable_warning_without_repeating_the_batch()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var now = Timestamp.AddDays(31);
+        var time = new MutableTimeProvider(now);
+        var first = new CustomLoopInvocationOperationStore(paths, time);
+        await PersistCompletedAsync(first, "invoke-outcome-warning", Timestamp.AddSeconds(1));
+        var request = RetentionRequest(now);
+        var reserved = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await first.ReserveCompletedReceiptRetentionAsync(request)).Operation);
+        await first.MarkReceiptRetentionIntentAuditedAsync(reserved.OperationId, now.AddSeconds(1));
+        await first.CommitCompletedReceiptRetentionAsync(reserved.OperationId, now.AddSeconds(2));
+        await first.MarkReceiptRetentionOutcomeAuditStartedAsync(reserved.OperationId, now.AddSeconds(3));
+        time.UtcNow = now + CustomLoopInvocationReceiptRetentionPolicy.StaleRecoveryWindow + TimeSpan.FromSeconds(1);
+
+        var recovered = await new CustomLoopInvocationOperationStore(paths, time).ReserveCompletedReceiptRetentionAsync(RetentionRequest(time.UtcNow));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, recovered.Status);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, recovered.Operation!.State);
+        Assert.Equal(1, recovered.Operation.DeletedReceiptCount);
+        Assert.Null(await first.GetAsync("invoke-outcome-warning"));
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await first.BeginAsync(Pending("invoke-after-outcome-warning", "new receipt"))).Status);
+    }
+
+    [Fact]
+    public async Task Receipt_quota_and_retention_reject_unrecognized_store_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopInvocationOperationsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, "unexpected.bin"), "unaccounted");
+        var store = new CustomLoopInvocationOperationStore(paths);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(Pending("invoke-unsafe-store", "prompt")));
+        await Assert.ThrowsAsync<FormatException>(() => store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(Timestamp.AddDays(31))));
     }
 
     [Fact]

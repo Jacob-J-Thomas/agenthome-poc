@@ -12,6 +12,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOperationStore
 {
+    private const string MutationLockFileName = ".custom-loop-mutations.lock";
     private const string RetentionOperationFileName = "active.json";
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -225,19 +226,52 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_root);
-            var now = _timeProvider.GetUtcNow().ToUniversalTime();
             var existing = await ReadRetentionOperationAsync(cancellationToken);
-            if (existing is not null && existing.State != CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded)
+            if (existing is not null
+                && existing.State is not CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded
+                    and not CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning)
             {
-                return existing.State switch
+                var now = _timeProvider.GetUtcNow().ToUniversalTime();
+                if (existing.State is CustomLoopInvocationReceiptRetentionOperationState.Reserved or CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded)
                 {
-                    CustomLoopInvocationReceiptRetentionOperationState.Reserved when IsInsideOwnershipWindow(existing, now) => new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, existing),
-                    CustomLoopInvocationReceiptRetentionOperationState.Reserved => new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.Reserved, existing),
-                    CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded when IsInsideOwnershipWindow(existing, now) => new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, existing),
-                    CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded => new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.ReadyToCommit, existing),
-                    CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted => new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, existing),
-                    _ => throw new FormatException("The invocation-receipt retention journal contains an unsupported state.")
-                };
+                    if (IsInsideOwnershipWindow(existing, now))
+                    {
+                        return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, existing);
+                    }
+
+                    var resumed = existing with { OwnershipStartedAtUtc = Max(existing.OwnershipStartedAtUtc, now), UpdatedAtUtc = Max(existing.UpdatedAtUtc, now) };
+                    await WriteRetentionOperationAsync(resumed, cancellationToken);
+                    var resumedStatus = resumed.State == CustomLoopInvocationReceiptRetentionOperationState.Reserved
+                        ? CustomLoopInvocationReceiptRetentionReservationStatus.Reserved
+                        : CustomLoopInvocationReceiptRetentionReservationStatus.ReadyToCommit;
+                    return new CustomLoopInvocationReceiptRetentionReservationResult(resumedStatus, resumed);
+                }
+
+                if (existing.State == CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted)
+                {
+                    if (IsInsideOwnershipWindow(existing, now))
+                    {
+                        return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, existing);
+                    }
+
+                    var warned = existing with { UpdatedAtUtc = Max(existing.UpdatedAtUtc, now), State = CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning };
+                    await WriteRetentionOperationAsync(warned, cancellationToken);
+                    return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, warned);
+                }
+
+                if (existing.State == CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted)
+                {
+                    if (IsInsideOwnershipWindow(existing, now))
+                    {
+                        return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, existing);
+                    }
+
+                    var resumed = existing with { OwnershipStartedAtUtc = Max(existing.OwnershipStartedAtUtc, now), UpdatedAtUtc = Max(existing.UpdatedAtUtc, now) };
+                    await WriteRetentionOperationAsync(resumed, cancellationToken);
+                    return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, resumed);
+                }
+
+                throw new FormatException("The invocation-receipt retention journal contains an unsupported state.");
             }
 
             var candidates = new List<CustomLoopInvocationReceiptRetentionCandidate>();
@@ -260,7 +294,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.NothingEligible, null);
             }
 
-            var reservedAtUtc = now < request.RequestedAtUtc ? request.RequestedAtUtc : now;
+            var persistedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
+            var reservedAtUtc = persistedAtUtc < request.RequestedAtUtc ? request.RequestedAtUtc : persistedAtUtc;
             var retention = new CustomLoopInvocationReceiptRetentionOperation(
                 CustomLoopInvocationReceiptRetentionOperation.CurrentSchemaVersion,
                 request.OperationId,
@@ -268,6 +303,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 request.Surface,
                 request.RequestedAtUtc,
                 request.ReplayCutoffUtc,
+                reservedAtUtc,
                 reservedAtUtc,
                 ordered,
                 CustomLoopInvocationReceiptRetentionOperationState.Reserved,
@@ -352,7 +388,17 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
-        return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded, cancellationToken);
+        return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded, cancellationToken);
+    }
+
+    public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+    {
+        return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, cancellationToken);
+    }
+
+    public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+    {
+        return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, cancellationToken);
     }
 
     private async Task<CustomLoopInvocationOperation?> ReadIfExistsAsync(string operationId, CancellationToken cancellationToken)
@@ -451,10 +497,36 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             return [];
         }
 
-        return Directory.EnumerateFiles(_root, "*.json", SearchOption.TopDirectoryOnly)
-            .Select(path => _pathGuard.GetFilePath(_root, Path.GetFileName(path)))
-            .OrderBy(path => path, StringComparer.Ordinal)
-            .ToArray();
+        if (Directory.EnumerateDirectories(_root, "*", SearchOption.TopDirectoryOnly).Any())
+        {
+            throw new FormatException("Custom-loop invocation receipt storage cannot contain subdirectories.");
+        }
+
+        var paths = new List<string>();
+        foreach (var path in Directory.EnumerateFiles(_root, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.Ordinal))
+        {
+            var fileName = Path.GetFileName(path);
+            if (string.Equals(fileName, MutationLockFileName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var operationId = Path.GetFileNameWithoutExtension(fileName);
+            if (!string.Equals(Path.GetExtension(fileName), ".json", StringComparison.OrdinalIgnoreCase)
+                || !CustomLoopArtifactIdentifier.IsValid(operationId, CustomLoopLimits.MaxMutationOperationIdCharacters))
+            {
+                throw new FormatException($"Custom-loop invocation receipt artifact `{path}` has an unsafe filename.");
+            }
+
+            paths.Add(_pathGuard.GetFilePath(_root, fileName));
+        }
+
+        if (paths.Count > CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace)
+        {
+            throw new FormatException($"Custom-loop invocation receipt storage exceeds its explicit {CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace}-artifact limit.");
+        }
+
+        return paths;
     }
 
     private async Task<CustomLoopInvocationReceiptRetentionOperation> AdvanceRetentionOperationAsync(
@@ -515,6 +587,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
 
         var expectedPath = _pathGuard.GetFilePath(_retentionRoot, RetentionOperationFileName);
+        if (Directory.EnumerateDirectories(_retentionRoot, "*", SearchOption.TopDirectoryOnly).Any())
+        {
+            throw new FormatException("Invocation-receipt retention storage cannot contain subdirectories.");
+        }
+
         var files = Directory.EnumerateFiles(_retentionRoot, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.Ordinal).ToArray();
         if (files.Length == 0)
         {
@@ -599,9 +676,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
         RequireUtc(operation.RequestedAtUtc, nameof(operation.RequestedAtUtc));
         RequireUtc(operation.ReplayCutoffUtc, nameof(operation.ReplayCutoffUtc));
+        RequireUtc(operation.OwnershipStartedAtUtc, nameof(operation.OwnershipStartedAtUtc));
         RequireUtc(operation.UpdatedAtUtc, nameof(operation.UpdatedAtUtc));
         if (operation.ReplayCutoffUtc != operation.RequestedAtUtc - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration
-            || operation.UpdatedAtUtc < operation.RequestedAtUtc
+            || operation.OwnershipStartedAtUtc < operation.RequestedAtUtc
+            || operation.UpdatedAtUtc < operation.OwnershipStartedAtUtc
             || operation.Candidates is not { Length: > 0 and <= CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace })
         {
             throw new FormatException("Invocation-receipt retention chronology or candidate count is invalid.");
@@ -632,7 +711,10 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             prior = candidate;
         }
 
-        var committed = operation.State is CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded;
+        var committed = operation.State is CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted
+            or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted
+            or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded
+            or CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning;
         var expectedBytes = operation.Candidates.Sum(candidate => candidate.ArtifactUtf8Bytes);
         if (committed
             ? operation.DeletedReceiptCount != operation.Candidates.Length || operation.DeletedReceiptUtf8Bytes != expectedBytes
@@ -644,7 +726,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
     private static bool IsInsideOwnershipWindow(CustomLoopInvocationReceiptRetentionOperation operation, DateTimeOffset now)
     {
-        return operation.UpdatedAtUtc > now - CustomLoopInvocationReceiptRetentionPolicy.OperationOwnershipWindow;
+        return operation.OwnershipStartedAtUtc > now - CustomLoopInvocationReceiptRetentionPolicy.StaleRecoveryWindow;
     }
 
     private static string Hash(ReadOnlySpan<byte> content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();

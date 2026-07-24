@@ -1,6 +1,8 @@
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.TraceRetention;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -8,6 +10,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
@@ -15,6 +18,9 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
@@ -99,6 +105,27 @@ public sealed class CustomLoopRuntimeTests
         Assert.Null(replay.Run);
         Assert.Empty(replay.ValidationErrors);
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Invocation_quota_pressure_prunes_expired_completed_receipts_before_accepting_a_new_operation()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteExpiredInvocationReceiptQuotaAsync(paths);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-receipt-retention", "quota recovery");
+
+        var response = await runtime.InvokeCustomLoopAsync(input);
+
+        Assert.Equal("NotFound", response.AdmissionStatus);
+        Assert.NotNull(await new CustomLoopInvocationOperationStore(paths).GetAsync(input.OperationId));
+        Assert.Null(await new CustomLoopInvocationOperationStore(paths).GetAsync("invoke-expired-00000"));
+        var audit = await new AuditLog(paths).ReadTailAsync(20);
+        Assert.Contains(audit, item => item.Action == AuditSchema.Actions.LoopInvocationReceiptRetentionIntent && item.Outcome == AuditSchema.Outcomes.Requested);
+        Assert.Contains(audit, item => item.Action == AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome && item.Outcome == AuditSchema.Outcomes.Succeeded);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopInvocationReceiptRetentionPath, "active.json")));
     }
 
     [Fact]
@@ -1050,6 +1077,35 @@ public sealed class CustomLoopRuntimeTests
             null,
             [],
             "The invocation is pending.");
+    }
+
+    private static async Task WriteExpiredInvocationReceiptQuotaAsync(WorkspacePaths paths)
+    {
+        Directory.CreateDirectory(paths.CustomLoopInvocationOperationsPath);
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true,
+            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
+        };
+        var completedAtUtc = DateTimeOffset.UtcNow.ToUniversalTime() - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration - TimeSpan.FromDays(1);
+        for (var index = 0; index < CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace; index++)
+        {
+            var operationId = $"invoke-expired-{index:D5}";
+            var input = new LoopRunInvocationInput("loop-expired", 1, new string('b', CustomLoopLimits.Sha256HexCharacters), operationId, "expired quota receipt");
+            var completed = PendingInvocation(input, "default") with
+            {
+                BindingState = CustomLoopInvocationBindingState.LegacyConversation,
+                InvokingConversationId = new string('c', CustomLoopLimits.Sha256HexCharacters),
+                CreatedAtUtc = completedAtUtc.AddSeconds(-1),
+                UpdatedAtUtc = completedAtUtc,
+                State = CustomLoopInvocationOperationState.Complete,
+                Outcome = CustomLoopInvocationOutcome.Rejected,
+                AdmissionStatus = CustomLoopAdmissionStatusNames.NotFound,
+                Detail = "The expired invocation was rejected before a run was created."
+            };
+            var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
+            await File.WriteAllTextAsync(path, JsonSerializer.Serialize(completed, jsonOptions));
+        }
     }
 
     private static async Task PersistRejectedReceiptAsync(WorkspacePaths paths, LoopRunInvocationInput input, string roleId, string runId, CustomLoopAdmissionStatus admissionStatus)
