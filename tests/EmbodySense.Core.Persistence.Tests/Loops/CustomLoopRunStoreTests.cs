@@ -651,12 +651,16 @@ public sealed class CustomLoopRunStoreTests
 
         var store = new CustomLoopRunStore(paths);
         var quota = await store.GetTraceQuotaAsync();
+        var recent = await store.ListRecentAsync(1);
+        var nonterminal = await store.ListNonterminalAsync();
         var extra = CreateRun("loop-extra", "run-extra", "invoke-extra");
         var result = await store.CreateAsync(extra);
 
         Assert.Equal(maximumReservations, quota.ActiveReservationCount);
         Assert.Equal(CustomLoopLimits.MaxRunTraceWorkspaceUtf8Bytes, quota.AccountedTraceUtf8Bytes);
         Assert.Equal(0, quota.AvailableAccountedUtf8Bytes);
+        Assert.Equal("run-000", Assert.Single(recent).Id);
+        Assert.Equal(maximumReservations, nonterminal.Count);
         Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, result.Status);
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, extra.LoopId, extra.Id + ".json")));
         Assert.Equal(maximumReservations, Directory.EnumerateFiles(paths.CustomLoopRunsPath, "*.json", SearchOption.AllDirectories).Count());
