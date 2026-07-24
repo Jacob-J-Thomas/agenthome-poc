@@ -209,7 +209,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     }
 
     [Fact]
-    public async Task Rejected_completion_round_trips_bounded_validation_errors_and_migrates_scalar_receipts()
+    public async Task Rejected_completion_round_trips_bounded_validation_errors()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -237,17 +237,22 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
         Assert.Equal(errors, loaded.ValidationErrors);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.CompleteAsync(rejected)).Status);
+    }
 
-        var legacyPending = Pending("invoke-legacy-scalar", "prompt");
-        await store.BeginAsync(legacyPending);
-        var legacyPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, legacyPending.OperationId + ".json");
-        var legacy = JsonNode.Parse(await File.ReadAllTextAsync(legacyPath))!.AsObject();
-        legacy["schemaVersion"] = 1;
-        legacy.Remove("validationErrors");
-        await File.WriteAllTextAsync(legacyPath, legacy.ToJsonString());
-        var migrated = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(legacyPending.OperationId));
-        Assert.Equal(CustomLoopInvocationOperation.CurrentSchemaVersion, migrated.SchemaVersion);
-        Assert.Empty(migrated.ValidationErrors);
+    [Fact]
+    public async Task Receipt_without_structured_validation_errors_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-incompatible-shape", "prompt");
+        await store.BeginAsync(pending);
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        persisted.Remove("validationErrors");
+        await File.WriteAllTextAsync(path, persisted.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
     }
 
     [Fact]

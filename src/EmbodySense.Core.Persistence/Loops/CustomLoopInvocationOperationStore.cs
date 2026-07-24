@@ -10,7 +10,6 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOperationStore
 {
-    private const int LegacyScalarReceiptSchemaVersion = 1;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -146,7 +145,6 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             throw new FormatException($"Custom-loop invocation operation `{path}` is invalid JSON.", exception);
         }
 
-        operation = NormalizeSchema(operation);
         Validate(operation, requirePending: operation?.State == CustomLoopInvocationOperationState.Pending);
         if (!string.Equals(operation!.OperationId, operationId, StringComparison.Ordinal))
         {
@@ -249,16 +247,6 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && string.Equals(left.RunId, right.RunId, StringComparison.Ordinal)
             && left.ValidationErrors.SequenceEqual(right.ValidationErrors)
             && string.Equals(left.Detail, right.Detail, StringComparison.Ordinal);
-    }
-
-    private static CustomLoopInvocationOperation? NormalizeSchema(CustomLoopInvocationOperation? operation)
-    {
-        if (operation is { SchemaVersion: LegacyScalarReceiptSchemaVersion, ValidationErrors: null })
-        {
-            return operation with { SchemaVersion = CustomLoopInvocationOperation.CurrentSchemaVersion, ValidationErrors = [] };
-        }
-
-        return operation;
     }
 
     private static void Validate(CustomLoopInvocationOperation? operation, bool requirePending)

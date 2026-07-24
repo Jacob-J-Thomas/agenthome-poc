@@ -112,7 +112,7 @@ public sealed class CustomLoopRuntimeTests
         var rejected = await runtime.InvokeCustomLoopAsync(input);
         var replay = await runtime.InvokeCustomLoopAsync(input);
 
-        Assert.Equal("Conflict", rejected.AdmissionStatus);
+        Assert.Equal("Invalid", rejected.AdmissionStatus);
         var error = Assert.Single(rejected.ValidationErrors, item => item.Code == "definition_conflict");
         Assert.Equal(error, Assert.Single(replay.ValidationErrors, item => item.Code == "definition_conflict"));
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
