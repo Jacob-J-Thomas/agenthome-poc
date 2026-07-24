@@ -500,7 +500,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             UpdatedAtUtc = warning.TimestampUtc,
             Events = [.. current.Events, warning]
         };
-        var serialized = SerializeBounded(candidate, artifact.PersistedBytes);
+        var serialized = SerializeBounded(candidate);
         ValidateReservedTraceCapacity(current, candidate, artifact.PersistedUtf8Bytes, serialized.LongLength);
         await WriteArtifactAsync(matches[0].Path, serialized, overwrite: true, cancellationToken);
         return CustomLoopRunStoreResult.Updated(candidate);
@@ -556,7 +556,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new FormatException($"Custom loop run update is invalid. {details}");
         }
 
-        var serialized = SerializeBounded(run, artifact.PersistedBytes);
+        var serialized = SerializeBounded(run);
         ValidateReservedTraceCapacity(current, run, artifact.PersistedUtf8Bytes, serialized.LongLength);
 
         await WriteArtifactAsync(matches[0].Path, serialized, overwrite: true, cancellationToken);
@@ -584,12 +584,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return true;
         }
 
-        return HasSufficientTraceCapacityForDispatch(candidate, artifact.PersistedBytes);
+        return HasSufficientTraceCapacityForDispatch(candidate);
     }
 
-    private static bool HasSufficientTraceCapacityForDispatch(CustomLoopRunRecord candidate, byte[]? previousEnvelope = null)
+    private static bool HasSufficientTraceCapacityForDispatch(CustomLoopRunRecord candidate)
     {
-        var serialized = CustomLoopRunArtifactCodec.Encode(candidate, previousEnvelope);
+        var serialized = CustomLoopRunArtifactCodec.Encode(candidate);
         return serialized.LongLength <= CustomLoopLimits.MaxRunTraceUtf8Bytes
             && CalculateRequiredTraceCapacity(candidate, serialized.LongLength) <= CustomLoopLimits.MaxRunTraceUtf8Bytes;
     }
@@ -858,9 +858,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         return content;
     }
 
-    private static byte[] SerializeBounded(CustomLoopRunRecord run, byte[]? previousEnvelope = null)
+    private static byte[] SerializeBounded(CustomLoopRunRecord run)
     {
-        var content = CustomLoopRunArtifactCodec.Encode(run, previousEnvelope);
+        var content = CustomLoopRunArtifactCodec.Encode(run);
         if (content.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
             throw new FormatException($"Custom loop run `{run.Id}` exceeds the {CustomLoopLimits.MaxRunTraceUtf8Bytes}-byte trace limit.");
