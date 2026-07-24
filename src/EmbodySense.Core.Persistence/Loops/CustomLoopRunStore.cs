@@ -476,7 +476,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var completedAtUtc = run.CompletedAtUtc ?? throw new FormatException("A terminal custom-loop run must have a completion timestamp before trace deletion.");
-        var deletedAtUtc = operation.RequestedAtUtc < completedAtUtc ? completedAtUtc : operation.RequestedAtUtc;
+        var mutationAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
+        var deletedAtUtc = mutationAtUtc < completedAtUtc ? completedAtUtc : mutationAtUtc;
         var tombstone = new CustomLoopTraceTombstone(
             CustomLoopTraceTombstone.CurrentSchemaVersion,
             CustomLoopTraceTombstone.CurrentArtifactKind,

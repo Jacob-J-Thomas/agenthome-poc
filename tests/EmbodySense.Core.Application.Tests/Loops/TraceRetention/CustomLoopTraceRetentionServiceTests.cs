@@ -47,11 +47,41 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var result = await new CustomLoopTraceRetentionService(store, audit).DeleteAsync(Request());
 
         Assert.Equal(CustomLoopTraceDeletionStatus.AuditUnavailable, result.Status);
+        Assert.True(result.IsOutcomeCommitted);
         Assert.Equal(0, store.DeleteCalls);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.AuditUnavailable, store.Operation!.Outcome);
         Assert.Equal(CustomLoopTraceDeletionIntegrity.Complete, store.Operation.Integrity);
         Assert.Equal(new[] { AuditSchema.Actions.LoopTraceDeletionOutcome }, audit.Events.Select(item => item.Action));
         Assert.Equal(new[] { CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted, CustomLoopTraceDeletionIntegrity.Complete }, store.MarkedIntegrities);
+    }
+
+    [Fact]
+    public async Task Intent_audit_failure_with_an_ambiguous_rejection_receipt_preserves_the_operation_for_recovery()
+    {
+        var store = new RecordingStore(Inspection(), null) { CommitAuditFailureException = new IOException("receipt response lost") };
+        var audit = new RecordingAuditLog(failOnAttempt: 1);
+
+        var result = await new CustomLoopTraceRetentionService(store, audit).DeleteAsync(Request());
+
+        Assert.Equal(CustomLoopTraceDeletionStatus.AuditUnavailable, result.Status);
+        Assert.False(result.IsOutcomeCommitted);
+        Assert.Equal(CustomLoopTraceDeletionOperationState.PendingMutation, store.Operation!.State);
+        Assert.Equal(0, store.DeleteCalls);
+        Assert.Contains("requires recovery", result.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Delayed_reservation_response_cannot_extend_the_owner_past_its_durable_deadline()
+    {
+        var store = new RecordingStore(Inspection(), null);
+        var audit = new RecordingAuditLog();
+
+        var result = await new CustomLoopTraceRetentionService(store, audit, new SequencedTimeProvider(Timestamp.AddMinutes(3), Timestamp.AddMinutes(3).AddSeconds(31))).DeleteAsync(Request());
+
+        Assert.Equal(CustomLoopTraceDeletionStatus.AuditUnavailable, result.Status);
+        Assert.True(result.IsOutcomeCommitted);
+        Assert.Equal(0, store.DeleteCalls);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.AuditUnavailable, store.Operation!.Outcome);
     }
 
     [Fact]
@@ -75,6 +105,8 @@ public sealed class CustomLoopTraceRetentionServiceTests
         Assert.Equal(1, audit.Events.Count(item => item.Action == AuditSchema.Actions.LoopTraceDeletionOutcome));
         Assert.Equal(1, store.ReserveCalls);
         Assert.Equal(1, store.DeleteCalls);
+        Assert.True(audit.IntentCancellationToken.CanBeCanceled);
+        Assert.Equal(audit.IntentCancellationToken, store.DeletionCancellationToken);
     }
 
     [Fact]
@@ -618,10 +650,13 @@ public sealed class CustomLoopTraceRetentionServiceTests
         public Task IntentStarted => _intentStarted.Task;
         public List<AuditEvent> Events { get; } = [];
 
+        public CancellationToken IntentCancellationToken { get; private set; }
+
         public async Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
         {
             if (auditEvent.Action == AuditSchema.Actions.LoopTraceDeletionIntent)
             {
+                IntentCancellationToken = cancellationToken;
                 _intentStarted.TrySetResult();
                 await _releaseIntent.Task.WaitAsync(cancellationToken);
             }
@@ -643,6 +678,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
 
         public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             Attempts++;
             if (_failOnAttempt == Attempts)
             {
@@ -677,6 +713,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         public Exception? ReserveException { get; set; }
         public bool ReserveBeforeThrow { get; set; }
         public Exception? DeleteException { get; set; }
+        public Exception? CommitAuditFailureException { get; set; }
         public bool DeleteExceptionOnlyOnFirstAttempt { get; set; }
         public int? ThrowOnMarkAttempt { get; set; }
         public Queue<CustomLoopTraceDeletionAuditMarkStatus> MarkStatuses { get; } = [];
@@ -688,6 +725,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         public int QuotaCalls { get; private set; }
         public int MarkAttempts { get; private set; }
         public bool RecoveryReusedMutationToken { get; private set; }
+        public CancellationToken DeletionCancellationToken => _mutationToken;
         private CancellationToken _mutationToken;
 
         public Task<CustomLoopTraceQuota> GetTraceQuotaAsync(CancellationToken cancellationToken = default)
@@ -754,6 +792,11 @@ public sealed class CustomLoopTraceRetentionServiceTests
 
         public Task<CustomLoopTraceDeletionStoreResult> CommitTraceDeletionAuditFailureAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
         {
+            if (CommitAuditFailureException is not null)
+            {
+                throw CommitAuditFailureException;
+            }
+
             if (Operation is null)
             {
                 return Task.FromResult(new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Unknown, null, CustomLoopTraceDeletionIntegrity.Unknown));
@@ -825,5 +868,16 @@ public sealed class CustomLoopTraceRetentionServiceTests
     private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => value;
+    }
+
+    private sealed class SequencedTimeProvider(params DateTimeOffset[] values) : TimeProvider
+    {
+        private int _index;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            var index = Math.Min(Interlocked.Increment(ref _index) - 1, values.Length - 1);
+            return values[index];
+        }
     }
 }

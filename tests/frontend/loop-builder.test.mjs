@@ -908,7 +908,7 @@ test("terminal trace deletion rotates its operation after a durable audit-unavai
   const operationIds = [];
   server.on("POST", `/api/loop-runs/${run.id}/trace/delete`, ({ body }) => {
     operationIds.push(body.operationId);
-    return { status: 503, body: { status: "AuditUnavailable", isCommitted: false, detail: "The intent audit was unavailable.", tombstone: null } };
+    return { status: 503, body: { status: "AuditUnavailable", isCommitted: false, isOutcomeCommitted: true, detail: "The intent audit was unavailable.", tombstone: null } };
   });
   const app = await loadLoopBuilder({ server });
   await selectCustomLoop(app);
@@ -922,6 +922,31 @@ test("terminal trace deletion rotates its operation after a durable audit-unavai
   assert.equal(operationIds.length, 2);
   assert.notEqual(operationIds[0], operationIds[1]);
   assert.match(app.elements.validationBanner.textContent, /intent audit was unavailable/);
+});
+
+test("terminal trace deletion preserves its operation while audit rejection remains ambiguous", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  server.runs = [{ id: run.id, loopId: run.loopId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: run.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null }];
+  server.runDetails.set(run.id, run);
+  server.traceDetails.set(run.id, createTraceSnapshot(run));
+  const operationIds = [];
+  server.on("POST", `/api/loop-runs/${run.id}/trace/delete`, ({ body }) => {
+    operationIds.push(body.operationId);
+    return { status: 503, body: { status: "AuditUnavailable", isCommitted: false, isOutcomeCommitted: false, detail: "The durable rejection requires recovery.", tombstone: null } };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  const deleteButton = app.elements.runActions.children.find(child => child.textContent === "Delete sensitive trace");
+  await deleteButton.click();
+  await deleteButton.click();
+
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[0], operationIds[1]);
+  assert.match(app.elements.validationBanner.textContent, /requires recovery/);
 });
 
 test("Run confirmation exposes real governed limits and never reintroduces fixed context", async () => {

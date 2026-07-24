@@ -109,10 +109,12 @@ public sealed class LoopRunInspectionFacadeTests
 
         Assert.Equal("Deleted", deleted.Status);
         Assert.True(deleted.IsCommitted);
+        Assert.True(deleted.IsOutcomeCommitted);
         Assert.Equal("actor-user", deleted.Tombstone!.DeletionActor);
         Assert.Equal("web", deleted.Tombstone.DeletionSurface);
         Assert.Equal("Complete", deleted.Tombstone.OutcomeIntegrity);
         Assert.Equal("Replayed", replay.Status);
+        Assert.True(replay.IsOutcomeCommitted);
         Assert.True(tombstone!.IsDeleted);
         Assert.True(recent.IsDeleted);
         Assert.Equal(terminal.Id, recent.Id);

@@ -125,6 +125,26 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Deletion_tombstone_uses_the_actual_post_intent_mutation_time()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var time = new MutableTimeProvider(Timestamp.AddHours(1));
+        var store = new CustomLoopRunStore(paths, time);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var mutation = Mutation(Request(terminal.Id, inspection.PersistedArtifactHash));
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
+        time.UtcNow = Timestamp.AddHours(2);
+
+        var deleted = await store.DeleteTerminalTraceAsync(mutation);
+
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, deleted.Status);
+        Assert.Equal(time.UtcNow, deleted.Tombstone!.DeletedAtUtc);
+        Assert.True(deleted.Tombstone.DeletedAtUtc > mutation.RequestedAtUtc);
+    }
+
+    [Fact]
     public async Task Intent_audit_failure_completion_is_durable_and_does_not_replace_trace_content()
     {
         using var workspace = new TestWorkspace();
@@ -243,7 +263,9 @@ public sealed class CustomLoopTraceRetentionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new CustomLoopRunStore(paths);
+        var deletionTime = Timestamp.AddHours(1);
+        var timeProvider = new FixedTimeProvider(deletionTime);
+        var store = new CustomLoopRunStore(paths, timeProvider);
         var terminal = await CreateTerminalRunAsync(store);
         var inspection = await store.InspectTraceAsync(terminal.Id);
         Assert.NotNull(inspection);
@@ -253,14 +275,14 @@ public sealed class CustomLoopTraceRetentionStoreTests
         await WriteOperationAsync(paths, pending);
         var retry = mutation with { RequestedAtUtc = mutation.RequestedAtUtc.AddMinutes(10) };
 
-        var recoveredBeforeMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(retry);
+        var recoveredBeforeMutation = await new CustomLoopRunStore(paths, timeProvider).DeleteTerminalTraceAsync(retry);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, recoveredBeforeMutation.Status);
         var firstTombstone = (await store.InspectTraceAsync(terminal.Id))!.Tombstone;
         Assert.NotNull(firstTombstone);
-        Assert.Equal(pending.RequestedAtUtc, firstTombstone.DeletedAtUtc);
+        Assert.Equal(deletionTime, firstTombstone.DeletedAtUtc);
 
         await WriteOperationAsync(paths, pending);
-        var recoveredAfterMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(retry);
+        var recoveredAfterMutation = await new CustomLoopRunStore(paths, timeProvider).DeleteTerminalTraceAsync(retry);
 
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, recoveredAfterMutation.Status);
         Assert.Equal(firstTombstone, recoveredAfterMutation.Tombstone);
@@ -451,6 +473,13 @@ public sealed class CustomLoopTraceRetentionStoreTests
     private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => timestamp;
+    }
+
+    private sealed class MutableTimeProvider(DateTimeOffset timestamp) : TimeProvider
+    {
+        public DateTimeOffset UtcNow { get; set; } = timestamp;
+
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 
     private static string Hash(byte[] content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
