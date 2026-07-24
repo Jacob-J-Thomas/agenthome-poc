@@ -202,6 +202,29 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Validate_requires_workspace_reinitialization_for_the_pre_role_identity_manifest()
+    {
+        var seed = CreateRun();
+        var legacyManifest = seed.ContextSnapshot.SourceManifest.ToArray();
+        legacyManifest[1] = legacyManifest[1] with { SourceId = "agent", SourcePath = "C:/workspace/.agent/AGENT.md" };
+        legacyManifest[2] = legacyManifest[2] with
+        {
+            SourceType = CustomLoopContextSource.RoleInstruction,
+            Provenance = CustomLoopContextProvenance.WorkspaceRoleFile
+        };
+        legacyManifest[3] = legacyManifest[3] with
+        {
+            SourceType = CustomLoopContextSource.RoleInstruction,
+            Provenance = CustomLoopContextProvenance.WorkspaceRoleFile
+        };
+        var legacySnapshot = CustomLoopContextSnapshotHash.Apply(seed.ContextSnapshot with { SourceManifest = legacyManifest });
+
+        var validation = CustomLoopRunValidator.Validate(seed with { ContextSnapshot = legacySnapshot });
+
+        AssertCodes(validation, "invalid_workspace_context_classification");
+    }
+
+    [Fact]
     public void Validate_rejects_non_monotonic_or_incomplete_events_and_context_evidence()
     {
         var seed = CreateRun();

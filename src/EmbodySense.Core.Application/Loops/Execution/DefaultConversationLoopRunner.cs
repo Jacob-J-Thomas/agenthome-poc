@@ -7,6 +7,8 @@ using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Diagnostics;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Runtime.Models;
 
@@ -79,8 +81,22 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         var inferenceContextMessages = _conversationState.ContextMessages
             .Concat([new RuntimeContextMessage(userMessage, RuntimeContextSource.CurrentTurnInput, "Current user input being evaluated by the active loop before provider dispatch.")])
             .ToArray();
-        var inferenceMessages = inferenceContextMessages.Select(message => message.Message).ToArray();
-        var inferenceRequest = new LlmInferenceRequest(inferenceMessages);
+        var trustedStartupInstructions = inferenceContextMessages
+            .Where(message => message.Source == RuntimeContextSource.StartupContext && message.Message.Role == LlmMessageRole.System)
+            .Select((message, index) => new EmbodySenseTrustedInstruction($"startup-context-{index + 1}", message.Message.Content))
+            .ToArray();
+        var inferenceMessages = inferenceContextMessages
+            .Where(message => message.Source != RuntimeContextSource.StartupContext || message.Message.Role != LlmMessageRole.System)
+            .Select(message => message.Message)
+            .ToArray();
+        var availableToolCommands = Enum.GetValues<ToolCommand>()
+            .Where(command => LoopCapabilityIds.AllowsWorkspaceCommand(_loopDefinition.CapabilityIds, command))
+            .ToArray();
+        var instructionContext = new LlmInferenceInstructionContext(
+            EmbodySenseDeveloperInstructions.Capture(availableToolCommands),
+            trustedStartupInstructions,
+            preserveExactLogicalContext: false);
+        var inferenceRequest = new LlmInferenceRequest(inferenceMessages, instructionContext: instructionContext);
         var runId = CreateRunId();
         var runIdentity = new LoopRunIdentity(_loopDefinition.Id, runId, _loopDefinition.RoleId);
         var run = LoopRunRecord.Started(

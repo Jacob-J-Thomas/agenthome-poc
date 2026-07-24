@@ -1,4 +1,3 @@
-using System.Text;
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Common.Context;
 using EmbodySense.Core.Common.Inference.Models;
@@ -22,32 +21,31 @@ public sealed class AgentContextProvider : IAgentContextProvider
     {
         ArgumentNullException.ThrowIfNull(paths);
 
-        var sections = new List<string>();
         var documents = await _contextStore.LoadDocumentsAsync(paths, cancellationToken);
-        foreach (var document in documents)
-        {
-            if (string.IsNullOrWhiteSpace(document.Content))
-            {
-                continue;
-            }
-
-            sections.Add(FormatSection(document.Kind, document.DisplayPath, document.Content));
-        }
-
-        if (sections.Count == 0)
+        var availableDocuments = documents.Where(document => !string.IsNullOrWhiteSpace(document.Content)).ToArray();
+        if (availableDocuments.Length == 0)
         {
             return [];
         }
 
-        var builder = new StringBuilder();
-        builder.AppendLine("EmbodySense loaded the following startup context from trusted role instructions, durable agent identity, and lower-authority workspace state.");
-        builder.AppendLine("Follow the current user request and higher-priority instructions first.");
-        builder.AppendLine("Durable memory policy: treat `.agent/MEMORY.md` as the primary place to store, update, create, and retrieve most memories.");
-        builder.AppendLine("Query conversation history only for transcript-specific evidence such as exact wording, chronology, or context that has not yet been distilled into `.agent/MEMORY.md`.");
-        builder.AppendLine();
-        builder.AppendLine(string.Join(Environment.NewLine, sections));
+        var messages = new List<LlmMessage>
+        {
+            LlmMessage.System("""
+                EmbodySense loaded startup context from trusted role instructions, durable agent identity, and lower-authority workspace state.
+                Follow the current user request and higher-priority instructions first.
+                Durable memory policy: treat `.agent/MEMORY.md` as the primary place to store, update, create, and retrieve most memories.
+                Query conversation history only for transcript-specific evidence such as exact wording, chronology, or context that has not yet been distilled into `.agent/MEMORY.md`.
+                """)
+        };
+        foreach (var document in availableDocuments)
+        {
+            var section = FormatSection(document.Kind, document.DisplayPath, document.Content);
+            messages.Add(document.Kind is WorkspaceContextDocumentKind.RoleInstruction or WorkspaceContextDocumentKind.AgentIdentity
+                ? LlmMessage.System(section)
+                : LlmMessage.User(section));
+        }
 
-        return [LlmMessage.System(builder.ToString().Trim())];
+        return messages;
     }
 
     private static string FormatSection(WorkspaceContextDocumentKind kind, string displayPath, string content)
