@@ -342,9 +342,9 @@ public static class CustomLoopRunValidator
         var expectedWorkspaceSources = new[]
         {
             (Id: "nearest-agents", PathSuffix: "AGENTS.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
-            (Id: "agent", PathSuffix: ".agent/AGENT.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
-            (Id: "soul", PathSuffix: ".agent/SOUL.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
-            (Id: "personality", PathSuffix: ".agent/PERSONALITY.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "role", PathSuffix: ".agent/ROLE.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "soul", PathSuffix: ".agent/SOUL.md", Source: CustomLoopContextSource.AgentIdentity, Provenance: CustomLoopContextProvenance.WorkspaceAgentIdentityFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "personality", PathSuffix: ".agent/PERSONALITY.md", Source: CustomLoopContextSource.AgentIdentity, Provenance: CustomLoopContextProvenance.WorkspaceAgentIdentityFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
             (Id: "context", PathSuffix: ".agent/CONTEXT.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
             (Id: "memory", PathSuffix: ".agent/MEMORY.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
             (Id: "models", PathSuffix: ".agent/models.json", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User)
@@ -375,7 +375,7 @@ public static class CustomLoopRunValidator
 
             if (!Enum.IsDefined(source.SourceType) || source.SourceType is CustomLoopContextSource.Unknown or CustomLoopContextSource.HarnessGovernance or CustomLoopContextSource.RunMetadata or CustomLoopContextSource.NodeInstruction or CustomLoopContextSource.TriggerPrompt or CustomLoopContextSource.EarlierRetainedOutput or CustomLoopContextSource.PreviousIterationResult)
             {
-                Add(errors, "unsupported_manifest_source_type", $"{field}.sourceType", "Admission manifest may contain only role instruction, contextual state, and invoking-conversation sources.");
+                Add(errors, "unsupported_manifest_source_type", $"{field}.sourceType", "Admission manifest may contain only role instruction, agent identity, contextual state, and invoking-conversation sources.");
             }
 
             if (!Enum.IsDefined(source.Provenance) || source.Provenance == CustomLoopContextProvenance.Unknown)
@@ -415,7 +415,7 @@ public static class CustomLoopRunValidator
                 var expected = expectedWorkspaceSources[index];
                 if (!string.Equals(source.SourceId, expected.Id, StringComparison.Ordinal) || !HasPathSuffix(source.SourcePath, expected.PathSuffix) || source.SourceType != expected.Source || source.Provenance != expected.Provenance || source.TrustClass != expected.Trust || source.Role != expected.Role)
                 {
-                    Add(errors, "invalid_workspace_context_classification", field, "Workspace sources must preserve the designated AGENTS, role-instruction, and contextual-state order and trust classes.");
+                    Add(errors, "invalid_workspace_context_classification", field, "Workspace sources must preserve the designated AGENTS, role-instruction, agent-identity, and contextual-state order and trust classes.");
                 }
             }
             else if (source.SourceType != CustomLoopContextSource.InvokingConversation || source.Provenance != CustomLoopContextProvenance.LogicalConversation || source.TrustClass != CustomLoopContextTrustClass.UntrustedData || source.Role != LlmMessageRole.User)
@@ -423,7 +423,7 @@ public static class CustomLoopRunValidator
                 Add(errors, "invalid_conversation_context_classification", field, "Sources after the seven workspace entries must be lower-authority logical invoking-conversation data.");
             }
 
-            if (source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.ContextualState && source.UsedCharacterCount > CustomLoopLimits.MaxInstructionCharacters)
+            if (source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity or CustomLoopContextSource.ContextualState && source.UsedCharacterCount > CustomLoopLimits.MaxInstructionCharacters)
             {
                 Add(errors, "workspace_context_source_too_large", $"{field}.usedCharacterCount", $"A workspace context source cannot exceed {CustomLoopLimits.MaxInstructionCharacters} admitted characters.");
             }

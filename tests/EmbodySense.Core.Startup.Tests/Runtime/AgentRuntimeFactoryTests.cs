@@ -74,7 +74,7 @@ public sealed class AgentRuntimeFactoryTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "AGENT.md"), "runtime guide");
+        await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "ROLE.md"), "runtime guide");
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
         var chunks = new List<string>();
 
@@ -347,7 +347,7 @@ public sealed class AgentRuntimeFactoryTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "AGENT.md"), "runtime guide");
+        await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "ROLE.md"), "runtime guide");
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
         var contexts = new List<string>();
 

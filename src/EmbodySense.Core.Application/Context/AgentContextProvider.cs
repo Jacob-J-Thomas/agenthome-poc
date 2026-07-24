@@ -1,5 +1,6 @@
 using System.Text;
 using EmbodySense.Core.Application.Context;
+using EmbodySense.Core.Common.Context;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
 
@@ -30,7 +31,7 @@ public sealed class AgentContextProvider : IAgentContextProvider
                 continue;
             }
 
-            sections.Add(FormatSection(document.DisplayPath, document.Content));
+            sections.Add(FormatSection(document.Kind, document.DisplayPath, document.Content));
         }
 
         if (sections.Count == 0)
@@ -39,7 +40,7 @@ public sealed class AgentContextProvider : IAgentContextProvider
         }
 
         var builder = new StringBuilder();
-        builder.AppendLine("EmbodySense loaded the following startup context from workspace instructions and workspace agent documents.");
+        builder.AppendLine("EmbodySense loaded the following startup context from trusted role instructions, durable agent identity, and lower-authority workspace state.");
         builder.AppendLine("Follow the current user request and higher-priority instructions first.");
         builder.AppendLine("Durable memory policy: treat `.agent/MEMORY.md` as the primary place to store, update, create, and retrieve most memories.");
         builder.AppendLine("Query conversation history only for transcript-specific evidence such as exact wording, chronology, or context that has not yet been distilled into `.agent/MEMORY.md`.");
@@ -49,7 +50,7 @@ public sealed class AgentContextProvider : IAgentContextProvider
         return [LlmMessage.System(builder.ToString().Trim())];
     }
 
-    private static string FormatSection(string displayPath, string content)
+    private static string FormatSection(WorkspaceContextDocumentKind kind, string displayPath, string content)
     {
         var normalized = content.Trim();
         if (normalized.Length > MaxFileCharacters)
@@ -57,6 +58,13 @@ public sealed class AgentContextProvider : IAgentContextProvider
             normalized = normalized[..MaxFileCharacters] + Environment.NewLine + $"[truncated after {MaxFileCharacters} characters]";
         }
 
-        return $"## {displayPath}{Environment.NewLine}{normalized}";
+        var classification = kind switch
+        {
+            WorkspaceContextDocumentKind.RoleInstruction => "Trusted role instruction",
+            WorkspaceContextDocumentKind.AgentIdentity => "Trusted durable agent identity",
+            WorkspaceContextDocumentKind.ContextualState => "Lower-authority contextual state",
+            _ => "Workspace context"
+        };
+        return $"## {classification}: {displayPath}{Environment.NewLine}{normalized}";
     }
 }

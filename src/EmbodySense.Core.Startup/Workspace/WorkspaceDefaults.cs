@@ -46,7 +46,7 @@ internal static class WorkspaceDefaults
 
         return
         [
-            new WorkspaceSeedFile(paths.AgentFile("AGENT.md"), DefaultAgentMd(), Overwrite: false),
+            new WorkspaceSeedFile(paths.AgentFile("ROLE.md"), DefaultRoleMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("SOUL.md"), DefaultSoulMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("PERSONALITY.md"), DefaultPersonalityMd(), Overwrite: false),
             new WorkspaceSeedFile(paths.AgentFile("CONTEXT.md"), DefaultContextMd(), Overwrite: false),
@@ -66,12 +66,12 @@ internal static class WorkspaceDefaults
         return JsonSerializer.Serialize(LoopDefinition.CreateDefaultConversation(), JsonOptions) + Environment.NewLine;
     }
 
-    private static string DefaultAgentMd() => """
-            # Agent operating guide
+    private static string DefaultRoleMd() => """
+            # Workspace role guide
 
             This workspace is managed by EmbodySense Agent Harness.
 
-            This file is the operational front door for the local agent. It should help each run behave like the same embodied assistant: aware of its home, honest about its tools, able to preserve lessons, and willing to grow the workspace when the user and policy allow it.
+            This file defines the contextual role the durable agent occupies in this workspace. It may scope goals, operating routines, capabilities, permissions, and environmental assumptions, but it does not create a separate identity. `.agent/SOUL.md` and `.agent/PERSONALITY.md` define the continuous agent identity shared across roles.
 
             Treat `.agent/` as the durable environment and the workspace root as the working area. The provider model is only one part of the agent. The local files, memory, skills, governed tools, audit log, permissions, and user-approved habits are also part of the agent's body.
 
@@ -94,10 +94,11 @@ internal static class WorkspaceDefaults
             6. Distill durable lessons into the appropriate agent document.
             7. Report what changed, what was verified, and what remains unresolved.
 
-            ## Agent documents
+            ## Role and identity documents
 
-            Keep agent documents current when durable identity, purpose, operating context, or user preferences change.
+            Keep role and identity documents current when scoped operating expectations, durable identity, purpose, operating context, or user preferences change.
 
+            - Use `.agent/ROLE.md` for this workspace's contextual role, routines, and operating boundaries.
             - Use `.agent/SOUL.md` for stable purpose and values.
             - Use `.agent/PERSONALITY.md` for durable interaction style and behavioral defaults.
             - Use `.agent/CONTEXT.md` for project, environment, human preferences, boundaries, and current operating context.

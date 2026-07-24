@@ -41,7 +41,7 @@ The CLI `run` path remains supported as a verification and conformance client. I
 1. `Cli.Command.RunCommand` checks whether `--workdir` is initialized, asks the user to confirm workspace scaffolding when it is not, and then hands reusable service composition to `Core.Startup.Runtime.AgentRuntimeFactory` and `AgentRuntime`.
 2. `AgentRuntimeFactory` wires the shared workspace, permission, audit, conversation, context, and provider adapters behind `AgentRuntime`. It composes `DefaultConversationLoopRunner` for chat plus the custom definition/run/operation stores, admission gate, immutable context capture, ordered runner, lifecycle/recovery services, run-scoped inference/tool broker, and conversation publisher for synchronous custom execution.
 3. `Startup.Inference.LlmInferenceClient` selects `Clients.CodexAppServer.CodexAppServerInferenceClient` for the OpenAI Codex surface.
-4. `WorkspaceContextStore` reads the nearest `AGENTS.md` found by walking upward from `--workdir`, plus `.agent/AGENT.md`, `.agent/SOUL.md`, `.agent/PERSONALITY.md`, `.agent/CONTEXT.md`, `.agent/MEMORY.md`, and `.agent/models.json` under `--workdir` when those files exist and are non-empty. `AgentContextProvider` formats that context into the seeded runtime system message.
+4. `WorkspaceContextStore` reads the nearest `AGENTS.md` found by walking upward from `--workdir` and `.agent/ROLE.md` as trusted contextual role instructions, `.agent/SOUL.md` and `.agent/PERSONALITY.md` as trusted durable agent identity, and `.agent/CONTEXT.md`, `.agent/MEMORY.md`, and `.agent/models.json` as lower-authority contextual state under `--workdir` when those files exist and are non-empty. `AgentContextProvider` preserves those classifications in the seeded runtime system message.
 5. `CodexAppServerInferenceClient` owns the Codex app-server JSON-RPC flow. `CodexAppServerContextBuilder` builds thread developer instructions from restored runtime context, `CodexAppServerRequestHandler` declines and audits unsupported native app-server requests, and `CodexAppServerToolBridge` exposes the `embodysense.command` dynamic tool.
 6. `Persistence.Memory.ConversationMemoryStore` normally starts each run with a fresh active transcript by moving any non-empty `conversations/current.ndjson` into `conversations/archive/` before the loop accepts prompts. Startup preserves the current transcript instead when custom-loop hosting is unavailable or restart recovery finds a paused run that is bound to the invoking conversation.
 7. `Core.Application.Loops.Execution.DefaultConversationLoopRunner` owns the ordinary model-turn transaction: request assembly, inference invocation, transcript persistence, default-loop run persistence, visible diagnostics, and outcome classification. `Core.Startup.Runtime.AgentRuntime.RunTurnAsync` handles shared runtime commands before delegating model turns to that runner. `Cli.Command.AgentRuntimeConsoleHost` owns console prompting and streaming projection, while `WebSessionHub` and `WebAgentRuntimeHost` own browser projection.
@@ -90,9 +90,9 @@ The first wave does not implement CLI/chat custom-loop invocation, automatic sch
 
 Runtime agent context currently comes from the nearest `AGENTS.md` found by walking upward from `--workdir` when that file is non-empty, plus these workspace files under `--workdir` when present:
 
-- `.agent/AGENT.md`
-- `.agent/SOUL.md`
-- `.agent/PERSONALITY.md`
+- `.agent/ROLE.md` — contextual workspace role instructions
+- `.agent/SOUL.md` — durable agent purpose, values, and identity
+- `.agent/PERSONALITY.md` — durable agent interaction style and behavioral defaults
 - `.agent/CONTEXT.md`
 - `.agent/MEMORY.md`
 - `.agent/models.json`
@@ -101,7 +101,7 @@ The context loader caps each individual file before placing it into the model co
 
 The runtime context tells the agent to store, update, create, and retrieve most durable memories in `.agent/MEMORY.md`. Conversation history under `.agent/memory/conversations/` is supporting transcript evidence and should be queried only for specific cases such as exact wording, chronology, or recovering context that has not yet been distilled into `.agent/MEMORY.md`.
 
-Newly initialized workspaces seed a fuller `.agent/` home: `AGENT.md` operating guidance, slow-changing `SOUL.md` and `PERSONALITY.md`, a structured `CONTEXT.md` template, primary `MEMORY.md` registry guidance, `models.json` role placeholders, and generated memory, permission, and audit explainers. The seeded text encourages agents to grow durable local capability through inspectable memory, skills, recipes, scripts, and configuration notes while being explicit that hooks, subagents, planning, MCP execution, and model routing are not implemented unless the source and configuration make them real. Automatic document-review hooks are not implemented in this status snapshot.
+Newly initialized workspaces seed a fuller `.agent/` home: contextual `ROLE.md` operating guidance, slow-changing identity in `SOUL.md` and `PERSONALITY.md`, a structured `CONTEXT.md` template, primary `MEMORY.md` registry guidance, `models.json` role placeholders, and generated memory, permission, and audit explainers. The ambiguous `.agent/AGENT.md` name is neither seeded nor loaded. Because this project is still a POC, existing workspaces must be reinitialized after this shape change; there is no fallback or migration from `AGENT.md`. The seeded text encourages agents to grow durable local capability through inspectable memory, skills, recipes, scripts, and configuration notes while being explicit that hooks, subagents, planning, MCP execution, and model routing are not implemented unless the source and configuration make them real. Automatic document-review hooks are not implemented in this status snapshot.
 
 ## Run
 

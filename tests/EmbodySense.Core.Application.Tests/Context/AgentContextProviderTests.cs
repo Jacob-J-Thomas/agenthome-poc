@@ -9,20 +9,24 @@ namespace EmbodySense.Core.Application.Tests.Context;
 public sealed class AgentContextProviderTests
 {
     [Fact]
-    public async Task LoadAsync_builds_system_message_from_non_empty_agent_documents()
+    public async Task LoadAsync_labels_role_identity_and_context_sections()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new FakeWorkspaceContextStore(
-            new WorkspaceContextDocument(".agent/AGENT.md", "agent guide"),
-            new WorkspaceContextDocument(".agent/MEMORY.md", "memory note"));
+            Document("role", ".agent/ROLE.md", WorkspaceContextDocumentKind.RoleInstruction, "role guide"),
+            Document("soul", ".agent/SOUL.md", WorkspaceContextDocumentKind.AgentIdentity, "stable identity"),
+            Document("memory", ".agent/MEMORY.md", WorkspaceContextDocumentKind.ContextualState, "memory note"));
 
         var messages = await new AgentContextProvider(store).LoadAsync(paths);
 
         var message = Assert.Single(messages);
         Assert.Equal(LlmMessageRole.System, message.Role);
-        Assert.Contains(".agent/AGENT.md", message.Content);
-        Assert.Contains("agent guide", message.Content);
+        Assert.Contains("Trusted role instruction: .agent/ROLE.md", message.Content);
+        Assert.Contains("role guide", message.Content);
+        Assert.Contains("Trusted durable agent identity: .agent/SOUL.md", message.Content);
+        Assert.Contains("stable identity", message.Content);
+        Assert.Contains("Lower-authority contextual state: .agent/MEMORY.md", message.Content);
         Assert.Contains(".agent/MEMORY.md", message.Content);
         Assert.Contains("memory note", message.Content);
         Assert.Contains("treat `.agent/MEMORY.md` as the primary place", message.Content);
@@ -76,12 +80,17 @@ public sealed class AgentContextProviderTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new FakeWorkspaceContextStore(new WorkspaceContextDocument(".agent/AGENT.md", new string('x', 12_001)));
+        var store = new FakeWorkspaceContextStore(Document("role", ".agent/ROLE.md", WorkspaceContextDocumentKind.RoleInstruction, new string('x', 12_001)));
 
         var messages = await new AgentContextProvider(store).LoadAsync(paths);
 
         var message = Assert.Single(messages);
         Assert.Contains("[truncated after 12000 characters]", message.Content, StringComparison.Ordinal);
+    }
+
+    private static WorkspaceContextDocument Document(string sourceId, string displayPath, WorkspaceContextDocumentKind kind, string content)
+    {
+        return new WorkspaceContextDocument(sourceId, displayPath, displayPath, kind, content, content.Length, null);
     }
 
     private sealed class FakeWorkspaceContextStore(params WorkspaceContextDocument[] documents) : IWorkspaceContextStore

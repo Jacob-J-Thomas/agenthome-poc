@@ -259,7 +259,7 @@ Every model-facing Inference or enabled Exit node resolves its admitted context 
 The runtime intersects each node selection with material actually admitted or retained. Selecting a source never manufactures it, widens authority, or bypasses bounds. `includeRoleContext = false` may omit directory-role and startup product context, but it never removes non-overridable harness governance, current enforcement, or the minimum trusted run/authority metadata required to execute and audit safely. Each provider request is assembled from EmbodySense-owned state in this order:
 
 1. Current fixed harness governance/developer instructions captured for that attempt; current policy may narrow but never widen admitted authority.
-2. When selected, explicit directory-role instruction sources loaded through the existing context provider, including the nearest `AGENTS.md` and applicable `.agent/AGENT.md`, `.agent/SOUL.md`, and `.agent/PERSONALITY.md` content.
+2. When selected, explicit trusted workspace sources loaded through the existing context provider: contextual role instructions from the nearest `AGENTS.md` and `.agent/ROLE.md`, followed by durable agent identity from `.agent/SOUL.md` and `.agent/PERSONALITY.md`.
 3. When selected, bounded contextual state from `.agent/CONTEXT.md`, `.agent/MEMORY.md`, and `.agent/models.json`, with source labels and truncation.
 4. Trusted run metadata describing loop, run, role, iteration, step, and effective tools. Metadata informs the model but cannot alter server enforcement.
 5. The current step's authored instruction.
@@ -275,7 +275,7 @@ No unrelated conversation transcript is attached. A manual trigger may explicitl
 | ID | Requirement |
 | --- | --- |
 | CTX-001 | Fixed harness governance outranks role and loop instructions and cannot be overridden by definition or invocation data. |
-| CTX-002 | Only explicitly designated role instruction files and the authored step instruction enter an instruction channel. Description, names, layout, input, memory, arbitrary workspace files, prior model output, tool output, and external content do not silently become trusted instructions. |
+| CTX-002 | Only explicitly designated role instruction and durable agent-identity files, plus the authored step instruction, enter an instruction channel. Description, names, layout, input, memory, arbitrary workspace files, prior model output, tool output, and external content do not silently become trusted instructions. |
 | CTX-003 | Contextual data may inform reasoning but cannot add a tool, command, role, permission, provider, model, review policy, or actuator. Enforcement uses the admitted server snapshot regardless of model claims. |
 | CTX-004 | The context manifest records source type, source identity/path, provenance class, content hash, captured content used by the model, order, character count, truncation, omission, and capture timestamp. |
 | CTX-005 | `.agent/MEMORY.md` remains the primary durable local memory registry and is loaded through the existing bounded startup path when present. Wave one performs no automatic memory writeback. |

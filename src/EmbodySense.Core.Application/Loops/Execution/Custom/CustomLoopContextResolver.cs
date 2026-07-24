@@ -101,7 +101,7 @@ public sealed class CustomLoopContextResolver
         List<EmbodySenseTrustedInstruction> trustedInstructions)
     {
         var sources = run.ContextSnapshot.SourceManifest
-            .Where(source => source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.ContextualState)
+            .Where(source => source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity or CustomLoopContextSource.ContextualState)
             .OrderBy(source => source.Order)
             .ToArray();
         if (!policy.ContextIn.IncludeRoleContext)
@@ -122,7 +122,7 @@ public sealed class CustomLoopContextResolver
                 continue;
             }
 
-            if (source.SourceType == CustomLoopContextSource.RoleInstruction)
+            if (source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity)
             {
                 trustedInstructions.Add(new EmbodySenseTrustedInstruction(source.SourceId, source.Content));
                 AddIncluded(blocks, source.SourceType, source.SourceId, LlmMessageRole.System, source.Content, source.OriginalCharacterCount, source.Truncated);

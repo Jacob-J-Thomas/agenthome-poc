@@ -573,9 +573,9 @@ public sealed class CustomLoopRunValidatorTests
         return
         [
             Source(1, CustomLoopContextSource.RoleInstruction, "nearest-agents", "C:/workspace/AGENTS.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, roleContent),
-            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "agent", "C:/workspace/.agent/AGENT.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", "C:/workspace/.agent/SOUL.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", "C:/workspace/.agent/PERSONALITY.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "role", "C:/workspace/.agent/ROLE.md", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(3, CustomLoopContextSource.AgentIdentity, "soul", "C:/workspace/.agent/SOUL.md", CustomLoopContextProvenance.WorkspaceAgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(4, CustomLoopContextSource.AgentIdentity, "personality", "C:/workspace/.agent/PERSONALITY.md", CustomLoopContextProvenance.WorkspaceAgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
             OmittedSource(5, CustomLoopContextSource.ContextualState, "context", "C:/workspace/.agent/CONTEXT.md", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             OmittedSource(6, CustomLoopContextSource.ContextualState, "memory", "C:/workspace/.agent/MEMORY.md", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             OmittedSource(7, CustomLoopContextSource.ContextualState, "models", "C:/workspace/.agent/models.json", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User)
