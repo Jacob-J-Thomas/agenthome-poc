@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Models.Custom;
+
 namespace EmbodySense.Core.Application.Loops;
 
 public sealed record CustomLoopInvocationOperation(
@@ -19,6 +21,7 @@ public sealed record CustomLoopInvocationOperation(
     CustomLoopInvocationOutcome Outcome,
     string AdmissionStatus,
     string? RunId,
+    CustomLoopValidationError[] ValidationErrors,
     string Detail)
 {
     public const int CurrentSchemaVersion = 1;
