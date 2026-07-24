@@ -331,7 +331,7 @@ internal static class CustomLoopRunArtifactCodec
 
     private static void CompactToolEvidence(JsonObject projection, ContentRegistry contents, StructuralRegistry blocks, StructuralRegistry authorities, StructuralRegistry requests)
     {
-        var states = new Dictionary<string, ToolProjectionState>(StringComparer.Ordinal);
+        var states = new Dictionary<(int RequestOrdinal, string RequestCorrelationId), ToolProjectionState>();
         foreach (var item in RequireArray(projection, "events"))
         {
             var runEvent = item?.AsObject() ?? throw new FormatException("Run-event projection entries must be objects.");
@@ -358,7 +358,7 @@ internal static class CustomLoopRunArtifactCodec
                 continue;
             }
 
-            var correlationId = RequireString(evidence, "requestCorrelationId");
+            var requestKey = ToolRequestKey(evidence);
             var phase = RequireString(evidence, "phase");
             var returned = RequireBoolean(evidence, "returnedToModel");
             var sequence = RequireInt64(runEvent, "sequence");
@@ -379,23 +379,12 @@ internal static class CustomLoopRunArtifactCodec
             JsonObject compact;
             if (string.Equals(phase, "requestReserved", StringComparison.Ordinal))
             {
-                if (states.ContainsKey(correlationId) || returned || evidence["governance"] is not null || evidence["outcome"] is not null || evidence["canonicalResultReturnedToModel"] is not null)
+                if (states.ContainsKey(requestKey) || returned || evidence["governance"] is not null || evidence["outcome"] is not null || evidence["canonicalResultReturnedToModel"] is not null)
                 {
                     throw new FormatException("A tool request reservation must be the unique exact request-and-authority owner.");
                 }
 
-                var request = new JsonObject
-                {
-                    ["authority"] = ReferenceObject(AuthorityReferenceProperty, authorityId),
-                    ["requestOrdinal"] = Clone(evidence, "requestOrdinal"),
-                    ["requestCorrelationId"] = Clone(evidence, "requestCorrelationId"),
-                    ["command"] = Clone(evidence, "command"),
-                    ["targetPath"] = Clone(evidence, "targetPath"),
-                    ["content"] = Clone(evidence, "content"),
-                    ["pattern"] = Clone(evidence, "pattern"),
-                    ["resolvedTarget"] = Clone(evidence, "resolvedTarget"),
-                    ["reservedUtf8Bytes"] = Clone(evidence, "reservedUtf8Bytes")
-                };
+                var request = ToolRequest(evidence, authorityId);
                 ProjectToolRequest(request.DeepClone().AsObject(), contents);
                 var requestId = requests.Reference(request);
                 compact = new JsonObject
@@ -405,11 +394,39 @@ internal static class CustomLoopRunArtifactCodec
                     ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, requestId),
                     ["brokerRequestId"] = Clone(evidence, "brokerRequestId")
                 };
-                states.Add(correlationId, new ToolProjectionState(evidence.DeepClone().AsObject(), evidenceAuthority.DeepClone().AsObject(), authorityId, requestId));
+                states.Add(requestKey, new ToolProjectionState(evidence.DeepClone().AsObject(), evidenceAuthority.DeepClone().AsObject(), authorityId, requestId));
+            }
+            else if (string.Equals(phase, "integrityFailed", StringComparison.Ordinal) && !states.ContainsKey(requestKey))
+            {
+                if (returned
+                    || evidence["brokerRequestId"] is not null
+                    || evidence["governance"] is not null
+                    || evidence["outcome"] is not null
+                    || evidence["canonicalResultReturnedToModel"] is not null
+                    || evidence["canonicalResultHash"] is not null
+                    || evidence["canonicalResultCharacterCount"] is not null)
+                {
+                    throw new FormatException("A standalone tool integrity record may contain only the exact non-actuating request-and-authority evidence.");
+                }
+
+                var request = ToolRequest(evidence, authorityId);
+                ProjectToolRequest(request.DeepClone().AsObject(), contents);
+                var requestId = requests.Reference(request);
+                compact = new JsonObject
+                {
+                    ["shape"] = 6,
+                    ["phase"] = Clone(evidence, "phase"),
+                    ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, requestId),
+                    ["brokerRequestId"] = Clone(evidence, "brokerRequestId")
+                };
+                states.Add(requestKey, new ToolProjectionState(evidence.DeepClone().AsObject(), evidenceAuthority.DeepClone().AsObject(), authorityId, requestId)
+                {
+                    IntegrityFailed = true
+                });
             }
             else
             {
-                if (!states.TryGetValue(correlationId, out var state))
+                if (!states.TryGetValue(requestKey, out var state))
                 {
                     throw new FormatException("Tool evidence references a request that has no earlier exact reservation.");
                 }
@@ -522,6 +539,7 @@ internal static class CustomLoopRunArtifactCodec
     {
         var states = new Dictionary<string, ToolHydrationState>(StringComparer.Ordinal);
         var correlationIds = new HashSet<string>(StringComparer.Ordinal);
+        var requestKeys = new HashSet<(int RequestOrdinal, string RequestCorrelationId)>();
         foreach (var item in RequireArray(projection, "events"))
         {
             if (item is not JsonObject runEvent)
@@ -552,12 +570,14 @@ internal static class CustomLoopRunArtifactCodec
             }
 
             var correlationId = RequireString(request, "requestCorrelationId");
+            var requestKey = ToolRequestKey(request);
             JsonObject evidence;
             if (shape == 1)
             {
                 RequireProperties(compact, "shape", "phase", "toolRequest", "brokerRequestId");
                 if (!string.Equals(RequireString(compact, "phase"), "requestReserved", StringComparison.Ordinal)
                     || states.ContainsKey(requestId)
+                    || !requestKeys.Add(requestKey)
                     || !correlationIds.Add(correlationId))
                 {
                     throw new FormatException("The compact tool trace contains a duplicate request reservation.");
@@ -565,6 +585,23 @@ internal static class CustomLoopRunArtifactCodec
 
                 evidence = FullEvidence(request, authority, null, null, null, null, null, returned: false, compact);
                 states.Add(requestId, new ToolHydrationState(request, authority, authorityId));
+            }
+            else if (shape == 6)
+            {
+                RequireProperties(compact, "shape", "phase", "toolRequest", "brokerRequestId");
+                if (!string.Equals(RequireString(compact, "phase"), "integrityFailed", StringComparison.Ordinal)
+                    || compact["brokerRequestId"] is not null
+                    || states.ContainsKey(requestId)
+                    || !requestKeys.Add(requestKey))
+                {
+                    throw new FormatException("A compact standalone tool integrity record must uniquely own its exact non-actuating request.");
+                }
+
+                evidence = FullEvidence(request, authority, null, null, null, null, null, returned: false, compact);
+                states.Add(requestId, new ToolHydrationState(request, authority, authorityId)
+                {
+                    IntegrityFailed = true
+                });
             }
             else
             {
@@ -660,6 +697,27 @@ internal static class CustomLoopRunArtifactCodec
             runEvent["toolAuthority"] = authority.DeepClone();
             runEvent["toolEvidence"] = evidence;
         }
+    }
+
+    private static JsonObject ToolRequest(JsonObject evidence, string authorityId)
+    {
+        return new JsonObject
+        {
+            ["authority"] = ReferenceObject(AuthorityReferenceProperty, authorityId),
+            ["requestOrdinal"] = Clone(evidence, "requestOrdinal"),
+            ["requestCorrelationId"] = Clone(evidence, "requestCorrelationId"),
+            ["command"] = Clone(evidence, "command"),
+            ["targetPath"] = Clone(evidence, "targetPath"),
+            ["content"] = Clone(evidence, "content"),
+            ["pattern"] = Clone(evidence, "pattern"),
+            ["resolvedTarget"] = Clone(evidence, "resolvedTarget"),
+            ["reservedUtf8Bytes"] = Clone(evidence, "reservedUtf8Bytes")
+        };
+    }
+
+    private static (int RequestOrdinal, string RequestCorrelationId) ToolRequestKey(JsonObject source)
+    {
+        return (RequireInt32(source, "requestOrdinal"), RequireString(source, "requestCorrelationId"));
     }
 
     private static JsonObject FullEvidence(

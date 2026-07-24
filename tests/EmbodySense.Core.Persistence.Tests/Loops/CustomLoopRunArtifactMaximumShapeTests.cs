@@ -40,8 +40,8 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         Assert.Equal(CustomLoopLimits.MaxModelAttemptsPerRun, fixture.Executor.Requests.Count);
         Assert.Equal(55, fixture.Executor.Requests.Count(request => !request.IsExit));
         Assert.Equal(10, fixture.Executor.Requests.Count(request => request.IsExit));
-        Assert.Equal(CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun, terminal.Checkpoint.ToolRequestsUsed);
-        Assert.Equal(CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun, terminal.Events.Count(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved));
+        Assert.Equal(CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun, terminal.Checkpoint.ToolRequestsUsed);
+        Assert.Equal(CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun, terminal.Events.Count(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved));
         var governanceEvents = terminal.Events.Where(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.GovernanceDecided).ToArray();
         Assert.Equal(CustomLoopLimits.MaxGovernedToolRequestsPerRun, governanceEvents.Count(item => item.ToolEvidence!.Governance!.AuthorityDecision == ToolAuthorityDecision.Allowed));
         var deniedGovernance = Assert.Single(governanceEvents, item => item.ToolEvidence!.Governance!.AuthorityDecision == ToolAuthorityDecision.Denied);
@@ -539,7 +539,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
             _inferenceCount++;
             var consumed = 0;
-            if (_toolCount < CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)
+            if (_toolCount < CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun)
             {
                 _toolCount++;
                 await AppendToolProtocolAsync(request, authority, _toolCount, _toolCount > CustomLoopLimits.MaxGovernedToolRequestsPerRun, cancellationToken);

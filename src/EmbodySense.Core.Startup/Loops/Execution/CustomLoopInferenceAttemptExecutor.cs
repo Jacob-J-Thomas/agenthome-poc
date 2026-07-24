@@ -219,7 +219,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             throw new ArgumentException("Definition hash must be a lowercase SHA-256 hexadecimal value.", nameof(request));
         }
 
-        if (request.ToolRequestsUsedInRun < 0 || request.ToolRequestsUsedInRun > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)
+        if (request.ToolRequestsUsedInRun < 0 || request.ToolRequestsUsedInRun > CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun)
         {
             throw new ArgumentOutOfRangeException(nameof(request), request.ToolRequestsUsedInRun, "Persisted run tool-request usage is outside the governed evidence limit.");
         }

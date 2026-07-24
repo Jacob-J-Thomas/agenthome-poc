@@ -1049,7 +1049,7 @@ public sealed class CustomLoopOrderedRunnerTests
     public async Task Exhausted_recorded_run_budget_makes_later_inference_attempts_tool_less()
     {
         var definition = Definition(tools: [CustomLoopToolAssignment.Read]);
-        var run = Run(definition) with { Checkpoint = CustomLoopRunCheckpoint.Start() with { ToolRequestsUsed = CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun } };
+        var run = Run(definition) with { Checkpoint = CustomLoopRunCheckpoint.Start() with { ToolRequestsUsed = CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun } };
         var store = new FakeRunStore(run);
         var executor = new QueueExecutor(Result("completed without tools"));
 
@@ -1059,7 +1059,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var request = Assert.Single(executor.Requests);
         Assert.False(request.AllowTools);
         Assert.Contains(request.InferenceRequest.Messages, message => message.Content.Contains("Tools: none", StringComparison.Ordinal));
-        Assert.Equal(CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun, result.Run!.Checkpoint.ToolRequestsUsed);
+        Assert.Equal(CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun, result.Run!.Checkpoint.ToolRequestsUsed);
     }
 
     [Fact]
@@ -1091,6 +1091,26 @@ public sealed class CustomLoopOrderedRunnerTests
 
         Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
         Assert.Contains("reservation, governance decision, observed outcome, and exact returned-to-model marker", result.Run!.FailureDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Exact_unreserved_repeated_request_integrity_is_recognized_but_never_counted_as_completed_usage()
+    {
+        var store = new FakeRunStore(Run(Definition(tools: [CustomLoopToolAssignment.Read])));
+        var executor = new QueueExecutor(Result("untrusted", toolCalls: 1))
+        {
+            AfterExecute = async request =>
+            {
+                await AppendToolTraceAsync(store, request, requestCount: 1, includeOutcomes: true);
+                await AppendStandaloneIntegrityAsync(store, request, requestOrdinal: 2, correlationId: $"tool-{request.Iteration}-{request.StepId}-1");
+            }
+        };
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Contains("exact non-actuating integrity failure", result.Run!.FailureDetail, StringComparison.Ordinal);
+        Assert.Equal(0, result.Run.Checkpoint.ToolRequestsUsed);
     }
 
     [Fact]
@@ -1886,6 +1906,37 @@ public sealed class CustomLoopOrderedRunnerTests
         {
             LifecycleVersion = store.Current.LifecycleVersion + 1,
             Events = [.. store.Current.Events, .. events]
+        };
+        var stored = await store.UpdateAsync(candidate, store.Current.LifecycleVersion);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, stored.Status);
+    }
+
+    private static async Task AppendStandaloneIntegrityAsync(FakeRunStore store, CustomLoopInferenceAttemptRequest request, int requestOrdinal, string correlationId)
+    {
+        var authority = Assert.IsType<CustomLoopToolAuthoritySnapshot>(request.AuthoritySnapshot);
+        var integrity = new CustomLoopToolTraceEvidence(
+            CustomLoopToolEvidencePhase.IntegrityFailed,
+            requestOrdinal,
+            correlationId,
+            null,
+            ToolCommand.Read,
+            "shared/repeated.txt",
+            null,
+            null,
+            "workspace/shared/repeated.txt",
+            authority,
+            null,
+            null,
+            null,
+            null,
+            null,
+            false,
+            CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
+        var traceEvent = ToolEvent(store.Current.Events.Length + 1, CustomLoopRunEventKind.ToolIntegrityFailed, request, integrity);
+        var candidate = store.Current with
+        {
+            LifecycleVersion = store.Current.LifecycleVersion + 1,
+            Events = [.. store.Current.Events, traceEvent]
         };
         var stored = await store.UpdateAsync(candidate, store.Current.LifecycleVersion);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, stored.Status);

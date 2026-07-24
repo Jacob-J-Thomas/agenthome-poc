@@ -37,8 +37,10 @@ public static class CustomLoopLimits
     public const long MaxRunExecutionMilliseconds = 30 * 60 * 1_000;
     public const int MaxGovernedToolRequestsPerRun = 30;
     public const int MaxGovernedToolRequestsPerAttempt = 5;
-    public const int MaxRecordedGovernedToolRequestsPerRun = MaxGovernedToolRequestsPerRun + 1;
-    public const int MaxRecordedGovernedToolRequestsPerAttempt = MaxGovernedToolRequestsPerAttempt + 1;
+    public const int MaxModelVisibleGovernedToolRequestsPerRun = MaxGovernedToolRequestsPerRun + 1;
+    public const int MaxModelVisibleGovernedToolRequestsPerAttempt = MaxGovernedToolRequestsPerAttempt + 1;
+    public const int MaxRecordedGovernedToolRequestsPerRun = MaxModelVisibleGovernedToolRequestsPerRun + 1;
+    public const int MaxRecordedGovernedToolRequestsPerAttempt = MaxModelVisibleGovernedToolRequestsPerAttempt + 1;
     public const int MaxGovernedToolTargetCharacters = 1_024;
     public const int MaxGovernedToolArgumentCharacters = 1_024;
     public const int MaxLifecycleControlEventsPerRun = 64;
@@ -59,10 +61,11 @@ public static class CustomLoopLimits
     public const int MaxGovernedToolGovernanceEvidenceUtf8Bytes = 14 * 1_024;
     public const int MaxGovernedToolOutcomeEvidenceUtf8Bytes = 251 * 1_024;
     public const int MaxGovernedToolReturnEvidenceUtf8Bytes = 8 * 1_024;
+    public const int MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes = MaxGovernedToolRequestEvidenceUtf8Bytes;
     public const int MaxGovernedToolEvidenceReservationUtf8Bytes = MaxGovernedToolRequestEvidenceUtf8Bytes + MaxGovernedToolGovernanceEvidenceUtf8Bytes + MaxGovernedToolOutcomeEvidenceUtf8Bytes + MaxGovernedToolReturnEvidenceUtf8Bytes;
     public const int MaxTraceControlReserveUtf8Bytes = 512 * 1_024;
     public const int MaxTraceControlEventUtf8Bytes = 8 * 1_024;
-    public const int MaxPermanentTerminalIntegrityReserveUtf8Bytes = 128 * 1_024;
+    public const int MaxPermanentTerminalIntegrityReserveUtf8Bytes = (128 * 1_024) + MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes;
     public const int MaxToolGovernanceDetailCharacters = 512;
     public const int MaxCanonicalToolResultCharacters = ToolResultFormatter.MaxFormattedCharacters;
 
