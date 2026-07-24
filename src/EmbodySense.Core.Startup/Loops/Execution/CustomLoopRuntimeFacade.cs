@@ -387,6 +387,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 {
                     return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: runtime host reacquisition found interrupted work that could not be parked safely.");
                 }
+
+                if (!await _runtimeContext.TryReconcileConversationAsync(cancellationToken))
+                {
+                    return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: durable conversation history diverged from this runtime's active transcript, so local state was preserved and custom-loop hosting remains unavailable.");
+                }
             }
 
             Volatile.Write(ref _customExecutionAvailable, true);

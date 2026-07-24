@@ -67,13 +67,17 @@ public sealed class WebAgentRuntimeHostTests
         using var ownership = competingHost.TryAcquire("active-custom-loop", new string('a', 64)).Lease!;
 
         var unavailable = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-execution-busy"));
+        await conversationMemory.AppendMessageAsync(LlmMessage.Assistant("externally published custom-loop output"));
         ownership.Dispose();
         var retried = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-host-reacquired"));
         var transcript = await host.GetCurrentTranscriptAsync();
 
         Assert.Equal("WorkspaceHostUnavailable", unavailable.Status);
         Assert.Equal("NotFound", retried.Status);
-        Assert.Collection(transcript!, message => Assert.Equal("preserved while custom execution is active", message.Content));
+        Assert.Collection(
+            transcript!,
+            message => Assert.Equal("preserved while custom execution is active", message.Content),
+            message => Assert.Equal("externally published custom-loop output", message.Content));
         Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
     }
 

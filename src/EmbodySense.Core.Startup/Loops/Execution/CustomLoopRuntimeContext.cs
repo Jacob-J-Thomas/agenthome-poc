@@ -62,6 +62,15 @@ internal sealed class CustomLoopRuntimeContext
             new CustomLoopConversationReference(persistedConversation.Version, conversationVersion, capturedAtUtc));
     }
 
+    public async Task<bool> TryReconcileConversationAsync(CancellationToken cancellationToken)
+    {
+        using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))
+        {
+            var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+            return _conversationState.TrySynchronizeConversationTranscript(persistedConversation.Messages);
+        }
+    }
+
     internal static LlmMessage[] GetLogicalConversationMessages(ConversationRuntimeState conversationState)
     {
         ArgumentNullException.ThrowIfNull(conversationState);

@@ -138,6 +138,7 @@ public sealed class AgentRuntimeFactoryTests
         var blockedResume = await runtime.ResumeCustomLoopAsync(new LoopRunControlInput("run-one", 1, "resume-one"));
         var blockedCancel = await runtime.CancelCustomLoopAsync(new LoopRunControlInput("run-one", 1, "cancel-one"));
         var turn = await runtime.RunTurnAsync("hello");
+        await conversationMemory.AppendMessageAsync(LlmMessage.Assistant("externally published custom-loop output"));
         ownership.Dispose();
         var afterRelease = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-two", "prompt"));
         var transcriptAfterReacquisition = runtime.GetActiveConversationTranscript();
@@ -163,6 +164,7 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("NotFound", afterRelease.AdmissionStatus);
         Assert.Contains(transcriptAfterReacquisition, message => message.Content == "preserved external-host transcript");
         Assert.Contains(transcriptAfterReacquisition, message => message.Content == "hello");
+        Assert.Contains(transcriptAfterReacquisition, message => message.Content == "externally published custom-loop output");
         Assert.Equal("NotFound", afterRecreate.AdmissionStatus);
     }
 
