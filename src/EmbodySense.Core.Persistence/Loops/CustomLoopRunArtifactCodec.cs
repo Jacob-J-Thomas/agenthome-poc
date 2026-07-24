@@ -27,14 +27,9 @@ internal static class CustomLoopRunArtifactCodec
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
 
-    internal static byte[] Encode(CustomLoopRunRecord run, byte[]? previousEnvelope = null)
+    internal static byte[] Encode(CustomLoopRunRecord run)
     {
         ArgumentNullException.ThrowIfNull(run);
-        if (previousEnvelope is not null)
-        {
-            _ = Parse(previousEnvelope, requireCanonical: true);
-        }
-
         var contents = new ContentRegistry([]);
         var blocks = new StructuralRegistry("b", "context-block", []);
         var authorities = new StructuralRegistry("a", "authority", []);

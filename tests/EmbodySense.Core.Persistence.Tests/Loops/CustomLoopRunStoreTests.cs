@@ -85,6 +85,23 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Update_rejects_a_noncanonical_prior_envelope_before_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun();
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var path = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        byte[] noncanonical = [.. await File.ReadAllBytesAsync(path), (byte)' '];
+        await File.WriteAllBytesAsync(path, noncanonical);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.UpdateAsync(Advance(admitted, CustomLoopRunStatus.Running), admitted.LifecycleVersion));
+
+        Assert.Equal(noncanonical, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
     public async Task Empty_store_reads_are_restart_safe_and_non_mutating()
     {
         using var workspace = new TestWorkspace();
