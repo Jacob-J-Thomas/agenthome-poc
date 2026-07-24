@@ -205,7 +205,8 @@ public sealed class AgentRuntimeFactoryTests
 
         Assert.Collection(preserved, message => Assert.Equal("preserved recovery-failure transcript", message.Content));
         Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
-        Assert.Equal("WorkspaceHostUnavailable", customLoop.AdmissionStatus);
+        Assert.Equal("Failed", customLoop.AdmissionStatus);
+        Assert.Contains("custom_loop_recovery_failed", customLoop.Detail, StringComparison.Ordinal);
         Assert.False(customLoop.WasDispatched);
     }
 
