@@ -140,6 +140,7 @@ public sealed class AgentRuntimeFactoryTests
         var turn = await runtime.RunTurnAsync("hello");
         ownership.Dispose();
         var afterRelease = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-two", "prompt"));
+        var transcriptAfterReacquisition = runtime.GetActiveConversationTranscript();
         await using var recreatedRuntime = await CreateRuntimeAsync(workspace);
         var afterRecreate = await recreatedRuntime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-three", "prompt"));
 
@@ -159,7 +160,9 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("WorkspaceHostUnavailable", blockedCancel.Status);
         Assert.Equal("cancel-one", blockedCancel.OperationId);
         Assert.Null(await new CustomLoopControlOperationStore(paths).GetAsync(blockedCancel.OperationId));
-        Assert.Equal("WorkspaceHostUnavailable", afterRelease.AdmissionStatus);
+        Assert.Equal("NotFound", afterRelease.AdmissionStatus);
+        Assert.Contains(transcriptAfterReacquisition, message => message.Content == "preserved external-host transcript");
+        Assert.Contains(transcriptAfterReacquisition, message => message.Content == "hello");
         Assert.Equal("NotFound", afterRecreate.AdmissionStatus);
     }
 

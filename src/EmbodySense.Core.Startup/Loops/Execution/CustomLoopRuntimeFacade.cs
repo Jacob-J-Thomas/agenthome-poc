@@ -21,12 +21,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private readonly CustomLoopLifecycleService _lifecycleService;
     private readonly CustomLoopOrderedRunner _runner;
     private readonly CustomLoopRuntimeContext _runtimeContext;
-    private readonly bool _customExecutionAvailable;
+    private readonly SemaphoreSlim _executionAvailabilityGate = new(1, 1);
     private readonly string _surface;
     private readonly string _actor;
     private readonly string _currentRoleId;
     private readonly CustomLoopModelSnapshot _modelSnapshot;
     private readonly TimeProvider _timeProvider;
+    private bool _customExecutionAvailable;
 
     public CustomLoopRuntimeFacade(
         ICustomLoopDefinitionStore definitionStore,
@@ -100,9 +101,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             }
         }
 
-        if (!_customExecutionAvailable)
+        var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+        if (!availability.Available)
         {
-            return new LoopRunInvocationResponse("WorkspaceHostUnavailable", null, false, null, [], "workspace_host_unavailable: this runtime could not safely obtain or retain custom-loop hosting and must be recreated before it can execute custom loops.");
+            return new LoopRunInvocationResponse(availability.Status, null, false, null, [], availability.Detail);
         }
 
         CustomLoopExecutionLeaseResult ownership;
@@ -304,9 +306,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return replay;
         }
 
-        if (!_customExecutionAvailable)
+        var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+        if (!availability.Available)
         {
-            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime could not safely obtain or retain custom-loop hosting and must be recreated before it can cancel custom loops.");
+            return new LoopRunControlResponse(availability.Status, null, input.OperationId, availability.Detail);
         }
 
         return await ExecuteControlAsync(awaitable: _lifecycleService.CancelAsync(new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
@@ -321,9 +324,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return replay;
         }
 
-        if (!_customExecutionAvailable)
+        var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+        if (!availability.Available)
         {
-            return new LoopRunControlResponse("WorkspaceHostUnavailable", null, input.OperationId, "workspace_host_unavailable: this runtime could not safely obtain or retain custom-loop hosting and must be recreated before it can resume custom loops.");
+            return new LoopRunControlResponse(availability.Status, null, input.OperationId, availability.Detail);
         }
 
         return await ExecuteControlAsync(awaitable: _lifecycleService.ResumeAsync(new CustomLoopResumeRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
@@ -332,6 +336,66 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _executionGate.DisposeAsync();
+        _executionAvailabilityGate.Dispose();
+    }
+
+    private async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _customExecutionAvailable))
+        {
+            return CustomExecutionAvailability.AvailableNow;
+        }
+
+        await _executionAvailabilityGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_customExecutionAvailable)
+            {
+                return CustomExecutionAvailability.AvailableNow;
+            }
+
+            var recoveryOperationId = $"runtime-recovery-{Guid.NewGuid():N}";
+            var ownership = _executionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
+            if (ownership.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
+            {
+                return new CustomExecutionAvailability(false, "WorkspaceHostUnavailable", ownership.Detail);
+            }
+
+            if (ownership.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
+            {
+                return new CustomExecutionAvailability(false, "WorkspaceExecutionBusy", "workspace_execution_busy: custom-loop hosting is available, but recovery must wait for the active custom-loop operation to reach a safe boundary.");
+            }
+
+            if (ownership.Status != CustomLoopExecutionLeaseStatus.Acquired || ownership.Lease is null)
+            {
+                return new CustomExecutionAvailability(false, "Failed", $"custom_loop_recovery_unavailable: runtime host reacquisition returned {ownership.Status}.");
+            }
+
+            using (ownership.Lease)
+            {
+                IReadOnlyList<CustomLoopRecoveryResult> recovery;
+                try
+                {
+                    recovery = await _recoveryService.RecoverAsync(_actor, cancellationToken);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    return new CustomExecutionAvailability(false, "Failed", $"custom_loop_recovery_failed: runtime host reacquisition could not recover interrupted runs safely: {exception.GetType().Name}.");
+                }
+
+                if (recovery.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
+                {
+                    return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: runtime host reacquisition found interrupted work that could not be parked safely.");
+                }
+
+                Volatile.Write(ref _customExecutionAvailable, true);
+                return CustomExecutionAvailability.AvailableNow;
+            }
+        }
+        finally
+        {
+            _executionAvailabilityGate.Release();
+        }
     }
 
     private static async Task<LoopRunControlResponse> ExecuteControlAsync(Task<CustomLoopControlResult> awaitable)
@@ -884,6 +948,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             block.CharacterCount,
             block.Truncated,
             block.SourceVersion);
+    }
+
+    private sealed record CustomExecutionAvailability(bool Available, string Status, string Detail)
+    {
+        public static CustomExecutionAvailability AvailableNow { get; } = new(true, "Available", "Custom-loop hosting is available and interrupted-run recovery is complete.");
     }
 
     private static string ToRole(LlmMessageRole role) => role.ToString().ToLowerInvariant();

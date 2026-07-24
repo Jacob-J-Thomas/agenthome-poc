@@ -1,3 +1,7 @@
+using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
@@ -21,6 +25,56 @@ public sealed class WebAgentRuntimeHostTests
         Assert.True(after.Initialized);
         Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
         Assert.Contains("embodysense.web", await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson")));
+    }
+
+    [Fact]
+    public async Task Custom_control_reacquires_released_hosting_without_replacing_the_preserved_chat_runtime()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved while custom hosting is external"));
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+
+        var unavailable = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-host-unavailable"));
+        ownership.Dispose();
+        var retried = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-host-reacquired"));
+        var transcript = await host.GetCurrentTranscriptAsync();
+
+        Assert.Equal("WorkspaceHostUnavailable", unavailable.Status);
+        Assert.Equal("NotFound", retried.Status);
+        Assert.Collection(transcript!, message => Assert.Equal("preserved while custom hosting is external", message.Content));
+        Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
+    }
+
+    [Fact]
+    public async Task Custom_control_reacquires_released_in_process_hosting_without_replacing_the_preserved_chat_runtime()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved while custom execution is active"));
+        await using var competingHost = new CustomLoopWorkspaceExecutionGate(paths);
+        using var ownership = competingHost.TryAcquire("active-custom-loop", new string('a', 64)).Lease!;
+
+        var unavailable = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-execution-busy"));
+        ownership.Dispose();
+        var retried = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-host-reacquired"));
+        var transcript = await host.GetCurrentTranscriptAsync();
+
+        Assert.Equal("WorkspaceExecutionBusy", unavailable.Status);
+        Assert.Equal("NotFound", retried.Status);
+        Assert.Collection(transcript!, message => Assert.Equal("preserved while custom execution is active", message.Content));
+        Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
     }
 
     [Fact]
