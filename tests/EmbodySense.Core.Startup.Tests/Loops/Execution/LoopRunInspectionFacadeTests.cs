@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 
@@ -46,6 +47,42 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Equal("Paused", recovered!.Status);
         Assert.Equal(interrupted.LifecycleVersion + 1, recovered.LifecycleVersion);
         Assert.Contains("Restart recovery parked the admitted run", await File.ReadAllTextAsync(paths.EventsLogPath), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task Recovery_preserves_chat_only_when_the_parked_checkpoint_can_still_publish(bool publishToConversation, bool expectedPreservation)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var currentConversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var store = new CustomLoopRunStore(paths);
+        _ = await CreateInterruptedRunAsync(store, publishToConversation, currentConversationIdentity);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+
+        var recovery = await facade.RecoverInterruptedRunsAsync();
+
+        Assert.True(recovery.Completed);
+        Assert.Equal(expectedPreservation, recovery.PreserveCurrentConversation);
+    }
+
+    [Fact]
+    public async Task Recovery_does_not_preserve_a_replacement_current_conversation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        var originalIdentity = (await conversationMemory.LoadCurrentConversationSnapshotAsync()).Version;
+        var store = new CustomLoopRunStore(paths);
+        _ = await CreateInterruptedRunAsync(store, publishToConversation: true, conversationIdentity: originalIdentity);
+        await conversationMemory.StartFreshConversationAsync();
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+
+        var recovery = await facade.RecoverInterruptedRunsAsync();
+
+        Assert.True(recovery.Completed);
+        Assert.False(recovery.PreserveCurrentConversation);
     }
 
     [Fact]
@@ -118,11 +155,32 @@ public sealed class LoopRunInspectionFacadeTests
         return completed;
     }
 
-    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store)
+    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, bool? publishToConversation = null, string? conversationIdentity = null)
     {
         var definition = CustomLoopDefinition.CreateSeed("loop-interrupted", "default-role", "step-1", "create-interrupted-loop", Timestamp);
+        CustomLoopConversationReference? conversation = null;
+        if (publishToConversation is { } publish)
+        {
+            var input = new CustomLoopContextInputPolicy(true, true, false, true, true);
+            var noPublication = new CustomLoopContextPolicy(input, new CustomLoopContextOutputPolicy(false, false));
+            var inference = new CustomLoopContextPolicy(input, new CustomLoopContextOutputPolicy(false, publish));
+            definition = CustomLoopDefinitionContentHash.Apply(definition with
+            {
+                ContentHash = string.Empty,
+                ContextDefaults = new CustomLoopContextDefaults(noPublication, noPublication),
+                InferenceSteps =
+                [
+                    definition.InferenceSteps[0] with
+                    {
+                        ContextPolicy = CustomLoopNodeContextPolicy.Override(inference)
+                    }
+                ]
+            });
+            conversation = new CustomLoopConversationReference(conversationIdentity ?? "conversation-interrupted", new string('a', CustomLoopLimits.Sha256HexCharacters), Timestamp);
+        }
+
         var admittedEvent = Event(1, "interrupted-admitted", CustomLoopRunEventKind.Admitted, Timestamp);
-        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-interrupted", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-interrupted", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-interrupted", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-interrupted", "test-user", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
