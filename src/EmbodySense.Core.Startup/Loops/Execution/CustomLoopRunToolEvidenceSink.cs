@@ -69,7 +69,7 @@ public sealed class CustomLoopRunToolEvidenceSink : ICustomLoopToolEvidenceSink
                 CustomLoopToolEvidencePhase.GovernanceDecided => "Current authority, permission, and approval posture retained before any permitted actuator call.",
                 CustomLoopToolEvidencePhase.OutcomeObserved when evidence.ReturnedToModel => "Exact canonical governed tool result retained before returning it to the model.",
                 CustomLoopToolEvidencePhase.OutcomeObserved => "Exact governed tool outcome retained before post-outcome audit completion.",
-                _ => "Tool evidence integrity failure retained; no automatic retry is permitted."
+                _ => "Exact repeated tool request retained as a bounded non-actuating integrity failure; no automatic retry is permitted."
             };
             var traceEvent = new CustomLoopRunEvent(
                 run.Events.Length + 1,

@@ -940,6 +940,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new ArgumentOutOfRangeException(nameof(persistedUtf8Bytes));
         }
 
+        ValidateRecordedToolEvidenceBound(run);
         if (run.IsTerminal)
         {
             return checked(persistedUtf8Bytes + (HasTerminalIntegrityWarning(run) ? 0 : CustomLoopLimits.MaxTraceControlEventUtf8Bytes));
@@ -950,13 +951,6 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         if (startedAttempts > maximumAttempts)
         {
             throw new FormatException("The run contains more provider-attempt starts than its admitted traversal can execute.");
-        }
-
-        var maximumRecordedToolRequests = run.AdmittedDefinition.ToolAssignments.Length == 0 ? 0 : CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun;
-        var recordedToolRequests = run.Events.Count(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved);
-        if (recordedToolRequests > maximumRecordedToolRequests)
-        {
-            throw new FormatException("The run contains more governed tool-request reservations than its finite evidence bound permits.");
         }
 
         var controlEventCount = run.Events.Count(IsLifecycleControlEvent);
@@ -984,9 +978,28 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             CustomLoopToolEvidencePhase.GovernanceDecided => CustomLoopLimits.MaxGovernedToolGovernanceEvidenceUtf8Bytes,
             CustomLoopToolEvidencePhase.OutcomeObserved when !evidence.ReturnedToModel => CustomLoopLimits.MaxGovernedToolOutcomeEvidenceUtf8Bytes,
             CustomLoopToolEvidencePhase.OutcomeObserved => CustomLoopLimits.MaxGovernedToolReturnEvidenceUtf8Bytes,
-            CustomLoopToolEvidencePhase.IntegrityFailed => CustomLoopLimits.MaxGovernedToolReturnEvidenceUtf8Bytes,
+            CustomLoopToolEvidencePhase.IntegrityFailed => CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes,
             _ => 0
         };
+    }
+
+    private static void ValidateRecordedToolEvidenceBound(CustomLoopRunRecord run)
+    {
+        var groups = run.Events
+            .Where(item => item.ToolEvidence is not null)
+            .GroupBy(item => (item.ToolEvidence!.RequestOrdinal, item.ToolEvidence.RequestCorrelationId))
+            .ToArray();
+        var reservationCount = groups.Count(group => group.Any(item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.RequestReserved));
+        var integrityOnly = groups.Where(group => group.All(item => item.ToolEvidence!.Phase != CustomLoopToolEvidencePhase.RequestReserved)).ToArray();
+        var maximumVisibleRequests = run.AdmittedDefinition.ToolAssignments.Length == 0 ? 0 : CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun;
+        var maximumRecordedRequests = run.AdmittedDefinition.ToolAssignments.Length == 0 ? 0 : CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun;
+        if (reservationCount > maximumVisibleRequests
+            || groups.Length > maximumRecordedRequests
+            || integrityOnly.Length > 1
+            || integrityOnly.Any(group => group.Count() != 1 || group.Single().ToolEvidence!.Phase != CustomLoopToolEvidencePhase.IntegrityFailed))
+        {
+            throw new FormatException("The run contains governed tool evidence outside the finite model-visible and one repeated-request integrity bounds.");
+        }
     }
 
     private static bool IsLifecycleControlEvent(CustomLoopRunEvent item)
@@ -1048,12 +1061,17 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new FormatException("A custom-loop run cannot hold more than one provider-attempt trace reservation.");
         }
 
-        foreach (var group in run.Events.Where(item => item.ToolEvidence is not null).GroupBy(item => item.ToolEvidence!.RequestCorrelationId, StringComparer.Ordinal))
+        foreach (var group in run.Events.Where(item => item.ToolEvidence is not null).GroupBy(item => (item.ToolEvidence!.RequestOrdinal, item.ToolEvidence.RequestCorrelationId)))
         {
             var reservation = group.SingleOrDefault(item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.RequestReserved);
             if (reservation is null)
             {
-                throw new FormatException("Governed tool evidence exists without one exact request reservation.");
+                if (group.Count() == 1 && group.Single().ToolEvidence!.Phase == CustomLoopToolEvidencePhase.IntegrityFailed)
+                {
+                    continue;
+                }
+
+                throw new FormatException("Governed tool evidence exists without one exact request reservation or the one bounded non-actuating repeated-request integrity record.");
             }
 
             var finalized = group.Any(item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.IntegrityFailed

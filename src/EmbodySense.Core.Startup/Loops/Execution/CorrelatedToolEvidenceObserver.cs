@@ -68,9 +68,22 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
         return RecordAsync(State(result.Request), CustomLoopToolEvidencePhase.OutcomeObserved, result.RequestId, result.Governance, result, true, cancellationToken);
     }
 
-    public Task RecordIntegrityAsync(ToolRequest request, CancellationToken cancellationToken)
+    public Task RecordIntegrityAsync(
+        ToolRequest request,
+        string resolvedTarget,
+        CustomLoopToolAuthoritySnapshot authority,
+        int requestOrdinal,
+        CancellationToken cancellationToken)
     {
-        return RecordAsync(State(request), CustomLoopToolEvidencePhase.IntegrityFailed, null, null, null, false, cancellationToken);
+        _ = request.CorrelationId ?? throw new CustomLoopToolEvidenceIntegrityException("A bounded repeated tool request must have a correlation id before its integrity evidence is retained.");
+        return RecordAsync(
+            new RequestEvidenceState(requestOrdinal, request, resolvedTarget, authority),
+            CustomLoopToolEvidencePhase.IntegrityFailed,
+            null,
+            null,
+            null,
+            false,
+            cancellationToken);
     }
 
     private async Task RecordAsync(RequestEvidenceState state, CustomLoopToolEvidencePhase phase, string? brokerRequestId, ToolGovernanceEvidence? governance, ToolResult? result, bool returnedToModel, CancellationToken cancellationToken)

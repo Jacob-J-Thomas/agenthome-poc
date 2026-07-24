@@ -875,7 +875,7 @@ public static class CustomLoopRunValidator
             Add(errors, "unsupported_tool_evidence_phase", $"{field}.phase", "Tool evidence phase must be concrete.");
         }
 
-        if (evidence.RequestOrdinal < 1 || evidence.RequestOrdinal > CustomLoopLimits.MaxGovernedToolRequestsPerAttempt + 1)
+        if (evidence.RequestOrdinal < 1 || evidence.RequestOrdinal > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt)
         {
             Add(errors, "tool_request_ordinal_out_of_range", $"{field}.requestOrdinal", "Tool request ordinal is outside the per-attempt limit.");
         }
@@ -946,6 +946,18 @@ public static class CustomLoopRunValidator
                 ValidateContentHash(evidence.CanonicalResultReturnedToModel, evidence.CanonicalResultHash, $"{field}.canonicalResultHash", errors);
             }
         }
+
+        if (evidence.Phase == CustomLoopToolEvidencePhase.IntegrityFailed
+            && (evidence.BrokerRequestId is not null
+                || evidence.Governance is not null
+                || evidence.Outcome is not null
+                || evidence.CanonicalResultReturnedToModel is not null
+                || evidence.CanonicalResultHash is not null
+                || evidence.CanonicalResultCharacterCount is not null
+                || evidence.ReturnedToModel))
+        {
+            Add(errors, "invalid_tool_integrity_payload", field, "A non-actuating tool integrity record may contain only the exact request, authority, correlation, and reserved capacity.");
+        }
     }
 
     private static void ValidateAssignmentSet(CustomLoopToolAssignment[]? assignments, string field, List<CustomLoopValidationError> errors)
@@ -993,9 +1005,9 @@ public static class CustomLoopRunValidator
             Add(errors, "invalid_pending_exit_checkpoint", "checkpoint.pendingExitDecision", "Pending Exit decision requires all steps complete and remaining repeat authority.");
         }
 
-        if (checkpoint.ToolRequestsUsed < 0 || checkpoint.ToolRequestsUsed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)
+        if (checkpoint.ToolRequestsUsed < 0 || checkpoint.ToolRequestsUsed > CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun)
         {
-            Add(errors, "tool_request_budget_out_of_range", "checkpoint.toolRequestsUsed", $"Persisted tool-request usage must be between 0 and {CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun}, including the one visible over-limit denial.");
+            Add(errors, "tool_request_budget_out_of_range", "checkpoint.toolRequestsUsed", $"Persisted model-visible tool-request usage must be between 0 and {CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun}, including the one visible over-limit denial.");
         }
 
         if (checkpoint.EarlierRetainedOutputs is null)

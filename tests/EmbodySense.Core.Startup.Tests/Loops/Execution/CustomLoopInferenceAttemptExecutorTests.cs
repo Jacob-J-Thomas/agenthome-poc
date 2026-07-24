@@ -250,17 +250,87 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             Assert.NotNull(broker);
             for (var index = 0; index < 6; index++)
             {
-                await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                await broker.ExecuteAsync(new ToolRequest(
+                    ToolCommand.Read,
+                    Path.Combine("system", "note.txt"),
+                    CorrelationId: $"visible-request-{index + 1}"), cancellationToken);
             }
 
-            await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+            await broker.ExecuteAsync(new ToolRequest(
+                ToolCommand.Read,
+                Path.Combine("system", "repeated.txt"),
+                CorrelationId: "exact-repeated-request"), cancellationToken);
             return Response();
         }, evidenceSink: evidenceSink);
 
         await Assert.ThrowsAsync<CustomLoopToolEvidenceIntegrityException>(() => executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read])));
 
-        Assert.DoesNotContain(evidenceSink.Evidence, item => item.RequestOrdinal == 7);
-        Assert.Contains(evidenceSink.Evidence, item => item is { RequestOrdinal: 6, Phase: CustomLoopToolEvidencePhase.IntegrityFailed });
+        Assert.DoesNotContain(evidenceSink.Evidence, item => item is { RequestOrdinal: 6, Phase: CustomLoopToolEvidencePhase.IntegrityFailed });
+        var integrity = Assert.Single(evidenceSink.Evidence, item => item.Phase == CustomLoopToolEvidencePhase.IntegrityFailed);
+        Assert.Equal(7, integrity.RequestOrdinal);
+        Assert.Equal("exact-repeated-request", integrity.RequestCorrelationId);
+        Assert.Equal(Path.Combine("system", "repeated.txt"), integrity.TargetPath);
+        Assert.Null(integrity.BrokerRequestId);
+        Assert.Null(integrity.Governance);
+        Assert.Null(integrity.Outcome);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_persists_the_exact_seventh_attempt_request_for_public_inspection_without_actuation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "repeated.txt"), "must not be read");
+        var store = new CustomLoopRunStore(paths);
+        var admitted = await CreateAdmittedRunAsync(store);
+        var evidenceSink = new CustomLoopRunToolEvidenceSink(store);
+        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        {
+            Assert.NotNull(broker);
+            for (var ordinal = 1; ordinal <= CustomLoopLimits.MaxGovernedToolRequestsPerAttempt; ordinal++)
+            {
+                var result = await broker.ExecuteAsync(new ToolRequest(
+                    ToolCommand.Read,
+                    Path.Combine("system", "note.txt"),
+                    CorrelationId: $"attempt-visible-{ordinal}"), cancellationToken);
+                Assert.Equal(ToolExecutionOutcome.Succeeded, result.Outcome);
+            }
+
+            var denied = await broker.ExecuteAsync(new ToolRequest(
+                ToolCommand.Read,
+                Path.Combine("system", "note.txt"),
+                CorrelationId: "provider-reused-attempt-correlation"), cancellationToken);
+            Assert.Equal(ToolExecutionOutcome.Denied, denied.Outcome);
+            await broker.ExecuteAsync(new ToolRequest(
+                ToolCommand.Read,
+                Path.Combine("system", "repeated.txt"),
+                CorrelationId: "provider-reused-attempt-correlation"), cancellationToken);
+            return Response();
+        }, evidenceSink: evidenceSink);
+        var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, new PublishedConversation(), new AuditLog(paths), new TestAuthorityProvider());
+
+        var execution = await runner.RunAsync(new CustomLoopOrderedRunRequest(admitted.Id, "web"));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, execution.Status);
+        var reloaded = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        Assert.Equal(CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerAttempt, reloaded.Events.Count(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved));
+        var integrityEvent = Assert.Single(reloaded.Events, item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.IntegrityFailed);
+        var integrity = integrityEvent.ToolEvidence!;
+        Assert.Equal(CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt, integrity.RequestOrdinal);
+        Assert.Equal("provider-reused-attempt-correlation", integrity.RequestCorrelationId);
+        Assert.Equal(Path.Combine("system", "repeated.txt"), integrity.TargetPath);
+        Assert.Null(integrity.BrokerRequestId);
+        Assert.Null(integrity.Governance);
+        Assert.Null(integrity.Outcome);
+        var projectedRun = Assert.IsType<LoopRunSnapshot>(await new LoopRunInspectionFacade(workspace.RootPath).GetAsync(admitted.Id));
+        AssertToolEvidenceProjection(integrityEvent, Assert.Single(projectedRun.Events, item => item.Sequence == integrityEvent.Sequence));
+        var audit = await new AuditLog(paths).ReadTailAsync(200);
+        Assert.Equal(CustomLoopLimits.MaxGovernedToolRequestsPerAttempt, audit.Count(item => item.Action == AuditSchema.Actions.ToolExecute));
+        var limitAudits = audit.Where(item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "limit_scope") == "attempt").ToArray();
+        Assert.Equal(2, limitAudits.Length);
+        Assert.Single(limitAudits, item => item.Outcome == AuditSchema.Outcomes.Denied && Metadata(item, "tool_request_ordinal") == "6");
+        Assert.Single(limitAudits, item => item.Outcome == AuditSchema.Outcomes.Failed && Metadata(item, "tool_request_ordinal") == "7");
     }
 
     [Fact]
@@ -269,15 +339,22 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         using var workspace = new TestWorkspace();
         var paths = await InitializeWorkspaceAsync(workspace);
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "repeated.txt"), "must not be read");
         var store = new CustomLoopRunStore(paths);
         var admitted = await CreateAdmittedRunAsync(store);
         var evidenceSink = new CustomLoopRunToolEvidenceSink(store);
         var inner = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
         {
             Assert.NotNull(broker);
-            var denied = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+            var denied = await broker.ExecuteAsync(new ToolRequest(
+                ToolCommand.Read,
+                Path.Combine("system", "note.txt"),
+                CorrelationId: "provider-reused-correlation"), cancellationToken);
             Assert.Equal(ToolExecutionOutcome.Denied, denied.Outcome);
-            await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+            await broker.ExecuteAsync(new ToolRequest(
+                ToolCommand.Read,
+                Path.Combine("system", "repeated.txt"),
+                CorrelationId: "provider-reused-correlation"), cancellationToken);
             return Response();
         }, evidenceSink: evidenceSink);
         var executor = new RunLimitAttemptExecutor(inner);
@@ -290,14 +367,24 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var toolEvents = reloaded.Events.Where(item => item.ToolEvidence is not null).ToArray();
         Assert.True(toolEvents.Length == 5, $"Phases: {string.Join(',', toolEvents.Select(item => $"{item.ToolEvidence!.Phase}:{item.ToolEvidence.ReturnedToModel}"))}. Failure: {reloaded.FailureDetail}");
         Assert.Single(toolEvents, item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.RequestReserved);
-        Assert.Single(toolEvents, item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.IntegrityFailed);
+        var integrity = Assert.Single(toolEvents, item => item.ToolEvidence!.Phase == CustomLoopToolEvidencePhase.IntegrityFailed).ToolEvidence!;
         Assert.Single(toolEvents.Select(item => item.ToolEvidence!.RequestCorrelationId).Distinct(StringComparer.Ordinal));
+        Assert.Equal(2, integrity.RequestOrdinal);
+        Assert.Equal("provider-reused-correlation", integrity.RequestCorrelationId);
+        Assert.Equal(Path.Combine("system", "repeated.txt"), integrity.TargetPath);
+        Assert.Equal(2, toolEvents.Select(item => (item.ToolEvidence!.RequestOrdinal, item.ToolEvidence.RequestCorrelationId)).Distinct().Count());
+        Assert.Null(integrity.BrokerRequestId);
+        Assert.Null(integrity.Governance);
+        Assert.Null(integrity.Outcome);
         var sourceEvent = Assert.Single(toolEvents, item => item.ToolEvidence!.Governance is not null && item.ToolEvidence.Phase == CustomLoopToolEvidencePhase.GovernanceDecided);
         var projectedRun = Assert.IsType<LoopRunSnapshot>(await new LoopRunInspectionFacade(workspace.RootPath).GetAsync(admitted.Id));
         AssertToolEvidenceProjection(sourceEvent, Assert.Single(projectedRun.Events, item => item.Sequence == sourceEvent.Sequence));
         var audit = await new AuditLog(paths).ReadTailAsync(200);
         Assert.DoesNotContain(audit, item => item.Action == AuditSchema.Actions.ToolExecute);
-        Assert.Single(audit, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "limit_scope") == "run");
+        var limitAudits = audit.Where(item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "limit_scope") == "run").ToArray();
+        Assert.Equal(2, limitAudits.Length);
+        Assert.Single(limitAudits, item => item.Outcome == AuditSchema.Outcomes.Denied && Metadata(item, "tool_request_ordinal") == "1");
+        Assert.Single(limitAudits, item => item.Outcome == AuditSchema.Outcomes.Failed && Metadata(item, "tool_request_ordinal") == "2");
     }
 
     [Theory]
@@ -700,7 +787,13 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(source.Authority.EvaluatedAtUtc, projected.Authority.EvaluatedAtUtc);
         Assert.Equal(source.Authority.IsValid, projected.Authority.IsValid);
         Assert.Equal(source.Authority.Detail, projected.Authority.Detail);
-        var sourceGovernance = Assert.IsType<ToolGovernanceEvidence>(source.Governance);
+        if (source.Governance is null)
+        {
+            Assert.Null(projected.Governance);
+            return;
+        }
+
+        var sourceGovernance = source.Governance;
         var projectedGovernance = Assert.IsType<LoopRunToolGovernanceSnapshot>(projected.Governance);
         Assert.Equal(sourceGovernance.AuthorityDecision.ToString(), projectedGovernance.AuthorityDecision);
         Assert.Equal(sourceGovernance.AuthorityDetail, projectedGovernance.AuthorityDetail);
