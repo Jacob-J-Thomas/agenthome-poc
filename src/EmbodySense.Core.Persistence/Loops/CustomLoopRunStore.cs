@@ -747,7 +747,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
             foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, PathComparer))
             {
-                if (IsTemporaryArtifactPath(path))
+                if (IsTemporaryArtifactPath(path, CustomLoopLimits.MaxArtifactIdCharacters))
                 {
                     continue;
                 }
@@ -1158,7 +1158,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new FormatException("Custom loop trace-deletion operation storage cannot contain subdirectories.");
         }
 
-        var paths = Directory.EnumerateFiles(_traceDeletionOperationsRoot, "*", SearchOption.TopDirectoryOnly).Where(path => !IsTemporaryArtifactPath(path)).OrderBy(path => path, PathComparer).ToArray();
+        var paths = Directory.EnumerateFiles(_traceDeletionOperationsRoot, "*", SearchOption.TopDirectoryOnly).Where(path => !IsTemporaryArtifactPath(path, CustomLoopLimits.MaxMutationOperationIdCharacters)).OrderBy(path => path, PathComparer).ToArray();
         if (paths.Length > CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace)
         {
             throw new FormatException($"Custom loop trace-deletion operation storage exceeds its explicit {CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace}-artifact limit.");
@@ -1183,25 +1183,110 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             && string.Equals(artifact.PersistedHash, request.ExpectedTraceHash, StringComparison.Ordinal);
     }
 
-    private static bool IsTemporaryArtifactPath(string path)
+    private void RecoverOrphanedTemporaryArtifacts()
+    {
+        RecoverRunTemporaryArtifacts();
+        RecoverTraceDeletionOperationTemporaryArtifacts();
+    }
+
+    private void RecoverRunTemporaryArtifacts()
+    {
+        EnsureSafeDirectory(_runsRoot, create: false);
+        var rootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
+        if (rootFiles.Any(path => !string.Equals(Path.GetFileName(path), MutationLockFileName, StringComparison.Ordinal)))
+        {
+            throw new FormatException("Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory.");
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(_runsRoot, "*", SearchOption.TopDirectoryOnly))
+        {
+            EnsureSafeDirectory(directory, create: false);
+            if (!CustomLoopArtifactIdentifier.IsValid(Path.GetFileName(directory)))
+            {
+                throw new FormatException($"Custom loop run directory `{directory}` has an unsafe loop id.");
+            }
+
+            if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any())
+            {
+                throw new FormatException($"Custom loop run directory `{directory}` cannot contain nested directories.");
+            }
+
+            foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly))
+            {
+                if (IsTemporaryArtifactPath(path, CustomLoopLimits.MaxArtifactIdCharacters))
+                {
+                    DeleteOrphanedTemporaryArtifact(_runsRoot, path);
+                }
+                else if (LooksLikeTemporaryArtifactPath(path))
+                {
+                    throw new FormatException($"Custom loop run storage contains an unrecognized temporary-looking artifact `{path}`.");
+                }
+            }
+        }
+    }
+
+    private void RecoverTraceDeletionOperationTemporaryArtifacts()
+    {
+        if (!Directory.Exists(_traceDeletionOperationsRoot))
+        {
+            return;
+        }
+
+        EnsureSafeDirectory(_traceDeletionOperationsRoot, create: false);
+        if (Directory.EnumerateDirectories(_traceDeletionOperationsRoot, "*", SearchOption.TopDirectoryOnly).Any())
+        {
+            throw new FormatException("Custom loop trace-deletion operation storage cannot contain subdirectories.");
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_traceDeletionOperationsRoot, "*", SearchOption.TopDirectoryOnly))
+        {
+            if (IsTemporaryArtifactPath(path, CustomLoopLimits.MaxMutationOperationIdCharacters))
+            {
+                DeleteOrphanedTemporaryArtifact(_traceDeletionOperationsRoot, path);
+            }
+            else if (LooksLikeTemporaryArtifactPath(path))
+            {
+                throw new FormatException($"Custom loop trace-deletion operation storage contains an unrecognized temporary-looking artifact `{path}`.");
+            }
+        }
+    }
+
+    private void DeleteOrphanedTemporaryArtifact(string root, string path)
+    {
+        EnsureSafeArtifactPath(root, path, mustExist: true);
+        File.Delete(path);
+        if (File.Exists(path))
+        {
+            throw new IOException($"Orphaned custom loop staging artifact `{path}` could not be removed under the mutation lease.");
+        }
+    }
+
+    private static bool LooksLikeTemporaryArtifactPath(string path)
     {
         var fileName = Path.GetFileName(path);
-        if (!fileName.StartsWith(".", StringComparison.Ordinal) || !fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
+        return fileName.StartsWith(".", StringComparison.Ordinal) || fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTemporaryArtifactPath(string path, int maximumIdentifierCharacters)
+    {
+        var fileName = Path.GetFileName(path);
+        if (!fileName.StartsWith(".", StringComparison.Ordinal) || !fileName.EndsWith(".tmp", StringComparison.Ordinal))
         {
             return false;
         }
 
-        var nonceSeparator = fileName.LastIndexOf(".json.", StringComparison.OrdinalIgnoreCase);
+        var nonceSeparator = fileName.LastIndexOf(".json.", StringComparison.Ordinal);
         var nonceStart = nonceSeparator + ".json.".Length;
         var nonceLength = fileName.Length - nonceStart - ".tmp".Length;
-        if (nonceSeparator <= 1 || nonceLength != 32)
+        var identifier = nonceSeparator > 1 ? fileName[1..nonceSeparator] : "";
+        if (!CustomLoopArtifactIdentifier.IsValid(identifier, maximumIdentifierCharacters) || nonceLength != 32)
         {
             return false;
         }
 
         for (var index = nonceStart; index < nonceStart + nonceLength; index++)
         {
-            if (!Uri.IsHexDigit(fileName[index]))
+            if (fileName[index] is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
             {
                 return false;
             }
@@ -1324,16 +1409,28 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                FileStream stream;
                 try
                 {
                     RejectReparsePointIfPresent(_mutationLockPath);
-                    var stream = new FileStream(_mutationLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
-                    RejectReparsePoint(_mutationLockPath);
-                    return new MutationLease(stream, _processMutationGate);
+                    stream = new FileStream(_mutationLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
                 }
                 catch (IOException exception) when (IsLockContention(exception))
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(15), cancellationToken);
+                    continue;
+                }
+
+                try
+                {
+                    RejectReparsePoint(_mutationLockPath);
+                    RecoverOrphanedTemporaryArtifacts();
+                    return new MutationLease(stream, _processMutationGate);
+                }
+                catch
+                {
+                    await stream.DisposeAsync();
+                    throw;
                 }
             }
         }
@@ -1430,7 +1527,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         const int resourceTemporarilyUnavailable = 11;
         const int sharingViolation = 32;
         const int lockViolation = 33;
-        return (exception.HResult & 0xFFFF) is resourceTemporarilyUnavailable or sharingViolation or lockViolation;
+        const int resourceDeadlockAvoided = 35;
+        return (exception.HResult & 0xFFFF) is resourceTemporarilyUnavailable or sharingViolation or lockViolation or resourceDeadlockAvoided;
     }
 
     private static void EnsureContained(string root, string candidate)

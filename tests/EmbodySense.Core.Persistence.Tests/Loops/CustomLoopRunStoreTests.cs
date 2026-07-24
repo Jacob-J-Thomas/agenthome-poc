@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -15,6 +16,10 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopRunStoreTests
 {
+    private const string CrossProcessLockPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_LOCK_PATH";
+    private const string CrossProcessReadyPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_READY_PATH";
+    private const string CrossProcessReleasePathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_RELEASE_PATH";
+    private const string CrossProcessStagingPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_STAGING_PATH";
     private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
     private static readonly JsonSerializerOptions ArtifactJsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -157,17 +162,57 @@ public sealed class CustomLoopRunStoreTests
         await store.CreateAsync(run);
         var runDirectory = Path.Combine(paths.CustomLoopRunsPath, run.LoopId);
         await File.WriteAllTextAsync(Path.Combine(runDirectory, $".{run.Id}.json.{Guid.NewGuid():N}.tmp"), "partial");
-        Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
-        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, $".delete-trace.json.{Guid.NewGuid():N}.tmp"), "partial");
 
         AssertRun(run, await store.GetAsync(run.Id));
         AssertRun(run, await store.GetByAdmissionOperationAsync(run.AdmissionOperationId));
         Assert.Equal(run.Id, Assert.Single(await store.ListRecentAsync(50)).Id);
         Assert.Equal(run.Id, Assert.Single(await store.ListNonterminalAsync()).Id);
-        Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync("delete-trace")).Status);
 
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "unexpected.tmp"), "partial");
         await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(run.Id));
+    }
+
+    [Fact]
+    public async Task Mutation_lease_recovers_exact_orphaned_staging_artifacts_in_both_roots()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runDirectory = Path.Combine(paths.CustomLoopRunsPath, "loop-alpha");
+        Directory.CreateDirectory(runDirectory);
+        Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
+        var runStagingPath = Path.Combine(runDirectory, $".run-alpha.json.{Guid.NewGuid():N}.tmp");
+        var operationStagingPath = Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, $".delete-trace.json.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(runStagingPath, "flushed partial trace");
+        await File.WriteAllTextAsync(operationStagingPath, "flushed partial operation");
+
+        var quota = await new CustomLoopRunStore(paths).GetTraceQuotaAsync();
+
+        Assert.Equal(CustomLoopTraceQuota.Empty(), quota);
+        Assert.False(File.Exists(runStagingPath));
+        Assert.False(File.Exists(operationStagingPath));
+    }
+
+    [Fact]
+    public async Task Mutation_lease_fails_closed_without_removing_unrecognized_temporary_looking_artifacts()
+    {
+        using var runWorkspace = new TestWorkspace();
+        var runPaths = new WorkspacePaths(runWorkspace.RootPath);
+        var runDirectory = Path.Combine(runPaths.CustomLoopRunsPath, "loop-alpha");
+        Directory.CreateDirectory(runDirectory);
+        var runArtifact = Path.Combine(runDirectory, ".run-alpha.json.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.tmp");
+        await File.WriteAllTextAsync(runArtifact, "not an exact internal staging artifact");
+
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(runPaths).GetTraceQuotaAsync());
+        Assert.True(File.Exists(runArtifact));
+
+        using var operationWorkspace = new TestWorkspace();
+        var operationPaths = new WorkspacePaths(operationWorkspace.RootPath);
+        Directory.CreateDirectory(operationPaths.CustomLoopTraceDeletionOperationsPath);
+        var operationArtifact = Path.Combine(operationPaths.CustomLoopTraceDeletionOperationsPath, ".delete trace.json.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tmp");
+        await File.WriteAllTextAsync(operationArtifact, "not an exact internal staging artifact");
+
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(operationPaths).GetTraceQuotaAsync());
+        Assert.True(File.Exists(operationArtifact));
     }
 
     [Fact]
@@ -322,6 +367,69 @@ public sealed class CustomLoopRunStoreTests
 
         var result = await store.UpdateAsync(candidate, 1);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+    }
+
+    [Fact]
+    public async Task Cross_process_mutation_lease_preserves_active_staging_until_the_writer_exits()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runDirectory = Path.Combine(paths.CustomLoopRunsPath, "loop-alpha");
+        Directory.CreateDirectory(runDirectory);
+        var lockPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-runs.lock");
+        var stagingPath = Path.Combine(runDirectory, $".run-alpha.json.{Guid.NewGuid():N}.tmp");
+        var readyPath = workspace.File("writer-ready");
+        var releasePath = workspace.File("writer-release");
+        using var writer = StartCrossProcessStagingWriter(lockPath, stagingPath, readyPath, releasePath);
+        var outputTask = writer.StandardOutput.ReadToEndAsync();
+        var errorTask = writer.StandardError.ReadToEndAsync();
+        try
+        {
+            await WaitForFileAsync(readyPath, writer, TimeSpan.FromSeconds(15));
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new CustomLoopRunStore(paths).GetTraceQuotaAsync(cancellation.Token));
+            Assert.True(File.Exists(stagingPath));
+
+            await File.WriteAllTextAsync(releasePath, "release");
+            await writer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.True(writer.ExitCode == 0, $"Cross-process staging writer failed with exit code {writer.ExitCode}.{Environment.NewLine}{await outputTask}{Environment.NewLine}{await errorTask}");
+
+            Assert.Equal(CustomLoopTraceQuota.Empty(), await new CustomLoopRunStore(paths).GetTraceQuotaAsync());
+            Assert.False(File.Exists(stagingPath));
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(releasePath, "release");
+            if (!writer.HasExited)
+            {
+                writer.Kill(entireProcessTree: true);
+                await writer.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Cross_process_staging_writer_holds_mutation_lease_for_recovery_test()
+    {
+        var lockPath = Environment.GetEnvironmentVariable(CrossProcessLockPathVariable);
+        if (string.IsNullOrWhiteSpace(lockPath))
+        {
+            return;
+        }
+
+        var stagingPath = Environment.GetEnvironmentVariable(CrossProcessStagingPathVariable) ?? throw new InvalidOperationException("The cross-process staging path is required.");
+        var readyPath = Environment.GetEnvironmentVariable(CrossProcessReadyPathVariable) ?? throw new InvalidOperationException("The cross-process ready path is required.");
+        var releasePath = Environment.GetEnvironmentVariable(CrossProcessReleasePathVariable) ?? throw new InvalidOperationException("The cross-process release path is required.");
+        Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(stagingPath)!);
+        await using var lease = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
+        await File.WriteAllTextAsync(stagingPath, "active staging content");
+        await File.WriteAllTextAsync(readyPath, "ready");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        while (!File.Exists(releasePath))
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(15), cancellation.Token);
+        }
     }
 
     [Fact]
@@ -899,6 +1007,46 @@ public sealed class CustomLoopRunStoreTests
         var path = Path.Combine(directory, runId + ".json");
         await File.WriteAllTextAsync(path, content);
         return path;
+    }
+
+    private static Process StartCrossProcessStagingWriter(string lockPath, string stagingPath, string readyPath, string releasePath)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("vstest");
+        startInfo.ArgumentList.Add(typeof(CustomLoopRunStoreTests).Assembly.Location);
+        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunStoreTests.Cross_process_staging_writer_holds_mutation_lease_for_recovery_test");
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        startInfo.Environment[CrossProcessLockPathVariable] = lockPath;
+        startInfo.Environment[CrossProcessStagingPathVariable] = stagingPath;
+        startInfo.Environment[CrossProcessReadyPathVariable] = readyPath;
+        startInfo.Environment[CrossProcessReleasePathVariable] = releasePath;
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("The cross-process staging writer did not start.");
+    }
+
+    private static async Task WaitForFileAsync(string path, Process process, TimeSpan timeout)
+    {
+        var wait = Stopwatch.StartNew();
+        while (!File.Exists(path))
+        {
+            if (process.HasExited)
+            {
+                throw new InvalidOperationException($"The cross-process staging writer exited before signaling readiness with exit code {process.ExitCode}.");
+            }
+
+            if (wait.Elapsed >= timeout)
+            {
+                throw new TimeoutException("The cross-process staging writer did not signal readiness within the bounded wait.");
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(15));
+        }
     }
 
     private static void AssertRun(CustomLoopRunRecord expected, CustomLoopRunRecord? actual)
