@@ -8,5 +8,7 @@ public enum CustomLoopInvocationBindingState
     ConversationWorkspaceExecutionBusy = 3,
     ConversationInvalid = 4,
     CapturedContext = 5,
-    CapturedContextNotFound = 6
+    CapturedContextNotFound = 6,
+    LegacyUnbound = 7,
+    LegacyConversation = 8
 }

@@ -14,6 +14,7 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
@@ -140,6 +141,53 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task New_terminal_binding_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await File.WriteAllTextAsync(paths.CurrentConversationPath + ".identity.json", "{ malformed");
+        var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-unreadable-new-conversation", "private prompt");
+
+        var response = await runtime.InvokeCustomLoopAsync(input);
+        var receipt = Assert.IsType<CustomLoopInvocationOperation>(await new CustomLoopInvocationOperationStore(paths).GetAsync(input.OperationId));
+
+        Assert.Equal("Invalid", response.AdmissionStatus);
+        Assert.Contains("conversation identity could not be read safely", response.Detail, StringComparison.Ordinal);
+        Assert.False(response.WasDispatched);
+        Assert.Equal(CustomLoopInvocationOperationState.Pending, receipt.State);
+        Assert.Equal(CustomLoopInvocationBindingState.Unbound, receipt.BindingState);
+    }
+
+    [Fact]
+    public async Task Version_one_completed_receipt_is_claimed_by_the_current_conversation_before_replay()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-legacy-complete", "private prompt");
+        Assert.Equal("NotFound", (await runtime.InvokeCustomLoopAsync(input)).AdmissionStatus);
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, input.OperationId + ".json");
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        persisted["schemaVersion"] = 1;
+        persisted.Remove("bindingState");
+        persisted.Remove("invokingConversationId");
+        persisted.Remove("contextIdentityHash");
+        await File.WriteAllTextAsync(path, persisted.ToJsonString());
+
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+        var receipt = Assert.IsType<CustomLoopInvocationOperation>(await new CustomLoopInvocationOperationStore(paths).GetAsync(input.OperationId));
+
+        Assert.Equal("NotFound", replay.AdmissionStatus);
+        Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(CustomLoopInvocationOperation.CurrentSchemaVersion, receipt.SchemaVersion);
+        Assert.Equal(CustomLoopInvocationBindingState.LegacyConversation, receipt.BindingState);
+        Assert.Equal((await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version, receipt.InvokingConversationId);
+    }
+
+    [Fact]
     public async Task Rejected_invocation_replay_preserves_structured_validation_errors()
     {
         using var workspace = new TestWorkspace();
@@ -178,6 +226,38 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal(CustomLoopInvocationOperationState.Complete, receipt.State);
         Assert.Equal(CustomLoopInvocationBindingState.ConversationInvalid, receipt.BindingState);
         Assert.DoesNotContain("private prompt", await File.ReadAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, input.OperationId + ".json")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Captured_receipt_retains_its_context_binding_when_a_retried_definition_read_fails()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-captured-definition-failure", "update-captured-definition-failure");
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-captured-definition-failure", "private prompt");
+        var receiptStore = new CustomLoopInvocationOperationStore(paths);
+        var pending = PendingInvocation(input, definition.RoleId);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
+        var captured = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version,
+            ContextIdentityHash = new string('c', CustomLoopLimits.Sha256HexCharacters),
+            Detail = "The invocation context was captured before interruption."
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(captured)).Status);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"), "{ malformed");
+
+        var response = await runtime.InvokeCustomLoopAsync(input);
+        var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(input.OperationId));
+
+        Assert.Equal("Invalid", response.AdmissionStatus);
+        Assert.False(response.WasDispatched);
+        Assert.Equal(CustomLoopInvocationOperationState.Complete, completed.State);
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, completed.BindingState);
+        Assert.Equal(captured.ContextIdentityHash, completed.ContextIdentityHash);
     }
 
     [Fact]
@@ -538,15 +618,17 @@ public sealed class CustomLoopRuntimeTests
         var pendingAdmission = run with { LifecycleVersion = 1, Events = [admittedEvent] };
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await runStore.CreateAsync(pendingAdmission)).Status);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await runStore.UpdateAsync(run, expectedLifecycleVersion: 1)).Status);
-        await using var runtime = await CreateRuntimeAsync(workspace);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
 
         var replay = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, run.AdmissionOperationId, run.TriggerPrompt));
+        var receipt = Assert.IsType<CustomLoopInvocationOperation>(await new CustomLoopInvocationOperationStore(paths).GetAsync(run.AdmissionOperationId));
 
         Assert.Equal("Admitted", replay.AdmissionStatus);
         Assert.Equal("Paused", replay.ExecutionStatus);
         Assert.False(replay.WasDispatched);
         Assert.Null(replay.Run!.InvokingConversation);
         Assert.Equal(run.Id, replay.Run.Id);
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, receipt.BindingState);
     }
 
     [Fact]

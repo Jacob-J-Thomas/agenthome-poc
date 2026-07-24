@@ -65,12 +65,13 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
     public async Task<CustomLoopInvocationOperationStoreResult> BindAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default)
     {
-        Validate(operation, requirePending: true);
+        Validate(operation, requirePending: operation.State == CustomLoopInvocationOperationState.Pending);
         if (operation.BindingState is not (CustomLoopInvocationBindingState.ConversationNotFound
             or CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy
             or CustomLoopInvocationBindingState.ConversationInvalid
             or CustomLoopInvocationBindingState.CapturedContext
-            or CustomLoopInvocationBindingState.CapturedContextNotFound))
+            or CustomLoopInvocationBindingState.CapturedContextNotFound
+            or CustomLoopInvocationBindingState.LegacyConversation))
         {
             throw new ArgumentException("Invocation binding must identify its conversation and optional captured context.", nameof(operation));
         }
@@ -90,7 +91,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
 
-            if (existing.BindingState != CustomLoopInvocationBindingState.Unbound)
+            var canBindLegacyPending = existing.State == CustomLoopInvocationOperationState.Pending
+                && existing.BindingState == CustomLoopInvocationBindingState.LegacyUnbound;
+            var canClaimLegacyCompleted = existing.State == CustomLoopInvocationOperationState.Complete
+                && existing.BindingState == CustomLoopInvocationBindingState.LegacyUnbound
+                && operation.BindingState == CustomLoopInvocationBindingState.LegacyConversation;
+            if (existing.BindingState != CustomLoopInvocationBindingState.Unbound && !canBindLegacyPending && !canClaimLegacyCompleted)
             {
                 if (SameBinding(existing, operation))
                 {
@@ -108,13 +114,32 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 }
             }
 
-            if (existing.State != CustomLoopInvocationOperationState.Pending || operation.UpdatedAtUtc < existing.UpdatedAtUtc)
+            if (canClaimLegacyCompleted)
+            {
+                var expected = existing with
+                {
+                    BindingState = operation.BindingState,
+                    InvokingConversationId = operation.InvokingConversationId,
+                    ContextIdentityHash = operation.ContextIdentityHash,
+                    UpdatedAtUtc = operation.UpdatedAtUtc
+                };
+                if (!SameCompletedOperation(expected, operation))
+                {
+                    return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+                }
+            }
+            else if (existing.State != CustomLoopInvocationOperationState.Pending || operation.State != CustomLoopInvocationOperationState.Pending)
+            {
+                return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+            }
+
+            if (operation.UpdatedAtUtc < existing.UpdatedAtUtc)
             {
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
 
             var normalized = operation with { CreatedAtUtc = existing.CreatedAtUtc };
-            Validate(normalized, requirePending: true);
+            Validate(normalized, requirePending: normalized.State == CustomLoopInvocationOperationState.Pending);
             var json = SerializeBounded(normalized);
             EnsureCapacity(Encoding.UTF8.GetByteCount(json), normalized.OperationId);
             await WriteAsync(normalized, json, cancellationToken);
@@ -213,6 +238,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             throw new FormatException($"Custom-loop invocation operation `{path}` is invalid JSON.", exception);
         }
 
+        operation = Migrate(operation);
         Validate(operation, requirePending: operation?.State == CustomLoopInvocationOperationState.Pending);
         if (!string.Equals(operation!.OperationId, operationId, StringComparison.Ordinal))
         {
@@ -387,8 +413,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
         return operation.Outcome switch
         {
-            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.BindingState == CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy && operation.RunId is null && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
-            CustomLoopInvocationOutcome.Admitted => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && CustomLoopArtifactIdentifier.IsValid(operation.RunId) && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => (operation.BindingState == CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy || IsLegacyBinding(operation.BindingState)) && operation.RunId is null && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.Admitted => (operation.BindingState == CustomLoopInvocationBindingState.CapturedContext || IsLegacyBinding(operation.BindingState)) && CustomLoopArtifactIdentifier.IsValid(operation.RunId) && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
             CustomLoopInvocationOutcome.Rejected => ValidRejectedOutcome(operation),
             _ => false
         };
@@ -402,6 +428,20 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
 
         var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
+        if (IsLegacyBinding(operation.BindingState))
+        {
+            return operation.AdmissionStatus switch
+            {
+                CustomLoopAdmissionStatusNames.Invalid => hasValidOptionalRun,
+                CustomLoopAdmissionStatusNames.Conflict => hasValidOptionalRun,
+                CustomLoopAdmissionStatusNames.NonterminalRunExists => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
+                CustomLoopAdmissionStatusNames.LimitExceeded => operation.RunId is null,
+                CustomLoopAdmissionStatusNames.NotFound => operation.RunId is null,
+                CustomLoopAdmissionStatusNames.AuditUnavailable => hasValidOptionalRun,
+                _ => false
+            };
+        }
+
         return operation.AdmissionStatus switch
         {
             CustomLoopAdmissionStatusNames.Invalid => operation.BindingState == CustomLoopInvocationBindingState.ConversationInvalid
@@ -426,8 +466,34 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             CustomLoopInvocationBindingState.ConversationInvalid => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             CustomLoopInvocationBindingState.CapturedContext => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
             CustomLoopInvocationBindingState.CapturedContextNotFound => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
+            CustomLoopInvocationBindingState.LegacyUnbound => operation.InvokingConversationId is null && operation.ContextIdentityHash is null,
+            CustomLoopInvocationBindingState.LegacyConversation => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             _ => false
         };
+    }
+
+    private static CustomLoopInvocationOperation Migrate(CustomLoopInvocationOperation? operation)
+    {
+        if (operation is null || operation.SchemaVersion != 1)
+        {
+            return operation!;
+        }
+
+        if (operation.BindingState is CustomLoopInvocationBindingState.LegacyUnbound or CustomLoopInvocationBindingState.LegacyConversation)
+        {
+            throw new FormatException("Version-one custom-loop invocation operations cannot contain version-two legacy migration states.");
+        }
+
+        return operation with
+        {
+            SchemaVersion = CustomLoopInvocationOperation.CurrentSchemaVersion,
+            BindingState = operation.BindingState == CustomLoopInvocationBindingState.Unknown ? CustomLoopInvocationBindingState.LegacyUnbound : operation.BindingState
+        };
+    }
+
+    private static bool IsLegacyBinding(CustomLoopInvocationBindingState bindingState)
+    {
+        return bindingState is CustomLoopInvocationBindingState.LegacyUnbound or CustomLoopInvocationBindingState.LegacyConversation;
     }
 
     private static bool ValidValidationError(CustomLoopValidationError? error)
