@@ -10,6 +10,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOperationStore
 {
+    private const int LegacyScalarReceiptSchemaVersion = 1;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -98,7 +99,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             var normalized = operation with { CreatedAtUtc = existing.CreatedAtUtc };
             if (existing.State == CustomLoopInvocationOperationState.Complete)
             {
-                return existing == normalized
+                return SameCompletedOperation(existing, normalized)
                     ? new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Replayed, existing)
                     : new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
@@ -145,6 +146,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             throw new FormatException($"Custom-loop invocation operation `{path}` is invalid JSON.", exception);
         }
 
+        operation = NormalizeSchema(operation);
         Validate(operation, requirePending: operation?.State == CustomLoopInvocationOperationState.Pending);
         if (!string.Equals(operation!.OperationId, operationId, StringComparison.Ordinal))
         {
@@ -235,6 +237,30 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && string.Equals(left.Model, right.Model, StringComparison.Ordinal);
     }
 
+    private static bool SameCompletedOperation(CustomLoopInvocationOperation left, CustomLoopInvocationOperation right)
+    {
+        return SameRequest(left, right)
+            && left.SchemaVersion == right.SchemaVersion
+            && left.CreatedAtUtc == right.CreatedAtUtc
+            && left.UpdatedAtUtc == right.UpdatedAtUtc
+            && left.State == right.State
+            && left.Outcome == right.Outcome
+            && string.Equals(left.AdmissionStatus, right.AdmissionStatus, StringComparison.Ordinal)
+            && string.Equals(left.RunId, right.RunId, StringComparison.Ordinal)
+            && left.ValidationErrors.SequenceEqual(right.ValidationErrors)
+            && string.Equals(left.Detail, right.Detail, StringComparison.Ordinal);
+    }
+
+    private static CustomLoopInvocationOperation? NormalizeSchema(CustomLoopInvocationOperation? operation)
+    {
+        if (operation is { SchemaVersion: LegacyScalarReceiptSchemaVersion, ValidationErrors: null })
+        {
+            return operation with { SchemaVersion = CustomLoopInvocationOperation.CurrentSchemaVersion, ValidationErrors = [] };
+        }
+
+        return operation;
+    }
+
     private static void Validate(CustomLoopInvocationOperation? operation, bool requirePending)
     {
         if (operation is null)
@@ -264,6 +290,9 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             && operation.State != CustomLoopInvocationOperationState.Unknown
             && Enum.IsDefined(operation.Outcome)
             && operation.Detail is { Length: > 0 and <= CustomLoopLimits.MaxRunDetailCharacters };
+        valid = valid
+            && operation.ValidationErrors is { Length: <= CustomLoopLimits.MaxInvocationValidationErrors }
+            && operation.ValidationErrors.All(ValidValidationError);
         if (!valid)
         {
             throw new FormatException("Custom-loop invocation operation failed canonical validation.");
@@ -272,7 +301,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         if (requirePending && (operation.State != CustomLoopInvocationOperationState.Pending
             || operation.Outcome != CustomLoopInvocationOutcome.Unknown
             || operation.AdmissionStatus is not { Length: 0 }
-            || operation.RunId is not null))
+            || operation.RunId is not null
+            || operation.ValidationErrors.Length != 0))
         {
             throw new FormatException("Pending custom-loop invocation operation contains completed outcome fields.");
         }
@@ -292,8 +322,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
         return operation.Outcome switch
         {
-            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.RunId is null && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
-            CustomLoopInvocationOutcome.Admitted => CustomLoopArtifactIdentifier.IsValid(operation.RunId) && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => operation.RunId is null && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.Admitted => CustomLoopArtifactIdentifier.IsValid(operation.RunId) && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
             CustomLoopInvocationOutcome.Rejected => ValidRejectedOutcome(operation),
             _ => false
         };
@@ -312,6 +342,14 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             CustomLoopAdmissionStatusNames.AuditUnavailable => hasValidOptionalRun,
             _ => false
         };
+    }
+
+    private static bool ValidValidationError(CustomLoopValidationError? error)
+    {
+        return error is not null
+            && IsBoundedText(error.Code, CustomLoopLimits.MaxInvocationValidationErrorCodeCharacters)
+            && IsBoundedText(error.Field, CustomLoopLimits.MaxInvocationValidationErrorFieldCharacters)
+            && IsBoundedText(error.Message, CustomLoopLimits.MaxInvocationValidationErrorMessageCharacters);
     }
 
     private static bool IsHash(string? value)

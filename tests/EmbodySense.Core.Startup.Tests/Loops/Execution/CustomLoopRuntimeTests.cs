@@ -101,6 +101,24 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task Rejected_invocation_replay_preserves_structured_validation_errors()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-validation-replay", "update-validation-replay");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, new string('0', CustomLoopLimits.Sha256HexCharacters), "invoke-validation-replay", "validate replay");
+
+        var rejected = await runtime.InvokeCustomLoopAsync(input);
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+
+        Assert.Equal("Conflict", rejected.AdmissionStatus);
+        var error = Assert.Single(rejected.ValidationErrors, item => item.Code == "definition_conflict");
+        Assert.Equal(error, Assert.Single(replay.ValidationErrors, item => item.Code == "definition_conflict"));
+        Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Context_capture_bounds_selected_conversation_entries_and_aggregates_all_omissions_once()
     {
         using var workspace = new TestWorkspace();

@@ -391,6 +391,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             CustomLoopInvocationOutcome.Unknown,
             string.Empty,
             null,
+            [],
             "The canonical custom-loop invocation is durably pending before context capture or admission.");
     }
 
@@ -586,13 +587,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         string detail,
         IReadOnlyList<CustomLoopValidationError>? validationErrors = null)
     {
-        var completed = await CompleteOperationAsync(operation, CustomLoopInvocationOutcome.Rejected, admissionStatus, run, detail);
+        var completed = await CompleteOperationAsync(operation, CustomLoopInvocationOutcome.Rejected, admissionStatus, run, detail, validationErrors);
         return completed
             ? new LoopRunInvocationResponse(admissionStatus, null, false, run is null ? null : Map(run), (validationErrors ?? []).Select(Map).ToArray(), detail)
             : new LoopRunInvocationResponse(CustomLoopAdmissionStatus.AuditUnavailable.ToString(), null, false, run is null ? null : Map(run), (validationErrors ?? []).Select(Map).ToArray(), "The invocation was rejected, but its strict operation receipt could not be completed safely; no provider request was dispatched.");
     }
 
-    private async Task<bool> CompleteOperationAsync(CustomLoopInvocationOperation operation, CustomLoopInvocationOutcome outcome, string admissionStatus, CustomLoopRunRecord? run, string detail)
+    private async Task<bool> CompleteOperationAsync(CustomLoopInvocationOperation operation, CustomLoopInvocationOutcome outcome, string admissionStatus, CustomLoopRunRecord? run, string detail, IReadOnlyList<CustomLoopValidationError>? validationErrors = null)
     {
         var completed = operation with
         {
@@ -601,6 +602,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             Outcome = outcome,
             AdmissionStatus = admissionStatus,
             RunId = run?.Id,
+            ValidationErrors = (validationErrors ?? []).ToArray(),
             Detail = detail
         };
         return await CompleteReceiptAsync(completed);
@@ -652,7 +654,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             durableRun?.Status.ToString(),
             false,
             run,
-            [],
+            operation.ValidationErrors.Select(Map).ToArray(),
             operation.Outcome == CustomLoopInvocationOutcome.Admitted
                 ? "The durable admitted invocation outcome was replayed without another provider dispatch."
                 : $"{operation.Detail} The durable {operation.AdmissionStatus} invocation outcome was replayed without context capture or provider dispatch.");
