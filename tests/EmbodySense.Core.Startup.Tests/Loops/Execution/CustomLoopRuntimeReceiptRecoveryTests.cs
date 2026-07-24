@@ -124,6 +124,89 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
     }
 
     [Fact]
+    public async Task Pending_captured_receipt_terminalizes_and_replays_busy_without_losing_its_context_binding()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            workspace.File("unused-codex.cmd"),
+            "read-only",
+            AgentRuntimeSurface.Cli);
+        var definition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(definitionSnapshot.Id));
+        var receiptStore = new CustomLoopInvocationOperationStore(paths);
+        const string operationId = "invoke-interrupted-after-context-capture";
+        const string prompt = "captured before workspace became busy";
+        var now = DateTimeOffset.UtcNow;
+        var requestHash = CustomLoopInvocationRequestHash.Compute(
+            operationId,
+            definition.Id,
+            definition.DefinitionVersion,
+            definition.ContentHash,
+            WorkspaceActors.Cli,
+            AgentRuntimeSurface.Cli.Id,
+            definition.RoleId,
+            prompt,
+            LlmInferenceSurface.OpenAiCodex.ToString(),
+            "test-model");
+        var pending = new CustomLoopInvocationOperation(
+            CustomLoopInvocationOperation.CurrentSchemaVersion,
+            operationId,
+            requestHash,
+            definition.Id,
+            definition.DefinitionVersion,
+            definition.ContentHash,
+            WorkspaceActors.Cli,
+            AgentRuntimeSurface.Cli.Id,
+            definition.RoleId,
+            CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
+            LlmInferenceSurface.OpenAiCodex.ToString(),
+            "test-model",
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
+            now,
+            now,
+            CustomLoopInvocationOperationState.Pending,
+            CustomLoopInvocationOutcome.Unknown,
+            string.Empty,
+            null,
+            [],
+            "Invocation receipt persisted before the simulated interruption.");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
+        var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var contextIdentity = CustomLoopContextSnapshotHash.ComputeIdentity(CustomLoopContextSnapshot.CreateEmpty(now));
+        var captured = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = conversationIdentity,
+            ContextIdentityHash = contextIdentity
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(captured)).Status);
+
+        await using var competingGate = new CustomLoopWorkspaceExecutionGate(paths);
+        using var competing = competingGate.TryAcquire("competing-after-context-capture", new string('f', CustomLoopLimits.Sha256HexCharacters)).Lease!;
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, operationId, prompt);
+        var response = await runtime.InvokeCustomLoopAsync(input);
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+        var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(operationId));
+
+        Assert.Equal("WorkspaceExecutionBusy", response.AdmissionStatus);
+        Assert.Equal("WorkspaceExecutionBusy", replay.AdmissionStatus);
+        Assert.False(response.WasDispatched);
+        Assert.False(replay.WasDispatched);
+        Assert.Contains("captured-context binding", response.Detail, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopInvocationOperationState.Complete, completed.State);
+        Assert.Equal(CustomLoopInvocationOutcome.WorkspaceExecutionBusy, completed.Outcome);
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, completed.BindingState);
+        Assert.Equal(conversationIdentity, completed.InvokingConversationId);
+        Assert.Equal(contextIdentity, completed.ContextIdentityHash);
+    }
+
+    [Fact]
     public async Task Receipt_completion_failure_after_admission_parks_the_run_and_a_later_replay_completes_without_dispatch()
     {
         using var workspace = new TestWorkspace();

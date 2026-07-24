@@ -125,6 +125,45 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, (await store.GetAsync(pending.OperationId))!.BindingState);
     }
 
+    [Theory]
+    [InlineData("binding-state")]
+    [InlineData("captured-context")]
+    [InlineData("conversation-id")]
+    [InlineData("context-identity")]
+    public async Task Version_one_receipts_reject_every_version_two_binding_field(string injectedField)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-legacy-binding-field-" + injectedField, "prompt");
+        await store.BeginAsync(pending);
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        persisted["schemaVersion"] = 1;
+        switch (injectedField)
+        {
+            case "binding-state":
+                persisted["bindingState"] = "unknown";
+                break;
+            case "captured-context":
+                persisted["bindingState"] = "capturedContext";
+                persisted["invokingConversationId"] = new string('b', CustomLoopLimits.Sha256HexCharacters);
+                persisted["contextIdentityHash"] = new string('c', CustomLoopLimits.Sha256HexCharacters);
+                break;
+            case "conversation-id":
+                persisted.Remove("bindingState");
+                persisted["invokingConversationId"] = new string('b', CustomLoopLimits.Sha256HexCharacters);
+                break;
+            case "context-identity":
+                persisted.Remove("bindingState");
+                persisted["contextIdentityHash"] = new string('c', CustomLoopLimits.Sha256HexCharacters);
+                break;
+        }
+        await File.WriteAllTextAsync(path, persisted.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
+    }
+
     [Fact]
     public async Task Completion_preserves_creation_time_and_rejects_update_time_regression()
     {

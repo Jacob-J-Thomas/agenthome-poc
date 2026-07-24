@@ -654,9 +654,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 return await ReplayOperationAsync(durable, cancellationToken);
             }
 
+            var detail = durable.BindingState == CustomLoopInvocationBindingState.CapturedContext
+                ? "workspace_execution_busy: a captured-context binding from the interrupted invocation was retained, but another custom-loop run is actively executing; no run or provider request was created by this retry."
+                : "workspace_execution_busy: another custom-loop run is actively executing; no run, deadline, context snapshot, or provider request was created.";
             if (durable.BindingState is CustomLoopInvocationBindingState.Unbound or CustomLoopInvocationBindingState.LegacyUnbound)
             {
-                const string detail = "workspace_execution_busy: another custom-loop run is actively executing; no run, deadline, context snapshot, or provider request was created.";
                 var binding = await BindOperationAsync(durable, await _runtimeContext.CaptureConversationIdentityAsync(cancellationToken), CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy, contextIdentityHash: null, detail, cancellationToken);
                 if (binding.Failure is not null)
                 {
@@ -673,7 +675,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 Outcome = CustomLoopInvocationOutcome.WorkspaceExecutionBusy,
                 AdmissionStatus = "WorkspaceExecutionBusy",
                 RunId = null,
-                Detail = durable.Detail
+                Detail = detail
             };
             var stored = await CompleteReceiptAsync(completed);
             if (stored)
@@ -1026,7 +1028,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
         if (operation.Outcome == CustomLoopInvocationOutcome.WorkspaceExecutionBusy)
         {
-            return Busy("The durable workspace_execution_busy outcome was replayed; no run, context capture, or provider dispatch was attempted.");
+            var detail = operation.BindingState == CustomLoopInvocationBindingState.CapturedContext
+                ? "The durable workspace_execution_busy outcome was replayed with its prior captured-context binding; no run or provider dispatch was attempted by the retry."
+                : "The durable workspace_execution_busy outcome was replayed; no run, context capture, or provider dispatch was attempted.";
+            return Busy(detail);
         }
 
         if (operation.RunId is not null && durableRun is null)
