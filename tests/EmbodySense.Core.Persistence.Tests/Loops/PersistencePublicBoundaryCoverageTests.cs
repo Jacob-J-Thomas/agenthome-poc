@@ -306,6 +306,19 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     [Fact]
+    public void Tool_evidence_artifact_round_trips_decomposed_unicode_target_paths_exactly()
+    {
+        const string decomposedPath = "shared/cafe\u0301.txt";
+        var run = CreateToolRun(targetPath: decomposedPath);
+
+        var artifact = CustomLoopRunArtifactSerializer.Serialize(run);
+        var hydrated = CustomLoopRunArtifactSerializer.Deserialize(artifact);
+
+        Assert.All(hydrated.Events.Where(item => item.ToolEvidence is not null), item => Assert.Equal(decomposedPath, item.ToolEvidence!.TargetPath));
+        Assert.Equal(artifact, CustomLoopRunArtifactSerializer.Serialize(hydrated));
+    }
+
+    [Fact]
     public void Artifact_serializer_rejects_cross_event_tool_protocol_mismatches()
     {
         var run = CreateToolRun();
@@ -422,7 +435,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
-    private static CustomLoopRunRecord CreateToolRun(bool includeIntegrity = false)
+    private static CustomLoopRunRecord CreateToolRun(bool includeIntegrity = false, string targetPath = ".")
     {
         var seed = CustomLoopDefinition.CreateSeed("loop-tool-boundary", "default-role", "step-1", "create-tool-loop", Timestamp);
         var definition = CustomLoopDefinitionContentHash.Apply(seed with { ToolAssignments = [CustomLoopToolAssignment.Search], ContentHash = string.Empty });
@@ -439,10 +452,10 @@ public sealed class PersistencePublicBoundaryCoverageTests
             "Approval was not required.");
         const string canonical = "search-result";
         var canonicalHash = CustomLoopTraceContentHash.Compute(canonical);
-        var reservation = ToolEvidence(CustomLoopToolEvidencePhase.RequestReserved, null, null, null, null, null, null, false, authority);
-        var governed = ToolEvidence(CustomLoopToolEvidencePhase.GovernanceDecided, "broker-1", governance, null, null, null, null, false, authority);
-        var outcome = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, false, authority);
-        var returned = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, true, authority);
+        var reservation = ToolEvidence(CustomLoopToolEvidencePhase.RequestReserved, null, null, null, null, null, null, false, authority, targetPath);
+        var governed = ToolEvidence(CustomLoopToolEvidencePhase.GovernanceDecided, "broker-1", governance, null, null, null, null, false, authority, targetPath);
+        var outcome = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, false, authority, targetPath);
+        var returned = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, true, authority, targetPath);
         var events = new List<CustomLoopRunEvent>
         {
             new(1, "event-admitted", Timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null, authority),
@@ -454,7 +467,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
         };
         if (includeIntegrity)
         {
-            var integrity = ToolEvidence(CustomLoopToolEvidencePhase.IntegrityFailed, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, false, authority);
+            var integrity = ToolEvidence(CustomLoopToolEvidencePhase.IntegrityFailed, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, false, authority, targetPath);
             events.Add(ToolEvent(7, "event-integrity", CustomLoopRunEventKind.ToolIntegrityFailed, integrity, authority));
         }
 
@@ -488,9 +501,10 @@ public sealed class PersistencePublicBoundaryCoverageTests
         string? canonicalHash,
         int? canonicalCharacters,
         bool returned,
-        CustomLoopToolAuthoritySnapshot authority)
+        CustomLoopToolAuthoritySnapshot authority,
+        string targetPath)
     {
-        return new CustomLoopToolTraceEvidence(phase, 1, "request-correlation-1", brokerRequestId, ToolCommand.Search, ".", null, "*.cs", workspaceResolvedTarget(), authority, governance, outcome, canonical, canonicalHash, canonicalCharacters, returned, CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
+        return new CustomLoopToolTraceEvidence(phase, 1, "request-correlation-1", brokerRequestId, ToolCommand.Search, targetPath, null, "*.cs", workspaceResolvedTarget(), authority, governance, outcome, canonical, canonicalHash, canonicalCharacters, returned, CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
 
         static string workspaceResolvedTarget() => "workspace/search";
     }

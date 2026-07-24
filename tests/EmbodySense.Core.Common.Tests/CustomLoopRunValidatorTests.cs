@@ -279,6 +279,25 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
+    public void Tool_evidence_preserves_exact_well_formed_unicode_paths_without_requiring_normalization()
+    {
+        const string decomposedPath = "shared/cafe\u0301.txt";
+        var seed = CreateRun();
+        var authority = Authority([CustomLoopToolAssignment.Read]);
+        var started = new CustomLoopRunEvent(2, "attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, authority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        var evidence = ToolEvidence(authority, ToolCommand.Read, decomposedPath);
+        var reserved = new CustomLoopRunEvent(3, "tool-decomposed-path", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, authority, evidence);
+        var run = seed with { Events = [seed.Events[0], started, reserved] };
+
+        var validation = CustomLoopRunValidator.Validate(run);
+
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors.Select(error => $"{error.Code}: {error.Message}")));
+        Assert.Equal(decomposedPath, run.Events[^1].ToolEvidence!.TargetPath);
+        var unsafeRun = run with { Events = [run.Events[0], started, reserved with { ToolEvidence = evidence with { TargetPath = "shared/\0.txt" } }] };
+        AssertCodes(CustomLoopRunValidator.Validate(unsafeRun), "unsafe_text");
+    }
+
+    [Fact]
     public void Validate_accepts_the_exact_nonterminal_control_limit_with_terminal_and_warning_slots_reserved()
     {
         var run = WithLifecycleControlEvents(CreateRun(), CustomLoopLimits.MaxNonterminalLifecycleControlEventsPerRun);
@@ -504,9 +523,9 @@ public sealed class CustomLoopRunValidatorTests
         return new CustomLoopToolAuthoritySnapshot("default-role", effectiveAssignments, effectiveAssignments, catalog, effectiveAssignments, new string('a', CustomLoopLimits.Sha256HexCharacters), new string('b', CustomLoopLimits.Sha256HexCharacters), Timestamp, true, "Test authority snapshot.");
     }
 
-    private static CustomLoopToolTraceEvidence ToolEvidence(CustomLoopToolAuthoritySnapshot authority, ToolCommand command)
+    private static CustomLoopToolTraceEvidence ToolEvidence(CustomLoopToolAuthoritySnapshot authority, ToolCommand command, string targetPath = "shared/file.txt")
     {
-        return new CustomLoopToolTraceEvidence(CustomLoopToolEvidencePhase.RequestReserved, 1, "tool-correlation", null, command, "shared/file.txt", null, null, null, authority, null, null, null, null, null, false, CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
+        return new CustomLoopToolTraceEvidence(CustomLoopToolEvidencePhase.RequestReserved, 1, "tool-correlation", null, command, targetPath, null, null, null, authority, null, null, null, null, null, false, CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
     }
 
     private static CustomLoopRunRecord Advance(CustomLoopRunRecord run, CustomLoopRunStatus status)

@@ -891,7 +891,7 @@ public static class CustomLoopRunValidator
             Add(errors, "unsupported_tool_command", $"{field}.command", "Tool command must be a supported concrete value.");
         }
 
-        ValidateText(evidence.TargetPath, $"{field}.targetPath", CustomLoopLimits.MaxGovernedToolTargetCharacters, required: true, errors);
+        ValidateText(evidence.TargetPath, $"{field}.targetPath", CustomLoopLimits.MaxGovernedToolTargetCharacters, required: true, errors, requireNormalized: false);
         ValidateOptionalText(evidence.Content, $"{field}.content", CustomLoopLimits.MaxGovernedToolArgumentCharacters, errors, requireNormalized: false);
         ValidateOptionalText(evidence.Pattern, $"{field}.pattern", CustomLoopLimits.MaxGovernedToolArgumentCharacters, errors, requireNormalized: false);
         ValidateOptionalText(evidence.ResolvedTarget, $"{field}.resolvedTarget", CustomLoopLimits.MaxGovernedToolTargetCharacters, errors, requireNormalized: false);
