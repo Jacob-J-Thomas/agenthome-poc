@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -202,6 +203,82 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("Invalid", rejected.AdmissionStatus);
         var error = Assert.Single(rejected.ValidationErrors, item => item.Code == "definition_conflict");
         Assert.Equal(error, Assert.Single(replay.ValidationErrors, item => item.Code == "definition_conflict"));
+        Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Audit_unavailable_receipt_replays_a_valid_nonterminal_run_relationship()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definitionSnapshot = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-audit-relation-replay", "update-audit-relation-replay");
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var definition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(definitionSnapshot.Id));
+        var runStore = new CustomLoopRunStore(paths);
+        var referencedRun = await CreateReferencedRunAsync(runStore, definition, "run-audit-relation", "invoke-existing-audit-relation");
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-audit-relation-replay", "audit relation replay");
+        await PersistRejectedReceiptAsync(paths, input, definition.RoleId, referencedRun.Id, CustomLoopAdmissionStatus.AuditUnavailable);
+
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+
+        Assert.Equal("AuditUnavailable", replay.AdmissionStatus);
+        Assert.Equal(referencedRun.Id, replay.Run!.Id);
+        Assert.Equal(referencedRun.Status.ToString(), replay.ExecutionStatus);
+        Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Audit_unavailable_receipt_replays_a_valid_operation_conflict_run_relationship()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var requestedDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-audit-conflict-request", "update-audit-conflict-request");
+        var conflictingDefinitionSnapshot = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-audit-conflict-run", "update-audit-conflict-run");
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conflictingDefinition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(conflictingDefinitionSnapshot.Id));
+        var runStore = new CustomLoopRunStore(paths);
+        const string operationId = "invoke-audit-conflict-replay";
+        var referencedRun = await CreateReferencedRunAsync(runStore, conflictingDefinition, "run-audit-conflict", operationId);
+        var input = new LoopRunInvocationInput(requestedDefinition.Id, requestedDefinition.DefinitionVersion, requestedDefinition.ContentHash, operationId, "audit conflict replay");
+        await PersistRejectedReceiptAsync(paths, input, requestedDefinition.RoleId, referencedRun.Id, CustomLoopAdmissionStatus.AuditUnavailable);
+
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+
+        Assert.Equal("AuditUnavailable", replay.AdmissionStatus);
+        Assert.Equal(referencedRun.Id, replay.Run!.Id);
+        Assert.Equal(referencedRun.Status.ToString(), replay.ExecutionStatus);
+        Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Rejected_receipt_replays_against_its_intentionally_deleted_run_tombstone()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definitionSnapshot = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-deleted-rejection-replay", "update-deleted-rejection-replay");
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var definition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(definitionSnapshot.Id));
+        var runStore = new CustomLoopRunStore(paths);
+        var referencedRun = await CreateReferencedRunAsync(runStore, definition, "run-deleted-rejection", "invoke-existing-deleted-rejection");
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-deleted-rejection-replay", "deleted rejection replay");
+        await PersistRejectedReceiptAsync(paths, input, definition.RoleId, referencedRun.Id, CustomLoopAdmissionStatus.NonterminalRunExists);
+        var running = AdvanceRun(referencedRun, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await runStore.UpdateAsync(running, referencedRun.LifecycleVersion)).Status);
+        var completed = AdvanceRun(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await runStore.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await runStore.InspectTraceAsync(completed.Id));
+        var deletionRequest = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-rejected-reference", WorkspaceActors.Cli, "cli");
+        var deletion = new CustomLoopTraceDeletionMutation(deletionRequest, CustomLoopTraceDeletionRequestHash.Compute(deletionRequest), completed.UpdatedAtUtc.AddSeconds(1));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await runStore.DeleteTerminalTraceAsync(deletion)).Status);
+
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+
+        Assert.Equal("NonterminalRunExists", replay.AdmissionStatus);
+        Assert.Equal(CustomLoopRunStatus.Completed.ToString(), replay.ExecutionStatus);
+        Assert.Null(replay.Run);
         Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1001,6 +1078,84 @@ public sealed class CustomLoopRuntimeTests
             null,
             [],
             "The invocation is pending.");
+    }
+
+    private static async Task PersistRejectedReceiptAsync(WorkspacePaths paths, LoopRunInvocationInput input, string roleId, string runId, CustomLoopAdmissionStatus admissionStatus)
+    {
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = PendingInvocation(input, roleId);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version,
+            ContextIdentityHash = new string('c', CustomLoopLimits.Sha256HexCharacters),
+            Detail = "The invocation context was captured before its rejected admission outcome."
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+        var completed = bound with
+        {
+            UpdatedAtUtc = bound.UpdatedAtUtc.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = admissionStatus.ToString(),
+            RunId = runId,
+            Detail = $"The {admissionStatus} rejection retained its status-specific run relationship."
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+    }
+
+    private static async Task<CustomLoopRunRecord> CreateReferencedRunAsync(CustomLoopRunStore store, CustomLoopDefinition definition, string runId, string admissionOperationId)
+    {
+        var now = DateTimeOffset.UtcNow.ToUniversalTime();
+        var admittedEvent = RuntimeEvent(1, $"{runId}-admitted", CustomLoopRunEventKind.Admitted, now);
+        var run = new CustomLoopRunRecord(
+            CustomLoopRunRecord.CurrentSchemaVersion,
+            runId,
+            definition.Id,
+            1,
+            CustomLoopRunStatus.Admitted,
+            now,
+            now,
+            null,
+            "cli",
+            new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
+            admissionOperationId,
+            WorkspaceActors.Cli,
+            string.Empty,
+            definition,
+            "existing invocation",
+            null,
+            CustomLoopContextSnapshot.CreateEmpty(now),
+            CustomLoopExecutionClock.NotStarted(),
+            CustomLoopRunCheckpoint.Start(),
+            [admittedEvent],
+            null,
+            null,
+            null);
+        run = CustomLoopAdmissionRequestHash.Apply(run);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(run)).Status);
+        return run;
+    }
+
+    private static CustomLoopRunRecord AdvanceRun(CustomLoopRunRecord run, CustomLoopRunStatus status)
+    {
+        var updatedAt = run.UpdatedAtUtc.AddSeconds(1);
+        return run with
+        {
+            LifecycleVersion = run.LifecycleVersion + 1,
+            Status = status,
+            UpdatedAtUtc = updatedAt,
+            CompletedAtUtc = status == CustomLoopRunStatus.Completed ? updatedAt : null,
+            ExecutionClock = status == CustomLoopRunStatus.Running ? new CustomLoopExecutionClock(0, updatedAt) : new CustomLoopExecutionClock(1_000, null),
+            Events = [.. run.Events, RuntimeEvent(run.Events.Length + 1L, $"{run.Id}-event-{run.Events.Length + 1}", CustomLoopRunEventKind.LifecycleChanged, updatedAt)],
+            FinalOutput = status == CustomLoopRunStatus.Completed ? "done" : null
+        };
+    }
+
+    private static CustomLoopRunEvent RuntimeEvent(long sequence, string eventId, CustomLoopRunEventKind kind, DateTimeOffset timestamp)
+    {
+        return new CustomLoopRunEvent(sequence, eventId, timestamp, kind, null, null, null, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null);
     }
 
     private static bool HasValidSurrogatePairs(string value)

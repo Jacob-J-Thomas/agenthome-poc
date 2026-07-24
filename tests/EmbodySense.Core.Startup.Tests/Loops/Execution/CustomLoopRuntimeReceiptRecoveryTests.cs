@@ -16,13 +16,14 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 public sealed class CustomLoopRuntimeReceiptRecoveryTests
 {
     [Fact]
-    public async Task Pending_receipt_with_an_already_admitted_run_is_reconciled_before_a_new_busy_owner_can_overwrite_it()
+    public async Task Version_one_pending_receipt_with_an_already_admitted_run_is_bound_and_reconciled_before_a_new_busy_owner()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
@@ -101,6 +102,13 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 conversation,
                 context));
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(receiptPath))!.AsObject();
+        persisted["schemaVersion"] = 1;
+        persisted.Remove("bindingState");
+        persisted.Remove("invokingConversationId");
+        persisted.Remove("contextIdentityHash");
+        await File.WriteAllTextAsync(receiptPath, persisted.ToJsonString());
 
         await using var competingGate = new CustomLoopWorkspaceExecutionGate(paths);
         var competing = competingGate.TryAcquire("competing-active-operation", new string('f', CustomLoopLimits.Sha256HexCharacters));
@@ -119,6 +127,9 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(operationId));
         Assert.Equal(CustomLoopInvocationOperationState.Complete, completed.State);
         Assert.Equal(CustomLoopInvocationOutcome.Admitted, completed.Outcome);
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, completed.BindingState);
+        Assert.Equal(conversationIdentity, completed.InvokingConversationId);
+        Assert.Equal(CustomLoopContextSnapshotHash.ComputeIdentity(context), completed.ContextIdentityHash);
         Assert.Equal(admission.Run!.Id, completed.RunId);
         Assert.NotEqual(CustomLoopInvocationOutcome.WorkspaceExecutionBusy, completed.Outcome);
     }

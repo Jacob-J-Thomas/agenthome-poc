@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -236,29 +237,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             CustomLoopConversationReference? conversationReference;
             if (admittedByInterruptedOwner is not null)
             {
-                if (operation.BindingState is CustomLoopInvocationBindingState.Unbound or CustomLoopInvocationBindingState.LegacyUnbound)
+                var priorRunBinding = await BindPendingOperationToRunAsync(operation, admittedByInterruptedOwner, cancellationToken);
+                if (priorRunBinding.Failure is not null)
                 {
-                    var identity = await CaptureConversationIdentityAsync(cancellationToken);
-                    if (identity.Failure is not null)
-                    {
-                        return identity.Failure;
-                    }
-
-                    if (admittedByInterruptedOwner.InvokingConversation is not null
-                        && !string.Equals(admittedByInterruptedOwner.InvokingConversation.ConversationId, identity.ConversationId, StringComparison.Ordinal))
-                    {
-                        return Conflict("The prior admitted run belongs to a different logical conversation.");
-                    }
-
-                    var legacyBinding = await BindOperationAsync(operation, identity.ConversationId!, CustomLoopInvocationBindingState.CapturedContext, CustomLoopContextSnapshotHash.ComputeIdentity(admittedByInterruptedOwner.ContextSnapshot), "The legacy pre-binding invocation receipt was durably bound to its prior admitted run before replay.", cancellationToken);
-                    if (legacyBinding.Failure is not null)
-                    {
-                        return legacyBinding.Failure;
-                    }
-
-                    operation = legacyBinding.Operation!;
+                    return priorRunBinding.Failure;
                 }
 
+                operation = priorRunBinding.Operation!;
                 if (!InvocationMatchesRun(operation, admittedByInterruptedOwner))
                 {
                     return Conflict("The pending invocation receipt and its prior run do not describe the same bound conversation and captured context.");
@@ -801,6 +786,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return null;
         }
 
+        var priorRunBinding = await BindPendingOperationToRunAsync(operation, run, cancellationToken);
+        if (priorRunBinding.Failure is not null)
+        {
+            return priorRunBinding.Failure;
+        }
+
+        operation = priorRunBinding.Operation!;
         if (!InvocationMatchesRun(operation, run))
         {
             return Conflict("The pending invocation receipt and its prior run do not describe the same canonical authorized invocation.");
@@ -816,6 +808,28 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         return completed
             ? new LoopRunInvocationResponse(admissionStatus, run.Status.ToString(), false, Map(run), [], detail)
             : new LoopRunInvocationResponse(CustomLoopAdmissionStatus.AuditUnavailable.ToString(), run.Status.ToString(), false, Map(run), [], "The prior admission was found, but its invocation receipt could not be reconciled safely; no provider request was dispatched.");
+    }
+
+    private async Task<InvocationBindingResult> BindPendingOperationToRunAsync(CustomLoopInvocationOperation operation, CustomLoopRunRecord run, CancellationToken cancellationToken)
+    {
+        if (operation.BindingState is not (CustomLoopInvocationBindingState.Unbound or CustomLoopInvocationBindingState.LegacyUnbound))
+        {
+            return new InvocationBindingResult(operation, null);
+        }
+
+        var identity = await CaptureConversationIdentityAsync(cancellationToken);
+        if (identity.Failure is not null)
+        {
+            return new InvocationBindingResult(null, identity.Failure);
+        }
+
+        if (run.InvokingConversation is not null
+            && !string.Equals(run.InvokingConversation.ConversationId, identity.ConversationId, StringComparison.Ordinal))
+        {
+            return new InvocationBindingResult(null, Conflict("The prior admitted run belongs to a different logical conversation."));
+        }
+
+        return await BindOperationAsync(operation, identity.ConversationId!, CustomLoopInvocationBindingState.CapturedContext, CustomLoopContextSnapshotHash.ComputeIdentity(run.ContextSnapshot), "The legacy pre-binding invocation receipt was durably bound to its prior admitted run before replay.", cancellationToken);
     }
 
     private async Task<UndispatchedParkingResult> ParkUndispatchedAdmissionAsync(CustomLoopRunRecord run)
@@ -1013,12 +1027,18 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     {
         LoopRunSnapshot? run = null;
         CustomLoopRunRecord? durableRun = null;
+        CustomLoopTraceInspection? deletedTrace = null;
         if (operation.RunId is not null)
         {
             try
             {
                 durableRun = await _runStore.GetAsync(operation.RunId, cancellationToken);
                 run = durableRun is null ? null : Map(durableRun);
+                if (durableRun is null && operation.Outcome == CustomLoopInvocationOutcome.Rejected)
+                {
+                    var inspected = await _runStore.InspectTraceAsync(operation.RunId, cancellationToken);
+                    deletedTrace = inspected is { IsDeleted: true, Tombstone: not null } ? inspected : null;
+                }
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -1034,7 +1054,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return Busy(detail);
         }
 
-        if (operation.RunId is not null && durableRun is null)
+        if (operation.RunId is not null && durableRun is null && deletedTrace is null)
         {
             return Invalid($"The durable {operation.AdmissionStatus} invocation receipt refers to a missing run; no provider request was dispatched.");
         }
@@ -1049,9 +1069,14 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return Conflict("The durable rejected invocation receipt does not match its status-specific run reference; no provider request was dispatched.");
         }
 
+        if (operation.Outcome == CustomLoopInvocationOutcome.Rejected && deletedTrace is not null && !RejectedInvocationReferencesTrace(operation, deletedTrace))
+        {
+            return Conflict("The durable rejected invocation receipt does not match its status-specific deleted-run reference; no provider request was dispatched.");
+        }
+
         return new LoopRunInvocationResponse(
             operation.AdmissionStatus,
-            durableRun?.Status.ToString(),
+            durableRun?.Status.ToString() ?? deletedTrace?.TerminalStatus.ToString(),
             false,
             run,
             operation.ValidationErrors.Select(Map).ToArray(),
@@ -1072,8 +1097,24 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         {
             nameof(CustomLoopAdmissionStatus.NonterminalRunExists) => string.Equals(operation.LoopId, run.LoopId, StringComparison.Ordinal),
             nameof(CustomLoopAdmissionStatus.Conflict) => string.Equals(operation.OperationId, run.AdmissionOperationId, StringComparison.Ordinal),
-            nameof(CustomLoopAdmissionStatus.AuditUnavailable) => InvocationMatchesRun(operation, run),
+            nameof(CustomLoopAdmissionStatus.AuditUnavailable) => InvocationMatchesRun(operation, run)
+                || string.Equals(operation.LoopId, run.LoopId, StringComparison.Ordinal)
+                || string.Equals(operation.OperationId, run.AdmissionOperationId, StringComparison.Ordinal),
             nameof(CustomLoopAdmissionStatus.Invalid) => string.Equals(operation.LoopId, run.LoopId, StringComparison.Ordinal),
+            _ => false
+        };
+    }
+
+    private static bool RejectedInvocationReferencesTrace(CustomLoopInvocationOperation operation, CustomLoopTraceInspection trace)
+    {
+        var tombstone = trace.Tombstone!;
+        return operation.AdmissionStatus switch
+        {
+            nameof(CustomLoopAdmissionStatus.NonterminalRunExists) => string.Equals(operation.LoopId, trace.LoopId, StringComparison.Ordinal),
+            nameof(CustomLoopAdmissionStatus.Conflict) => string.Equals(operation.OperationId, tombstone.AdmissionOperationId, StringComparison.Ordinal),
+            nameof(CustomLoopAdmissionStatus.AuditUnavailable) => string.Equals(operation.LoopId, trace.LoopId, StringComparison.Ordinal)
+                || string.Equals(operation.OperationId, tombstone.AdmissionOperationId, StringComparison.Ordinal),
+            nameof(CustomLoopAdmissionStatus.Invalid) => string.Equals(operation.LoopId, trace.LoopId, StringComparison.Ordinal),
             _ => false
         };
     }
