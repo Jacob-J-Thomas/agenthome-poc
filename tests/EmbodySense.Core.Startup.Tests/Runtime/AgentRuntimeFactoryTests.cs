@@ -41,7 +41,14 @@ public sealed class AgentRuntimeFactoryTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var permissions = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        var current = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        var permissions = new PermissionsDocument
+        {
+            Version = PermissionsDocument.ToolResponseInspectionMigrationSourceVersion,
+            Scope = current.Scope,
+            Approved = [.. current.Approved],
+            Denied = [.. current.Denied]
+        };
         permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
         await File.WriteAllTextAsync(paths.PermissionsPath, permissions.ToJson());
 
@@ -53,6 +60,7 @@ public sealed class AgentRuntimeFactoryTests
             AgentRuntimeSurface.Cli);
 
         var migrated = new PermissionPolicyStore().Load(paths);
+        Assert.Equal(PermissionsDocument.CurrentVersion, Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath))).Version);
         var evaluation = migrated.EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
         Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
     }

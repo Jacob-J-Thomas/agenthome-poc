@@ -202,6 +202,11 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         var buffer = new char[MaxReadCharacters + 1];
         var count = await reader.ReadBlockAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
         var take = Math.Min(count, MaxReadCharacters);
+        if (take < count && char.IsHighSurrogate(buffer[take - 1]) && char.IsLowSurrogate(buffer[take]))
+        {
+            take--;
+        }
+
         var text = new string(buffer, 0, take);
         if (text.Contains('\0'))
         {
@@ -255,9 +260,18 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 
     private static string FormatMatchLine(string line)
     {
-        return line.Length <= MaxMatchLineCharacters
-            ? line
-            : line[..MaxMatchLineCharacters] + " [line truncated]";
+        if (line.Length <= MaxMatchLineCharacters)
+        {
+            return line;
+        }
+
+        var retainedCharacterCount = MaxMatchLineCharacters;
+        if (char.IsHighSurrogate(line[retainedCharacterCount - 1]) && char.IsLowSurrogate(line[retainedCharacterCount]))
+        {
+            retainedCharacterCount--;
+        }
+
+        return line[..retainedCharacterCount] + " [line truncated]";
     }
 
     private static string ApplySearchOutputLimit(string text, SearchState state)
