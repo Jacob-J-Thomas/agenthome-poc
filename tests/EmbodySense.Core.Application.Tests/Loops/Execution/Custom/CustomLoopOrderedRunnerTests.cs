@@ -1931,7 +1931,7 @@ public sealed class CustomLoopOrderedRunnerTests
             null,
             null,
             false,
-            CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
+            CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes);
         var traceEvent = ToolEvent(store.Current.Events.Length + 1, CustomLoopRunEventKind.ToolIntegrityFailed, request, integrity);
         var candidate = store.Current with
         {

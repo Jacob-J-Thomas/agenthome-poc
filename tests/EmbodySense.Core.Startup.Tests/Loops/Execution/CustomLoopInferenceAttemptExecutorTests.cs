@@ -273,6 +273,49 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Null(integrity.BrokerRequestId);
         Assert.Null(integrity.Governance);
         Assert.Null(integrity.Outcome);
+        Assert.Equal(CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes, integrity.ReservedUtf8Bytes);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_completes_repeat_integrity_audit_after_provider_cancellation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
+        using var providerCancellation = new CancellationTokenSource();
+        var evidenceSink = new CancelOnIntegrityEvidenceSink(providerCancellation);
+        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        {
+            Assert.NotNull(broker);
+            for (var ordinal = 1; ordinal <= CustomLoopLimits.MaxGovernedToolRequestsPerAttempt; ordinal++)
+            {
+                await broker.ExecuteAsync(new ToolRequest(
+                    ToolCommand.Read,
+                    Path.Combine("system", "note.txt"),
+                    CorrelationId: $"cancel-audit-{ordinal}"), cancellationToken);
+            }
+
+            await broker.ExecuteAsync(new ToolRequest(
+                ToolCommand.Read,
+                Path.Combine("system", "note.txt"),
+                CorrelationId: "cancel-audit-visible-denial"), cancellationToken);
+            await broker.ExecuteAsync(new ToolRequest(
+                ToolCommand.Read,
+                Path.Combine("system", "repeated.txt"),
+                CorrelationId: "cancel-audit-repeat"), cancellationToken);
+            return Response();
+        }, evidenceSink: evidenceSink);
+
+        await Assert.ThrowsAsync<CustomLoopToolEvidenceIntegrityException>(() => executor.ExecuteAsync(
+            CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]),
+            providerCancellation.Token));
+
+        Assert.True(providerCancellation.IsCancellationRequested);
+        var audit = await new AuditLog(paths).ReadTailAsync(200);
+        var failed = Assert.Single(audit, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate
+            && item.Outcome == AuditSchema.Outcomes.Failed
+            && Metadata(item, "tool_request_ordinal") == "7");
+        Assert.Equal("attempt", Metadata(failed, "limit_scope"));
     }
 
     [Fact]
@@ -323,6 +366,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Null(integrity.BrokerRequestId);
         Assert.Null(integrity.Governance);
         Assert.Null(integrity.Outcome);
+        Assert.Equal(CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes, integrity.ReservedUtf8Bytes);
         var projectedRun = Assert.IsType<LoopRunSnapshot>(await new LoopRunInspectionFacade(workspace.RootPath).GetAsync(admitted.Id));
         AssertToolEvidenceProjection(integrityEvent, Assert.Single(projectedRun.Events, item => item.Sequence == integrityEvent.Sequence));
         var audit = await new AuditLog(paths).ReadTailAsync(200);
@@ -376,6 +420,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Null(integrity.BrokerRequestId);
         Assert.Null(integrity.Governance);
         Assert.Null(integrity.Outcome);
+        Assert.Equal(CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes, integrity.ReservedUtf8Bytes);
         var sourceEvent = Assert.Single(toolEvents, item => item.ToolEvidence!.Governance is not null && item.ToolEvidence.Phase == CustomLoopToolEvidencePhase.GovernanceDecided);
         var projectedRun = Assert.IsType<LoopRunSnapshot>(await new LoopRunInspectionFacade(workspace.RootPath).GetAsync(admitted.Id));
         AssertToolEvidenceProjection(sourceEvent, Assert.Single(projectedRun.Events, item => item.Sequence == sourceEvent.Sequence));
@@ -892,6 +937,19 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         public Task RecordAsync(string runId, int iteration, string stepId, int attempt, CustomLoopToolTraceEvidence evidence, CancellationToken cancellationToken = default)
         {
             Evidence.Add(evidence);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CancelOnIntegrityEvidenceSink(CancellationTokenSource cancellation) : ICustomLoopToolEvidenceSink
+    {
+        public Task RecordAsync(string runId, int iteration, string stepId, int attempt, CustomLoopToolTraceEvidence evidence, CancellationToken cancellationToken = default)
+        {
+            if (evidence.Phase == CustomLoopToolEvidencePhase.IntegrityFailed)
+            {
+                cancellation.Cancel();
+            }
+
             return Task.CompletedTask;
         }
     }

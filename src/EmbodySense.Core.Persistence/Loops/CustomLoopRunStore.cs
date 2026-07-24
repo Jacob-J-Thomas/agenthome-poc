@@ -978,7 +978,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             CustomLoopToolEvidencePhase.GovernanceDecided => CustomLoopLimits.MaxGovernedToolGovernanceEvidenceUtf8Bytes,
             CustomLoopToolEvidencePhase.OutcomeObserved when !evidence.ReturnedToModel => CustomLoopLimits.MaxGovernedToolOutcomeEvidenceUtf8Bytes,
             CustomLoopToolEvidencePhase.OutcomeObserved => CustomLoopLimits.MaxGovernedToolReturnEvidenceUtf8Bytes,
-            CustomLoopToolEvidencePhase.IntegrityFailed => CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes,
+            CustomLoopToolEvidencePhase.IntegrityFailed when evidence.ReservedUtf8Bytes == CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes => CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes,
+            CustomLoopToolEvidencePhase.IntegrityFailed => CustomLoopLimits.MaxGovernedToolReturnEvidenceUtf8Bytes,
             _ => 0
         };
     }

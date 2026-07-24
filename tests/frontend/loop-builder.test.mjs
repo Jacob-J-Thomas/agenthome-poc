@@ -523,6 +523,35 @@ test("Runs projects durable timeline and context evidence from the authenticated
   assert.doesNotMatch(app.elements.inspectorContent.textContent, /chain-of-thought/i);
 });
 
+test("standalone integrity evidence reports governance as intentionally not evaluated", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  const integrity = {
+    ...createToolEvidenceSnapshot(),
+    phase: "IntegrityFailed",
+    requestOrdinal: 2,
+    brokerRequestId: null,
+    governance: null,
+    outcome: null,
+    canonicalResultReturnedToModel: null,
+    canonicalResultHash: null,
+    canonicalResultCharacterCount: null,
+    returnedToModel: false,
+    reservedUtf8Bytes: 18432
+  };
+  run.events[2] = { ...run.events[2], kind: "ToolIntegrityFailed", detail: "Repeated request retained without actuation.", toolEvidence: integrity };
+  server.runs = [{ id: run.id, loopId: run.loopId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: run.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  assert.match(app.elements.runTimeline.textContent, /governance not evaluated · non-actuating integrity failure/);
+  assert.doesNotMatch(app.elements.runTimeline.textContent, /governance decision not yet recorded/);
+});
+
 test("live run monitoring binds the exact admission operation instead of another recent run", async () => {
   const server = new FakeFetchServer(createCatalog());
   const older = createRunSnapshot();

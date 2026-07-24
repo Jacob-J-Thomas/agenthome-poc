@@ -100,7 +100,7 @@ public sealed class WorkspaceInitializerTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.AgentPath);
-        var permissions = PermissionsDocument.CreateDefault(paths);
+        var permissions = VersionTwoPermissions(paths);
         permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
         permissions.Approved.Add(new ApprovedFileSystemPermission
         {
@@ -113,6 +113,7 @@ public sealed class WorkspaceInitializerTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
 
         var migrated = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        Assert.Equal(PermissionsDocument.CurrentVersion, migrated.Version);
         var inspection = Assert.Single(migrated.Approved, entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
         Assert.Equal([FileSystemOperation.List, FileSystemOperation.Read], inspection.Operations);
         Assert.True(inspection.RequiresApproval);
@@ -120,6 +121,76 @@ public sealed class WorkspaceInitializerTests
         Assert.Contains(migrated.Denied, entry => string.Equals(entry.Path, ".agent/logs", StringComparison.Ordinal));
         var evaluation = new PermissionPolicyStore().Load(paths).EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
         Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
+        Assert.Empty(Directory.EnumerateFiles(paths.AgentPath, "permissions.json.*.migration"));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_preserves_a_current_policy_that_intentionally_removes_tool_response_inspection()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var permissions = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        await File.WriteAllTextAsync(paths.PermissionsPath, permissions.ToJson());
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        var preserved = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        Assert.Equal(PermissionsDocument.CurrentVersion, preserved.Version);
+        Assert.DoesNotContain(preserved.Approved, entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        var evaluation = new PermissionPolicyStore().Load(paths).EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
+        Assert.Equal(PermissionDecision.Deny, evaluation.Decision);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_cancellation_leaves_the_original_version_two_policy_intact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        var permissions = VersionTwoPermissions(paths);
+        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        var original = permissions.ToJson();
+        await File.WriteAllTextAsync(paths.PermissionsPath, original);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new WorkspaceInitializer().InitializeAsync(workspace.RootPath, cancellation.Token));
+
+        Assert.Equal(original, await File.ReadAllTextAsync(paths.PermissionsPath));
+        Assert.Empty(Directory.EnumerateFiles(paths.AgentPath, "permissions.json.*.migration"));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_does_not_overwrite_permissions_while_another_writer_holds_the_file()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        var permissions = VersionTwoPermissions(paths);
+        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        var original = permissions.ToJson();
+        await File.WriteAllTextAsync(paths.PermissionsPath, original);
+        await using var concurrentWriter = new FileStream(paths.PermissionsPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+
+        await Assert.ThrowsAnyAsync<IOException>(() => new WorkspaceInitializer().InitializeAsync(workspace.RootPath));
+
+        concurrentWriter.Position = 0;
+        using var reader = new StreamReader(concurrentWriter, leaveOpen: true);
+        Assert.Equal(original, await reader.ReadToEndAsync());
+    }
+
+    private static PermissionsDocument VersionTwoPermissions(WorkspacePaths paths)
+    {
+        var current = PermissionsDocument.CreateDefault(paths);
+        return new PermissionsDocument
+        {
+            Version = PermissionsDocument.ToolResponseInspectionMigrationSourceVersion,
+            Scope = current.Scope,
+            Approved = [.. current.Approved],
+            Denied = [.. current.Denied]
+        };
     }
 
     [Fact]

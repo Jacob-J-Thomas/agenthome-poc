@@ -332,6 +332,8 @@ internal static class CustomLoopRunArtifactCodec
     private static void CompactToolEvidence(JsonObject projection, ContentRegistry contents, StructuralRegistry blocks, StructuralRegistry authorities, StructuralRegistry requests)
     {
         var states = new Dictionary<(int RequestOrdinal, string RequestCorrelationId), ToolProjectionState>();
+        var reservationCorrelationIds = new HashSet<string>(StringComparer.Ordinal);
+        var standaloneIntegrityProjected = false;
         foreach (var item in RequireArray(projection, "events"))
         {
             var runEvent = item?.AsObject() ?? throw new FormatException("Run-event projection entries must be objects.");
@@ -379,7 +381,12 @@ internal static class CustomLoopRunArtifactCodec
             JsonObject compact;
             if (string.Equals(phase, "requestReserved", StringComparison.Ordinal))
             {
-                if (states.ContainsKey(requestKey) || returned || evidence["governance"] is not null || evidence["outcome"] is not null || evidence["canonicalResultReturnedToModel"] is not null)
+                if (states.ContainsKey(requestKey)
+                    || !reservationCorrelationIds.Add(RequireString(evidence, "requestCorrelationId"))
+                    || returned
+                    || evidence["governance"] is not null
+                    || evidence["outcome"] is not null
+                    || evidence["canonicalResultReturnedToModel"] is not null)
                 {
                     throw new FormatException("A tool request reservation must be the unique exact request-and-authority owner.");
                 }
@@ -398,7 +405,8 @@ internal static class CustomLoopRunArtifactCodec
             }
             else if (string.Equals(phase, "integrityFailed", StringComparison.Ordinal) && !states.ContainsKey(requestKey))
             {
-                if (returned
+                if (standaloneIntegrityProjected
+                    || returned
                     || evidence["brokerRequestId"] is not null
                     || evidence["governance"] is not null
                     || evidence["outcome"] is not null
@@ -409,6 +417,7 @@ internal static class CustomLoopRunArtifactCodec
                     throw new FormatException("A standalone tool integrity record may contain only the exact non-actuating request-and-authority evidence.");
                 }
 
+                standaloneIntegrityProjected = true;
                 var request = ToolRequest(evidence, authorityId);
                 ProjectToolRequest(request.DeepClone().AsObject(), contents);
                 var requestId = requests.Reference(request);
@@ -540,6 +549,7 @@ internal static class CustomLoopRunArtifactCodec
         var states = new Dictionary<string, ToolHydrationState>(StringComparer.Ordinal);
         var correlationIds = new HashSet<string>(StringComparer.Ordinal);
         var requestKeys = new HashSet<(int RequestOrdinal, string RequestCorrelationId)>();
+        var standaloneIntegrityHydrated = false;
         foreach (var item in RequireArray(projection, "events"))
         {
             if (item is not JsonObject runEvent)
@@ -591,12 +601,14 @@ internal static class CustomLoopRunArtifactCodec
                 RequireProperties(compact, "shape", "phase", "toolRequest", "brokerRequestId");
                 if (!string.Equals(RequireString(compact, "phase"), "integrityFailed", StringComparison.Ordinal)
                     || compact["brokerRequestId"] is not null
+                    || standaloneIntegrityHydrated
                     || states.ContainsKey(requestId)
                     || !requestKeys.Add(requestKey))
                 {
                     throw new FormatException("A compact standalone tool integrity record must uniquely own its exact non-actuating request.");
                 }
 
+                standaloneIntegrityHydrated = true;
                 evidence = FullEvidence(request, authority, null, null, null, null, null, returned: false, compact);
                 states.Add(requestId, new ToolHydrationState(request, authority, authorityId)
                 {

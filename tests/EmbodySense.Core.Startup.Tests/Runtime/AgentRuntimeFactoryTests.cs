@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -7,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
@@ -31,6 +33,36 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(string.Empty, await File.ReadAllTextAsync(paths.CurrentConversationPath));
         Assert.NotEmpty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
         Assert.True(File.Exists(paths.ConversationTurnLockPath));
+    }
+
+    [Fact]
+    public async Task CreateAsync_migrates_permissions_for_an_existing_workspace_before_loading_policy()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var current = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        var permissions = new PermissionsDocument
+        {
+            Version = PermissionsDocument.ToolResponseInspectionMigrationSourceVersion,
+            Scope = current.Scope,
+            Approved = [.. current.Approved],
+            Denied = [.. current.Denied]
+        };
+        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        await File.WriteAllTextAsync(paths.PermissionsPath, permissions.ToJson());
+
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+            null,
+            workspace.RootPath,
+            "codex-not-used",
+            "read-only",
+            AgentRuntimeSurface.Cli);
+
+        var migrated = new PermissionPolicyStore().Load(paths);
+        Assert.Equal(PermissionsDocument.CurrentVersion, Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath))).Version);
+        var evaluation = migrated.EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
+        Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
     }
 
     [Fact]

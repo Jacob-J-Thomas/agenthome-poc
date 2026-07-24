@@ -106,7 +106,9 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
             canonical is null ? null : CustomLoopTraceContentHash.Compute(canonical),
             canonical?.Length,
             returnedToModel,
-            CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
+            phase == CustomLoopToolEvidencePhase.IntegrityFailed
+                ? CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes
+                : CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes);
         await _sink.RecordAsync(_attempt.RunId, _attempt.Iteration, _attempt.StepId, _attempt.Attempt, evidence, cancellationToken);
     }
 

@@ -73,6 +73,22 @@ public sealed class ToolBrokerTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_retains_a_utf16_safe_response_when_read_truncation_meets_a_surrogate_pair()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "surrogate-boundary.txt"), new string('a', 119_999) + "\U0001F600" + "tail");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/surrogate-boundary.txt", CorrelationId: "surrogate-boundary"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        Assert.DoesNotContain("\uD83D", result.OutputText, StringComparison.Ordinal);
+        Assert.Contains("[truncated after 120000 characters]", result.OutputText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_reports_a_retention_failure_before_truncated_content_without_claiming_an_artifact()
     {
         using var workspace = new TestWorkspace();

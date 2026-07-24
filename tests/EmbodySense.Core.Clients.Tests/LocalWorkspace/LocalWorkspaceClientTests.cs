@@ -1,3 +1,4 @@
+using System.Text;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Workspace;
@@ -72,6 +73,23 @@ public sealed class LocalWorkspaceClientTests
         var result = await new LocalWorkspaceClient(paths).ReadAsync(file);
 
         Assert.Contains("[truncated after", result.Text);
+        Assert.Equal(true, result.Metadata["truncated"]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_keeps_the_character_limit_utf16_safe()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var file = workspace.File("workspace", "shared", "surrogate-boundary.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllTextAsync(file, new string('a', 119_999) + "\U0001F600" + "tail");
+
+        var result = await new LocalWorkspaceClient(paths).ReadAsync(file);
+
+        _ = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetBytes(result.Text);
+        Assert.DoesNotContain("\uD83D", result.Text, StringComparison.Ordinal);
+        Assert.Equal(119_999, result.Metadata["character_count"]);
         Assert.Equal(true, result.Metadata["truncated"]);
     }
 
@@ -153,6 +171,22 @@ public sealed class LocalWorkspaceClientTests
 
         Assert.Contains("[line truncated]", result.Text);
         Assert.Equal(1, result.Metadata["match_count"]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_keeps_matching_line_truncation_utf16_safe()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var file = workspace.File("workspace", "shared", "surrogate-match.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllTextAsync(file, "needle " + new string('x', 492) + "\U0001F600" + "tail");
+
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(file, "needle");
+
+        _ = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetBytes(result.Text);
+        Assert.DoesNotContain("\uD83D", result.Text, StringComparison.Ordinal);
+        Assert.Contains("[line truncated]", result.Text, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -639,6 +639,7 @@ public static class CustomLoopRunValidator
             }
         }
 
+        ValidateIntegrityReservationScope(run.Events, errors);
         if (run.Events[0] is { Sequence: 1, Kind: not CustomLoopRunEventKind.Admitted })
         {
             Add(errors, "first_event_not_admission", "events[0].kind", "The first run event must be the admission event.");
@@ -665,6 +666,34 @@ public static class CustomLoopRunValidator
                 || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null)
             {
                 Add(errors, "invalid_admission_audit_marker", $"events[{markerIndex}]", "The admission-audit completion marker cannot carry prompt, output, provider, publication, or node-attempt data.");
+            }
+        }
+    }
+
+    private static void ValidateIntegrityReservationScope(IReadOnlyList<CustomLoopRunEvent> events, List<CustomLoopValidationError> errors)
+    {
+        for (var index = 0; index < events.Count; index++)
+        {
+            if (events[index]?.ToolEvidence is not { Phase: CustomLoopToolEvidencePhase.IntegrityFailed } integrity)
+            {
+                continue;
+            }
+
+            var hasEarlierReservation = events.Take(index).Any(item => item?.ToolEvidence is { Phase: CustomLoopToolEvidencePhase.RequestReserved } reservation
+                && reservation.RequestOrdinal == integrity.RequestOrdinal
+                && string.Equals(reservation.RequestCorrelationId, integrity.RequestCorrelationId, StringComparison.Ordinal));
+            var expected = hasEarlierReservation
+                ? CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes
+                : CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes;
+            if (integrity.ReservedUtf8Bytes != expected)
+            {
+                Add(
+                    errors,
+                    "invalid_tool_integrity_reservation",
+                    $"events[{index}].toolEvidence.reservedUtf8Bytes",
+                    hasEarlierReservation
+                        ? "A compatibility integrity marker attached to an earlier reservation must retain the original full reservation class."
+                        : "A standalone non-actuating integrity marker must use the bounded repeated-request reservation class.");
             }
         }
     }
@@ -895,7 +924,9 @@ public static class CustomLoopRunValidator
         ValidateOptionalText(evidence.Content, $"{field}.content", CustomLoopLimits.MaxGovernedToolArgumentCharacters, errors, requireNormalized: false);
         ValidateOptionalText(evidence.Pattern, $"{field}.pattern", CustomLoopLimits.MaxGovernedToolArgumentCharacters, errors, requireNormalized: false);
         ValidateOptionalText(evidence.ResolvedTarget, $"{field}.resolvedTarget", CustomLoopLimits.MaxGovernedToolTargetCharacters, errors, requireNormalized: false);
-        if (evidence.ReservedUtf8Bytes != CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes)
+        var isStandaloneIntegrity = evidence.Phase == CustomLoopToolEvidencePhase.IntegrityFailed
+            && evidence.ReservedUtf8Bytes == CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes;
+        if (!isStandaloneIntegrity && evidence.ReservedUtf8Bytes != CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes)
         {
             Add(errors, "invalid_tool_evidence_reservation", $"{field}.reservedUtf8Bytes", "Every governed request must reserve the server-owned worst-case evidence allowance before dispatch.");
         }
@@ -947,7 +978,7 @@ public static class CustomLoopRunValidator
             }
         }
 
-        if (evidence.Phase == CustomLoopToolEvidencePhase.IntegrityFailed
+        if (isStandaloneIntegrity
             && (evidence.BrokerRequestId is not null
                 || evidence.Governance is not null
                 || evidence.Outcome is not null

@@ -23,6 +23,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 {
+    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
     private readonly IToolBroker _inner;
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
@@ -114,6 +115,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             var scope = attemptLimitExceeded ? "attempt" : "run";
             var limit = attemptLimitExceeded ? CustomLoopLimits.MaxGovernedToolRequestsPerAttempt : CustomLoopLimits.MaxGovernedToolRequestsPerRun;
             await _observer.RecordIntegrityAsync(correlatedRequest, resolvedTarget, authority, requestOrdinal, cancellationToken);
+            using var auditIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
             await RecordAuthorityAsync(
                 null,
                 correlatedRequest,
@@ -124,7 +126,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
                 "A governed tool request repeated after the one visible over-limit denial; its exact non-actuating identity was retained and the attempt failed.",
                 scope,
                 limit,
-                cancellationToken);
+                auditIntegrityWindow.Token);
             throw new CustomLoopToolEvidenceIntegrityException("A governed tool request repeated after the one visible over-limit denial; the attempt failed without actuation.");
         }
 
