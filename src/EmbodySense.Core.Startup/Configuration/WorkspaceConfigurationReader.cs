@@ -67,6 +67,7 @@ public sealed class WorkspaceConfigurationReader
             PathItem("Skills", "Agent", paths.SkillsPath, "Agent skill path."),
             PathItem("Hooks", "Agent", paths.HooksPath, "Hook configuration path."),
             PathItem("Recipes", "Agent", paths.RecipesPath, "Agent recipe path."),
+            PathItem("Retained tool responses", "Governance", paths.ToolResponsesPath, "Sensitive complete governed responses; model-facing references require approval before agent inspection."),
             PathItem("Logs", "Governance", paths.LogsPath, "Harness log path denied to agent tools by default.")
         ];
     }

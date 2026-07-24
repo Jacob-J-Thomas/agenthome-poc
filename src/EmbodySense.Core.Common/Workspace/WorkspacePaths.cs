@@ -21,6 +21,10 @@ public sealed class WorkspacePaths
 
     public string LogsPath => Path.Combine(AgentPath, "logs");
 
+    public string ToolResponsesPath => Path.Combine(LogsPath, "tool-responses");
+
+    public string ToolResponseRetentionLockPath => Path.Combine(ToolResponsesPath, ".retention.lock");
+
     public string AuditPath => Path.Combine(AgentPath, "audit");
 
     public string AuditReadmePath => Path.Combine(AuditPath, "README.md");

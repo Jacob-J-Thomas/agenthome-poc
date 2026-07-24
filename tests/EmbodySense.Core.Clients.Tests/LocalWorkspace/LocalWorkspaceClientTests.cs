@@ -1,4 +1,5 @@
 using EmbodySense.Core.Clients.LocalWorkspace;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Tests.Support;
 
@@ -19,6 +20,29 @@ public sealed class LocalWorkspaceClientTests
 
         Assert.Equal("notes" + Path.DirectorySeparatorChar + Environment.NewLine + "b.txt", result.Text);
         Assert.Equal(2, result.Metadata["entry_count"]);
+    }
+
+    [Fact]
+    public async Task ListAsync_keeps_a_deterministic_bounded_prefix_and_reports_omissions()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var target = workspace.File("workspace", "shared");
+        Directory.CreateDirectory(target);
+        foreach (var index in Enumerable.Range(1, 505).Reverse())
+        {
+            await File.WriteAllTextAsync(Path.Combine(target, $"note-{index:000}.txt"), "file");
+        }
+
+        var result = await new LocalWorkspaceClient(paths).ListAsync(target);
+
+        Assert.Contains("note-001.txt", result.Text, StringComparison.Ordinal);
+        Assert.Contains("note-500.txt", result.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("note-501.txt", result.Text, StringComparison.Ordinal);
+        Assert.EndsWith("[truncated to the first 500 of 505 entries]", result.Text, StringComparison.Ordinal);
+        Assert.Equal(505, result.Metadata["entry_count"]);
+        Assert.Equal(500, result.Metadata["returned_entry_count"]);
+        Assert.Equal(true, result.Metadata["truncated"]);
     }
 
     [Fact]
@@ -129,5 +153,21 @@ public sealed class LocalWorkspaceClientTests
 
         Assert.Contains("[line truncated]", result.Text);
         Assert.Equal(1, result.Metadata["match_count"]);
+    }
+
+    [Fact]
+    public async Task SearchAsync_caps_the_complete_rendered_result_below_the_retention_ceiling()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var file = workspace.File("workspace", "shared", new string('d', 100), "many-long-matches.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        await File.WriteAllLinesAsync(file, Enumerable.Range(1, 220).Select(index => $"needle {index} " + new string('x', 600)));
+
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(file, "needle");
+
+        Assert.True(result.Text.Length < ToolResultRetentionLimits.MaxOutputCharacters);
+        Assert.EndsWith("[search output truncated to 120000 characters]", result.Text, StringComparison.Ordinal);
+        Assert.Equal(true, result.Metadata["truncated"]);
     }
 }

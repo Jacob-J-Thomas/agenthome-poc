@@ -138,7 +138,7 @@ Wave-one limits are server-owned constants. The Web UI must display them and use
 | LIM-008 | Invocation or preset trigger prompt | 24,000 characters | Reject before Save/admission as applicable; preset and invocation are never combined. |
 | LIM-009 | Canonical model output per attempt | 8,000 characters | Truncate once, record original length and truncation, and use that same canonical value for downstream context and evidence. This custom-loop bound preserves the absolute UTF-8 worst-case run shape beneath the finite trace budget without reducing the shared 64,000-character governed-tool formatter bound. |
 | LIM-010 | Workspace startup context source | Existing 12,000-character per-source limit | Preserve source-specific truncation markers and provenance. |
-| LIM-011 | Governed tool output | Existing 64,000-character formatted limit | Preserve existing explicit truncation behavior. |
+| LIM-011 | Governed tool output | Existing 64,000-character formatted limit | Preserve explicit model-facing truncation after the complete bounded governed response has been retained and referenced. |
 | LIM-012 | Accumulated run execution deadline | 30 minutes | Persist accumulated Running/PauseRequested/CancelRequested time across transitions and restart. Paused time and process downtime do not count; approval wait does count. |
 | LIM-013 | Persisted run trace | 16 MiB UTF-8 | Store immutable content blocks once and reference them from attempts. Reserve worst-case evidence capacity before every provider/tool dispatch. Never silently discard required evidence. |
 | LIM-014 | Recent-run page size | 50 | Require bounded pagination for older records. |
@@ -149,6 +149,7 @@ Wave-one limits are server-owned constants. The Web UI must display them and use
 | LIM-019 | Retained run evidence per workspace | 250 run traces or 1 GiB, whichever is reached first | Never auto-prune. Admission reserves one maximum trace and fails clearly when quota is unavailable. |
 | LIM-020 | Exit decision instruction | 12,000 characters | Required and bounded when continuation is enabled. A bounded saved default may remain while disabled for honest toggle-on editing, but it is not sent to a model until continuation is enabled. |
 | LIM-021 | Invoking-conversation snapshot | 24,000 characters and at most 384 selected entries | Capture the newest logical messages that fit. Record selected-message truncation, represent all older omissions with one bounded aggregate manifest entry containing omitted count and aggregate original character count, and exclude the current invoking prompt so it enters model context exactly once. |
+| LIM-022 | Complete governed tool-response retention | 160,000 characters per response; 32,000-character UTF-16-safe chunks; 256 artifacts or 64 MiB per workspace | Retain before model-facing formatting. Under the cross-process retention lock, recover exact staging directories and evict only the oldest complete artifact. Never advertise a partial or unavailable artifact as retained. |
 
 All length checks use normalized server-side values. Validation errors identify the field, actual value/count, and allowed limit without echoing secrets into logs. Tests must prove that every definition valid at the maximum component limits can complete within the aggregate trace budget; if the serialization overhead does not fit, reduce the component limits rather than admitting a run that cannot preserve required evidence.
 
@@ -329,6 +330,8 @@ admitted assignment/current-ceiling check + trace/audit
 | GOV-011 | Trace/audit records contain both the admitted command maximum and the current role/catalog/permission-policy hashes actually evaluated. A policy or role-ceiling change may revoke a pending/read request but cannot grant a command absent from admission. |
 | GOV-012 | If the approval-owning connection disconnects, the pending approval is rejected as `owner_disconnected`; reconnect does not revive it. If no approval owner exists for a later request, that request is denied. The governed denial is returned to the model and the run may continue. |
 | GOV-013 | Approval timeout or explicit rejection is an ordinary governed tool observation. Process restart with an open provider attempt still follows the NeedsReview recovery rule because the complete inference outcome is unknown even when no read actuator ran. |
+| GOV-014 | Every ToolBroker outcome, including bounded custom-loop denials, is durably retained before it is observed by the model. The returned summary places its manifest path, exact content hash, sizes, and chunk count before output so the reference survives the 64,000-character formatter limit. |
+| GOV-015 | Retention artifacts correlate broker request, provider call, loop, role, run, definition, iteration, step, and attempt where available. Audit records only safe correlation, path, hash, length, status, and eviction metadata; raw response content does not enter audit. A retention failure is explicit in the returned result and audit. |
 
 ## 10. Web And Artifact Security
 
@@ -345,6 +348,7 @@ admitted assignment/current-ceiling check + trace/audit
 | SEC-009 | API and audit errors use stable classes and safe details. Stack traces, environment data, provider credentials, session secrets, raw prompts, raw responses, and raw context documents do not enter the audit log. |
 | SEC-010 | Request size, definition size, execution count, duration, output, trace, and page-size limits are enforced server-side to prevent accidental or hostile resource exhaustion. |
 | SEC-011 | Sensitive traces remain under the user-owned `.agent` tree, which the repository already ignores. The harness inherits operating-system filesystem access controls, serves trace content only through authorized local endpoints, and never uploads/syncs it automatically. Wave one makes no at-rest encryption claim, and the UI labels the retention risk honestly. |
+| SEC-012 | Complete tool-response manifests and chunks are sensitive local evidence under `.agent/logs/tool-responses`. Root, lock, artifact, manifest, and chunk reparse points fail closed. The general logs tree remains denied to agent tools; the more-specific response path requires human approval for read/list inspection. |
 
 ## 11. Lifecycle, Checkpoints, And Crash Recovery
 
@@ -401,11 +405,11 @@ The authorized, user-visible run trace stores the exact bounded product state ne
 - Effective command/tool schema snapshot.
 - Ordered step instructions and exact canonical prior outputs used for every attempt.
 - Provider/model/request correlations and visible canonical outputs.
-- Checkpoints, lifecycle transitions, each bounded tool request, server-resolved target, authority/permission/approval decisions, exact canonical tool result returned to the model, failures, and final result.
+- Checkpoints, lifecycle transitions, each bounded tool request, server-resolved target, authority/permission/approval decisions, exact canonical tool result returned to the model, its separately retained complete-response manifest/hash reference, failures, and final result.
 
 The trace is explicitly sensitive local data. It is read only through authorized local endpoints or direct user-owned workspace access. It never contains the Web session token, provider-private reasoning, or harness credentials.
 
-Trace storage is bounded by LIM-019 and never pruned automatically. The production maximum-bounded-shape runner/codec fixture includes 30 allowed governed requests plus the visible 31st over-limit denial and encodes to 15,246,408 bytes, which leaves 482,232 bytes beneath the 15 MiB reservation target and 1,530,808 bytes beneath the 16 MiB hard cap while retaining every required event and exact bounded payload. A terminal trace without an integrity warning continues accounting its reserved 8,192-byte warning slot, for 15,254,600 accounted bytes and 474,040 bytes of remaining 15 MiB headroom at that maximum shape. The Web UI shows current count/bytes and reserved capacity. An authenticated user may explicitly delete a terminal run's sensitive content using its expected trace hash and a confirmation operation ID. Deletion retains a small immutable tombstone containing run/loop identity, terminal status, definition/trace hashes, timestamps, deletion actor/surface, and audit correlation; it never rewrites the historical audit log.
+Trace storage is bounded by LIM-019 and never pruned automatically. The production maximum-bounded-shape runner/codec fixture includes 30 allowed governed requests plus the visible 31st over-limit denial and encodes to 15,215,692 bytes, which leaves 512,948 bytes beneath the 15 MiB reservation target and 1,561,524 bytes beneath the 16 MiB hard cap while retaining every required event and exact bounded payload. A terminal trace without an integrity warning continues accounting its reserved 8,192-byte warning slot, for 15,223,884 accounted bytes and 504,756 bytes of remaining 15 MiB headroom at that maximum shape. The Web UI shows current count/bytes and reserved capacity. An authenticated user may explicitly delete a terminal run's sensitive content using its expected trace hash and a confirmation operation ID. Deletion retains a small immutable tombstone containing run/loop identity, terminal status, definition/trace hashes, timestamps, deletion actor/surface, and audit correlation; it never rewrites the historical audit log.
 
 **Append-only audit log**
 
@@ -447,6 +451,7 @@ Every run-trace event has a stable sequence number, UTC timestamp, event ID, app
 | OBS-007 | Node-level status updates are required; token-by-token model streaming is not. Polling or existing authenticated real-time projection may satisfy live updates. |
 | OBS-008 | Show workspace trace quota, per-run size, sensitive-data warning, and explicit terminal-trace deletion/tombstone outcome. No automatic retention action is hidden from the user. |
 | OBS-009 | Show provider-reported token/usage/cost data when available and label it unavailable when not. Never fabricate cost precision; always show the deterministic maximum inference/tool-request counts before Invoke. |
+| OBS-010 | Model-facing tool results expose the approved-inspection manifest path, exact content hash, character/UTF-8 sizes, chunk count, retention status, and any oldest-artifact eviction count. They never imply that the 64,000-character summary is the complete retained response. |
 
 ## 13. Persistence, Concurrency, And Deletion
 
