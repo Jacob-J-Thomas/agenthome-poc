@@ -69,7 +69,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         if (operation.BindingState is not (CustomLoopInvocationBindingState.ConversationNotFound
             or CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy
             or CustomLoopInvocationBindingState.ConversationInvalid
-            or CustomLoopInvocationBindingState.CapturedContext))
+            or CustomLoopInvocationBindingState.CapturedContext
+            or CustomLoopInvocationBindingState.CapturedContextNotFound))
         {
             throw new ArgumentException("Invocation binding must identify its conversation and optional captured context.", nameof(operation));
         }
@@ -96,7 +97,15 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                     return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Replayed, existing);
                 }
 
-                return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+                var canTerminalizeCapturedNotFound = existing.State == CustomLoopInvocationOperationState.Pending
+                    && existing.BindingState == CustomLoopInvocationBindingState.CapturedContext
+                    && operation.BindingState == CustomLoopInvocationBindingState.CapturedContextNotFound
+                    && string.Equals(existing.InvokingConversationId, operation.InvokingConversationId, StringComparison.Ordinal)
+                    && string.Equals(existing.ContextIdentityHash, operation.ContextIdentityHash, StringComparison.Ordinal);
+                if (!canTerminalizeCapturedNotFound)
+                {
+                    return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
+                }
             }
 
             if (existing.State != CustomLoopInvocationOperationState.Pending || operation.UpdatedAtUtc < existing.UpdatedAtUtc)
@@ -401,7 +410,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             CustomLoopAdmissionStatusNames.Conflict => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && hasValidOptionalRun,
             CustomLoopAdmissionStatusNames.NonterminalRunExists => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && CustomLoopArtifactIdentifier.IsValid(operation.RunId),
             CustomLoopAdmissionStatusNames.LimitExceeded => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && operation.RunId is null,
-            CustomLoopAdmissionStatusNames.NotFound => operation.BindingState == CustomLoopInvocationBindingState.ConversationNotFound && operation.RunId is null,
+            CustomLoopAdmissionStatusNames.NotFound => operation.BindingState is (CustomLoopInvocationBindingState.ConversationNotFound or CustomLoopInvocationBindingState.CapturedContextNotFound) && operation.RunId is null,
             CustomLoopAdmissionStatusNames.AuditUnavailable => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && hasValidOptionalRun,
             _ => false
         };
@@ -416,6 +425,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             CustomLoopInvocationBindingState.ConversationInvalid => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             CustomLoopInvocationBindingState.CapturedContext => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
+            CustomLoopInvocationBindingState.CapturedContextNotFound => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
             _ => false
         };
     }

@@ -122,6 +122,24 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task Bound_invocation_replay_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-unreadable-conversation", "private prompt");
+        Assert.Equal("NotFound", (await runtime.InvokeCustomLoopAsync(input)).AdmissionStatus);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await File.WriteAllTextAsync(paths.CurrentConversationPath + ".identity.json", "{ malformed");
+
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+
+        Assert.Equal("Invalid", replay.AdmissionStatus);
+        Assert.Contains("conversation identity could not be read safely", replay.Detail, StringComparison.Ordinal);
+        Assert.False(replay.WasDispatched);
+    }
+
+    [Fact]
     public async Task Rejected_invocation_replay_preserves_structured_validation_errors()
     {
         using var workspace = new TestWorkspace();

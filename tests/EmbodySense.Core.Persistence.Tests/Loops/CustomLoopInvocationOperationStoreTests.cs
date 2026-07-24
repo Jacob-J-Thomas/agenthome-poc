@@ -33,6 +33,14 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(terminalPending)).Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(terminal)).Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(ContextBound(terminalPending))).Status);
+
+        var capturedPending = Pending("invoke-captured-not-found", "secret prompt");
+        var captured = ContextBound(capturedPending);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(capturedPending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(captured)).Status);
+        var terminalized = captured with { BindingState = CustomLoopInvocationBindingState.CapturedContextNotFound, Detail = "The definition disappeared after context capture." };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(terminalized)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(captured)).Status);
     }
 
     [Fact]
