@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -79,6 +80,44 @@ public sealed class ToolBrokerTests
         var events = await ReadAuditAsync(workspace);
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.response.retain" && auditEvent.Outcome == "succeeded");
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "succeeded");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_returns_the_completed_mutation_when_full_response_retention_times_out()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), retentionStore: new BlockingRetentionStore(), postActuationIntegrityTimeout: TimeSpan.FromMilliseconds(25));
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, result.Retention?.Status);
+        Assert.Contains("full-response retention timed out", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("already finished", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("must not be retried", result.Retention?.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_returns_the_retained_mutation_with_an_explicit_audit_gap_when_retention_audit_times_out()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var audit = new BlockingRetentionAuditLog(new AuditLog(paths));
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), auditLog: audit, postActuationIntegrityTimeout: TimeSpan.FromMilliseconds(25));
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        Assert.Contains("retention audit could not be appended", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("execution audit timed out", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("must not be retried", result.Retention?.Detail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -371,11 +410,13 @@ public sealed class ToolBrokerTests
         IToolApprovalPrompt prompt,
         LoopDefinition? loopDefinition = null,
         IToolResultRetentionStore? retentionStore = null,
-        IWorkspaceToolExecutor? workspaceToolExecutor = null)
+        IWorkspaceToolExecutor? workspaceToolExecutor = null,
+        IAuditLog? auditLog = null,
+        TimeSpan? postActuationIntegrityTimeout = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths));
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? new LocalWorkspaceClient(paths), auditLog ?? new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths), postActuationIntegrityTimeout: postActuationIntegrityTimeout);
     }
 
     private sealed class CancellingWorkspaceToolExecutor(IWorkspaceToolExecutor inner, CancellationTokenSource cancellation) : IWorkspaceToolExecutor
@@ -403,6 +444,30 @@ public sealed class ToolBrokerTests
         public Task<ToolResultRetentionReference> RetainAsync(ToolResult result, LoopDefinition loopDefinition, CancellationToken cancellationToken = default)
         {
             throw new IOException("retention unavailable");
+        }
+    }
+
+    private sealed class BlockingRetentionStore : IToolResultRetentionStore
+    {
+        public async Task<ToolResultRetentionReference> RetainAsync(ToolResult result, LoopDefinition loopDefinition, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The cancellation-aware wait returned unexpectedly.");
+        }
+    }
+
+    private sealed class BlockingRetentionAuditLog(IAuditLog inner) : IAuditLog
+    {
+        public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+        {
+            return auditEvent.Action == AuditSchema.Actions.ToolResponseRetain
+                ? Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                : inner.AppendAsync(auditEvent, cancellationToken);
+        }
+
+        public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)
+        {
+            return inner.ReadTailAsync(limit, cancellationToken);
         }
     }
 

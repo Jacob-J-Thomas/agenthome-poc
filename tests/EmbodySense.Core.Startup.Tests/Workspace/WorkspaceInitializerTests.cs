@@ -257,6 +257,54 @@ public sealed class WorkspaceInitializerTests
         Assert.Equal(original, await reader.ReadToEndAsync());
     }
 
+    [Fact]
+    public async Task InitializeAsync_waits_for_a_concurrent_permission_migration_and_accepts_its_result()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        var permissions = VersionTwoPermissions(paths);
+        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        await File.WriteAllTextAsync(paths.PermissionsPath, permissions.ToJson());
+        var winner = new FileStream(paths.PermissionsPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        var initialization = new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await Task.Delay(75);
+        try
+        {
+            var migrated = Assert.IsType<PermissionsDocument>(permissions.MigrateToolResponseInspectionPolicy());
+            var bytes = System.Text.Encoding.UTF8.GetBytes(migrated.ToJson());
+            winner.Position = 0;
+            winner.SetLength(0);
+            await winner.WriteAsync(bytes);
+            await winner.FlushAsync();
+        }
+        finally
+        {
+            await winner.DisposeAsync();
+        }
+
+        await initialization;
+
+        var accepted = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        Assert.Equal(PermissionsDocument.CurrentVersion, accepted.Version);
+        Assert.Single(accepted.Approved, entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_rejects_an_oversized_legacy_permission_policy_instead_of_silently_skipping_migration()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        var original = VersionTwoPermissions(paths).ToJson() + new string(' ', (128 * 1024) + 1);
+        await File.WriteAllTextAsync(paths.PermissionsPath, original);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => new WorkspaceInitializer().InitializeAsync(workspace.RootPath));
+
+        Assert.Contains("migration safety limit", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(original, await File.ReadAllTextAsync(paths.PermissionsPath));
+    }
+
     private static PermissionsDocument VersionTwoPermissions(WorkspacePaths paths)
     {
         var current = PermissionsDocument.CreateDefault(paths);

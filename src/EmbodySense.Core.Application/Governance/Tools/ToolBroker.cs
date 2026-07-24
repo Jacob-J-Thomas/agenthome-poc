@@ -18,7 +18,7 @@ public sealed class ToolBroker : IToolBroker
 {
     private const int MaxCorrelationCharacters = 512;
     private static readonly ToolCommand[] AllCommands = Enum.GetValues<ToolCommand>();
-    private static readonly TimeSpan PostActuationIntegrityTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultPostActuationIntegrityTimeout = TimeSpan.FromSeconds(30);
     private readonly WorkspacePaths _paths;
     private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
@@ -28,6 +28,7 @@ public sealed class ToolBroker : IToolBroker
     private readonly ToolResultRetentionService _toolResultRetention;
     private readonly IToolGovernanceObserver? _governanceObserver;
     private readonly ToolAuditMetadataFactory _auditMetadataFactory;
+    private readonly TimeSpan _postActuationIntegrityTimeout;
 
     public ToolBroker(
         WorkspacePaths paths,
@@ -37,7 +38,8 @@ public sealed class ToolBroker : IToolBroker
         IAuditLog auditLog,
         LoopDefinition loopDefinition,
         IToolResultRetentionStore toolResultRetentionStore,
-        IToolGovernanceObserver? governanceObserver = null)
+        IToolGovernanceObserver? governanceObserver = null,
+        TimeSpan? postActuationIntegrityTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(permissionService);
@@ -57,6 +59,11 @@ public sealed class ToolBroker : IToolBroker
         _governanceObserver = governanceObserver;
         AvailableCommands = GetAvailableCommands(_loopDefinition);
         _auditMetadataFactory = new ToolAuditMetadataFactory(_paths, _loopDefinition, AvailableCommands);
+        _postActuationIntegrityTimeout = postActuationIntegrityTimeout ?? DefaultPostActuationIntegrityTimeout;
+        if (_postActuationIntegrityTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(postActuationIntegrityTimeout), "Post-actuation integrity timeout must be positive.");
+        }
     }
 
     public IReadOnlyList<ToolCommand> AvailableCommands { get; }
@@ -151,9 +158,34 @@ public sealed class ToolBroker : IToolBroker
             executionOutcome = AuditSchema.Outcomes.Failed;
         }
 
-        using var integrity = new CancellationTokenSource(PostActuationIntegrityTimeout);
-        result = await RetainAndObserveOutcomeAsync(result, integrity.Token);
-        await RecordExecutionAsync(requestId, request, check, approvedByHuman, executionOutcome, executionMetadata, integrity.Token);
+        using var integrity = new CancellationTokenSource(_postActuationIntegrityTimeout);
+        try
+        {
+            result = await _toolResultRetention.RetainAsync(result, cancellationToken: integrity.Token);
+        }
+        catch (Exception exception)
+        {
+            result = WithPostActuationIntegrityWarning(result, "full-response retention", exception);
+        }
+
+        try
+        {
+            await ObserveOutcomeAsync(result, integrity.Token);
+        }
+        catch (Exception exception)
+        {
+            result = WithPostActuationIntegrityWarning(result, "outcome observation", exception);
+        }
+
+        try
+        {
+            await RecordExecutionAsync(requestId, request, check, approvedByHuman, executionOutcome, executionMetadata, integrity.Token);
+        }
+        catch (Exception exception)
+        {
+            result = WithPostActuationIntegrityWarning(result, "execution audit", exception);
+        }
+
         return result;
     }
 
@@ -206,6 +238,23 @@ public sealed class ToolBroker : IToolBroker
 
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.CorrelationId))).ToLowerInvariant();
         return request with { CorrelationId = $"sha256:{hash}" };
+    }
+
+    private static ToolResult WithPostActuationIntegrityWarning(ToolResult result, string phase, Exception exception)
+    {
+        var disposition = exception is OperationCanceledException ? "timed out" : "failed";
+        var warning = $"Post-actuation {phase} {disposition} ({exception.GetType().Name}). The workspace operation already finished, so this result must not be retried under a new operation id; inspect the workspace before any follow-up mutation.";
+        var retention = result.Retention ?? new ToolResultRetentionReference(
+            ToolResultRetentionStatus.Unavailable,
+            null,
+            null,
+            result.OutputText.Length,
+            null,
+            null,
+            null,
+            0,
+            "Durable full-response retention did not produce a reference.");
+        return result with { Retention = retention with { Detail = $"{retention.Detail} {warning}" } };
     }
 
     private static ToolGovernanceEvidence DecisionEvidence(ToolPermissionCheck check, ToolApprovalDecision approvalDecision, ToolApprovalResponse? approval)

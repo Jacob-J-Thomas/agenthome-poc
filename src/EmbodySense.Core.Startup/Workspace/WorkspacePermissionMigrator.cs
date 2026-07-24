@@ -8,30 +8,59 @@ namespace EmbodySense.Core.Startup.Workspace;
 internal static class WorkspacePermissionMigrator
 {
     private const long MaxMigratedPermissionsUtf8Bytes = 128 * 1024;
+    private const int MaxExclusiveOpenAttempts = 80;
+    private static readonly TimeSpan ExclusiveOpenRetryDelay = TimeSpan.FromMilliseconds(25);
     private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false);
 
     public static async Task MigrateAsync(WorkspacePaths paths, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        var inspected = await ReadCurrentAsync(paths.PermissionsPath, cancellationToken);
-        if (inspected is null)
+        for (var attempt = 1; attempt <= MaxExclusiveOpenAttempts; attempt++)
         {
-            return;
-        }
+            var inspected = await ReadCurrentAsync(paths.PermissionsPath, cancellationToken);
+            if (inspected is null)
+            {
+                return;
+            }
 
-        var migratedPermissions = ParseMigration(inspected);
-        if (migratedPermissions is null)
-        {
-            return;
-        }
+            var migratedPermissions = ParseMigration(inspected);
+            if (migratedPermissions is null)
+            {
+                return;
+            }
 
-        await using var source = new FileStream(paths.PermissionsPath, FileMode.Open, FileAccess.Read, FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        var lockedSource = await ReadBoundedAsync(source, cancellationToken);
-        if (!lockedSource.AsSpan().SequenceEqual(inspected))
-        {
-            throw new IOException("The permissions policy changed while its migration was being prepared.");
-        }
+            FileStream source;
+            try
+            {
+                source = new FileStream(paths.PermissionsPath, FileMode.Open, FileAccess.Read, FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            }
+            catch (IOException) when (attempt < MaxExclusiveOpenAttempts)
+            {
+                await Task.Delay(ExclusiveOpenRetryDelay, cancellationToken);
+                continue;
+            }
 
+            await using (source)
+            {
+                var lockedSource = await ReadBoundedAsync(source, cancellationToken);
+                if (!lockedSource.AsSpan().SequenceEqual(inspected))
+                {
+                    if (attempt == MaxExclusiveOpenAttempts)
+                    {
+                        throw new IOException("The permissions policy kept changing while its migration was being prepared.");
+                    }
+
+                    continue;
+                }
+
+                await CommitMigrationAsync(paths, source, lockedSource, migratedPermissions, cancellationToken);
+                return;
+            }
+        }
+    }
+
+    private static async Task CommitMigrationAsync(WorkspacePaths paths, FileStream source, byte[] lockedSource, PermissionsDocument migratedPermissions, CancellationToken cancellationToken)
+    {
         var migrated = Utf8.GetBytes(migratedPermissions.ToJson() + Environment.NewLine);
         var operationId = Guid.NewGuid().ToString("N");
         var temporaryPath = paths.PermissionsPath + "." + operationId + ".migration";
@@ -114,9 +143,14 @@ internal static class WorkspacePermissionMigrator
 
     private static async Task<byte[]> ReadBoundedAsync(FileStream source, CancellationToken cancellationToken)
     {
-        if (source.Length < 1 || source.Length > MaxMigratedPermissionsUtf8Bytes)
+        if (source.Length < 1)
         {
             return [];
+        }
+
+        if (source.Length > MaxMigratedPermissionsUtf8Bytes)
+        {
+            throw new IOException($"The permissions policy exceeds the {MaxMigratedPermissionsUtf8Bytes}-byte migration safety limit and cannot be accepted without an explicit policy update.");
         }
 
         source.Position = 0;
