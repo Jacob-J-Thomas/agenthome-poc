@@ -203,6 +203,7 @@ public sealed class AgentRuntimeFactoryTests
 
         var preserved = await conversationMemory.LoadCurrentConversationAsync();
         var turn = await runtime.RunTurnAsync("hello");
+        File.Delete(Path.Combine(runDirectory, "run-one.json"));
         var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-recovery-failure", "prompt"));
 
         Assert.Collection(preserved, message => Assert.Equal("preserved recovery-failure transcript", message.Content));

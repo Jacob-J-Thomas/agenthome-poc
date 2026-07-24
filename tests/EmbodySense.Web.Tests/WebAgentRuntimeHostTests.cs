@@ -82,6 +82,59 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task Custom_control_releases_reacquired_hosting_when_the_durable_conversation_diverges()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved local conversation"));
+        var competingHost = new CustomLoopWorkspaceExecutionGate(paths);
+        using var ownership = competingHost.TryAcquire("active-custom-loop", new string('a', 64)).Lease!;
+
+        Assert.Equal("WorkspaceHostUnavailable", (await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-before-divergence"))).Status);
+        await conversationMemory.StartFreshConversationAsync();
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("replacement durable conversation"));
+        ownership.Dispose();
+        await competingHost.DisposeAsync();
+        var failed = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-after-divergence"));
+        var transcript = await host.GetCurrentTranscriptAsync();
+        await using var successorHost = new CustomLoopWorkspaceExecutionGate(paths);
+        using var successorOwnership = successorHost.TryAcquire("successor-custom-loop", new string('b', 64)).Lease;
+
+        Assert.Equal("Failed", failed.Status);
+        Assert.Contains("local state was preserved", failed.Detail, StringComparison.Ordinal);
+        Assert.Collection(transcript!, message => Assert.Equal("preserved local conversation", message.Content));
+        Assert.NotNull(successorOwnership);
+    }
+
+    [Fact]
+    public async Task Custom_control_returns_a_structured_failure_and_releases_hosting_when_conversation_reconciliation_cannot_be_read()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved before unreadable reconciliation"));
+        var competingHost = new CustomLoopWorkspaceExecutionGate(paths);
+        using var ownership = competingHost.TryAcquire("active-custom-loop", new string('a', 64)).Lease!;
+
+        Assert.Equal("WorkspaceHostUnavailable", (await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-before-unreadable"))).Status);
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, "{ malformed");
+        ownership.Dispose();
+        await competingHost.DisposeAsync();
+        var failed = await host.CancelLoopAsync(new LoopRunControlInput("run-missing", 1, "cancel-after-unreadable"));
+        await using var successorHost = new CustomLoopWorkspaceExecutionGate(paths);
+        using var successorOwnership = successorHost.TryAcquire("successor-custom-loop", new string('b', 64)).Lease;
+
+        Assert.Equal("Failed", failed.Status);
+        Assert.Contains("could not be read safely", failed.Detail, StringComparison.Ordinal);
+        Assert.NotNull(successorOwnership);
+    }
+
+    [Fact]
     public async Task SendMessageAsync_requires_initialized_workspace()
     {
         using var workspace = new TestWorkspace();

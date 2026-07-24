@@ -28,6 +28,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private readonly CustomLoopModelSnapshot _modelSnapshot;
     private readonly TimeProvider _timeProvider;
     private bool _customExecutionAvailable;
+    private bool _customExecutionReacquisitionAllowed;
 
     public CustomLoopRuntimeFacade(
         ICustomLoopDefinitionStore definitionStore,
@@ -41,6 +42,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         CustomLoopOrderedRunner runner,
         CustomLoopRuntimeContext runtimeContext,
         bool customExecutionAvailable,
+        bool customExecutionReacquisitionAllowed,
         string surface,
         string actor,
         string currentRoleId,
@@ -58,6 +60,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
         _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
         _customExecutionAvailable = customExecutionAvailable;
+        _customExecutionReacquisitionAllowed = customExecutionReacquisitionAllowed;
         _surface = string.IsNullOrWhiteSpace(surface) ? throw new ArgumentException("Surface is required.", nameof(surface)) : surface;
         _actor = string.IsNullOrWhiteSpace(actor) ? throw new ArgumentException("Actor is required.", nameof(actor)) : actor;
         _currentRoleId = string.IsNullOrWhiteSpace(currentRoleId) ? throw new ArgumentException("Current role is required.", nameof(currentRoleId)) : currentRoleId;
@@ -354,6 +357,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 return CustomExecutionAvailability.AvailableNow;
             }
 
+            if (!_customExecutionReacquisitionAllowed)
+            {
+                return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: startup or retained-runtime recovery left unresolved integrity failure, so this runtime cannot automatically reacquire custom-loop execution.");
+            }
+
             var recoveryOperationId = $"runtime-recovery-{Guid.NewGuid():N}";
             var ownership = _executionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
             if (ownership.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
@@ -380,17 +388,30 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
+                    _customExecutionReacquisitionAllowed = false;
+                    _executionGate.RelinquishWorkspaceHost();
                     return new CustomExecutionAvailability(false, "Failed", $"custom_loop_recovery_failed: runtime host reacquisition could not recover interrupted runs safely: {exception.GetType().Name}.");
                 }
 
                 if (recovery.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
                 {
+                    _customExecutionReacquisitionAllowed = false;
+                    _executionGate.RelinquishWorkspaceHost();
                     return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: runtime host reacquisition found interrupted work that could not be parked safely.");
                 }
 
-                if (!await _runtimeContext.TryReconcileConversationAsync(cancellationToken))
+                try
                 {
-                    return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: durable conversation history diverged from this runtime's active transcript, so local state was preserved and custom-loop hosting remains unavailable.");
+                    if (!await _runtimeContext.TryReconcileConversationAsync(cancellationToken))
+                    {
+                        _executionGate.RelinquishWorkspaceHost();
+                        return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: durable conversation history diverged from this runtime's active transcript, so local state was preserved, hosting was released, and the request may be retried after the conversation is reconciled.");
+                    }
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    _executionGate.RelinquishWorkspaceHost();
+                    return new CustomExecutionAvailability(false, "Failed", $"custom_loop_recovery_failed: durable conversation reconciliation could not be read safely ({exception.GetType().Name}); hosting was released and the request may be retried.");
                 }
             }
 
