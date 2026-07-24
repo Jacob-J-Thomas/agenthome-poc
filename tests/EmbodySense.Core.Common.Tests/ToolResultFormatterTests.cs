@@ -20,13 +20,13 @@ public sealed class ToolResultFormatterTests
             "EmbodySense dynamic tool results:",
             "- request_id: request-1",
             "  tool: read",
-            "  target_path: shared/note.txt",
-            "  resolved_path: C:\\workspace\\shared\\note.txt",
             "  outcome: succeeded",
             "  full_response_manifest: .agent/logs/tool-responses/request-1/manifest.json",
             "  full_response_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "  full_response_size: 22 characters / 22 UTF-8 bytes / 1 chunks",
             "  full_response_retention: retained for test",
+            "  target_path: shared/note.txt",
+            "  resolved_path: C:\\workspace\\shared\\note.txt",
             "  output:",
             "    first line",
             "    second line",
@@ -70,13 +70,13 @@ public sealed class ToolResultFormatterTests
             "EmbodySense dynamic tool results:",
             "- request_id: request-1",
             "  tool: read",
-            "  target_path: shared/note.txt",
-            "  resolved_path: C:\\workspace\\shared\\note.txt",
             "  outcome: succeeded",
             "  full_response_manifest: .agent/logs/tool-responses/request-1/manifest.json",
             "  full_response_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "  full_response_size: 0 characters / 0 UTF-8 bytes / 1 chunks",
             "  full_response_retention: retained for test",
+            "  target_path: shared/note.txt",
+            "  resolved_path: C:\\workspace\\shared\\note.txt",
             "  output:",
             "    "
         ]);
@@ -106,6 +106,22 @@ public sealed class ToolResultFormatterTests
 
         Assert.Contains("full_response_manifest: unavailable", formatted, StringComparison.Ordinal);
         Assert.Contains("retention failed closed", formatted, StringComparison.Ordinal);
+        Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FormatResults_preserves_retention_references_before_untrusted_paths_consume_the_limit()
+    {
+        var result = CreateResult("complete") with
+        {
+            ResolvedPath = new string('r', ToolResultFormatter.MaxFormattedCharacters),
+            Request = new ToolRequest(ToolCommand.Read, new string('t', ToolResultFormatter.MaxFormattedCharacters))
+        };
+
+        var formatted = ToolResultFormatter.FormatResults([result]);
+
+        Assert.Contains("full_response_manifest: .agent/logs/tool-responses/request-1/manifest.json", formatted, StringComparison.Ordinal);
+        Assert.Contains("full_response_sha256: " + new string('a', 64), formatted, StringComparison.Ordinal);
         Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
     }
 

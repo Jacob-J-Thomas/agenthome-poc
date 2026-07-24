@@ -236,6 +236,33 @@ public sealed class ToolResultRetentionStoreTests
         Assert.Empty(Directory.EnumerateFileSystemEntries(outside.RootPath));
     }
 
+    [Fact]
+    public async Task RetainAsync_refuses_a_workspace_root_that_redirects_to_another_location()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var linkHost = new TestWorkspace();
+        using var outside = new TestWorkspace();
+        var workspaceLink = linkHost.File("workspace-link");
+        Directory.CreateSymbolicLink(workspaceLink, outside.RootPath);
+        try
+        {
+            var retained = await new ToolResultRetentionStore(new WorkspacePaths(workspaceLink))
+                .RetainAsync(Result(new string('9', 32), "sensitive"), LoopDefinition.CreateDefaultConversation());
+
+            Assert.Equal(ToolResultRetentionStatus.Unavailable, retained.Status);
+            Assert.Contains("InvalidDataException", retained.Detail, StringComparison.Ordinal);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(outside.RootPath));
+        }
+        finally
+        {
+            Directory.Delete(workspaceLink);
+        }
+    }
+
     private static ToolResult Result(string requestId, string output, ToolAuditCorrelation? correlation = null)
     {
         return new ToolResult(

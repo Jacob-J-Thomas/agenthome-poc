@@ -94,8 +94,15 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
     private void PrepareRetentionRoot()
     {
+        if (!Directory.Exists(_paths.RootPath))
+        {
+            throw new InvalidDataException("The tool-response retention workspace root does not exist.");
+        }
+
+        EnsurePlainDirectory(_paths.RootPath);
         foreach (var directory in new[] { _paths.AgentPath, _paths.LogsPath, _paths.ToolResponsesPath })
         {
+            EnsurePlainDirectory(Path.GetDirectoryName(directory)!);
             if (!Directory.Exists(directory))
             {
                 Directory.CreateDirectory(directory);
