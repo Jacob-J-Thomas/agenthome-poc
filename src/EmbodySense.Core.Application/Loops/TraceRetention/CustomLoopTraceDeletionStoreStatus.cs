@@ -10,5 +10,6 @@ public enum CustomLoopTraceDeletionStoreStatus
     HashMismatch = 5,
     OperationConflict = 6,
     TombstoneLimitExceeded = 7,
-    DeletionOperationLimitExceeded = 8
+    DeletionOperationLimitExceeded = 8,
+    AuditUnavailable = 9
 }

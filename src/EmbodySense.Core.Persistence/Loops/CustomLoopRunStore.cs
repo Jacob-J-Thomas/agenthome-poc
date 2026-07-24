@@ -334,6 +334,78 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         return operation is null ? CustomLoopTraceDeletionLookupResult.NotFound() : CustomLoopTraceDeletionLookupResult.Found(operation);
     }
 
+    public async Task<CustomLoopTraceDeletionReservationResult> ReserveTraceDeletionOperationAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
+    {
+        ValidateDeletionMutation(mutation);
+        await using var lease = await AcquireMutationLockAsync(cancellationToken);
+        var existingOperation = await ReadTraceDeletionOperationAsync(mutation.Request.OperationId, cancellationToken);
+        if (existingOperation is not null)
+        {
+            if (!DeletionRequestMatches(existingOperation, mutation))
+            {
+                return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.OperationConflict, existingOperation);
+            }
+
+            var existingStatus = existingOperation.State == CustomLoopTraceDeletionOperationState.PendingMutation
+                ? CustomLoopTraceDeletionReservationStatus.Pending
+                : CustomLoopTraceDeletionReservationStatus.OutcomeCommitted;
+            return new CustomLoopTraceDeletionReservationResult(existingStatus, existingOperation);
+        }
+
+        RunArtifact? artifact = null;
+        await ScanArtifactsAsync(candidate =>
+        {
+            if (string.Equals(candidate.Location.RunId, mutation.Request.RunId, StringComparison.Ordinal))
+            {
+                artifact = candidate;
+            }
+        }, cancellationToken);
+        var deletionOperationCount = EnumerateTraceDeletionOperationPaths().Count;
+        var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;
+        if (deletionOperationCount >= CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace
+            || (deletionOperationCount >= generalOperationCapacity && !CanUseTombstoneDeletionOperationReservation(artifact, mutation.Request)))
+        {
+            return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.DeletionOperationLimitExceeded, null);
+        }
+
+        var operation = new CustomLoopTraceDeletionOperation(
+            CustomLoopTraceDeletionOperation.CurrentSchemaVersion,
+            mutation.Request.OperationId,
+            mutation.RequestHash,
+            mutation.Request,
+            mutation.RequestedAtUtc,
+            mutation.RequestedAtUtc,
+            CustomLoopTraceDeletionOperationState.PendingMutation,
+            CustomLoopTraceDeletionStoreStatus.Unknown,
+            null,
+            CustomLoopTraceDeletionIntegrity.Unknown);
+        await WriteTraceDeletionOperationAsync(operation, overwrite: false, cancellationToken);
+        return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.Reserved, operation);
+    }
+
+    public async Task<CustomLoopTraceDeletionStoreResult> CommitTraceDeletionAuditFailureAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
+    {
+        ValidateDeletionMutation(mutation);
+        await using var lease = await AcquireMutationLockAsync(cancellationToken);
+        var operation = await ReadTraceDeletionOperationAsync(mutation.Request.OperationId, cancellationToken);
+        if (operation is null)
+        {
+            return new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Unknown, null, CustomLoopTraceDeletionIntegrity.Unknown);
+        }
+
+        if (!DeletionRequestMatches(operation, mutation))
+        {
+            return new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.OperationConflict, operation.Tombstone, operation.Integrity);
+        }
+
+        if (operation.State == CustomLoopTraceDeletionOperationState.OutcomeCommitted)
+        {
+            return operation.ToStoreResult() with { Status = operation.Outcome == CustomLoopTraceDeletionStoreStatus.Deleted ? CustomLoopTraceDeletionStoreStatus.AlreadyDeleted : operation.Outcome };
+        }
+
+        return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.AuditUnavailable, null, cancellationToken);
+    }
+
     public async Task<CustomLoopTraceDeletionStoreResult> DeleteTerminalTraceAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
     {
         ValidateDeletionMutation(mutation);
@@ -474,7 +546,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var tombstone = operation.Tombstone;
-        if (tombstone is not null)
+        if (tombstone is not null && operation.Outcome is CustomLoopTraceDeletionStoreStatus.Deleted or CustomLoopTraceDeletionStoreStatus.AlreadyDeleted)
         {
             tombstone = tombstone with { OutcomeIntegrity = integrity };
             ValidateTombstone(tombstone);
@@ -1097,9 +1169,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private async Task<CustomLoopTraceDeletionStoreResult> CommitDeletionOutcomeAsync(CustomLoopTraceDeletionOperation operation, CustomLoopTraceDeletionStoreStatus status, CustomLoopTraceTombstone? tombstone, CancellationToken cancellationToken)
     {
-        var integrity = status == CustomLoopTraceDeletionStoreStatus.Deleted
-            ? tombstone?.OutcomeIntegrity ?? CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit
-            : CustomLoopTraceDeletionIntegrity.Complete;
+        var integrity = tombstone is not null && status == CustomLoopTraceDeletionStoreStatus.Deleted
+            ? tombstone.OutcomeIntegrity
+            : CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit;
         var updatedAtUtc = tombstone is null ? operation.UpdatedAtUtc : Max(operation.UpdatedAtUtc, tombstone.DeletedAtUtc);
         var completed = operation with
         {
@@ -1632,10 +1704,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             }
         }
 
-        if (operation.Outcome is not CustomLoopTraceDeletionStoreStatus.Deleted and not CustomLoopTraceDeletionStoreStatus.AlreadyDeleted
-            && operation.Integrity != CustomLoopTraceDeletionIntegrity.Complete)
+        if (operation.Integrity is CustomLoopTraceDeletionIntegrity.Unknown)
         {
-            throw new FormatException("A non-mutating trace-deletion outcome must be durably complete.");
+            throw new FormatException("A committed trace-deletion outcome must retain its outcome-audit integrity state.");
         }
     }
 

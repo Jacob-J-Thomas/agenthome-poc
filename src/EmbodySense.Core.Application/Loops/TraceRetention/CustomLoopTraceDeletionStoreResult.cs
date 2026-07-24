@@ -6,4 +6,7 @@ public sealed record CustomLoopTraceDeletionStoreResult(
     CustomLoopTraceDeletionIntegrity Integrity)
 {
     public bool IsCommitted => Status is CustomLoopTraceDeletionStoreStatus.Deleted or CustomLoopTraceDeletionStoreStatus.AlreadyDeleted;
+
+    public bool HasCommittedOutcome => Integrity != CustomLoopTraceDeletionIntegrity.Unknown
+        && Status is not CustomLoopTraceDeletionStoreStatus.Unknown and not CustomLoopTraceDeletionStoreStatus.DeletionOperationLimitExceeded;
 }

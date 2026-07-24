@@ -12,5 +12,6 @@ public enum CustomLoopTraceDeletionStatus
     Invalid = 8,
     AuditUnavailable = 9,
     CommittedWithAuditWarning = 10,
-    OperationLimitExceeded = 11
+    OperationLimitExceeded = 11,
+    OperationInProgress = 12
 }
