@@ -140,6 +140,25 @@ public sealed class WorkspaceInitializerTests
     }
 
     [Fact]
+    public async Task InitializeAsync_does_not_overwrite_permissions_while_another_writer_holds_the_file()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        var permissions = PermissionsDocument.CreateDefault(paths);
+        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        var original = permissions.ToJson();
+        await File.WriteAllTextAsync(paths.PermissionsPath, original);
+        await using var concurrentWriter = new FileStream(paths.PermissionsPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+
+        await Assert.ThrowsAnyAsync<IOException>(() => new WorkspaceInitializer().InitializeAsync(workspace.RootPath));
+
+        concurrentWriter.Position = 0;
+        using var reader = new StreamReader(concurrentWriter, leaveOpen: true);
+        Assert.Equal(original, await reader.ReadToEndAsync());
+    }
+
+    [Fact]
     public async Task InitializeAsync_seeds_default_conversation_loop_definition()
     {
         using var workspace = new TestWorkspace();

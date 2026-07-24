@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,10 +19,12 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private const string StagingPrefix = ".staging-";
     private const string RetentionPolicy = "oldest-first within 256 artifacts and 64 MiB; full response chunks are sensitive local workspace evidence";
     private static readonly TimeSpan LockRetryDelay = TimeSpan.FromMilliseconds(25);
+    private static readonly TimeSpan MaxLockWait = TimeSpan.FromSeconds(5);
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
     private readonly WorkspacePaths _paths;
     private readonly TimeProvider _timeProvider;
+    private readonly Dictionary<string, ValidatedArtifactSnapshot> _validatedArtifacts = new(StringComparer.Ordinal);
 
     public ToolResultRetentionStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
@@ -59,8 +62,15 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
                 return Unavailable(result, "The complete governed response exceeds its bounded manifest or artifact byte limit.");
             }
 
+            if (IsToolResponseInspection(result)
+                && WouldExceedWorkspaceLimits(existingArtifacts, prepared.TotalUtf8Bytes))
+            {
+                return Unavailable(result, "The inspection response was not self-retained because doing so would evict tool-response evidence being inspected.");
+            }
+
             await WriteArtifactAsync(prepared, cancellationToken);
             var retainedArtifact = new RetainedArtifact(Path.Combine(_paths.ToolResponsesPath, prepared.Manifest.RequestId), prepared.Manifest, prepared.TotalUtf8Bytes);
+            _validatedArtifacts[prepared.Manifest.RequestId] = CaptureValidatedArtifact(retainedArtifact.Directory, prepared.Manifest, prepared.TotalUtf8Bytes);
             existingArtifacts.Add(retainedArtifact);
             var evicted = recoveredEvictions + EvictToLimits(existingArtifacts);
             if (retainedArtifact.Evicted || !Directory.Exists(retainedArtifact.Directory))
@@ -78,6 +88,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
     private async Task<FileStream> AcquireLeaseAsync(CancellationToken cancellationToken)
     {
+        var wait = Stopwatch.StartNew();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -85,7 +96,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             {
                 return new FileStream(_paths.ToolResponseRetentionLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
             }
-            catch (IOException)
+            catch (IOException exception) when (IsLockContention(exception) && wait.Elapsed < MaxLockWait)
             {
                 await Task.Delay(LockRetryDelay, cancellationToken);
             }
@@ -144,6 +155,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         }
 
         var artifacts = new List<RetainedArtifact>();
+        var presentRequestIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var directory in Directory.EnumerateDirectories(_paths.ToolResponsesPath, "*", SearchOption.TopDirectoryOnly))
         {
             EnsurePlainDirectory(directory);
@@ -153,10 +165,24 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
                 throw new InvalidDataException("The tool-response retention root contains an unrecognized directory.");
             }
 
+            presentRequestIds.Add(requestId);
+            if (_validatedArtifacts.TryGetValue(requestId, out var cached)
+                && MatchesValidatedArtifact(directory, cached))
+            {
+                artifacts.Add(new RetainedArtifact(directory, cached.Manifest, cached.TotalUtf8Bytes));
+                continue;
+            }
+
             var manifestPath = Path.Combine(directory, ManifestFileName);
             var manifest = await ReadManifestAsync(manifestPath, cancellationToken);
             var totalUtf8Bytes = await ValidateArtifactAsync(directory, requestId, manifest, cancellationToken);
+            _validatedArtifacts[requestId] = CaptureValidatedArtifact(directory, manifest, totalUtf8Bytes);
             artifacts.Add(new RetainedArtifact(directory, manifest, totalUtf8Bytes));
+        }
+
+        foreach (var staleRequestId in _validatedArtifacts.Keys.Where(requestId => !presentRequestIds.Contains(requestId)).ToArray())
+        {
+            _validatedArtifacts.Remove(staleRequestId);
         }
 
         return artifacts;
@@ -355,6 +381,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             }
 
             Directory.Delete(artifact.Directory, recursive: true);
+            _validatedArtifacts.Remove(artifact.Manifest.RequestId);
             artifact.Evicted = true;
             retainedCount--;
             retainedBytes -= artifact.TotalUtf8Bytes;
@@ -440,6 +467,83 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         }
     }
 
+    private bool IsToolResponseInspection(ToolResult result)
+    {
+        if (result.Request.Command is not (ToolCommand.List or ToolCommand.Read or ToolCommand.Search))
+        {
+            return false;
+        }
+
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_paths.ToolResponsesPath));
+        var candidate = Path.GetFullPath(result.ResolvedPath);
+        if (PathEquals(root, candidate))
+        {
+            return true;
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return candidate.StartsWith(root + Path.DirectorySeparatorChar, comparison);
+    }
+
+    private static bool WouldExceedWorkspaceLimits(IReadOnlyList<RetainedArtifact> artifacts, long additionalUtf8Bytes)
+    {
+        var retained = artifacts.Where(artifact => !artifact.Evicted).ToArray();
+        return retained.Length + 1 > ToolResultRetentionLimits.MaxArtifactsPerWorkspace
+            || retained.Sum(artifact => artifact.TotalUtf8Bytes) + additionalUtf8Bytes > ToolResultRetentionLimits.MaxWorkspaceUtf8Bytes;
+    }
+
+    private static ValidatedArtifactSnapshot CaptureValidatedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes)
+    {
+        if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any())
+        {
+            throw new InvalidDataException("A retained tool-response artifact contains an unrecognized directory.");
+        }
+
+        var files = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly)
+            .Select(path => new FileInfo(path))
+            .ToDictionary(
+                file => file.Name,
+                file =>
+                {
+                    if (!file.Exists || file.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                    {
+                        throw new InvalidDataException("A retained tool-response artifact file is missing or redirected.");
+                    }
+
+                    return new ArtifactFileStamp(file.Length, file.LastWriteTimeUtc.Ticks);
+                },
+                StringComparer.Ordinal);
+        return new ValidatedArtifactSnapshot(manifest, totalUtf8Bytes, files);
+    }
+
+    private static bool MatchesValidatedArtifact(string directory, ValidatedArtifactSnapshot cached)
+    {
+        if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any())
+        {
+            return false;
+        }
+
+        var files = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly).Select(path => new FileInfo(path)).ToArray();
+        if (files.Length != cached.Files.Count)
+        {
+            return false;
+        }
+
+        foreach (var file in files)
+        {
+            if (!file.Exists
+                || file.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                || !cached.Files.TryGetValue(file.Name, out var expected)
+                || file.Length != expected.Length
+                || file.LastWriteTimeUtc.Ticks != expected.LastWriteTimeUtcTicks)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static void EnsurePlainDirectory(string path)
     {
         if (new DirectoryInfo(path).Attributes.HasFlag(FileAttributes.ReparsePoint))
@@ -458,6 +562,16 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
     private static bool PathEquals(string left, string right) => string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
+    private static bool IsLockContention(IOException exception)
+    {
+        var error = exception.HResult & 0xffff;
+        return OperatingSystem.IsWindows()
+            ? error is 32 or 33
+            : OperatingSystem.IsMacOS()
+                ? error == 35
+                : error == 11;
+    }
+
     private static JsonSerializerOptions CreateJsonOptions()
     {
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true };
@@ -468,6 +582,10 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private sealed record PreparedChunk(string Path, byte[] Bytes, ToolResultArtifactChunk Manifest);
 
     private sealed record PreparedArtifact(ToolResultArtifactManifest Manifest, byte[] ManifestBytes, IReadOnlyList<PreparedChunk> Chunks, long TotalUtf8Bytes);
+
+    private sealed record ArtifactFileStamp(long Length, long LastWriteTimeUtcTicks);
+
+    private sealed record ValidatedArtifactSnapshot(ToolResultArtifactManifest Manifest, long TotalUtf8Bytes, IReadOnlyDictionary<string, ArtifactFileStamp> Files);
 
     private sealed class RetainedArtifact(string directory, ToolResultArtifactManifest manifest, long totalUtf8Bytes)
     {
