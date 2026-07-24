@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -45,11 +46,30 @@ public sealed class ToolResultRetentionStoreTests
     }
 
     [Fact]
+    public async Task RetainAsync_accepts_the_sixth_utf16_safe_chunk_at_the_maximum_character_bound()
+    {
+        using var workspace = new TestWorkspace();
+        var prefix = new string('a', ToolResultRetentionLimits.MaxChunkCharacters - 1) + "\U0001F600";
+        var output = prefix + new string('z', ToolResultRetentionLimits.MaxOutputCharacters - prefix.Length);
+        var result = Result("00000000000000000000000000000002", output);
+        var store = new ToolResultRetentionStore(new WorkspacePaths(workspace.RootPath));
+
+        var retained = await store.RetainAsync(result, LoopDefinition.CreateDefaultConversation());
+        var repeated = await store.RetainAsync(result, LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Retained, retained.Status);
+        Assert.Equal(6, retained.ChunkCount);
+        Assert.Equal(ToolResultRetentionStatus.Retained, repeated.Status);
+        Assert.Equal(retained.ContentSha256, repeated.ContentSha256);
+    }
+
+    [Fact]
     public async Task RetainAsync_evicts_only_the_oldest_complete_artifact_at_the_count_limit()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new ToolResultRetentionStore(paths);
+        var future = new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var store = new ToolResultRetentionStore(paths, new FixedTimeProvider(future));
         for (var index = 0; index < ToolResultRetentionLimits.MaxArtifactsPerWorkspace; index++)
         {
             var retained = await store.RetainAsync(Result(index.ToString("x32"), $"result-{index}"), LoopDefinition.CreateDefaultConversation());
@@ -57,10 +77,12 @@ public sealed class ToolResultRetentionStoreTests
             Assert.Equal(0, retained.EvictedArtifactCount);
         }
 
-        var latest = await store.RetainAsync(Result(new string('f', 32), "newest"), LoopDefinition.CreateDefaultConversation());
+        var latest = await new ToolResultRetentionStore(paths, new FixedTimeProvider(future.AddYears(-10)))
+            .RetainAsync(Result(new string('f', 32), "newest"), LoopDefinition.CreateDefaultConversation());
 
         Assert.Equal(ToolResultRetentionStatus.Retained, latest.Status);
         Assert.Equal(1, latest.EvictedArtifactCount);
+        Assert.Equal(future.AddTicks(ToolResultRetentionLimits.MaxArtifactsPerWorkspace), latest.RetainedAtUtc);
         Assert.False(Directory.Exists(Path.Combine(paths.ToolResponsesPath, new string('0', 32))));
         Assert.True(Directory.Exists(Path.Combine(paths.ToolResponsesPath, new string('f', 32))));
         Assert.Equal(ToolResultRetentionLimits.MaxArtifactsPerWorkspace, Directory.EnumerateDirectories(paths.ToolResponsesPath).Count());
@@ -142,6 +164,9 @@ public sealed class ToolResultRetentionStoreTests
     [InlineData("staging")]
     [InlineData("root-file")]
     [InlineData("manifest")]
+    [InlineData("chunk-content")]
+    [InlineData("aggregate-hash")]
+    [InlineData("oversized-manifest")]
     public async Task RetainAsync_fails_closed_when_existing_retention_state_is_not_canonical(string corruption)
     {
         using var workspace = new TestWorkspace();
@@ -161,8 +186,27 @@ public sealed class ToolResultRetentionStoreTests
         {
             var retained = await store.RetainAsync(Result(new string('7', 32), "original"), LoopDefinition.CreateDefaultConversation());
             var manifestPath = workspace.File(retained.ManifestPath!.Replace('/', Path.DirectorySeparatorChar));
-            var manifest = await File.ReadAllTextAsync(manifestPath);
-            await File.WriteAllTextAsync(manifestPath, manifest.Replace("\"schemaVersion\": 1", "\"schemaVersion\": 2", StringComparison.Ordinal));
+            if (corruption == "manifest")
+            {
+                var manifest = await File.ReadAllTextAsync(manifestPath);
+                await File.WriteAllTextAsync(manifestPath, manifest.Replace("\"schemaVersion\": 1", "\"schemaVersion\": 2", StringComparison.Ordinal));
+            }
+            else if (corruption == "chunk-content")
+            {
+                var chunkPath = Path.Combine(Path.GetDirectoryName(manifestPath)!, "0001.txt");
+                var content = await File.ReadAllTextAsync(chunkPath);
+                await File.WriteAllTextAsync(chunkPath, new string('x', content.Length));
+            }
+            else if (corruption == "aggregate-hash")
+            {
+                var manifest = JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+                manifest["contentSha256"] = new string('0', 64);
+                await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            else
+            {
+                await File.WriteAllTextAsync(manifestPath, new string('x', ToolResultRetentionLimits.MaxManifestUtf8Bytes + 1));
+            }
         }
 
         var unavailable = await store.RetainAsync(Result(new string('8', 32), "next"), LoopDefinition.CreateDefaultConversation());
@@ -210,5 +254,10 @@ public sealed class ToolResultRetentionStoreTests
     private static string Sha256(string text)
     {
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => timestamp;
     }
 }
