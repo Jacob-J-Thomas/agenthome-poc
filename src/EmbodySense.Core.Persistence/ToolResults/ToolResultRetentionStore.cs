@@ -21,11 +21,13 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
     private readonly WorkspacePaths _paths;
+    private readonly TimeProvider _timeProvider;
 
-    public ToolResultRetentionStore(WorkspacePaths paths)
+    public ToolResultRetentionStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<ToolResultRetentionReference> RetainAsync(ToolResult result, LoopDefinition loopDefinition, CancellationToken cancellationToken = default)
@@ -41,7 +43,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             CleanupStagingDirectories();
             var existingArtifacts = await LoadArtifactsAsync(cancellationToken);
             var recoveredEvictions = EvictToLimits(existingArtifacts);
-            var retainedAtUtc = DateTimeOffset.UtcNow;
+            var retainedAtUtc = NextRetainedAtUtc(existingArtifacts);
             var prepared = PrepareArtifact(result, loopDefinition, retainedAtUtc);
             var existing = existingArtifacts.SingleOrDefault(artifact => !artifact.Evicted && string.Equals(artifact.Manifest.RequestId, result.RequestId, StringComparison.Ordinal));
             if (existing is not null)
@@ -51,14 +53,21 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
                     : Unavailable(result, "The broker request id is already bound to different retained response evidence.");
             }
 
-            if (prepared.TotalUtf8Bytes > ToolResultRetentionLimits.MaxArtifactUtf8Bytes)
+            if (prepared.ManifestBytes.LongLength > ToolResultRetentionLimits.MaxManifestUtf8Bytes
+                || prepared.TotalUtf8Bytes > ToolResultRetentionLimits.MaxArtifactUtf8Bytes)
             {
-                return Unavailable(result, $"The complete governed response exceeds the {ToolResultRetentionLimits.MaxArtifactUtf8Bytes}-byte artifact limit.");
+                return Unavailable(result, "The complete governed response exceeds its bounded manifest or artifact byte limit.");
             }
 
             await WriteArtifactAsync(prepared, cancellationToken);
-            existingArtifacts.Add(new RetainedArtifact(Path.Combine(_paths.ToolResponsesPath, prepared.Manifest.RequestId), prepared.Manifest, prepared.TotalUtf8Bytes));
+            var retainedArtifact = new RetainedArtifact(Path.Combine(_paths.ToolResponsesPath, prepared.Manifest.RequestId), prepared.Manifest, prepared.TotalUtf8Bytes);
+            existingArtifacts.Add(retainedArtifact);
             var evicted = recoveredEvictions + EvictToLimits(existingArtifacts);
+            if (retainedArtifact.Evicted || !Directory.Exists(retainedArtifact.Directory))
+            {
+                return Unavailable(result, "The newly written full-response artifact did not survive bounded quota enforcement.");
+            }
+
             return CreateReference(prepared.Manifest, evicted);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -138,23 +147,51 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             }
 
             var manifestPath = Path.Combine(directory, ManifestFileName);
-            var manifest = JsonSerializer.Deserialize<ToolResultArtifactManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken), JsonOptions)
-                ?? throw new InvalidDataException("A retained tool-response manifest is empty.");
-            var totalUtf8Bytes = ValidateArtifact(directory, requestId, manifest);
+            var manifest = await ReadManifestAsync(manifestPath, cancellationToken);
+            var totalUtf8Bytes = await ValidateArtifactAsync(directory, requestId, manifest, cancellationToken);
             artifacts.Add(new RetainedArtifact(directory, manifest, totalUtf8Bytes));
         }
 
         return artifacts;
     }
 
-    private static long ValidateArtifact(string directory, string requestId, ToolResultArtifactManifest manifest)
+    private static async Task<ToolResultArtifactManifest> ReadManifestAsync(string manifestPath, CancellationToken cancellationToken)
+    {
+        var file = new FileInfo(manifestPath);
+        if (!file.Exists
+            || file.Attributes.HasFlag(FileAttributes.ReparsePoint)
+            || file.Length < 1
+            || file.Length > ToolResultRetentionLimits.MaxManifestUtf8Bytes)
+        {
+            throw new InvalidDataException("A retained tool-response manifest is missing, redirected, empty, or oversized.");
+        }
+
+        await using var stream = new FileStream(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length < 1 || stream.Length > ToolResultRetentionLimits.MaxManifestUtf8Bytes)
+        {
+            throw new InvalidDataException("A retained tool-response manifest changed outside its governed size bound.");
+        }
+
+        var bytes = new byte[checked((int)stream.Length)];
+        await stream.ReadExactlyAsync(bytes, cancellationToken);
+        return JsonSerializer.Deserialize<ToolResultArtifactManifest>(bytes, JsonOptions)
+            ?? throw new InvalidDataException("A retained tool-response manifest is empty.");
+    }
+
+    private static async Task<long> ValidateArtifactAsync(string directory, string requestId, ToolResultArtifactManifest manifest, CancellationToken cancellationToken)
     {
         if (manifest.SchemaVersion != CurrentSchemaVersion || !string.Equals(manifest.RequestId, requestId, StringComparison.Ordinal) || !IsSha256(manifest.ContentSha256))
         {
             throw new InvalidDataException("A retained tool-response manifest has an incompatible identity or schema.");
         }
 
-        if (manifest.CharacterCount < 0 || manifest.CharacterCount > ToolResultRetentionLimits.MaxOutputCharacters || manifest.Utf8ByteCount < 0 || manifest.Chunks.Length == 0)
+        var maximumChunkCount = ((ToolResultRetentionLimits.MaxOutputCharacters + ToolResultRetentionLimits.MaxChunkCharacters - 1) / ToolResultRetentionLimits.MaxChunkCharacters) + 1;
+        if (manifest.CharacterCount < 0
+            || manifest.CharacterCount > ToolResultRetentionLimits.MaxOutputCharacters
+            || manifest.Utf8ByteCount < 0
+            || manifest.Utf8ByteCount > ToolResultRetentionLimits.MaxArtifactUtf8Bytes
+            || manifest.Chunks.Length < 1
+            || manifest.Chunks.Length > maximumChunkCount)
         {
             throw new InvalidDataException("A retained tool-response manifest exceeds its governed content bounds.");
         }
@@ -169,6 +206,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         long totalUtf8Bytes = manifestFile.Length;
         long chunkUtf8Bytes = 0;
         var chunkCharacters = 0;
+        using var aggregateHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         for (var index = 0; index < manifest.Chunks.Length; index++)
         {
             var chunk = manifest.Chunks[index];
@@ -180,11 +218,24 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
             var chunkPath = Path.Combine(directory, expectedPath);
             var file = new FileInfo(chunkPath);
-            if (!file.Exists || file.Attributes.HasFlag(FileAttributes.ReparsePoint) || file.Length != chunk.Utf8ByteCount || chunk.CharacterCount < 0 || chunk.CharacterCount > ToolResultRetentionLimits.MaxChunkCharacters)
+            if (!file.Exists
+                || file.Attributes.HasFlag(FileAttributes.ReparsePoint)
+                || file.Length != chunk.Utf8ByteCount
+                || file.Length > ToolResultRetentionLimits.MaxArtifactUtf8Bytes
+                || chunk.CharacterCount < 0
+                || chunk.CharacterCount > ToolResultRetentionLimits.MaxChunkCharacters)
             {
                 throw new InvalidDataException("A retained tool-response chunk does not match its manifest bounds.");
             }
 
+            var bytes = await File.ReadAllBytesAsync(chunkPath, cancellationToken);
+            if (!string.Equals(Sha256(bytes), chunk.ContentSha256, StringComparison.Ordinal)
+                || StrictUtf8.GetString(bytes).Length != chunk.CharacterCount)
+            {
+                throw new InvalidDataException("A retained tool-response chunk does not match its exact content hash or character count.");
+            }
+
+            aggregateHash.AppendData(bytes);
             expectedFiles.Add(expectedPath);
             totalUtf8Bytes += file.Length;
             chunkUtf8Bytes += chunk.Utf8ByteCount;
@@ -199,12 +250,34 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             }
         }
 
-        if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any() || chunkUtf8Bytes != manifest.Utf8ByteCount || chunkCharacters != manifest.CharacterCount || totalUtf8Bytes > ToolResultRetentionLimits.MaxArtifactUtf8Bytes)
+        var aggregateContentSha256 = Convert.ToHexString(aggregateHash.GetHashAndReset()).ToLowerInvariant();
+        if (Directory.EnumerateDirectories(directory, "*", SearchOption.TopDirectoryOnly).Any()
+            || chunkUtf8Bytes != manifest.Utf8ByteCount
+            || chunkCharacters != manifest.CharacterCount
+            || !string.Equals(aggregateContentSha256, manifest.ContentSha256, StringComparison.Ordinal)
+            || totalUtf8Bytes > ToolResultRetentionLimits.MaxArtifactUtf8Bytes)
         {
             throw new InvalidDataException("A retained tool-response artifact does not match its manifest totals.");
         }
 
         return totalUtf8Bytes;
+    }
+
+    private DateTimeOffset NextRetainedAtUtc(IReadOnlyList<RetainedArtifact> existingArtifacts)
+    {
+        var now = _timeProvider.GetUtcNow();
+        var latest = existingArtifacts.Where(artifact => !artifact.Evicted).Select(artifact => artifact.Manifest.RetainedAtUtc).DefaultIfEmpty(DateTimeOffset.MinValue).Max();
+        if (latest < now)
+        {
+            return now;
+        }
+
+        if (latest == DateTimeOffset.MaxValue)
+        {
+            throw new InvalidDataException("Retained tool-response timestamps cannot advance monotonically.");
+        }
+
+        return latest.AddTicks(1);
     }
 
     private PreparedArtifact PrepareArtifact(ToolResult result, LoopDefinition loopDefinition, DateTimeOffset retainedAtUtc)
