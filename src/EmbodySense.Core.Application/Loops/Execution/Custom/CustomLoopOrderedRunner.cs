@@ -318,7 +318,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             authority = await _authorityProvider.ResolveAsync(run.AdmittedDefinition.RoleId, run.AdmittedDefinition.ToolAssignments, cancellationToken);
             EnsureAuthorityBound(run, authority, run.AdmittedDefinition.ToolAssignments);
 
-            effectiveAssignments = run.Checkpoint.ToolRequestsUsed < CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun ? authority.EffectiveAssignments : [];
+            effectiveAssignments = run.Checkpoint.ToolRequestsUsed < CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun ? authority.EffectiveAssignments : [];
             assembly = _contextResolver.ResolveInference(run, step, effectiveAssignments);
             EnsureRequestBound(assembly);
             EnsureAttemptBound(run);
@@ -1502,7 +1502,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return "The provider/model result does not match the immutable admitted model snapshot.";
         }
 
-        if (result.ToolRequestsConsumed < 0 || result.ToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt)
+        if (result.ToolRequestsConsumed < 0 || result.ToolRequestsConsumed > CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerAttempt)
         {
             return "The provider result reported a governed tool-call count outside the admitted per-attempt budget.";
         }
@@ -1530,7 +1530,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         var reservations = toolEvents.Where(item => item.Kind == CustomLoopRunEventKind.ToolRequestReserved).ToArray();
         durableToolRequestsConsumed = reservations.Length;
-        if (durableToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt || run.Checkpoint.ToolRequestsUsed + durableToolRequestsConsumed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)
+        if (durableToolRequestsConsumed > CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerAttempt || run.Checkpoint.ToolRequestsUsed + durableToolRequestsConsumed > CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun)
         {
             return "The durable governed tool-request trace exceeds the admitted run budget.";
         }
@@ -1541,13 +1541,24 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return "The durable governed tool-request reservations do not have unique contiguous ordinals.";
         }
 
-        var groups = toolEvents.GroupBy(item => item.ToolEvidence!.RequestCorrelationId, StringComparer.Ordinal).ToArray();
-        if (groups.Length != durableToolRequestsConsumed)
+        var groups = toolEvents.GroupBy(item => (item.ToolEvidence!.RequestOrdinal, item.ToolEvidence.RequestCorrelationId)).ToArray();
+        var reservedGroups = groups.Where(group => group.Any(item => item.Kind == CustomLoopRunEventKind.ToolRequestReserved)).ToArray();
+        var unreservedGroups = groups.Where(group => group.All(item => item.Kind != CustomLoopRunEventKind.ToolRequestReserved)).ToArray();
+        if (reservedGroups.Length != durableToolRequestsConsumed
+            || unreservedGroups.Length > 1
+            || unreservedGroups.Any(group => group.Count() != 1
+                || group.Single().Kind != CustomLoopRunEventKind.ToolIntegrityFailed
+                || group.Key.RequestOrdinal != reservations.Length + 1))
         {
-            return "The durable governed tool trace contains an unreserved or duplicate request correlation.";
+            return "The durable governed tool trace contains a duplicate reservation or evidence outside the one exact repeated-request integrity slot.";
         }
 
-        foreach (var group in groups)
+        if (unreservedGroups.Length == 1)
+        {
+            return "A repeated governed tool request recorded an exact non-actuating integrity failure and cannot be counted as a completed request.";
+        }
+
+        foreach (var group in reservedGroups)
         {
             var ordered = group.OrderBy(item => item.Sequence).ToArray();
             if (ordered.Count(item => item.Kind == CustomLoopRunEventKind.ToolIntegrityFailed) > 0)
