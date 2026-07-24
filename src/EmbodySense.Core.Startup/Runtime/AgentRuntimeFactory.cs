@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
@@ -139,6 +140,7 @@ public sealed class AgentRuntimeFactory
             var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId);
             var customDefinitionStore = new CustomLoopDefinitionStore(paths);
             var customInvocationOperations = new CustomLoopInvocationOperationStore(paths);
+            var customInvocationReceiptRetention = new CustomLoopInvocationReceiptRetentionService(customInvocationOperations, auditLog);
             var customControlOperations = new CustomLoopControlOperationStore(paths);
             var customToolAuthority = new CustomLoopToolAuthorityProvider(loopDefinitionStore);
             var customToolEvidence = new CustomLoopRunToolEvidenceSink(customRunStore);
@@ -153,6 +155,7 @@ public sealed class AgentRuntimeFactory
                 customDefinitionStore,
                 customRunStore,
                 customInvocationOperations,
+                customInvocationReceiptRetention,
                 customControlOperations,
                 customExecutionGate,
                 customAdmission,

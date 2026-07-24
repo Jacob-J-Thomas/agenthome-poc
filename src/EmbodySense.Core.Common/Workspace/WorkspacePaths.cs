@@ -61,6 +61,8 @@ public sealed class WorkspacePaths
 
     public string CustomLoopInvocationOperationsPath => Path.Combine(LoopRunsPath, "custom-invocation-operations");
 
+    public string CustomLoopInvocationReceiptRetentionPath => Path.Combine(LoopRunsPath, "custom-invocation-receipt-retention");
+
     public string CustomLoopTraceDeletionOperationsPath => Path.Combine(LoopRunsPath, "custom-trace-deletion-operations");
 
     public string CustomLoopHostLockPath => Path.Combine(LoopRunsPath, ".custom-workspace-host.lock");
