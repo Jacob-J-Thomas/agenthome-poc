@@ -109,7 +109,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
 
         var events = await new AuditLog(paths).ReadTailAsync(100);
         var authorityEvents = events.Where(item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate).ToArray();
-        Assert.Equal(4, authorityEvents.Length);
+        Assert.Equal(7, authorityEvents.Length);
+        Assert.Equal(3, authorityEvents.Count(item => Metadata(item, "authority_phase") == "pre_actuation_revalidation" && item.Outcome == AuditSchema.Outcomes.Allowed));
         Assert.Contains(authorityEvents, item => item.Outcome == AuditSchema.Outcomes.Denied && Metadata(item, "command") == "write");
         Assert.All(authorityEvents, AssertCorrelation);
         Assert.All(events.Where(item => item.Action is AuditSchema.Actions.ToolPermissionEvaluate or AuditSchema.Actions.ToolExecute), AssertCorrelation);
@@ -164,6 +165,47 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(ToolExecutionOutcome.Denied, Assert.IsType<ToolResult>(observed).Outcome);
         var authorityEvent = Assert.Single(await new AuditLog(paths).ReadTailAsync(100), item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate);
         Assert.Equal(AuditSchema.Outcomes.Denied, authorityEvent.Outcome);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_revalidates_authority_after_approval_and_denies_revocation_before_actuation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must remain unread");
+        var authorityProvider = new TestAuthorityProvider();
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: authorityProvider.Revoke);
+        var evidenceSink = new RecordingEvidenceSink();
+        ToolResult? observed = null;
+        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        {
+            Assert.NotNull(broker);
+            observed = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+            return Response();
+        }, approvalPrompt: approvalPrompt, evidenceSink: evidenceSink, authorityProvider: authorityProvider);
+
+        var result = await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
+
+        Assert.Equal(3, authorityProvider.ResolveCount);
+        Assert.Equal(1, result.ToolRequestsConsumed);
+        var toolResult = Assert.IsType<ToolResult>(observed);
+        Assert.Equal(ToolExecutionOutcome.Denied, toolResult.Outcome);
+        Assert.DoesNotContain("must remain unread", toolResult.OutputText, StringComparison.Ordinal);
+        Assert.Equal(ToolAuthorityDecision.Denied, toolResult.Governance?.AuthorityDecision);
+        Assert.Equal(ToolApprovalDecision.Approved, toolResult.Governance?.ApprovalDecision);
+        Assert.Single(approvalPrompt.Requests);
+        Assert.Contains(evidenceSink.Evidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Governance.AuthorityDecision: ToolAuthorityDecision.Denied, Governance.ApprovalDecision: ToolApprovalDecision.Approved });
+
+        var events = await new AuditLog(paths).ReadTailAsync(100);
+        var revalidation = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "authority_phase") == "pre_actuation_revalidation");
+        Assert.Equal(AuditSchema.Outcomes.Denied, revalidation.Outcome);
+        Assert.Equal(string.Empty, Metadata(revalidation, "current_role_commands"));
+        Assert.Equal("true", Metadata(revalidation, "authority_valid")?.ToLowerInvariant());
+        Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecutionIntent);
+        var deniedExecution = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolExecute);
+        Assert.Equal(AuditSchema.Outcomes.Denied, deniedExecution.Outcome);
+        Assert.Equal("true", Metadata(deniedExecution, "approved_by_human")?.ToLowerInvariant());
     }
 
     [Fact]
@@ -851,13 +893,14 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(sourceGovernance.ApprovalDetail, projectedGovernance.ApprovalDetail);
     }
 
-    private sealed class RecordingApprovalPrompt(bool approved = false) : IAgentToolApprovalPrompt, IToolApprovalPrompt
+    private sealed class RecordingApprovalPrompt(bool approved = false, Action? beforeDecision = null) : IAgentToolApprovalPrompt, IToolApprovalPrompt
     {
         public List<AgentToolApprovalRequest> Requests { get; } = [];
 
         public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
+            beforeDecision?.Invoke();
             return Task.FromResult((approved, "test", approved ? "approved" : "rejected"));
         }
 
@@ -880,21 +923,31 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
 
     private sealed class TestAuthorityProvider : ICustomLoopToolAuthorityProvider
     {
+        public int ResolveCount { get; private set; }
+        private bool _revoked;
+
+        public void Revoke()
+        {
+            _revoked = true;
+        }
+
         public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
         {
+            ResolveCount++;
             var admitted = admittedMaximum.ToArray();
             var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
+            var current = _revoked ? [] : admitted;
             return Task.FromResult(new CustomLoopToolAuthoritySnapshot(
                 roleId,
                 admitted,
-                admitted,
+                current,
                 catalog,
-                admitted,
-                CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', admitted)),
+                current,
+                CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', current)),
                 CustomLoopTraceContentHash.Compute(string.Join('\n', catalog)),
                 DateTimeOffset.UtcNow,
                 true,
-                "Test authority preserves the immutable admitted maximum."));
+                _revoked ? "Test authority was revoked." : "Test authority preserves the immutable admitted maximum."));
         }
     }
 
