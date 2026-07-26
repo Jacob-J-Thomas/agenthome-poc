@@ -4,6 +4,10 @@ let configuration = null;
 let activeConfigTab = "overview";
 let activeAgentMessage = null;
 let hub = null;
+let conversationSynchronization = Promise.resolve();
+const synchronizedConversationOperations = new Set();
+const synchronizedConversationOperationOrder = [];
+const maxSynchronizedConversationOperations = 128;
 
 const elements = {
   approvals: document.getElementById("approvals"),
@@ -87,6 +91,7 @@ async function connectHub() {
   hub = new JsonSignalRConnection(createHubUrl());
   hub.on("StatusChanged", applyStatus);
   hub.on("ApprovalsChanged", renderApprovals);
+  hub.on("ConversationChanged", queueConversationPublicationSynchronization);
   hub.on("StreamEvent", handleStreamEvent);
   hub.onclose = scheduleReconnect;
   await hub.start();
@@ -97,6 +102,49 @@ async function connectHub() {
     appendMessage("error", `Transcript unavailable: ${error.message}`);
   }
   applyStatus(status);
+}
+
+function queueConversationPublicationSynchronization(notification) {
+  conversationSynchronization = conversationSynchronization.then(() => synchronizeConversationPublication(notification));
+  return conversationSynchronization;
+}
+
+async function synchronizeConversationPublication(notification) {
+  const operationId = notification?.operationId;
+  if (!operationId || synchronizedConversationOperations.has(operationId)) {
+    return;
+  }
+
+  rememberSynchronizedConversationOperation(operationId);
+
+  try {
+    const currentTranscript = await hub.invoke("GetCurrentTranscript");
+    if (Array.isArray(currentTranscript)) {
+      replaceTranscript(currentTranscript);
+    } else {
+      forgetSynchronizedConversationOperation(operationId);
+    }
+  } catch (error) {
+    forgetSynchronizedConversationOperation(operationId);
+    appendMessage("error", `Conversation synchronization unavailable: ${error.message}`);
+  }
+}
+
+function rememberSynchronizedConversationOperation(operationId) {
+  synchronizedConversationOperations.add(operationId);
+  synchronizedConversationOperationOrder.push(operationId);
+  if (synchronizedConversationOperationOrder.length > maxSynchronizedConversationOperations) {
+    synchronizedConversationOperations.delete(synchronizedConversationOperationOrder.shift());
+  }
+}
+
+function forgetSynchronizedConversationOperation(operationId) {
+  synchronizedConversationOperations.delete(operationId);
+  for (let index = synchronizedConversationOperationOrder.length - 1; index >= 0; index -= 1) {
+    if (synchronizedConversationOperationOrder[index] === operationId) {
+      synchronizedConversationOperationOrder.splice(index, 1);
+    }
+  }
 }
 
 function createHubUrl() {

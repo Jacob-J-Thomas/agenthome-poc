@@ -4,6 +4,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 
@@ -70,8 +72,13 @@ public static class Program
         services.AddSingleton(options);
         services.AddSingleton<WebSessionSecurity>();
         services.AddSingleton<IWebClientNotifier, SignalRWebClientNotifier>();
+        services.AddSingleton<IAgentRuntimeConversationPublicationObserver, WebConversationPublicationObserver>();
         services.AddSingleton<WebApprovalCoordinator>();
-        services.AddSingleton<WebAgentRuntimeHost>();
+        services.AddSingleton(provider => new WebAgentRuntimeHost(
+            options,
+            provider.GetRequiredService<WebApprovalCoordinator>(),
+            WorkspaceInitializer.ForWeb(),
+            provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>()));
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
         services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
     }

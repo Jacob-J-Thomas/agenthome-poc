@@ -23,4 +23,11 @@ public sealed class SignalRWebClientNotifier : IWebClientNotifier
             ? _hubContext.Clients.All.ApprovalsChanged(approvals)
             : _hubContext.Clients.Client(ownerConnectionId).ApprovalsChanged(approvals);
     }
+
+    public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(notification);
+
+        return _hubContext.Clients.All.ConversationChanged(notification);
+    }
 }

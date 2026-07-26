@@ -552,6 +552,37 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task Runtime_notifies_each_verified_conversation_publication_in_durable_order()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-publication-observer")).Definition);
+        var publishInference = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Inference.ContextIn, new LoopContextOutputPolicy(true, true)));
+        var input = new LoopDefinitionInput(
+            "Observed publication loop",
+            "Publishes one verified inference output.",
+            new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, false),
+            [new LoopInferenceStep(created.InferenceSteps.Single().Id, "Publish", "Publish the result.", publishInference)],
+            [],
+            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, created.ExitPolicy.ContextPolicy));
+        var updated = await facade.UpdateAsync(created.Id, created.DefinitionVersion, "update-runtime-publication-observer", input);
+        var definition = Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
+        var observer = new RecordingConversationPublicationObserver();
+        await using var runtime = await CreateRuntimeAsync(workspace, observer);
+
+        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-publication-observer", "publish once"));
+
+        Assert.Equal("Completed", response.ExecutionStatus);
+        var publication = Assert.Single(observer.Publications);
+        Assert.Equal(response.Run!.Id, publication.RunId);
+        Assert.Equal(definition.Id, publication.LoopId);
+        Assert.Equal(1, publication.MessageCount);
+        Assert.False(publication.AlreadyPublished);
+        Assert.Equal(Assert.Single(response.Run.Events, item => item.Kind == "ConversationPublished").ConversationPublicationId, publication.OperationId);
+    }
+
+    [Fact]
     public async Task Admission_captures_bounded_labeled_role_sources_and_a_versioned_newest_conversation_snapshot()
     {
         using var workspace = new TestWorkspace();
@@ -1208,9 +1239,12 @@ public sealed class CustomLoopRuntimeTests
         return true;
     }
 
-    private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace)
+    private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, IAgentRuntimeConversationPublicationObserver? observer = null)
     {
-        return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        var factory = observer is null
+            ? new AgentRuntimeFactory(new RejectingApprovalPrompt())
+            : new AgentRuntimeFactory(new RejectingApprovalPrompt(), observer);
+        return await factory.CreateAsync(
             "test-model",
             workspace.RootPath,
             await CreateFakeCodexExecutableAsync(workspace),
@@ -1222,6 +1256,17 @@ public sealed class CustomLoopRuntimeTests
     {
         var executable = OperatingSystem.IsWindows() ? await CreateFakeCodexExecutableAsync(workspace) : "/usr/bin/false";
         return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync("test-model", workspace.RootPath, executable, "read-only", AgentRuntimeSurface.Cli);
+    }
+
+    private sealed class RecordingConversationPublicationObserver : IAgentRuntimeConversationPublicationObserver
+    {
+        public List<AgentRuntimeConversationPublication> Publications { get; } = [];
+
+        public Task PublicationCommittedAsync(AgentRuntimeConversationPublication publication, CancellationToken cancellationToken = default)
+        {
+            Publications.Add(publication);
+            return Task.CompletedTask;
+        }
     }
 
     private static async Task WaitForAttemptStartAsync(TestWorkspace workspace)

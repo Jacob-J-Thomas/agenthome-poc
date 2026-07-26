@@ -8,5 +8,7 @@ public interface IWebSessionClient
 
     Task ApprovalsChanged(IReadOnlyList<WebPendingApproval> approvals);
 
+    Task ConversationChanged(WebConversationChanged notification);
+
     Task StreamEvent(WebStreamEvent item);
 }

@@ -16,6 +16,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly WorkspaceStatusReader _statusReader;
     private readonly WorkspaceConfigurationReader _configurationReader;
     private readonly LoopRunInspectionFacade _loopRuns;
+    private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly object _turnCancellationGate = new();
@@ -30,11 +31,20 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private int _disposed;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
-        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb())
+        : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null)
     {
     }
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator, IWorkspaceInitializer workspaceInitializer)
+        : this(options, approvalCoordinator, workspaceInitializer, null)
+    {
+    }
+
+    public WebAgentRuntimeHost(
+        WebRunOptions options,
+        WebApprovalCoordinator approvalCoordinator,
+        IWorkspaceInitializer workspaceInitializer,
+        IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(approvalCoordinator);
@@ -43,6 +53,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         _options = options;
         _approvalCoordinator = approvalCoordinator;
         _workspaceInitializer = workspaceInitializer;
+        _conversationPublicationObserver = conversationPublicationObserver;
         _statusReader = new WorkspaceStatusReader();
         _configurationReader = new WorkspaceConfigurationReader();
         _loopRuns = new LoopRunInspectionFacade(options.WorkingDirectory, WorkspaceActors.Web, AgentRuntimeSurface.Web.Id);
@@ -393,7 +404,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         if (_runtime is null)
         {
-            _runtime = await new AgentRuntimeFactory(_approvalCoordinator).CreateAsync(
+            var factory = _conversationPublicationObserver is null
+                ? new AgentRuntimeFactory(_approvalCoordinator)
+                : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver);
+            _runtime = await factory.CreateAsync(
                 _options.Model,
                 _options.WorkingDirectory,
                 _options.CodexExecutablePath,
