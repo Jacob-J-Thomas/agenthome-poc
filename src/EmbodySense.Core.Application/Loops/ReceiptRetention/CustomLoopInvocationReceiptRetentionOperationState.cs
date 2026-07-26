@@ -8,5 +8,8 @@ public enum CustomLoopInvocationReceiptRetentionOperationState
     OutcomeAuditStarted = 4,
     OutcomeAuditRecorded = 5,
     CommittedWithAuditWarning = 6,
-    AbandonedCandidateChanged = 7
+    AbandonedCandidateChanged = 7,
+    AbandonedConflictAuditStarted = 8,
+    AbandonedConflictAuditRecorded = 9,
+    AbandonedWithAuditWarning = 10
 }

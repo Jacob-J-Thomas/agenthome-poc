@@ -190,7 +190,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
                 }
 
-                if (begun.Status is CustomLoopInvocationOperationStoreStatus.LimitExceeded or CustomLoopInvocationOperationStoreStatus.RetentionRequired)
+                if (IsReceiptWriteFailureStatus(begun.Status))
                 {
                     return ReceiptWriteFailure(begun.Status);
                 }
@@ -613,7 +613,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
                 }
 
-                if (begun.Status is CustomLoopInvocationOperationStoreStatus.LimitExceeded or CustomLoopInvocationOperationStoreStatus.RetentionRequired)
+                if (IsReceiptWriteFailureStatus(begun.Status))
                 {
                     return ReceiptWriteFailure(begun.Status);
                 }
@@ -704,7 +704,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return new InvocationBindingResult(null, Conflict("The invocation operation id is already bound to a different logical conversation or captured-context identity."));
         }
 
-        if (stored.Status is CustomLoopInvocationOperationStoreStatus.LimitExceeded or CustomLoopInvocationOperationStoreStatus.RetentionRequired)
+        if (IsReceiptWriteFailureStatus(stored.Status))
         {
             return new InvocationBindingResult(null, ReceiptWriteFailure(stored.Status));
         }
@@ -999,20 +999,36 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         var retention = await _invocationReceiptRetention.PruneForCapacityAsync(_actor, _surface, cancellationToken);
         if (!retention.AllowsReceiptWrite)
         {
-            var status = retention.Status == CustomLoopInvocationReceiptRetentionStatus.OperationInProgress
-                ? CustomLoopInvocationOperationStoreStatus.RetentionRequired
-                : CustomLoopInvocationOperationStoreStatus.LimitExceeded;
+            var status = retention.Status switch
+            {
+                CustomLoopInvocationReceiptRetentionStatus.OperationInProgress => CustomLoopInvocationOperationStoreStatus.RetentionRequired,
+                CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable => CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable,
+                CustomLoopInvocationReceiptRetentionStatus.Invalid => CustomLoopInvocationOperationStoreStatus.RetentionInvalid,
+                _ => CustomLoopInvocationOperationStoreStatus.LimitExceeded
+            };
             return new CustomLoopInvocationOperationStoreResult(status, result.Operation);
         }
 
         return await write(cancellationToken);
     }
 
-    private static LoopRunInvocationResponse ReceiptWriteFailure(CustomLoopInvocationOperationStoreStatus status)
+    internal static LoopRunInvocationResponse ReceiptWriteFailure(CustomLoopInvocationOperationStoreStatus status)
     {
-        return status == CustomLoopInvocationOperationStoreStatus.RetentionRequired
-            ? new LoopRunInvocationResponse("OperationInProgress", null, false, null, [], "A governed completed-receipt retention operation is still inside its bounded ownership window; retry later.")
-            : new LoopRunInvocationResponse("LimitExceeded", null, false, null, [], $"Invocation receipts reached their governed workspace quota and no completed receipt was eligible beyond the {CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration.TotalDays:0}-day replay boundary; no run or provider request was created.");
+        return status switch
+        {
+            CustomLoopInvocationOperationStoreStatus.RetentionRequired => new LoopRunInvocationResponse("OperationInProgress", null, false, null, [], "A governed completed-receipt retention operation is still inside its bounded ownership window; retry later."),
+            CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable => new LoopRunInvocationResponse("AuditUnavailable", null, false, null, [], "Expired completed invocation receipts were eligible, but governed retention could not establish durable audit integrity; no run or provider request was created."),
+            CustomLoopInvocationOperationStoreStatus.RetentionInvalid => new LoopRunInvocationResponse("Invalid", null, false, null, [], "Invocation receipt retention state is invalid or corrupt and requires operator review; no run or provider request was created."),
+            _ => new LoopRunInvocationResponse("LimitExceeded", null, false, null, [], $"Invocation receipts reached their governed workspace quota and no completed receipt was eligible beyond the {CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration.TotalDays:0}-day replay boundary; no run or provider request was created.")
+        };
+    }
+
+    private static bool IsReceiptWriteFailureStatus(CustomLoopInvocationOperationStoreStatus status)
+    {
+        return status is CustomLoopInvocationOperationStoreStatus.LimitExceeded
+            or CustomLoopInvocationOperationStoreStatus.RetentionRequired
+            or CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable
+            or CustomLoopInvocationOperationStoreStatus.RetentionInvalid;
     }
 
     private async Task<LoopRunInvocationResponse> ReplayOperationAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)

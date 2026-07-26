@@ -9,5 +9,7 @@ public enum CustomLoopInvocationOperationStoreStatus
     NotFound = 5,
     Bound = 6,
     LimitExceeded = 7,
-    RetentionRequired = 8
+    RetentionRequired = 8,
+    RetentionAuditUnavailable = 9,
+    RetentionInvalid = 10
 }

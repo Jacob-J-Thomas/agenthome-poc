@@ -6,5 +6,6 @@ public enum CustomLoopInvocationReceiptRetentionReservationStatus
     ReadyToCommit = 2,
     OutcomeCommitted = 3,
     OperationInProgress = 4,
-    NothingEligible = 5
+    NothingEligible = 5,
+    ConflictPendingAudit = 6
 }

@@ -125,17 +125,54 @@ public sealed class CustomLoopInvocationReceiptRetentionService
 
         if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged)
         {
-            if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome, AuditSchema.Outcomes.Conflict, operation, "No changed receipt was deleted; the immutable batch was abandoned for safe reselection."), ownerToken, cancellationToken))
+            try
             {
-                return Result(CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable, operation, "A changed receipt was preserved and the immutable batch was abandoned, but its conflict outcome audit could not be recorded.");
+                operation = await _store.MarkReceiptRetentionConflictAuditStartedAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
+            }
+            catch (Exception)
+            {
+                return Result(CustomLoopInvocationReceiptRetentionStatus.OperationInProgress, operation, "A changed or unexplained missing receipt was preserved, but its conflict audit could not be durably started.");
+            }
+        }
+
+        if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted)
+        {
+            if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome, AuditSchema.Outcomes.Conflict, operation, "No changed or unexplained missing receipt was attributed to cleanup; the immutable batch was abandoned for safe reselection."), ownerToken, cancellationToken))
+            {
+                try
+                {
+                    operation = await _store.MarkReceiptRetentionConflictAuditWarningAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
+                }
+                catch (Exception)
+                {
+                }
+
+                return Result(CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable, operation, "A changed or unexplained missing receipt was preserved, but its conflict outcome audit could not be recorded.");
             }
 
+            try
+            {
+                operation = await _store.MarkReceiptRetentionConflictAuditedAsync(operation.OperationId, UtcNow(operation.UpdatedAtUtc), ownerToken);
+            }
+            catch (Exception)
+            {
+                return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "The retention conflict audit was appended, but its durable completion marker requires review and the batch will not be replaced.");
+            }
+        }
+
+        if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditRecorded)
+        {
             if (remainingCandidateReselections == 0)
             {
-                return Result(CustomLoopInvocationReceiptRetentionStatus.OperationInProgress, operation, "A selected receipt changed again during cleanup; no changed receipt was deleted and a later request may safely reselect.");
+                return Result(CustomLoopInvocationReceiptRetentionStatus.OperationInProgress, operation, "A selected receipt changed or disappeared again during cleanup; nothing was attributed to this batch and a later request may safely reselect.");
             }
 
             return await PruneForCapacityAsync(actor, surface, remainingCandidateReselections - 1, cancellationToken);
+        }
+
+        if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning)
+        {
+            return Result(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, operation, "A changed or unexplained missing receipt was preserved, but the bounded conflict-audit attempt requires review and the journal was retained.");
         }
 
         if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning)

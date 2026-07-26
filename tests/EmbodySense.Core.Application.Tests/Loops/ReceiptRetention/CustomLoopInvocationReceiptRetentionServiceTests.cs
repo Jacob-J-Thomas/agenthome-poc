@@ -209,7 +209,7 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
                 throw ReserveException;
             }
 
-            if (Current!.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged)
+            if (Current!.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditRecorded)
             {
                 Current = Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved) with
                 {
@@ -229,6 +229,9 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
                 CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted => CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted,
                 CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded => CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted,
                 CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning => CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted,
+                CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged => CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit,
+                CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted => CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit,
+                CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning => CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit,
                 _ => throw new InvalidOperationException()
             };
             return Task.FromResult(new CustomLoopInvocationReceiptRetentionReservationResult(status, status == CustomLoopInvocationReceiptRetentionReservationStatus.NothingEligible ? null : Current));
@@ -285,6 +288,27 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         {
             MutationTokens.Add(cancellationToken);
             Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, UpdatedAtUtc = updatedAtUtc };
+            return Task.FromResult(Current);
+        }
+
+        public Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            MutationTokens.Add(cancellationToken);
+            Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted, UpdatedAtUtc = updatedAtUtc };
+            return Task.FromResult(Current);
+        }
+
+        public Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            MutationTokens.Add(cancellationToken);
+            Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditRecorded, UpdatedAtUtc = updatedAtUtc };
+            return Task.FromResult(Current);
+        }
+
+        public Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            MutationTokens.Add(cancellationToken);
+            Current = Current! with { State = CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, UpdatedAtUtc = updatedAtUtc };
             return Task.FromResult(Current);
         }
 

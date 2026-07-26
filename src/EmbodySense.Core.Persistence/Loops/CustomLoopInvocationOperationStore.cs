@@ -230,8 +230,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             var existing = await ReadRetentionOperationAsync(cancellationToken);
             if (existing is not null
                 && existing.State is not CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded
-                    and not CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning
-                    and not CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged)
+                    and not CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditRecorded)
             {
                 var now = _timeProvider.GetUtcNow().ToUniversalTime();
                 if (existing.State is CustomLoopInvocationReceiptRetentionOperationState.Reserved or CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded)
@@ -271,6 +270,40 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                     var resumed = existing with { OwnershipStartedAtUtc = Max(existing.OwnershipStartedAtUtc, now), UpdatedAtUtc = Max(existing.UpdatedAtUtc, now) };
                     await WriteRetentionOperationAsync(resumed, cancellationToken);
                     return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, resumed);
+                }
+
+                if (existing.State == CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning)
+                {
+                    return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, existing);
+                }
+
+                if (existing.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged)
+                {
+                    if (IsInsideOwnershipWindow(existing, now))
+                    {
+                        return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, existing);
+                    }
+
+                    var resumed = existing with { OwnershipStartedAtUtc = Max(existing.OwnershipStartedAtUtc, now), UpdatedAtUtc = Max(existing.UpdatedAtUtc, now) };
+                    await WriteRetentionOperationAsync(resumed, cancellationToken);
+                    return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit, resumed);
+                }
+
+                if (existing.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted)
+                {
+                    if (IsInsideOwnershipWindow(existing, now))
+                    {
+                        return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, existing);
+                    }
+
+                    var warned = existing with { UpdatedAtUtc = Max(existing.UpdatedAtUtc, now), State = CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning };
+                    await WriteRetentionOperationAsync(warned, cancellationToken);
+                    return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit, warned);
+                }
+
+                if (existing.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning)
+                {
+                    return new CustomLoopInvocationReceiptRetentionReservationResult(CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit, existing);
                 }
 
                 throw new FormatException("The invocation-receipt retention journal contains an unsupported state.");
@@ -345,14 +378,13 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             }
 
             var retainedPaths = new List<string>();
-            var missingCandidates = new List<CustomLoopInvocationReceiptRetentionCandidate>();
             var candidateChanged = false;
             foreach (var candidate in operation.Candidates)
             {
                 var path = _pathGuard.GetFilePath(_root, candidate.OperationId + ".json");
                 if (!File.Exists(path))
                 {
-                    missingCandidates.Add(candidate);
+                    candidateChanged = true;
                     continue;
                 }
 
@@ -377,8 +409,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 {
                     UpdatedAtUtc = Max(updatedAtUtc, operation.UpdatedAtUtc),
                     State = CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged,
-                    DeletedReceiptCount = missingCandidates.Count,
-                    DeletedReceiptUtf8Bytes = missingCandidates.Sum(candidate => candidate.ArtifactUtf8Bytes)
+                    DeletedReceiptCount = 0,
+                    DeletedReceiptUtf8Bytes = 0
                 };
                 await WriteRetentionOperationAsync(abandoned, cancellationToken);
                 return abandoned;
@@ -418,6 +450,21 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, cancellationToken);
+    }
+
+    public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+    {
+        return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted, cancellationToken);
+    }
+
+    public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+    {
+        return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditRecorded, cancellationToken);
+    }
+
+    public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
+    {
+        return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, cancellationToken);
     }
 
     private async Task<CustomLoopInvocationOperation?> ReadIfExistsAsync(string operationId, CancellationToken cancellationToken)
@@ -530,9 +577,14 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 continue;
             }
 
+            if (IsAtomicWriteTemp(fileName, target => IsInvocationOperationFileName(target)))
+            {
+                _pathGuard.DeleteFile(_root, path);
+                continue;
+            }
+
             var operationId = Path.GetFileNameWithoutExtension(fileName);
-            if (!string.Equals(Path.GetExtension(fileName), ".json", StringComparison.OrdinalIgnoreCase)
-                || !CustomLoopArtifactIdentifier.IsValid(operationId, CustomLoopLimits.MaxMutationOperationIdCharacters))
+            if (!IsInvocationOperationFileName(fileName))
             {
                 throw new FormatException($"Custom-loop invocation receipt artifact `{path}` has an unsafe filename.");
             }
@@ -562,7 +614,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_root);
             var operation = await RequireRetentionOperationAsync(safeOperationId, cancellationToken);
-            if (operation.State >= nextState)
+            if (operation.State == nextState)
             {
                 return operation;
             }
@@ -612,6 +664,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
 
         var files = Directory.EnumerateFiles(_retentionRoot, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        foreach (var staleTemp in files.Where(path => IsAtomicWriteTemp(Path.GetFileName(path), target => string.Equals(target, RetentionOperationFileName, StringComparison.Ordinal))))
+        {
+            _pathGuard.DeleteFile(_retentionRoot, staleTemp);
+        }
+
+        files = Directory.EnumerateFiles(_retentionRoot, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.Ordinal).ToArray();
         if (files.Length == 0)
         {
             return null;
@@ -734,7 +792,10 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted
             or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded
             or CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning;
-        var abandoned = operation.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged;
+        var abandoned = operation.State is CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged
+            or CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted
+            or CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditRecorded
+            or CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning;
         var expectedBytes = operation.Candidates.Sum(candidate => candidate.ArtifactUtf8Bytes);
         var invalidTotals = committed
             ? operation.DeletedReceiptCount != operation.Candidates.Length || operation.DeletedReceiptUtf8Bytes != expectedBytes
@@ -754,6 +815,33 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
     private static bool IsInsideOwnershipWindow(CustomLoopInvocationReceiptRetentionOperation operation, DateTimeOffset now)
     {
         return operation.OwnershipStartedAtUtc > now - CustomLoopInvocationReceiptRetentionPolicy.StaleRecoveryWindow;
+    }
+
+    private static bool IsInvocationOperationFileName(string fileName)
+    {
+        var operationId = Path.GetFileNameWithoutExtension(fileName);
+        return string.Equals(Path.GetExtension(fileName), ".json", StringComparison.OrdinalIgnoreCase)
+            && CustomLoopArtifactIdentifier.IsValid(operationId, CustomLoopLimits.MaxMutationOperationIdCharacters);
+    }
+
+    private static bool IsAtomicWriteTemp(string fileName, Func<string, bool> validTarget)
+    {
+        const string suffix = ".tmp";
+        const int guidLength = 32;
+        if (fileName.Length == 0 || fileName[0] != '.' || !fileName.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var guidStart = fileName.Length - suffix.Length - guidLength;
+        if (guidStart <= 2 || fileName[guidStart - 1] != '.')
+        {
+            return false;
+        }
+
+        var target = fileName[1..(guidStart - 1)];
+        var guid = fileName.Substring(guidStart, guidLength);
+        return validTarget(target) && Guid.TryParseExact(guid, "N", out _);
     }
 
     private static string Hash(ReadOnlySpan<byte> content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
