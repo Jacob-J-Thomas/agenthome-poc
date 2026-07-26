@@ -79,30 +79,38 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         await _turnGate.WaitAsync(cancellationToken);
         try
         {
-            await _runtimeGate.WaitAsync(cancellationToken);
-            try
+            while (true)
             {
-                if (_discardRuntimeWhenCustomOperationsComplete)
+                Task? discardCompletion = null;
+                await _runtimeGate.WaitAsync(cancellationToken);
+                try
+                {
+                    if (_discardRuntimeWhenCustomOperationsComplete)
+                    {
+                        discardCompletion = _runtimeDiscardCompletion?.Task;
+                    }
+                    else
+                    {
+                        await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
+                        if (_runtime is null && _loopRecoveryCompleted && _preserveCurrentConversationAfterRecovery)
+                        {
+                            await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+                        }
+
+                        return _runtime?.GetActiveConversationTranscript().Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
+                    }
+                }
+                finally
+                {
+                    _runtimeGate.Release();
+                }
+
+                if (discardCompletion is null)
                 {
                     return null;
                 }
 
-                await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
-                if (_runtime is null && _loopRecoveryCompleted && _preserveCurrentConversationAfterRecovery)
-                {
-                    await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
-                }
-
-                if (_runtime is null)
-                {
-                    return null;
-                }
-
-                return _runtime.GetActiveConversationTranscript().Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
-            }
-            finally
-            {
-                _runtimeGate.Release();
+                await discardCompletion.WaitAsync(cancellationToken);
             }
         }
         finally
@@ -407,12 +415,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             var factory = _conversationPublicationObserver is null
                 ? new AgentRuntimeFactory(_approvalCoordinator)
                 : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver);
+            var preserveCurrentConversation = _preserveCurrentConversationAfterRecovery;
             _runtime = await factory.CreateAsync(
                 _options.Model,
                 _options.WorkingDirectory,
                 _options.CodexExecutablePath,
                 _options.CodexSandbox,
                 AgentRuntimeSurface.Web,
+                preserveCurrentConversation,
                 cancellationToken);
             _loopRecoveryCompleted = true;
             _preserveCurrentConversationAfterRecovery = false;
@@ -492,6 +502,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         var runtime = _runtime;
         var discardCompletion = _runtimeDiscardCompletion;
+        _preserveCurrentConversationAfterRecovery |= runtime is not null;
         _runtime = null;
         _runtimeDiscardCompletion = null;
         _discardRuntimeWhenCustomOperationsComplete = false;

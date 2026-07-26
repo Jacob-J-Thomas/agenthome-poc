@@ -66,10 +66,30 @@ public sealed class AgentRuntimeFactory
         }, runtimeSurface, cancellationToken);
     }
 
+    public Task<AgentRuntime> CreateAsync(
+        string? model,
+        string workingDirectory,
+        string? codexExecutablePath,
+        string codexSandbox,
+        AgentRuntimeSurface runtimeSurface,
+        bool preserveCurrentConversation,
+        CancellationToken cancellationToken = default)
+    {
+        return CreateAsync(new LlmInferenceClientOptions
+        {
+            Surface = LlmInferenceSurface.OpenAiCodex,
+            Model = model,
+            WorkingDirectory = workingDirectory,
+            CodexExecutablePath = codexExecutablePath,
+            CodexSandbox = codexSandbox
+        }, runtimeSurface, cancellationToken, preserveCurrentConversation);
+    }
+
     internal async Task<AgentRuntime> CreateAsync(
         LlmInferenceClientOptions options,
         AgentRuntimeSurface runtimeSurface,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool preserveCurrentConversation = false)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(runtimeSurface);
@@ -96,7 +116,7 @@ public sealed class AgentRuntimeFactory
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
             var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
             var customExecutionReacquisitionAllowed = recoveryOwnership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
-            var preserveCurrentConversation = !customExecutionAvailable;
+            preserveCurrentConversation |= !customExecutionAvailable;
             using var recoveryLease = recoveryOwnership.Lease;
             if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
             {

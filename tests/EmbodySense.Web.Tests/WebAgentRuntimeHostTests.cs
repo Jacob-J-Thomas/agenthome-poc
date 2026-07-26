@@ -4,6 +4,7 @@ using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
@@ -327,6 +328,35 @@ public sealed class WebAgentRuntimeHostTests
                 Assert.Equal("assistant", message.Role);
                 Assert.Equal("web response: hydrate during turn", message.Content);
             });
+    }
+
+    [Fact]
+    public async Task Transcript_hydration_waits_for_deferred_disposal_and_recreates_the_retained_runtime()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var conversationMemory = new ConversationMemoryStore(paths);
+        var type = typeof(WebAgentRuntimeHost);
+        var begin = type.GetMethod("BeginCustomRuntimeOperationAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var discard = type.GetMethod("DiscardRuntimeAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var end = type.GetMethod("EndCustomRuntimeOperationAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        await Assert.IsAssignableFrom<Task<AgentRuntime>>(begin.Invoke(host, [CancellationToken.None]));
+        await conversationMemory.AppendMessageAsync(LlmMessage.User("before deferred disposal"));
+        await Assert.IsAssignableFrom<Task>(discard.Invoke(host, [false]));
+
+        var hydration = host.GetCurrentTranscriptAsync();
+        await Task.Delay(100);
+        Assert.False(hydration.IsCompleted);
+        await conversationMemory.AppendMessageAsync(LlmMessage.Assistant("published while disposal was deferred"));
+        await Assert.IsAssignableFrom<Task>(end.Invoke(host, null));
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await hydration);
+
+        Assert.Collection(
+            transcript,
+            message => Assert.Equal("before deferred disposal", message.Content),
+            message => Assert.Equal("published while disposal was deferred", message.Content));
     }
 
     [Fact]
