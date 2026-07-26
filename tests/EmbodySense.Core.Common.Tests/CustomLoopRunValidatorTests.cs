@@ -202,7 +202,7 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
-    public void Validate_requires_workspace_reinitialization_for_the_pre_role_identity_manifest()
+    public void Validate_accepts_the_pre_role_identity_manifest_as_immutable_legacy_evidence()
     {
         var seed = CreateRun();
         var legacyManifest = seed.ContextSnapshot.SourceManifest.ToArray();
@@ -218,8 +218,23 @@ public sealed class CustomLoopRunValidatorTests
             Provenance = CustomLoopContextProvenance.WorkspaceRoleFile
         };
         var legacySnapshot = CustomLoopContextSnapshotHash.Apply(seed.ContextSnapshot with { SourceManifest = legacyManifest });
+        var legacyRun = CustomLoopAdmissionRequestHash.Apply(seed with { ContextSnapshot = legacySnapshot, AdmissionRequestHash = string.Empty });
 
-        var validation = CustomLoopRunValidator.Validate(seed with { ContextSnapshot = legacySnapshot });
+        var validation = CustomLoopRunValidator.Validate(legacyRun);
+
+        Assert.True(validation.IsValid);
+    }
+
+    [Fact]
+    public void Validate_rejects_a_mixed_current_and_legacy_workspace_manifest()
+    {
+        var seed = CreateRun();
+        var mixedManifest = seed.ContextSnapshot.SourceManifest.ToArray();
+        mixedManifest[1] = mixedManifest[1] with { SourceId = "agent", SourcePath = "C:/workspace/.agent/AGENT.md" };
+        var mixedSnapshot = CustomLoopContextSnapshotHash.Apply(seed.ContextSnapshot with { SourceManifest = mixedManifest });
+        var mixedRun = CustomLoopAdmissionRequestHash.Apply(seed with { ContextSnapshot = mixedSnapshot, AdmissionRequestHash = string.Empty });
+
+        var validation = CustomLoopRunValidator.Validate(mixedRun);
 
         AssertCodes(validation, "invalid_workspace_context_classification");
     }

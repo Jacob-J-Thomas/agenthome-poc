@@ -55,6 +55,35 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Legacy_pre_role_identity_trace_remains_listable_and_quota_visible_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        var legacyManifest = run.ContextSnapshot.SourceManifest.ToArray();
+        legacyManifest[1] = legacyManifest[1] with { SourceId = "agent", SourcePath = "unavailable/.agent/AGENT.md" };
+        legacyManifest[2] = legacyManifest[2] with
+        {
+            SourceType = CustomLoopContextSource.RoleInstruction,
+            Provenance = CustomLoopContextProvenance.WorkspaceRoleFile
+        };
+        legacyManifest[3] = legacyManifest[3] with
+        {
+            SourceType = CustomLoopContextSource.RoleInstruction,
+            Provenance = CustomLoopContextProvenance.WorkspaceRoleFile
+        };
+        var legacyContext = CustomLoopContextSnapshotHash.Apply(run.ContextSnapshot with { SourceManifest = legacyManifest });
+        var legacyRun = CustomLoopAdmissionRequestHash.Apply(run with { ContextSnapshot = legacyContext, AdmissionRequestHash = string.Empty });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await new CustomLoopRunStore(paths).CreateAsync(legacyRun)).Status);
+
+        var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        AssertRun(legacyRun, await restarted.GetAsync(legacyRun.Id));
+        Assert.Equal(legacyRun.Id, Assert.Single(await restarted.ListRecentAsync(50)).Id);
+        Assert.Equal(1, (await restarted.GetTraceQuotaAsync()).RetainedTraceCount);
+    }
+
+    [Fact]
     public async Task Canonical_envelope_reprojects_seedlessly_when_later_checkpoint_content_precedes_prior_event_content_after_restart()
     {
         using var workspace = new TestWorkspace();

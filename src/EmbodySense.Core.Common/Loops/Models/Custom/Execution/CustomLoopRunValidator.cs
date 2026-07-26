@@ -339,7 +339,7 @@ public static class CustomLoopRunValidator
             return;
         }
 
-        var expectedWorkspaceSources = new[]
+        var currentWorkspaceSources = new[]
         {
             (Id: "nearest-agents", PathSuffix: "AGENTS.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
             (Id: "role", PathSuffix: ".agent/ROLE.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
@@ -349,6 +349,17 @@ public static class CustomLoopRunValidator
             (Id: "memory", PathSuffix: ".agent/MEMORY.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
             (Id: "models", PathSuffix: ".agent/models.json", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User)
         };
+        var legacyWorkspaceSources = new[]
+        {
+            (Id: "nearest-agents", PathSuffix: "AGENTS.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "agent", PathSuffix: ".agent/AGENT.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "soul", PathSuffix: ".agent/SOUL.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "personality", PathSuffix: ".agent/PERSONALITY.md", Source: CustomLoopContextSource.RoleInstruction, Provenance: CustomLoopContextProvenance.WorkspaceRoleFile, Trust: CustomLoopContextTrustClass.TrustedInstruction, Role: LlmMessageRole.System),
+            (Id: "context", PathSuffix: ".agent/CONTEXT.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
+            (Id: "memory", PathSuffix: ".agent/MEMORY.md", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User),
+            (Id: "models", PathSuffix: ".agent/models.json", Source: CustomLoopContextSource.ContextualState, Provenance: CustomLoopContextProvenance.WorkspaceContextFile, Trust: CustomLoopContextTrustClass.UntrustedData, Role: LlmMessageRole.User)
+        };
+        var expectedWorkspaceSources = LooksLikeLegacyWorkspaceManifest(snapshot.SourceManifest) ? legacyWorkspaceSources : currentWorkspaceSources;
         if (snapshot.SourceManifest.Length < expectedWorkspaceSources.Length)
         {
             Add(errors, "incomplete_workspace_context_manifest", "contextSnapshot.sourceManifest", "The manifest must record all seven designated workspace role/context sources, including explicit omissions.");
@@ -415,7 +426,7 @@ public static class CustomLoopRunValidator
                 var expected = expectedWorkspaceSources[index];
                 if (!string.Equals(source.SourceId, expected.Id, StringComparison.Ordinal) || !HasPathSuffix(source.SourcePath, expected.PathSuffix) || source.SourceType != expected.Source || source.Provenance != expected.Provenance || source.TrustClass != expected.Trust || source.Role != expected.Role)
                 {
-                    Add(errors, "invalid_workspace_context_classification", field, "Workspace sources must preserve the designated AGENTS, role-instruction, agent-identity, and contextual-state order and trust classes.");
+                    Add(errors, "invalid_workspace_context_classification", field, "Workspace sources must preserve one coherent designated current or legacy role, identity, contextual-state order, and trust classification.");
                 }
             }
             else if (source.SourceType != CustomLoopContextSource.InvokingConversation || source.Provenance != CustomLoopContextProvenance.LogicalConversation || source.TrustClass != CustomLoopContextTrustClass.UntrustedData || source.Role != LlmMessageRole.User)
@@ -482,6 +493,16 @@ public static class CustomLoopRunValidator
     private static bool HasPathSuffix(string? path, string expectedSuffix)
     {
         return path?.Replace('\\', '/').EndsWith(expectedSuffix, StringComparison.Ordinal) == true;
+    }
+
+    private static bool LooksLikeLegacyWorkspaceManifest(IReadOnlyList<CustomLoopContextManifestSource> sources)
+    {
+        if (sources.Count < 2 || sources[1] is null)
+        {
+            return false;
+        }
+
+        return string.Equals(sources[1].SourceId, "agent", StringComparison.Ordinal) || HasPathSuffix(sources[1].SourcePath, ".agent/AGENT.md");
     }
 
     private static void ValidateEvents(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
