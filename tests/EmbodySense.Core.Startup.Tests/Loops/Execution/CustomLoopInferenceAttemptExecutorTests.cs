@@ -175,7 +175,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must remain unread");
         var authorityProvider = new TestAuthorityProvider();
-        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: authorityProvider.Revoke);
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: () => authorityProvider.Revoke("role-2"));
         var evidenceSink = new RecordingEvidenceSink();
         ToolResult? observed = null;
         var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
@@ -195,16 +195,29 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         Assert.Equal(ToolAuthorityDecision.Denied, toolResult.Governance?.AuthorityDecision);
         Assert.Equal(ToolApprovalDecision.Approved, toolResult.Governance?.ApprovalDecision);
         Assert.Single(approvalPrompt.Requests);
-        Assert.Contains(evidenceSink.Evidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Governance.AuthorityDecision: ToolAuthorityDecision.Denied, Governance.ApprovalDecision: ToolApprovalDecision.Approved });
+        var refreshedEvidence = evidenceSink.Evidence.Where(item => item.Phase is CustomLoopToolEvidencePhase.GovernanceDecided or CustomLoopToolEvidencePhase.OutcomeObserved).ToArray();
+        Assert.NotEmpty(refreshedEvidence);
+        Assert.All(refreshedEvidence, item =>
+        {
+            Assert.Equal("role-2", item.Authority.RoleId);
+            Assert.Empty(item.Authority.CurrentRoleCeiling);
+            Assert.Empty(item.Authority.EffectiveAssignments);
+            Assert.False(item.Authority.IsValid);
+        });
+        Assert.Contains(refreshedEvidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Governance.AuthorityDecision: ToolAuthorityDecision.Denied, Governance.ApprovalDecision: ToolApprovalDecision.Approved });
 
         var events = await new AuditLog(paths).ReadTailAsync(100);
         var revalidation = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "authority_phase") == "pre_actuation_revalidation");
         Assert.Equal(AuditSchema.Outcomes.Denied, revalidation.Outcome);
+        Assert.Equal("role-1", Metadata(revalidation, "role_id"));
+        Assert.Equal("role-2", Metadata(revalidation, "current_role_id"));
         Assert.Equal(string.Empty, Metadata(revalidation, "current_role_commands"));
-        Assert.Equal("true", Metadata(revalidation, "authority_valid")?.ToLowerInvariant());
+        Assert.Equal("false", Metadata(revalidation, "authority_valid")?.ToLowerInvariant());
         Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecutionIntent);
         var deniedExecution = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolExecute);
         Assert.Equal(AuditSchema.Outcomes.Denied, deniedExecution.Outcome);
+        Assert.Equal("role-1", Metadata(deniedExecution, "role_id"));
+        Assert.Equal("role-2", Metadata(deniedExecution, "current_role_id"));
         Assert.Equal("true", Metadata(deniedExecution, "approved_by_human")?.ToLowerInvariant());
     }
 
@@ -925,10 +938,12 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     {
         public int ResolveCount { get; private set; }
         private bool _revoked;
+        private string? _currentRoleId;
 
-        public void Revoke()
+        public void Revoke(string? currentRoleId = null)
         {
             _revoked = true;
+            _currentRoleId = currentRoleId;
         }
 
         public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
@@ -937,17 +952,19 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             var admitted = admittedMaximum.ToArray();
             var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
             var current = _revoked ? [] : admitted;
+            var resolvedRoleId = _currentRoleId ?? roleId;
+            var valid = _currentRoleId is null;
             return Task.FromResult(new CustomLoopToolAuthoritySnapshot(
-                roleId,
+                resolvedRoleId,
                 admitted,
                 current,
                 catalog,
                 current,
-                CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', current)),
+                CustomLoopTraceContentHash.Compute(resolvedRoleId + "\n" + string.Join('\n', current)),
                 CustomLoopTraceContentHash.Compute(string.Join('\n', catalog)),
                 DateTimeOffset.UtcNow,
-                true,
-                _revoked ? "Test authority was revoked." : "Test authority preserves the immutable admitted maximum."));
+                valid,
+                _currentRoleId is not null ? "The admitted directory role changed." : _revoked ? "Test authority was revoked." : "Test authority preserves the immutable admitted maximum."));
         }
     }
 

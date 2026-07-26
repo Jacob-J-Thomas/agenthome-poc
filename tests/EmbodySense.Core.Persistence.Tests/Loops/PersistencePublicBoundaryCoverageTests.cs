@@ -312,6 +312,41 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     [Fact]
+    public void Tool_evidence_artifact_round_trips_refreshed_pre_actuation_authority()
+    {
+        var run = CreateToolRun();
+        var refreshed = ToolAuthority() with
+        {
+            RoleId = "replacement-role",
+            CurrentRoleCeiling = [],
+            EffectiveAssignments = [],
+            RoleCeilingHash = CustomLoopTraceContentHash.Compute("replacement-role"),
+            IsValid = false,
+            Detail = "The admitted directory role changed before actuation."
+        };
+        var events = run.Events.Select((item, index) => index is 3 or 4 or 5
+            ? item with { ToolAuthority = refreshed, ToolEvidence = item.ToolEvidence! with { Authority = refreshed } }
+            : item).ToArray();
+        run = run with { Events = events };
+        var validation = CustomLoopRunValidator.Validate(run);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+
+        var artifact = CustomLoopRunArtifactSerializer.Serialize(run);
+        var root = Parse(artifact);
+        Assert.Equal(2, Authorities(root).Count);
+        Assert.NotEqual(
+            Events(root)[2]!["toolAuthority"]!["$authority"]!.GetValue<string>(),
+            Events(root)[3]!["toolAuthority"]!["$authority"]!.GetValue<string>());
+
+        var hydrated = CustomLoopRunArtifactSerializer.Deserialize(artifact);
+
+        Assert.Equal(JsonSerializer.Serialize(run), JsonSerializer.Serialize(hydrated));
+        Assert.Equal(artifact, CustomLoopRunArtifactSerializer.Serialize(hydrated));
+        Assert.Equal("default-role", hydrated.Events[2].ToolEvidence!.Authority.RoleId);
+        Assert.All(hydrated.Events.Skip(3).Take(3), item => Assert.Equal("replacement-role", item.ToolEvidence!.Authority.RoleId));
+    }
+
+    [Fact]
     public void Tool_evidence_artifact_round_trips_one_exact_standalone_repeated_request_integrity_record()
     {
         var run = CreateStandaloneRepeatedIntegrityRun();
@@ -391,7 +426,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
         RejectRun(ReplaceEvidence(run, 3, evidence => evidence with { TargetPath = "different-target" }));
 
         var differentAuthority = ToolAuthority() with { Detail = "Different current authority detail." };
-        RejectRun(ReplaceEvidence(run, 3, evidence => evidence with { Authority = differentAuthority }, differentAuthority));
+        RejectRun(ReplaceEvidence(run, 4, evidence => evidence with { Authority = differentAuthority }, differentAuthority));
         RejectRun(InsertEvent(run, 4, run.Events[3] with { EventId = "event-governance-duplicate" }));
         RejectRun(RemoveEvents(run, 3));
         RejectRun(RemoveEvents(run, 4));
@@ -428,7 +463,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
             var authority = authorities[0]!["authority"]!.DeepClone().AsObject();
             authority["isValid"] = false;
             authorities.Add(StructuralEntry("a1", "authority", authority));
-            Events(root)[3]!["toolAuthority"] = new JsonObject { ["$authority"] = "a1" };
+            Events(root)[4]!["toolAuthority"] = new JsonObject { ["$authority"] = "a1" };
         });
     }
 

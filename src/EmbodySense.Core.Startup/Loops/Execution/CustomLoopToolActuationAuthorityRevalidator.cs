@@ -11,17 +11,20 @@ internal sealed class CustomLoopToolActuationAuthorityRevalidator : IToolActuati
 {
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly CustomLoopInferenceAttemptRequest _attempt;
+    private readonly CorrelatedToolEvidenceObserver _observer;
 
-    public CustomLoopToolActuationAuthorityRevalidator(ICustomLoopToolAuthorityProvider authorityProvider, CustomLoopInferenceAttemptRequest attempt)
+    public CustomLoopToolActuationAuthorityRevalidator(ICustomLoopToolAuthorityProvider authorityProvider, CustomLoopInferenceAttemptRequest attempt, CorrelatedToolEvidenceObserver observer)
     {
         _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
         _attempt = attempt ?? throw new ArgumentNullException(nameof(attempt));
+        _observer = observer ?? throw new ArgumentNullException(nameof(observer));
     }
 
     public async Task<ToolActuationAuthorityRevalidation> RevalidateAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         var authority = await _authorityProvider.ResolveAsync(_attempt.RoleId, _attempt.AdmittedToolAssignments, cancellationToken);
+        _observer.RefreshAuthority(request, authority);
         var assignment = MapAssignment(request.Command);
         var allowed = authority.IsValid && assignment is not null && authority.EffectiveAssignments.Contains(assignment.Value);
         var detail = allowed
@@ -29,7 +32,7 @@ internal sealed class CustomLoopToolActuationAuthorityRevalidator : IToolActuati
             : "Current role or loop authority revoked the approved command before actuation.";
         var metadata = new Dictionary<string, object?>
         {
-            ["role_id"] = authority.RoleId,
+            ["current_role_id"] = authority.RoleId,
             ["admitted_commands"] = Join(authority.AdmittedMaximum),
             ["current_role_commands"] = Join(authority.CurrentRoleCeiling),
             ["effective_commands"] = Join(authority.EffectiveAssignments),

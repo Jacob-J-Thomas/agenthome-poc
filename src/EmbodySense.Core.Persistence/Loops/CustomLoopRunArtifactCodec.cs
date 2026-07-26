@@ -445,10 +445,11 @@ internal static class CustomLoopRunArtifactCodec
                     throw new FormatException("Tool evidence cannot continue after the request recorded an integrity failure.");
                 }
 
-                RequireRepeatedRequest(evidence, state.Request, state.Authority);
-                if (!string.Equals(state.AuthorityId, authorityId, StringComparison.Ordinal))
+                RequireRepeatedRequest(evidence, state.Request);
+                if (!string.Equals(phase, "governanceDecided", StringComparison.Ordinal)
+                    && !string.Equals(state.AuthorityId, authorityId, StringComparison.Ordinal))
                 {
-                    throw new FormatException("Tool evidence references a different authority table entry than its reserved request.");
+                    throw new FormatException("Tool evidence after governance references a different authority table entry than the refreshed request.");
                 }
 
                 if (string.Equals(phase, "governanceDecided", StringComparison.Ordinal))
@@ -469,6 +470,8 @@ internal static class CustomLoopRunArtifactCodec
                         ["brokerRequestId"] = Clone(evidence, "brokerRequestId"),
                         ["governance"] = projectedGovernance
                     };
+                    state.Authority = evidenceAuthority.DeepClone().AsObject();
+                    state.AuthorityId = authorityId;
                     state.Governance = governance.DeepClone().AsObject();
                     state.BrokerRequestId = Clone(evidence, "brokerRequestId");
                 }
@@ -571,13 +574,10 @@ internal static class CustomLoopRunArtifactCodec
             var requestId = RequireReference(compact, "toolRequest", ToolRequestReferenceProperty);
             var request = requests.Resolve(requestId);
             ValidateToolRequest(request);
-            var authorityId = RequireReference(request, "authority", AuthorityReferenceProperty);
-            var authority = authorities.Resolve(authorityId);
+            var requestAuthorityId = RequireReference(request, "authority", AuthorityReferenceProperty);
+            var requestAuthority = authorities.Resolve(requestAuthorityId);
             var eventAuthorityId = RequireReference(runEvent, "toolAuthority", AuthorityReferenceProperty);
-            if (!string.Equals(eventAuthorityId, authorityId, StringComparison.Ordinal))
-            {
-                throw new FormatException("A compact tool event references an authority different from its request.");
-            }
+            var eventAuthority = authorities.Resolve(eventAuthorityId);
 
             var correlationId = RequireString(request, "requestCorrelationId");
             var requestKey = ToolRequestKey(request);
@@ -588,13 +588,14 @@ internal static class CustomLoopRunArtifactCodec
                 if (!string.Equals(RequireString(compact, "phase"), "requestReserved", StringComparison.Ordinal)
                     || states.ContainsKey(requestId)
                     || !requestKeys.Add(requestKey)
-                    || !correlationIds.Add(correlationId))
+                    || !correlationIds.Add(correlationId)
+                    || !string.Equals(eventAuthorityId, requestAuthorityId, StringComparison.Ordinal))
                 {
                     throw new FormatException("The compact tool trace contains a duplicate request reservation.");
                 }
 
-                evidence = FullEvidence(request, authority, null, null, null, null, null, returned: false, compact);
-                states.Add(requestId, new ToolHydrationState(request, authority, authorityId));
+                evidence = FullEvidence(request, requestAuthority, null, null, null, null, null, returned: false, compact);
+                states.Add(requestId, new ToolHydrationState(request, requestAuthority, requestAuthorityId));
             }
             else if (shape == 6)
             {
@@ -603,14 +604,15 @@ internal static class CustomLoopRunArtifactCodec
                     || compact["brokerRequestId"] is not null
                     || standaloneIntegrityHydrated
                     || states.ContainsKey(requestId)
-                    || !requestKeys.Add(requestKey))
+                    || !requestKeys.Add(requestKey)
+                    || !string.Equals(eventAuthorityId, requestAuthorityId, StringComparison.Ordinal))
                 {
                     throw new FormatException("A compact standalone tool integrity record must uniquely own its exact non-actuating request.");
                 }
 
                 standaloneIntegrityHydrated = true;
-                evidence = FullEvidence(request, authority, null, null, null, null, null, returned: false, compact);
-                states.Add(requestId, new ToolHydrationState(request, authority, authorityId)
+                evidence = FullEvidence(request, requestAuthority, null, null, null, null, null, returned: false, compact);
+                states.Add(requestId, new ToolHydrationState(request, requestAuthority, requestAuthorityId)
                 {
                     IntegrityFailed = true
                 });
@@ -618,8 +620,7 @@ internal static class CustomLoopRunArtifactCodec
             else
             {
                 if (!states.TryGetValue(requestId, out var state)
-                    || !JsonNode.DeepEquals(request, state.Request)
-                    || !string.Equals(state.AuthorityId, authorityId, StringComparison.Ordinal))
+                    || !JsonNode.DeepEquals(request, state.Request))
                 {
                     throw new FormatException("Compact tool evidence has a dangling request reference.");
                 }
@@ -638,7 +639,9 @@ internal static class CustomLoopRunArtifactCodec
                     }
 
                     var governance = RequireObject(compact, "governance").DeepClone().AsObject();
-                    evidence = FullEvidence(state.Request, state.Authority, governance, null, null, null, null, returned: false, compact);
+                    evidence = FullEvidence(state.Request, eventAuthority, governance, null, null, null, null, returned: false, compact);
+                    state.Authority = eventAuthority;
+                    state.AuthorityId = eventAuthorityId;
                     state.Governance = governance;
                     state.BrokerRequestId = Clone(compact, "brokerRequestId");
                 }
@@ -647,7 +650,8 @@ internal static class CustomLoopRunArtifactCodec
                     RequireProperties(compact, "shape", "phase", "toolRequest", "brokerRequestId", "outcome", "canonicalResultReturnedToModel", "canonicalResultHash", "canonicalResultCharacterCount");
                     if (state.Governance is null
                         || state.OutcomeEvidence is not null
-                        || !JsonNode.DeepEquals(state.BrokerRequestId, compact["brokerRequestId"]))
+                        || !JsonNode.DeepEquals(state.BrokerRequestId, compact["brokerRequestId"])
+                        || !string.Equals(state.AuthorityId, eventAuthorityId, StringComparison.Ordinal))
                     {
                         throw new FormatException("A compact tool outcome has no earlier governance decision.");
                     }
@@ -671,7 +675,8 @@ internal static class CustomLoopRunArtifactCodec
                     if (state.OutcomeEvidence is null
                         || state.OutcomeSequence != RequireInt64(compact, "outcomeSequence")
                         || state.Returned
-                        || !JsonNode.DeepEquals(state.BrokerRequestId, compact["brokerRequestId"]))
+                        || !JsonNode.DeepEquals(state.BrokerRequestId, compact["brokerRequestId"])
+                        || !string.Equals(state.AuthorityId, eventAuthorityId, StringComparison.Ordinal))
                     {
                         throw new FormatException("A compact returned marker has a dangling or mismatched outcome reference.");
                     }
@@ -697,7 +702,12 @@ internal static class CustomLoopRunArtifactCodec
                         throw new FormatException("A compact integrity marker has a dangling governance or outcome reference.");
                     }
 
-                    evidence = FullEvidence(state.Request, state.Authority, hasGovernance ? state.Governance : null, outcome, canonical, canonicalHash, canonicalCount, returned: false, compact);
+                    if (!string.Equals(state.AuthorityId, eventAuthorityId, StringComparison.Ordinal))
+                    {
+                        throw new FormatException("A compact integrity marker references a different authority than the latest durable request phase.");
+                    }
+
+                    evidence = FullEvidence(state.Request, eventAuthority, hasGovernance ? state.Governance : null, outcome, canonical, canonicalHash, canonicalCount, returned: false, compact);
                     state.IntegrityFailed = true;
                 }
                 else
@@ -706,7 +716,7 @@ internal static class CustomLoopRunArtifactCodec
                 }
             }
 
-            runEvent["toolAuthority"] = authority.DeepClone();
+            runEvent["toolAuthority"] = eventAuthority.DeepClone();
             runEvent["toolEvidence"] = evidence;
         }
     }
@@ -766,7 +776,7 @@ internal static class CustomLoopRunArtifactCodec
         };
     }
 
-    private static void RequireRepeatedRequest(JsonObject evidence, JsonObject request, JsonObject authority)
+    private static void RequireRepeatedRequest(JsonObject evidence, JsonObject request)
     {
         foreach (var property in new[] { "requestOrdinal", "requestCorrelationId", "command", "targetPath", "content", "pattern", "resolvedTarget", "reservedUtf8Bytes" })
         {
@@ -774,11 +784,6 @@ internal static class CustomLoopRunArtifactCodec
             {
                 throw new FormatException($"Tool evidence structurally duplicated a mismatched request field `{property}`.");
             }
-        }
-
-        if (!JsonNode.DeepEquals(evidence["authority"], authority))
-        {
-            throw new FormatException("Tool evidence structurally duplicated a mismatched request authority.");
         }
     }
 
@@ -1390,8 +1395,8 @@ internal static class CustomLoopRunArtifactCodec
     private sealed class ToolProjectionState(JsonObject request, JsonObject authority, string authorityId, string requestId)
     {
         public JsonObject Request { get; } = request;
-        public JsonObject Authority { get; } = authority;
-        public string AuthorityId { get; } = authorityId;
+        public JsonObject Authority { get; set; } = authority;
+        public string AuthorityId { get; set; } = authorityId;
         public string RequestId { get; } = requestId;
         public JsonObject? Governance { get; set; }
         public JsonNode? BrokerRequestId { get; set; }
@@ -1404,8 +1409,8 @@ internal static class CustomLoopRunArtifactCodec
     private sealed class ToolHydrationState(JsonObject request, JsonObject authority, string authorityId)
     {
         public JsonObject Request { get; } = request;
-        public JsonObject Authority { get; } = authority;
-        public string AuthorityId { get; } = authorityId;
+        public JsonObject Authority { get; set; } = authority;
+        public string AuthorityId { get; set; } = authorityId;
         public JsonObject? Governance { get; set; }
         public JsonNode? BrokerRequestId { get; set; }
         public JsonObject? OutcomeEvidence { get; set; }

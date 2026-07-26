@@ -64,7 +64,7 @@ public static class CustomLoopLimits
     // The observed and completed events both retain canonical output; six bytes covers the default JSON encoder's worst-case UTF-16 escape.
     public const int MaxAttemptEvidenceReservationUtf8Bytes = (2 * MaxCanonicalModelOutputCharacters * MaxJsonEscapedUtf8BytesPerCharacter) + MaxAttemptOutcomeMetadataUtf8Bytes;
     public const int MaxGovernedToolRequestEvidenceUtf8Bytes = 18 * 1_024;
-    public const int MaxGovernedToolGovernanceEvidenceUtf8Bytes = 14 * 1_024;
+    public const int MaxGovernedToolGovernanceEvidenceUtf8Bytes = 20 * 1_024;
     public const int MaxGovernedToolOutcomeEvidenceUtf8Bytes = 251 * 1_024;
     public const int MaxGovernedToolReturnEvidenceUtf8Bytes = 8 * 1_024;
     public const int MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes = MaxGovernedToolRequestEvidenceUtf8Bytes;

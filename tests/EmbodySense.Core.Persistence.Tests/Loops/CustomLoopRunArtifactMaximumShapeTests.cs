@@ -594,9 +594,16 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             var formatted = ToolResultFormatter.FormatResults([new ToolResult(outcomeValue, completeResult, brokerId, resolved, request, governance, retention)]);
             Assert.Equal(CustomLoopLimits.MaxCanonicalToolResultCharacters, formatted.Length);
             var hash = CustomLoopTraceContentHash.Compute(formatted);
-            var reservation = Evidence(CustomLoopToolEvidencePhase.RequestReserved, null, null, null, false);
-            var governed = Evidence(CustomLoopToolEvidencePhase.GovernanceDecided, brokerId, governance, null, false);
-            var outcome = Evidence(CustomLoopToolEvidencePhase.OutcomeObserved, brokerId, governance, outcomeValue, false);
+            var refreshedAuthority = denied
+                ? authority
+                : authority with
+                {
+                    RoleCeilingHash = CustomLoopTraceContentHash.Compute($"refreshed-role-ceiling-{toolIndex}"),
+                    Detail = MaxText($"refreshed-authority-{toolIndex}", CustomLoopLimits.MaxToolGovernanceDetailCharacters)
+                };
+            var reservation = Evidence(CustomLoopToolEvidencePhase.RequestReserved, null, null, null, false, authority);
+            var governed = Evidence(CustomLoopToolEvidencePhase.GovernanceDecided, brokerId, governance, null, false, refreshedAuthority);
+            var outcome = Evidence(CustomLoopToolEvidencePhase.OutcomeObserved, brokerId, governance, outcomeValue, false, refreshedAuthority);
             var returned = outcome with { ReturnedToModel = true };
             var evidences = new[] { reservation, governed, outcome, returned };
             var kinds = new[] { CustomLoopRunEventKind.ToolRequestReserved, CustomLoopRunEventKind.ToolGovernanceDecided, CustomLoopRunEventKind.ToolOutcomeObserved, CustomLoopRunEventKind.ToolOutcomeObserved };
@@ -624,14 +631,14 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
                     null,
                     null,
                     null,
-                    authority,
+                    evidences[index].Authority,
                     evidences[index]);
                 var candidate = current with { LifecycleVersion = current.LifecycleVersion + 1, Events = [.. current.Events, toolEvent] };
                 var updated = await store.UpdateAsync(candidate, current.LifecycleVersion, cancellationToken);
                 Assert.Equal(CustomLoopRunStoreStatus.Updated, updated.Status);
             }
 
-            CustomLoopToolTraceEvidence Evidence(CustomLoopToolEvidencePhase phase, string? requestId, ToolGovernanceEvidence? toolGovernance, ToolExecutionOutcome? toolOutcome, bool returnedToModel)
+            CustomLoopToolTraceEvidence Evidence(CustomLoopToolEvidencePhase phase, string? requestId, ToolGovernanceEvidence? toolGovernance, ToolExecutionOutcome? toolOutcome, bool returnedToModel, CustomLoopToolAuthoritySnapshot evidenceAuthority)
             {
                 var hasOutcome = phase == CustomLoopToolEvidencePhase.OutcomeObserved;
                 return new CustomLoopToolTraceEvidence(
@@ -644,7 +651,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
                     content,
                     pattern,
                     resolved,
-                    authority,
+                    evidenceAuthority,
                     toolGovernance,
                     toolOutcome,
                     hasOutcome ? formatted : null,
