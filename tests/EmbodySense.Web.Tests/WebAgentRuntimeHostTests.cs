@@ -50,7 +50,7 @@ public sealed class WebAgentRuntimeHostTests
         Assert.Equal("web", configuration.Runtime.Surface);
         Assert.True(configuration.Permissions.Parsed);
         Assert.Contains(configuration.Paths, path => path.Name == "Agent home" && path.Exists);
-        Assert.Contains(configuration.Documents, document => document.Name == "Agent guide" && document.Exists);
+        Assert.Contains(configuration.Documents, document => document.Name == "Role guide" && document.Exists);
     }
 
     [Fact]

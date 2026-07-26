@@ -1,9 +1,11 @@
+using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Common.Context;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
@@ -11,6 +13,7 @@ using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Common.Runtime.Models;
+using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Tests.Runtime;
 
@@ -100,7 +103,16 @@ public sealed class DefaultConversationLoopRunnerTests
     public async Task RunTurnAsync_verbose_context_reports_memory_loaded_and_in_band_truncation()
     {
         var client = new RecordingInferenceClient("completed response");
-        var state = new ConversationRuntimeState([LlmMessage.System("## .agent/MEMORY.md" + Environment.NewLine + "memory note" + Environment.NewLine + "[truncated]")]);
+        var contextStore = new StaticWorkspaceContextStore(new WorkspaceContextDocument(
+            "memory",
+            ".agent/MEMORY.md",
+            ".agent/MEMORY.md",
+            WorkspaceContextDocumentKind.ContextualState,
+            "memory note" + Environment.NewLine + "[truncated]",
+            23,
+            null));
+        var startupMessages = await new AgentContextProvider(contextStore).LoadAsync(new WorkspacePaths(Directory.GetCurrentDirectory()));
+        var state = new ConversationRuntimeState(startupMessages);
         var runner = new DefaultConversationLoopRunner(client, state, loopDefinition: LoopDefinition.CreateDefaultConversation(), surface: RuntimeSurfaceId.Web);
         var diagnostics = new List<RuntimeDiagnosticMessage>();
 
@@ -621,6 +633,14 @@ public sealed class DefaultConversationLoopRunnerTests
 
             AfterGenerate?.Invoke();
             return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex);
+        }
+    }
+
+    private sealed class StaticWorkspaceContextStore(params WorkspaceContextDocument[] documents) : IWorkspaceContextStore
+    {
+        public Task<IReadOnlyList<WorkspaceContextDocument>> LoadDocumentsAsync(WorkspacePaths paths, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<WorkspaceContextDocument>>(documents);
         }
     }
 

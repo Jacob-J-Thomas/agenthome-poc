@@ -1,4 +1,5 @@
 using System.Globalization;
+using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Models;
@@ -274,7 +275,8 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     private static RuntimeContextOmission GetLocalMemoryStatus(IReadOnlyList<RuntimeContextMessage> messages)
     {
         var startupContent = string.Join(Environment.NewLine, messages.Where(message => message.Source == RuntimeContextSource.StartupContext).Select(message => message.Message.Content));
-        if (startupContent.Contains("## .agent/MEMORY.md", StringComparison.Ordinal))
+        var memorySectionHeader = $"## {AgentContextProvider.ContextualStateClassification}: .agent/MEMORY.md";
+        if (startupContent.Contains(memorySectionHeader, StringComparison.Ordinal))
         {
             return new RuntimeContextOmission(
                 "local-memory",

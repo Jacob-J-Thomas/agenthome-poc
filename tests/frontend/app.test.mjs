@@ -130,6 +130,35 @@ test("configuration tabs render permission details without creating markup from 
   assert.equal(findByTag(app.elements.configContent, "script").length, 0);
 });
 
+test("agent configuration expands the renamed role guide", async () => {
+  const app = await loadApp({
+    configuration: {
+      status: { initialized: true },
+      runtime: { surface: "web", model: "gpt-test", codexSandbox: "read-only" },
+      audit: { path: "audit/events.ndjson", exists: false, events: [], readProblems: [] },
+      conversationHistory: { directoryPath: ".agent/memory/conversations", currentPath: "current.ndjson", archivePath: "archive", transcripts: [], readProblems: [] },
+      paths: [],
+      concepts: [],
+      documents: [{
+        name: "Role guide",
+        category: "Role",
+        path: ".agent/ROLE.md",
+        exists: true,
+        sizeBytes: 10,
+        lastModifiedUtc: null,
+        content: "role guide"
+      }],
+      permissions: { exists: false, parsed: false, version: null, scope: "", defaultAccess: "ask", readProblems: [], approved: [], denied: [], rawJson: "" }
+    }
+  });
+
+  await configTab(app, "agent").click();
+
+  const details = assertSingle(findByTag(app.elements.configContent, "details"));
+  assert.equal(details.open, true);
+  assert.match(details.textContent, /Role guide/);
+});
+
 test("verbose toggle invokes hub and verbose context renders as system text", async () => {
   const app = await loadApp();
   app.elements.transcript.replaceChildren();
@@ -256,6 +285,11 @@ function findByTag(root, tagName) {
   }
 
   return matches;
+}
+
+function assertSingle(items) {
+  assert.equal(items.length, 1);
+  return items[0];
 }
 
 class FakeWebSocket {

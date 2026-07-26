@@ -309,7 +309,7 @@ function renderRuleSection(title, rules) {
 function renderDocument(documentItem) {
   const details = document.createElement("details");
   details.className = "config-document";
-  if (documentItem.exists && ["Agent guide", "Context", "Memory", "Models"].includes(documentItem.name)) {
+  if (documentItem.exists && ["Role guide", "Context", "Memory", "Models"].includes(documentItem.name)) {
     details.open = true;
   }
 

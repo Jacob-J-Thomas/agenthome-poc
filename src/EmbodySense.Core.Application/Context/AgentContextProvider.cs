@@ -8,6 +8,7 @@ namespace EmbodySense.Core.Application.Context;
 public sealed class AgentContextProvider : IAgentContextProvider
 {
     private const int MaxFileCharacters = 12_000;
+    internal const string ContextualStateClassification = "Lower-authority contextual state";
     private readonly IWorkspaceContextStore _contextStore;
 
     public AgentContextProvider(IWorkspaceContextStore contextStore)
@@ -60,7 +61,7 @@ public sealed class AgentContextProvider : IAgentContextProvider
         {
             WorkspaceContextDocumentKind.RoleInstruction => "Trusted role instruction",
             WorkspaceContextDocumentKind.AgentIdentity => "Trusted durable agent identity",
-            WorkspaceContextDocumentKind.ContextualState => "Lower-authority contextual state",
+            WorkspaceContextDocumentKind.ContextualState => ContextualStateClassification,
             _ => "Workspace context"
         };
         return $"## {classification}: {displayPath}{Environment.NewLine}{normalized}";
