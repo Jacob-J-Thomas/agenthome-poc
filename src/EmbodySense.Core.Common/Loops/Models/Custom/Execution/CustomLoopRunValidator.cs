@@ -31,12 +31,22 @@ public static class CustomLoopRunValidator
     public static CustomLoopValidationResult ValidateForDispatch(CustomLoopRunRecord? run)
     {
         var errors = Validate(run).Errors.ToList();
+        if (HasLegacyWorkspaceContextManifest(run))
+        {
+            Add(errors, "legacy_workspace_context_not_executable", "contextSnapshot.sourceManifest", "A retained pre-ROLE workspace manifest is historical evidence only and cannot be dispatched.");
+        }
+
         if (run is not null && !HasCompleteAdmissionAudit(run))
         {
             Add(errors, "admission_audit_incomplete", "events", "Provider dispatch requires the durable admission-audit completion marker.");
         }
 
         return new CustomLoopValidationResult(errors);
+    }
+
+    public static bool HasLegacyWorkspaceContextManifest(CustomLoopRunRecord? run)
+    {
+        return run?.ContextSnapshot?.SourceManifest is { } sources && LooksLikeLegacyWorkspaceManifest(sources);
     }
 
     public static bool HasCompleteAdmissionAudit(CustomLoopRunRecord? run)

@@ -77,6 +77,8 @@ public sealed class WorkspacePaths
 
     public string PermissionsReadmePath => AgentFile("PERMISSIONS.md");
 
+    public string RolePath => AgentFile("ROLE.md");
+
     public string WorkspacePrivatePath => Path.Combine(WorkspacePath, "private");
 
     public string WorkspaceSharedPath => Path.Combine(WorkspacePath, "shared");
@@ -85,5 +87,5 @@ public sealed class WorkspacePaths
 
     public string WorkspaceSystemPath => Path.Combine(WorkspacePath, "system");
 
-    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath);
+    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath);
 }

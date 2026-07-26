@@ -10,6 +10,23 @@ namespace EmbodySense.Core.Startup.Tests.Workspace;
 public sealed class WorkspaceInitializerTests
 {
     [Fact]
+    public async Task InitializeAsync_upgrades_a_pre_role_workspace_without_loading_or_deleting_legacy_agent_text()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "legacy role");
+        Assert.False(paths.IsInitialized);
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        Assert.True(paths.IsInitialized);
+        Assert.True(File.Exists(paths.RolePath));
+        Assert.Equal("legacy role", await File.ReadAllTextAsync(paths.AgentFile("AGENT.md")));
+    }
+
+    [Fact]
     public async Task InitializeAsync_seeds_memory_priority_guidance()
     {
         using var workspace = new TestWorkspace();

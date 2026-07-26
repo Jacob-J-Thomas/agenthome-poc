@@ -34,4 +34,18 @@ public sealed class WorkspaceStatusReaderTests
         Assert.Empty(status.ApprovedEntries);
         Assert.Empty(status.DeniedEntries);
     }
+
+    [Fact]
+    public async Task Read_reports_a_pre_role_workspace_as_uninitialized()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new EmbodySense.Core.Common.Workspace.WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "legacy role");
+
+        var status = new WorkspaceStatusReader().Read(workspace.RootPath);
+
+        Assert.False(status.IsInitialized);
+    }
 }

@@ -223,6 +223,8 @@ public sealed class CustomLoopRunValidatorTests
         var validation = CustomLoopRunValidator.Validate(legacyRun);
 
         Assert.True(validation.IsValid);
+        Assert.True(CustomLoopRunValidator.HasLegacyWorkspaceContextManifest(legacyRun));
+        AssertCodes(CustomLoopRunValidator.ValidateForDispatch(legacyRun), "legacy_workspace_context_not_executable");
     }
 
     [Fact]
