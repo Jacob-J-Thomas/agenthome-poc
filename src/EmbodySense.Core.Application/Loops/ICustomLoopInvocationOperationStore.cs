@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 
 namespace EmbodySense.Core.Application.Loops;
 

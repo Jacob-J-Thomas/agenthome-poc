@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
+
+namespace EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 
 public sealed record CustomLoopInvocationReceiptRetentionResult(
     CustomLoopInvocationReceiptRetentionStatus Status,

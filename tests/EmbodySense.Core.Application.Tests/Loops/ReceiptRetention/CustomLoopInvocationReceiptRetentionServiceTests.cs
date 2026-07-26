@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 
@@ -59,6 +60,26 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         Assert.Equal(CustomLoopInvocationReceiptRetentionStatus.CommittedWithAuditWarning, replay.Status);
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, store.Current!.State);
         Assert.Single(audit.Events, item => item.Action == AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome);
+    }
+
+    [Fact]
+    public async Task Changed_candidate_is_conflict_audited_and_reselected_before_cleanup_continues()
+    {
+        var store = new FakeStore(Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved)) { AbandonFirstCommit = true };
+        var audit = new FakeAuditLog();
+
+        var result = await Service(store, audit).PruneForCapacityAsync("embodysense.web", "web");
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionStatus.Pruned, result.Status);
+        Assert.Equal(2, store.CommitCalls);
+        Assert.Equal(
+            [
+                (AuditSchema.Actions.LoopInvocationReceiptRetentionIntent, AuditSchema.Outcomes.Requested),
+                (AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome, AuditSchema.Outcomes.Conflict),
+                (AuditSchema.Actions.LoopInvocationReceiptRetentionIntent, AuditSchema.Outcomes.Requested),
+                (AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome, AuditSchema.Outcomes.Succeeded)
+            ],
+            audit.Events.Select(item => (item.Action, item.Outcome)));
     }
 
     [Theory]
@@ -175,6 +196,8 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 
         public Exception? ReserveException { get; init; }
 
+        public bool AbandonFirstCommit { get; init; }
+
         public int CommitCalls { get; private set; }
 
         public List<CancellationToken> MutationTokens { get; } = [];
@@ -184,6 +207,18 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
             if (ReserveException is not null)
             {
                 throw ReserveException;
+            }
+
+            if (Current!.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged)
+            {
+                Current = Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved) with
+                {
+                    OperationId = request.OperationId,
+                    RequestedAtUtc = request.RequestedAtUtc,
+                    ReplayCutoffUtc = request.ReplayCutoffUtc,
+                    OwnershipStartedAtUtc = request.RequestedAtUtc,
+                    UpdatedAtUtc = request.RequestedAtUtc
+                };
             }
 
             var status = ReservationStatus ?? Current!.State switch
@@ -210,6 +245,18 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
         {
             MutationTokens.Add(cancellationToken);
             CommitCalls++;
+            if (AbandonFirstCommit && CommitCalls == 1)
+            {
+                Current = Current! with
+                {
+                    State = CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged,
+                    UpdatedAtUtc = updatedAtUtc,
+                    DeletedReceiptCount = 0,
+                    DeletedReceiptUtf8Bytes = 0
+                };
+                return Task.FromResult(Current);
+            }
+
             Current = Current! with
             {
                 State = CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted,

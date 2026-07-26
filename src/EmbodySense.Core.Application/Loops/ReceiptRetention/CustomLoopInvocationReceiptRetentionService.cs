@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -7,6 +8,7 @@ namespace EmbodySense.Core.Application.Loops.ReceiptRetention;
 
 public sealed class CustomLoopInvocationReceiptRetentionService
 {
+    private const int MaxCandidateReselections = 1;
     private readonly ICustomLoopInvocationOperationStore _store;
     private readonly IAuditLog _auditLog;
     private readonly TimeProvider _timeProvider;
@@ -18,7 +20,12 @@ public sealed class CustomLoopInvocationReceiptRetentionService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public async Task<CustomLoopInvocationReceiptRetentionResult> PruneForCapacityAsync(string actor, string surface, CancellationToken cancellationToken = default)
+    public Task<CustomLoopInvocationReceiptRetentionResult> PruneForCapacityAsync(string actor, string surface, CancellationToken cancellationToken = default)
+    {
+        return PruneForCapacityAsync(actor, surface, MaxCandidateReselections, cancellationToken);
+    }
+
+    private async Task<CustomLoopInvocationReceiptRetentionResult> PruneForCapacityAsync(string actor, string surface, int remainingCandidateReselections, CancellationToken cancellationToken)
     {
         if (!IsBoundedText(actor, CustomLoopLimits.MaxTraceReferenceCharacters) || !CustomLoopArtifactIdentifier.IsValid(surface))
         {
@@ -114,6 +121,21 @@ public sealed class CustomLoopInvocationReceiptRetentionService
                     return Result(CustomLoopInvocationReceiptRetentionStatus.Invalid, operation, $"Receipt retention could not be committed or reconciled safely: {exception.GetType().Name}.");
                 }
             }
+        }
+
+        if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged)
+        {
+            if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopInvocationReceiptRetentionOutcome, AuditSchema.Outcomes.Conflict, operation, "No changed receipt was deleted; the immutable batch was abandoned for safe reselection."), ownerToken, cancellationToken))
+            {
+                return Result(CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable, operation, "A changed receipt was preserved and the immutable batch was abandoned, but its conflict outcome audit could not be recorded.");
+            }
+
+            if (remainingCandidateReselections == 0)
+            {
+                return Result(CustomLoopInvocationReceiptRetentionStatus.OperationInProgress, operation, "A selected receipt changed again during cleanup; no changed receipt was deleted and a later request may safely reselect.");
+            }
+
+            return await PruneForCapacityAsync(actor, surface, remainingCandidateReselections - 1, cancellationToken);
         }
 
         if (operation.State == CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning)

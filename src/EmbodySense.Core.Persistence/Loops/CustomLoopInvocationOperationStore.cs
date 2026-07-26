@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 
@@ -229,7 +230,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             var existing = await ReadRetentionOperationAsync(cancellationToken);
             if (existing is not null
                 && existing.State is not CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded
-                    and not CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning)
+                    and not CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning
+                    and not CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged)
             {
                 var now = _timeProvider.GetUtcNow().ToUniversalTime();
                 if (existing.State is CustomLoopInvocationReceiptRetentionOperationState.Reserved or CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded)
@@ -343,11 +345,14 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             }
 
             var retainedPaths = new List<string>();
+            var missingCandidates = new List<CustomLoopInvocationReceiptRetentionCandidate>();
+            var candidateChanged = false;
             foreach (var candidate in operation.Candidates)
             {
                 var path = _pathGuard.GetFilePath(_root, candidate.OperationId + ".json");
                 if (!File.Exists(path))
                 {
+                    missingCandidates.Add(candidate);
                     continue;
                 }
 
@@ -359,10 +364,24 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                     || bytes.LongLength != candidate.ArtifactUtf8Bytes
                     || !string.Equals(Hash(bytes), candidate.ArtifactHash, StringComparison.Ordinal))
                 {
-                    throw new FormatException($"Invocation receipt `{candidate.OperationId}` changed after retention was reserved; cleanup failed closed.");
+                    candidateChanged = true;
+                    continue;
                 }
 
                 retainedPaths.Add(path);
+            }
+
+            if (candidateChanged)
+            {
+                var abandoned = operation with
+                {
+                    UpdatedAtUtc = Max(updatedAtUtc, operation.UpdatedAtUtc),
+                    State = CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged,
+                    DeletedReceiptCount = missingCandidates.Count,
+                    DeletedReceiptUtf8Bytes = missingCandidates.Sum(candidate => candidate.ArtifactUtf8Bytes)
+                };
+                await WriteRetentionOperationAsync(abandoned, cancellationToken);
+                return abandoned;
             }
 
             foreach (var path in retainedPaths)
@@ -715,10 +734,18 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted
             or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded
             or CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning;
+        var abandoned = operation.State == CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged;
         var expectedBytes = operation.Candidates.Sum(candidate => candidate.ArtifactUtf8Bytes);
-        if (committed
+        var invalidTotals = committed
             ? operation.DeletedReceiptCount != operation.Candidates.Length || operation.DeletedReceiptUtf8Bytes != expectedBytes
-            : operation.DeletedReceiptCount != 0 || operation.DeletedReceiptUtf8Bytes != 0)
+            : abandoned
+                ? operation.DeletedReceiptCount < 0
+                    || operation.DeletedReceiptCount >= operation.Candidates.Length
+                    || operation.DeletedReceiptUtf8Bytes < 0
+                    || operation.DeletedReceiptUtf8Bytes >= expectedBytes
+                    || operation.DeletedReceiptCount == 0 != (operation.DeletedReceiptUtf8Bytes == 0)
+                : operation.DeletedReceiptCount != 0 || operation.DeletedReceiptUtf8Bytes != 0;
+        if (invalidTotals)
         {
             throw new FormatException("Invocation-receipt retention outcome totals do not match its durable candidates and state.");
         }

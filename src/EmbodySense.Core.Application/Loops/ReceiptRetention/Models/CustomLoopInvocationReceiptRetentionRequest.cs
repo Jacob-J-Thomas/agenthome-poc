@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Loops.ReceiptRetention;
+namespace EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 
 public sealed record CustomLoopInvocationReceiptRetentionRequest(
     string OperationId,
