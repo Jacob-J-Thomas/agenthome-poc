@@ -282,6 +282,9 @@ public sealed class AgentRuntimeFactoryTests
             CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
             null,
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
             now,
             now,
             CustomLoopInvocationOperationState.Pending,
@@ -292,6 +295,12 @@ public sealed class AgentRuntimeFactoryTests
             "The invocation is pending.");
         var store = new CustomLoopInvocationOperationStore(paths);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        pending = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.ConversationNotFound,
+            InvokingConversationId = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(pending)).Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(pending with
         {
             State = CustomLoopInvocationOperationState.Complete,

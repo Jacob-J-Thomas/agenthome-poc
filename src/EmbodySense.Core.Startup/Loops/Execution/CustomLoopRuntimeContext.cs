@@ -73,6 +73,21 @@ internal sealed class CustomLoopRuntimeContext
         }
     }
 
+    public async Task<string> CaptureConversationIdentityAsync(CancellationToken cancellationToken)
+    {
+        using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))
+        {
+            var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+            if (!string.Equals(_conversationState.DurableConversationVersion, persistedConversation.Version, StringComparison.Ordinal)
+                || !_conversationState.TrySynchronizeConversationTranscript(persistedConversation.Messages))
+            {
+                throw new InvalidOperationException("The active logical conversation diverged from durable workspace state; custom-loop conversation identity was not captured.");
+            }
+
+            return persistedConversation.Version;
+        }
+    }
+
     internal static LlmMessage[] GetLogicalConversationMessages(ConversationRuntimeState conversationState)
     {
         ArgumentNullException.ThrowIfNull(conversationState);

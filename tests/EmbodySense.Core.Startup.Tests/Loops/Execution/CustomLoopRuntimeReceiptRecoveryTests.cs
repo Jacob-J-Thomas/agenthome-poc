@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
@@ -15,13 +16,14 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 public sealed class CustomLoopRuntimeReceiptRecoveryTests
 {
     [Fact]
-    public async Task Pending_receipt_with_an_already_admitted_run_is_reconciled_before_a_new_busy_owner_can_overwrite_it()
+    public async Task Version_one_pending_receipt_with_an_already_admitted_run_is_bound_and_reconciled_before_a_new_busy_owner()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
@@ -64,6 +66,9 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model",
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
             now,
             now,
             CustomLoopInvocationOperationState.Pending,
@@ -73,6 +78,16 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             [],
             "Invocation receipt persisted before the simulated interruption.");
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
+        var context = CustomLoopContextSnapshot.CreateEmpty(now);
+        var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var conversation = new CustomLoopConversationReference(conversationIdentity, new string('d', CustomLoopLimits.Sha256HexCharacters), now);
+        pending = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = conversationIdentity,
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
         var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
@@ -84,9 +99,16 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 definition.RoleId,
                 prompt,
                 new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
-                null,
-                CustomLoopContextSnapshot.CreateEmpty(now)));
+                conversation,
+                context));
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(receiptPath))!.AsObject();
+        persisted["schemaVersion"] = 1;
+        persisted.Remove("bindingState");
+        persisted.Remove("invokingConversationId");
+        persisted.Remove("contextIdentityHash");
+        await File.WriteAllTextAsync(receiptPath, persisted.ToJsonString());
 
         await using var competingGate = new CustomLoopWorkspaceExecutionGate(paths);
         var competing = competingGate.TryAcquire("competing-active-operation", new string('f', CustomLoopLimits.Sha256HexCharacters));
@@ -105,8 +127,94 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(operationId));
         Assert.Equal(CustomLoopInvocationOperationState.Complete, completed.State);
         Assert.Equal(CustomLoopInvocationOutcome.Admitted, completed.Outcome);
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, completed.BindingState);
+        Assert.Equal(conversationIdentity, completed.InvokingConversationId);
+        Assert.Equal(CustomLoopContextSnapshotHash.ComputeIdentity(context), completed.ContextIdentityHash);
         Assert.Equal(admission.Run!.Id, completed.RunId);
         Assert.NotEqual(CustomLoopInvocationOutcome.WorkspaceExecutionBusy, completed.Outcome);
+    }
+
+    [Fact]
+    public async Task Pending_captured_receipt_terminalizes_and_replays_busy_without_losing_its_context_binding()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            workspace.File("unused-codex.cmd"),
+            "read-only",
+            AgentRuntimeSurface.Cli);
+        var definition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(definitionSnapshot.Id));
+        var receiptStore = new CustomLoopInvocationOperationStore(paths);
+        const string operationId = "invoke-interrupted-after-context-capture";
+        const string prompt = "captured before workspace became busy";
+        var now = DateTimeOffset.UtcNow;
+        var requestHash = CustomLoopInvocationRequestHash.Compute(
+            operationId,
+            definition.Id,
+            definition.DefinitionVersion,
+            definition.ContentHash,
+            WorkspaceActors.Cli,
+            AgentRuntimeSurface.Cli.Id,
+            definition.RoleId,
+            prompt,
+            LlmInferenceSurface.OpenAiCodex.ToString(),
+            "test-model");
+        var pending = new CustomLoopInvocationOperation(
+            CustomLoopInvocationOperation.CurrentSchemaVersion,
+            operationId,
+            requestHash,
+            definition.Id,
+            definition.DefinitionVersion,
+            definition.ContentHash,
+            WorkspaceActors.Cli,
+            AgentRuntimeSurface.Cli.Id,
+            definition.RoleId,
+            CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
+            LlmInferenceSurface.OpenAiCodex.ToString(),
+            "test-model",
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
+            now,
+            now,
+            CustomLoopInvocationOperationState.Pending,
+            CustomLoopInvocationOutcome.Unknown,
+            string.Empty,
+            null,
+            [],
+            "Invocation receipt persisted before the simulated interruption.");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
+        var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var contextIdentity = CustomLoopContextSnapshotHash.ComputeIdentity(CustomLoopContextSnapshot.CreateEmpty(now));
+        var captured = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = conversationIdentity,
+            ContextIdentityHash = contextIdentity
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(captured)).Status);
+
+        await using var competingGate = new CustomLoopWorkspaceExecutionGate(paths);
+        using var competing = competingGate.TryAcquire("competing-after-context-capture", new string('f', CustomLoopLimits.Sha256HexCharacters)).Lease!;
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, operationId, prompt);
+        var response = await runtime.InvokeCustomLoopAsync(input);
+        var replay = await runtime.InvokeCustomLoopAsync(input);
+        var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(operationId));
+
+        Assert.Equal("WorkspaceExecutionBusy", response.AdmissionStatus);
+        Assert.Equal("WorkspaceExecutionBusy", replay.AdmissionStatus);
+        Assert.False(response.WasDispatched);
+        Assert.False(replay.WasDispatched);
+        Assert.Contains("captured-context binding", response.Detail, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopInvocationOperationState.Complete, completed.State);
+        Assert.Equal(CustomLoopInvocationOutcome.WorkspaceExecutionBusy, completed.Outcome);
+        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, completed.BindingState);
+        Assert.Equal(conversationIdentity, completed.InvokingConversationId);
+        Assert.Equal(contextIdentity, completed.ContextIdentityHash);
     }
 
     [Fact]
@@ -174,6 +282,9 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model",
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
             now,
             now,
             CustomLoopInvocationOperationState.Pending,
@@ -183,6 +294,16 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             [],
             "Invocation receipt persisted before the simulated interruption.");
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await receiptStore.BeginAsync(pending)).Status);
+        var context = CustomLoopContextSnapshot.CreateEmpty(now);
+        var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var conversation = new CustomLoopConversationReference(conversationIdentity, new string('d', CustomLoopLimits.Sha256HexCharacters), now);
+        pending = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = conversationIdentity,
+            ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
         var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
@@ -194,8 +315,8 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 definition.RoleId,
                 prompt,
                 new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
-                null,
-                CustomLoopContextSnapshot.CreateEmpty(now)));
+                conversation,
+                context));
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
         return (Assert.IsType<CustomLoopRunRecord>(admission.Run), receiptStore);
     }
