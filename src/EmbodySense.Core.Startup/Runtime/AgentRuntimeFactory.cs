@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -86,6 +87,7 @@ public sealed class AgentRuntimeFactory
 
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
             var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
+            var customExecutionReacquisitionAllowed = recoveryOwnership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
             var preserveCurrentConversation = !customExecutionAvailable;
             using var recoveryLease = recoveryOwnership.Lease;
             if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
@@ -104,6 +106,11 @@ public sealed class AgentRuntimeFactory
                 }
             }
 
+            if (!customExecutionAvailable && !customExecutionReacquisitionAllowed)
+            {
+                customExecutionGate.RelinquishWorkspaceHost();
+            }
+
             var workspaceClient = new LocalWorkspaceClient(paths);
             var loopDefinitionStore = new LoopDefinitionStore(paths);
             var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
@@ -115,15 +122,18 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                var currentConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
-                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults, currentConversation.Version))
+                var activeConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults, activeConversation.Version))
                 {
-                    conversationState.SynchronizeConversationTranscript(currentConversation.Messages);
+                    conversationState.SynchronizeConversationTranscript(activeConversation.Messages);
                 }
                 else
                 {
                     await conversationMemory.StartFreshConversationAsync(cancellationToken);
+                    activeConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
                 }
+
+                conversationState.SetDurableConversationVersion(activeConversation.Version);
             }
 
             var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId);
@@ -151,6 +161,7 @@ public sealed class AgentRuntimeFactory
                 customRunner,
                 customRuntimeContext,
                 customExecutionAvailable,
+                customExecutionReacquisitionAllowed,
                 runtimeSurface.Id,
                 actor,
                 defaultLoop.RoleId,

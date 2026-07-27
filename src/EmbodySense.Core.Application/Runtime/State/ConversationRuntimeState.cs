@@ -14,6 +14,7 @@ public sealed class ConversationRuntimeState
     private readonly object _messagesSync = new();
     private readonly SemaphoreSlim _exclusiveAccess;
     private readonly IConversationWorkspaceLease? _workspaceLease;
+    private string? _durableConversationVersion;
 
     public ConversationRuntimeState(
         IReadOnlyList<LlmMessage>? initialMessages = null,
@@ -47,6 +48,17 @@ public sealed class ConversationRuntimeState
             lock (_messagesSync)
             {
                 return _messages.ToArray();
+            }
+        }
+    }
+
+    public string? DurableConversationVersion
+    {
+        get
+        {
+            lock (_messagesSync)
+            {
+                return _durableConversationVersion;
             }
         }
     }
@@ -100,6 +112,15 @@ public sealed class ConversationRuntimeState
         }
 
         _resettableInferenceClient?.ResetConversation();
+    }
+
+    public void SetDurableConversationVersion(string version)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+        lock (_messagesSync)
+        {
+            _durableConversationVersion = version;
+        }
     }
 
     public void SynchronizeConversationTranscript(IReadOnlyList<LlmMessage> transcript)

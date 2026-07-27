@@ -138,8 +138,10 @@ public sealed class AgentRuntimeFactoryTests
         var blockedResume = await runtime.ResumeCustomLoopAsync(new LoopRunControlInput("run-one", 1, "resume-one"));
         var blockedCancel = await runtime.CancelCustomLoopAsync(new LoopRunControlInput("run-one", 1, "cancel-one"));
         var turn = await runtime.RunTurnAsync("hello");
+        await conversationMemory.AppendMessageAsync(LlmMessage.Assistant("externally published custom-loop output"));
         ownership.Dispose();
         var afterRelease = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-two", "prompt"));
+        var transcriptAfterReacquisition = runtime.GetActiveConversationTranscript();
         await using var recreatedRuntime = await CreateRuntimeAsync(workspace);
         var afterRecreate = await recreatedRuntime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-three", "prompt"));
 
@@ -159,7 +161,10 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("WorkspaceHostUnavailable", blockedCancel.Status);
         Assert.Equal("cancel-one", blockedCancel.OperationId);
         Assert.Null(await new CustomLoopControlOperationStore(paths).GetAsync(blockedCancel.OperationId));
-        Assert.Equal("WorkspaceHostUnavailable", afterRelease.AdmissionStatus);
+        Assert.Equal("NotFound", afterRelease.AdmissionStatus);
+        Assert.Contains(transcriptAfterReacquisition, message => message.Content == "preserved external-host transcript");
+        Assert.Contains(transcriptAfterReacquisition, message => message.Content == "hello");
+        Assert.Contains(transcriptAfterReacquisition, message => message.Content == "externally published custom-loop output");
         Assert.Equal("NotFound", afterRecreate.AdmissionStatus);
     }
 
@@ -198,11 +203,13 @@ public sealed class AgentRuntimeFactoryTests
 
         var preserved = await conversationMemory.LoadCurrentConversationAsync();
         var turn = await runtime.RunTurnAsync("hello");
+        File.Delete(Path.Combine(runDirectory, "run-one.json"));
         var customLoop = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput("loop-one", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-recovery-failure", "prompt"));
 
         Assert.Collection(preserved, message => Assert.Equal("preserved recovery-failure transcript", message.Content));
         Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, turn.Status);
-        Assert.Equal("WorkspaceHostUnavailable", customLoop.AdmissionStatus);
+        Assert.Equal("Failed", customLoop.AdmissionStatus);
+        Assert.Contains("custom_loop_recovery_failed", customLoop.Detail, StringComparison.Ordinal);
         Assert.False(customLoop.WasDispatched);
     }
 

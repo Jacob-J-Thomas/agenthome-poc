@@ -147,6 +147,22 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    public void RelinquishWorkspaceHost()
+    {
+        lock (HostsSync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_host is null)
+            {
+                return;
+            }
+
+            var host = _host;
+            _host = null;
+            ReleaseReference(_workspaceKey, host);
+        }
+    }
+
     private static void ReleaseLease(string workspaceKey, WorkspaceHost host, string operationId, long generation)
     {
         lock (HostsSync)

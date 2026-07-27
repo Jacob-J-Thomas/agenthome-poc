@@ -104,6 +104,26 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
+    public async Task Gate_can_relinquish_its_host_reference_and_reacquire_later()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
+        var active = gate.TryAcquire("invoke-one", FirstHash);
+        Assert.NotNull(active.Lease);
+
+        gate.RelinquishWorkspaceHost();
+        active.Lease.Dispose();
+        using (var externalOwnership = new FileStream(paths.CustomLoopHostLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
+        {
+            Assert.True(externalOwnership.CanWrite);
+        }
+
+        using var reacquired = gate.TryAcquire("invoke-two", SecondHash).Lease;
+        Assert.NotNull(reacquired);
+    }
+
+    [Fact]
     public void Gate_rejects_a_reparse_point_run_root_when_the_platform_allows_links()
     {
         using var workspace = new TestWorkspace();

@@ -29,6 +29,10 @@ internal sealed class TestExecutionGate : ICustomLoopWorkspaceExecutionGate
         throw new NotSupportedException("Lifecycle service tests never persist invocation workspace-busy receipts.");
     }
 
+    public void RelinquishWorkspaceHost()
+    {
+    }
+
     public ValueTask DisposeAsync()
     {
         return ValueTask.CompletedTask;
