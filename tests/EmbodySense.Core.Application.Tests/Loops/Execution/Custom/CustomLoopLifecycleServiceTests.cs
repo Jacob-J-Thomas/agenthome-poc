@@ -307,6 +307,37 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(CustomLoopControlStatus.CancelRequested, completed.Outcome);
     }
 
+    [Theory]
+    [InlineData(CustomLoopControlKind.Pause, CustomLoopControlStatus.PauseRequested)]
+    [InlineData(CustomLoopControlKind.Cancel, CustomLoopControlStatus.CancelRequested)]
+    [InlineData(CustomLoopControlKind.Resume, CustomLoopControlStatus.Completed)]
+    public async Task Explicit_retry_re_drives_an_orphaned_pre_transition_receipt_only_with_recovered_ownership(CustomLoopControlKind kind, CustomLoopControlStatus expectedStatus)
+    {
+        var initialStatus = kind == CustomLoopControlKind.Resume ? CustomLoopRunStatus.Paused : CustomLoopRunStatus.Running;
+        var run = Run($"run-orphaned-{kind.ToString().ToLowerInvariant()}", initialStatus);
+        var store = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore();
+        var operationId = $"{kind.ToString().ToLowerInvariant()}-orphaned-retry";
+        await operations.BeginAsync(Pending(kind, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web));
+        operations.RecoverPendingReplays = true;
+        var executor = new NoopResumeExecutor();
+        var cancellation = new RecordingCancellationSignal();
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+
+        var result = kind switch
+        {
+            CustomLoopControlKind.Pause => await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web)),
+            CustomLoopControlKind.Cancel => await service.CancelAsync(new CustomLoopCancelRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web)),
+            CustomLoopControlKind.Resume => await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web)),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(CustomLoopControlOperationState.Complete, (await operations.GetAsync(operationId))!.State);
+        Assert.Equal(kind == CustomLoopControlKind.Cancel ? 1 : 0, cancellation.AttemptCount);
+        Assert.Equal(kind == CustomLoopControlKind.Resume ? 1 : 0, executor.Requests.Count);
+    }
+
     [Fact]
     public async Task Pending_receipt_recovers_from_transition_owned_metadata_after_later_multi_event_writes()
     {
@@ -376,6 +407,26 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(CustomLoopControlStatus.OperationInProgress, result.Status);
         Assert.Equal(run, store[run.Id]);
         Assert.Equal(0, store.UpdateCallCount);
+        Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(operationId))!.State);
+        Assert.Empty(audit.Events);
+    }
+
+    [Fact]
+    public async Task Unproven_pending_owner_reports_in_progress_before_reading_or_completing_the_run()
+    {
+        const string operationId = "pause-owner-unproven";
+        var run = Run("run-owner-unproven", CustomLoopRunStatus.Running);
+        var store = new MultiRunStore([run]) { ThrowOnGet = true };
+        var operations = new InMemoryOperationStore { OwnershipUnprovenPendingReplays = true };
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        await operations.BeginAsync(pending);
+        var audit = new RecordingAuditLog();
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
+
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+
+        Assert.Equal(CustomLoopControlStatus.OperationInProgress, result.Status);
+        Assert.Null(result.Run);
         Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(operationId))!.State);
         Assert.Empty(audit.Events);
     }
@@ -1038,6 +1089,10 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public bool ThrowOnComplete { get; init; }
 
+        public bool RecoverPendingReplays { get; set; }
+
+        public bool OwnershipUnprovenPendingReplays { get; set; }
+
         public Task<CustomLoopControlOperationStoreResult> BeginAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken = default)
         {
             if (ThrowOnBegin)
@@ -1050,7 +1105,18 @@ public sealed class CustomLoopLifecycleServiceTests
                 if (_operations.TryGetValue(operation.OperationId, out var existing))
                 {
                     var status = existing.RequestHash == operation.RequestHash ? CustomLoopControlOperationStoreStatus.Replayed : CustomLoopControlOperationStoreStatus.Conflict;
-                    return Task.FromResult(new CustomLoopControlOperationStoreResult(status, existing));
+                    if (status == CustomLoopControlOperationStoreStatus.Replayed && existing.State == CustomLoopControlOperationState.Pending && OwnershipUnprovenPendingReplays)
+                    {
+                        status = CustomLoopControlOperationStoreStatus.OwnershipUnproven;
+                    }
+
+                    var recoverablePending = status == CustomLoopControlOperationStoreStatus.Replayed
+                        && existing.State == CustomLoopControlOperationState.Pending
+                        && RecoverPendingReplays;
+                    var lease = recoverablePending
+                        ? new RecoveryLease(operation.OperationId)
+                        : null;
+                    return Task.FromResult(new CustomLoopControlOperationStoreResult(status, existing, lease));
                 }
 
                 _operations.Add(operation.OperationId, operation);
@@ -1088,6 +1154,17 @@ public sealed class CustomLoopLifecycleServiceTests
 
                 _operations[operation.OperationId] = operation;
                 return Task.FromResult(new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Completed, operation));
+            }
+        }
+
+        private sealed class RecoveryLease(string operationId) : ICustomLoopControlOperationLease
+        {
+            public string OperationId { get; } = operationId;
+
+            public string OwnerGenerationId { get; } = "control-owner-test-recovery";
+
+            public void Dispose()
+            {
             }
         }
     }

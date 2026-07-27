@@ -24,4 +24,10 @@ public sealed record CustomLoopControlOperation(
     string Detail)
 {
     public const int CurrentSchemaVersion = 1;
+
+    public string? OwnerGenerationId { get; init; }
+
+    public int? OwnerProcessId { get; init; }
+
+    public DateTimeOffset? OwnerAcquiredAtUtc { get; init; }
 }

@@ -102,7 +102,10 @@ public sealed class PersistencePublicBoundaryCoverageTests
         Assert.Null(await store.GetAsync(pending.OperationId));
         Assert.Equal(CustomLoopControlOperationStoreStatus.NotFound, (await store.CompleteAsync(completed)).Status);
         await Assert.ThrowsAsync<ArgumentException>(() => store.CompleteAsync(pending));
-        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var created = await store.BeginAsync(pending);
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        completed = CompleteControl(created.Operation!);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, created.Status);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Replayed, (await store.CompleteAsync(completed)).Status);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Conflict, (await store.CompleteAsync(completed with { Detail = "Different completed detail." })).Status);
@@ -525,7 +528,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
     {
         return pending with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = pending.UpdatedAtUtc.AddSeconds(1),
             State = CustomLoopControlOperationState.Complete,
             Outcome = CustomLoopControlStatus.Paused,
             ResultLifecycleVersion = pending.ExpectedLifecycleVersion,
