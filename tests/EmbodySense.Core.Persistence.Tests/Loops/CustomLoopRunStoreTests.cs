@@ -889,10 +889,13 @@ public sealed class CustomLoopRunStoreTests
         var store = new CustomLoopRunStore(paths);
         Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var lockPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-runs.lock");
         File.Delete(indexPath);
-        var originalMode = File.GetUnixFileMode(paths.CustomLoopRunsPath);
+        var originalDirectoryMode = File.GetUnixFileMode(paths.CustomLoopRunsPath);
+        var originalLockMode = File.GetUnixFileMode(lockPath);
         try
         {
+            File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
             File.SetUnixFileMode(paths.CustomLoopRunsPath, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 
             var page = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
@@ -902,7 +905,8 @@ public sealed class CustomLoopRunStoreTests
         }
         finally
         {
-            File.SetUnixFileMode(paths.CustomLoopRunsPath, originalMode);
+            File.SetUnixFileMode(lockPath, originalLockMode);
+            File.SetUnixFileMode(paths.CustomLoopRunsPath, originalDirectoryMode);
         }
     }
 

@@ -269,20 +269,13 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     if (selectedRunId) {
       const requestedRunId = selectedRunId;
       const summary = visible.find(run => run.id === requestedRunId);
-      let nextRun;
-      let nextTrace;
-      if (summary?.isDeleted) {
-        nextRun = null;
-        nextTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}/trace`);
-      } else {
-        [nextRun, nextTrace] = await Promise.all([
-          requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}`),
-          requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}/trace`)
-        ]);
+      const evidence = await loadSelectedRunEvidence(requestedRunId, summary);
+      if (evidence.trace?.isDeleted) {
+        recentRuns = mergeRunSummaries([tombstoneRunSummary(evidence.trace)], recentRuns.filter(run => run.id !== requestedRunId));
       }
       if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return false;
-      selectedRun = nextRun;
-      selectedTrace = nextTrace;
+      selectedRun = evidence.run;
+      selectedTrace = evidence.trace;
     } else {
       selectedRun = null;
       selectedTrace = null;
@@ -344,6 +337,24 @@ async function loadMoreRuns() {
   }
 }
 
+async function loadSelectedRunEvidence(runId, summary) {
+  const traceRequest = requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`);
+  if (summary?.isDeleted) {
+    return { run: null, trace: await traceRequest };
+  }
+
+  const [runResult, traceResult] = await Promise.allSettled([
+    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
+    traceRequest
+  ]);
+  if (traceResult.status === "rejected") throw traceResult.reason;
+  if (runResult.status === "fulfilled") return { run: runResult.value, trace: traceResult.value };
+  if (runResult.reason?.status === 404 && traceResult.value?.isDeleted && traceResult.value.runId === runId) {
+    return { run: null, trace: traceResult.value };
+  }
+  throw runResult.reason;
+}
+
 function mergeRunSummaries(primary, secondary) {
   const byId = new Map();
   for (const run of [...primary, ...secondary]) {
@@ -355,6 +366,24 @@ function mergeRunSummaries(primary, secondary) {
     const created = String(right.createdAtUtc).localeCompare(String(left.createdAtUtc));
     return created !== 0 ? created : String(left.id).localeCompare(String(right.id));
   });
+}
+
+function tombstoneRunSummary(trace) {
+  const tombstone = trace.tombstone;
+  return {
+    id: tombstone.runId,
+    loopId: tombstone.loopId,
+    admissionOperationId: tombstone.admissionOperationId,
+    definitionVersion: tombstone.definitionVersion,
+    status: tombstone.terminalStatus,
+    createdAtUtc: tombstone.createdAtUtc,
+    updatedAtUtc: tombstone.deletedAtUtc,
+    completedAtUtc: tombstone.completedAtUtc,
+    iteration: 0,
+    nextStepIndex: 0,
+    failureCode: null,
+    isDeleted: true
+  };
 }
 
 function renderRuns() {
@@ -1292,20 +1321,7 @@ async function deleteSelectedTrace() {
 
   pendingTraceDeletion = null;
   const tombstone = deletion.tombstone;
-  const tombstoneSummary = {
-    id: tombstone.runId,
-    loopId: tombstone.loopId,
-    admissionOperationId: tombstone.admissionOperationId,
-    definitionVersion: tombstone.definitionVersion,
-    status: tombstone.terminalStatus,
-    createdAtUtc: tombstone.createdAtUtc,
-    updatedAtUtc: tombstone.deletedAtUtc,
-    completedAtUtc: tombstone.completedAtUtc,
-    iteration: 0,
-    nextStepIndex: 0,
-    failureCode: null,
-    isDeleted: true
-  };
+  const tombstoneSummary = tombstoneRunSummary({ tombstone });
   recentRuns = mergeRunSummaries([tombstoneSummary], recentRuns.filter(run => run.id !== runId));
   if (selectedLoopId() !== loopId || selectedRunId !== runId) {
     let quotaRefreshed = true;

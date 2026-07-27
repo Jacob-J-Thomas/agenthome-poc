@@ -246,36 +246,40 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return new CustomLoopRunPage([], null);
         }
 
-        var repairIndex = false;
-        long previousRevision = 0;
-        for (var attempt = 0; attempt < 2; attempt++)
+        MutationLease mutation;
+        try
         {
-            CustomLoopRunDiscoveryIndexEntry[] pageEntries;
-            await using (var mutation = await AcquireMutationLockAsync(cancellationToken))
+            mutation = await AcquireMutationLockAsync(cancellationToken);
+        }
+        catch (Exception exception) when (IsReadOnlyLockAccessFailure(exception))
+        {
+            return await ListCanonicalPageWithoutMutationLockAsync(request.MaximumCount, safeLoopId, after, cancellationToken);
+        }
+
+        await using (mutation)
+        {
+            var repairIndex = false;
+            long previousRevision = 0;
+            for (var attempt = 0; attempt < 2; attempt++)
             {
                 var index = repairIndex
                     ? await RebuildDiscoveryIndexAsync(previousRevision, cancellationToken)
                     : await LoadDiscoveryIndexAsync(cancellationToken);
                 previousRevision = index.Revision;
-                pageEntries = index.Entries
+                var pageEntries = index.Entries
                     .Where(entry => safeLoopId is null || string.Equals(entry.Summary.LoopId, safeLoopId, StringComparison.Ordinal))
                     .Where(entry => after is null || CompareSummaryToCursor(entry.Summary, after) > 0)
                     .Take(request.MaximumCount + 1)
                     .ToArray();
-            }
 
-            var canonicalSummaries = await ReadCanonicalDiscoveryPageAsync(pageEntries, cancellationToken);
-            if (canonicalSummaries is not null)
-            {
-                var hasMore = canonicalSummaries.Length > request.MaximumCount;
-                var items = canonicalSummaries.Take(request.MaximumCount).ToArray();
-                var continuationCursor = hasMore
-                    ? CustomLoopRunPageCursorCodec.Encode(ToCursor(items[^1], safeLoopId))
-                    : null;
-                return new CustomLoopRunPage(items, continuationCursor);
-            }
+                var canonicalSummaries = await ReadCanonicalDiscoveryPageAsync(pageEntries, cancellationToken);
+                if (canonicalSummaries is not null)
+                {
+                    return CreateDiscoveryPage(canonicalSummaries, request.MaximumCount, safeLoopId);
+                }
 
-            repairIndex = true;
+                repairIndex = true;
+            }
         }
 
         throw new FormatException("The custom loop run discovery index changed independently of its canonical artifacts and could not be repaired.");
@@ -878,15 +882,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private async Task<CustomLoopRunDiscoveryIndex> RebuildDiscoveryIndexAsync(long previousRevision, CancellationToken cancellationToken)
     {
-        var entries = new List<CustomLoopRunDiscoveryIndexEntry>();
-        await ScanArtifactsAsync(artifact =>
-        {
-            var summary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
-            entries.Add(CreateDiscoveryIndexEntry(artifact.Location.Path, summary, artifact.PersistedHash));
-        }, cancellationToken);
-        entries.Sort(CompareDiscoveryIndexEntries);
-        var index = new CustomLoopRunDiscoveryIndex(CustomLoopRunDiscoveryIndex.CurrentSchemaVersion, checked(previousRevision + 1), entries.ToArray());
-        ValidateDiscoveryIndex(index);
+        var index = await BuildDiscoveryIndexAsync(previousRevision, cancellationToken);
         try
         {
             await WriteDiscoveryIndexAsync(index, cancellationToken);
@@ -896,6 +892,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         {
             // The discovery index is derived. Canonical readable evidence remains available when cache persistence is not writable.
         }
+        return index;
+    }
+
+    private async Task<CustomLoopRunDiscoveryIndex> BuildDiscoveryIndexAsync(long previousRevision, CancellationToken cancellationToken)
+    {
+        var entries = new List<CustomLoopRunDiscoveryIndexEntry>();
+        await ScanArtifactsAsync(artifact =>
+        {
+            var summary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
+            entries.Add(CreateDiscoveryIndexEntry(artifact.Location.Path, summary, artifact.PersistedHash));
+        }, cancellationToken);
+        entries.Sort(CompareDiscoveryIndexEntries);
+        var index = new CustomLoopRunDiscoveryIndex(CustomLoopRunDiscoveryIndex.CurrentSchemaVersion, checked(previousRevision + 1), entries.ToArray());
+        ValidateDiscoveryIndex(index);
         return index;
     }
 
@@ -1034,6 +1044,28 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         return summaries.ToArray();
+    }
+
+    private async Task<CustomLoopRunPage> ListCanonicalPageWithoutMutationLockAsync(int maximumCount, string? loopId, CustomLoopRunPageCursor? after, CancellationToken cancellationToken)
+    {
+        var index = await BuildDiscoveryIndexAsync(previousRevision: 0, cancellationToken);
+        var summaries = index.Entries
+            .Select(entry => entry.Summary)
+            .Where(summary => loopId is null || string.Equals(summary.LoopId, loopId, StringComparison.Ordinal))
+            .Where(summary => after is null || CompareSummaryToCursor(summary, after) > 0)
+            .Take(maximumCount + 1)
+            .ToArray();
+        return CreateDiscoveryPage(summaries, maximumCount, loopId);
+    }
+
+    private static CustomLoopRunPage CreateDiscoveryPage(CustomLoopRunSummary[] summaries, int maximumCount, string? loopId)
+    {
+        var hasMore = summaries.Length > maximumCount;
+        var items = summaries.Take(maximumCount).ToArray();
+        var continuationCursor = hasMore
+            ? CustomLoopRunPageCursorCodec.Encode(ToCursor(items[^1], loopId))
+            : null;
+        return new CustomLoopRunPage(items, continuationCursor);
     }
 
     private static CustomLoopRunDiscoveryIndexEntry CreateDiscoveryIndexEntry(string path, CustomLoopRunSummary summary, string artifactHash)
@@ -2008,6 +2040,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         const int lockViolation = 33;
         const int resourceDeadlockAvoided = 35;
         return (exception.HResult & 0xFFFF) is resourceTemporarilyUnavailable or sharingViolation or lockViolation or resourceDeadlockAvoided;
+    }
+
+    private static bool IsReadOnlyLockAccessFailure(Exception exception)
+    {
+        if (exception is UnauthorizedAccessException)
+        {
+            return true;
+        }
+
+        const int accessDenied = 5;
+        const int permissionDenied = 13;
+        const int writeProtected = 19;
+        const int readOnlyFileSystem = 30;
+        return exception is IOException ioException && (ioException.HResult & 0xFFFF) is accessDenied or permissionDenied or writeProtected or readOnlyFileSystem;
     }
 
     private static void EnsureContained(string root, string candidate)
