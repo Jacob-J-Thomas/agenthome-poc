@@ -6,7 +6,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 internal static class CustomLoopRunPageCursorCodec
 {
-    private const int CurrentVersion = 1;
+    private const int CurrentVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
@@ -17,7 +17,7 @@ internal static class CustomLoopRunPageCursorCodec
     public static string Encode(CustomLoopRunPageCursor cursor)
     {
         ArgumentNullException.ThrowIfNull(cursor);
-        var payload = new CursorPayload(CurrentVersion, cursor.UpdatedAtUtc.UtcTicks, cursor.CreatedAtUtc.UtcTicks, cursor.RunId, cursor.LoopId);
+        var payload = new CursorPayload(CurrentVersion, cursor.CreatedAtUtc.UtcTicks, cursor.RunId, cursor.LoopId);
         return Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions));
     }
 
@@ -46,11 +46,10 @@ internal static class CustomLoopRunPageCursorCodec
             }
 
             var cursor = new CustomLoopRunPageCursor(
-                new DateTimeOffset(payload.UpdatedAtUtcTicks, TimeSpan.Zero),
                 new DateTimeOffset(payload.CreatedAtUtcTicks, TimeSpan.Zero),
                 payload.RunId,
                 payload.LoopId);
-            if (cursor.UpdatedAtUtc < cursor.CreatedAtUtc || !string.Equals(Encode(cursor), encoded, StringComparison.Ordinal))
+            if (cursor.CreatedAtUtc < DateTimeOffset.UnixEpoch || !string.Equals(Encode(cursor), encoded, StringComparison.Ordinal))
             {
                 throw InvalidCursor();
             }
@@ -79,5 +78,5 @@ internal static class CustomLoopRunPageCursorCodec
 
     private static ArgumentException InvalidCursor(Exception? innerException = null) => new("The custom-loop run cursor is invalid or belongs to a different loop filter.", "cursor", innerException);
 
-    private sealed record CursorPayload(int Version, long UpdatedAtUtcTicks, long CreatedAtUtcTicks, string RunId, string? LoopId);
+    private sealed record CursorPayload(int Version, long CreatedAtUtcTicks, string RunId, string? LoopId);
 }

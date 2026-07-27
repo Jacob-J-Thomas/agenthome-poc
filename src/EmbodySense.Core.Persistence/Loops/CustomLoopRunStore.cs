@@ -14,6 +14,9 @@ namespace EmbodySense.Core.Persistence.Loops;
 public sealed class CustomLoopRunStore : ICustomLoopRunStore
 {
     private const string MutationLockFileName = ".custom-loop-runs.lock";
+    private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
+    private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
+    private static readonly byte[] DiscoveryIndexPendingContent = "pending\n"u8.ToArray();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessMutationGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -29,6 +32,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private readonly string _runsRoot;
     private readonly string _traceDeletionOperationsRoot;
     private readonly string _mutationLockPath;
+    private readonly string _discoveryIndexPath;
+    private readonly string _discoveryIndexPendingPath;
     private readonly SemaphoreSlim _processMutationGate;
     private readonly TimeProvider _timeProvider;
 
@@ -43,6 +48,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         EnsureContained(_workspaceRoot, _runsRoot);
         EnsureContained(_workspaceRoot, _traceDeletionOperationsRoot);
         _mutationLockPath = Path.Combine(_runsRoot, MutationLockFileName);
+        _discoveryIndexPath = Path.Combine(_runsRoot, DiscoveryIndexFileName);
+        _discoveryIndexPendingPath = Path.Combine(_runsRoot, DiscoveryIndexPendingFileName);
         _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -141,7 +148,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         var path = GetRunPath(run.LoopId, run.Id);
         EnsureSafeDirectory(Path.GetDirectoryName(path)!, create: true);
         EnsureSafeArtifactPath(path, mustExist: false);
-        await WriteArtifactAsync(path, serialized, overwrite: false, cancellationToken);
+        await WriteArtifactAsync(path, serialized, ToSummary(run), overwrite: false, cancellationToken);
         return CustomLoopRunStoreResult.Created(run);
     }
 
@@ -233,24 +240,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
         var safeLoopId = request.LoopId is null ? null : CustomLoopArtifactIdentifier.Require(request.LoopId, nameof(request.LoopId));
         var after = CustomLoopRunPageCursorCodec.Decode(request.Cursor, safeLoopId);
-        var summaries = new List<CustomLoopRunSummary>(request.MaximumCount + 1);
-        await ScanArtifactsAsync(artifact =>
+        if (!Directory.Exists(_runsRoot))
         {
-            var summary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
-            if (safeLoopId is not null && !string.Equals(summary.LoopId, safeLoopId, StringComparison.Ordinal)
-                || after is not null && CompareSummaryToCursor(summary, after) <= 0)
-            {
-                return;
-            }
+            return new CustomLoopRunPage([], null);
+        }
 
-            summaries.Add(summary);
-            summaries.Sort(CompareSummaries);
-            if (summaries.Count > request.MaximumCount + 1)
-            {
-                summaries.RemoveAt(summaries.Count - 1);
-            }
-        }, cancellationToken);
-        var hasMore = summaries.Count > request.MaximumCount;
+        await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        var index = await LoadDiscoveryIndexAsync(cancellationToken);
+        var summaries = index.Entries
+            .Select(entry => entry.Summary)
+            .Where(summary => safeLoopId is null || string.Equals(summary.LoopId, safeLoopId, StringComparison.Ordinal))
+            .Where(summary => after is null || CompareSummaryToCursor(summary, after) > 0)
+            .Take(request.MaximumCount + 1)
+            .ToArray();
+        var hasMore = summaries.Length > request.MaximumCount;
         var items = summaries.Take(request.MaximumCount).ToArray();
         var continuationCursor = hasMore
             ? CustomLoopRunPageCursorCodec.Encode(ToCursor(items[^1], safeLoopId))
@@ -521,7 +524,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             mutation.Request.OperationId,
             CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit);
         ValidateTombstone(tombstone);
-        await WriteArtifactAsync(artifact.Location.Path, SerializeTombstoneBounded(tombstone), overwrite: true, cancellationToken);
+        await WriteArtifactAsync(artifact.Location.Path, SerializeTombstoneBounded(tombstone), ToSummary(tombstone), overwrite: true, cancellationToken);
         return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, cancellationToken);
     }
 
@@ -570,7 +573,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                 throw new FormatException("The trace-deletion tombstone no longer matches its durable operation ledger.");
             }
 
-            await WriteArtifactAsync(path, SerializeTombstoneBounded(tombstone), overwrite: true, cancellationToken);
+            await WriteArtifactAsync(path, SerializeTombstoneBounded(tombstone), ToSummary(tombstone), overwrite: true, cancellationToken);
         }
 
         var updated = operation with { UpdatedAtUtc = Max(operation.UpdatedAtUtc, DateTimeOffset.UtcNow), Tombstone = tombstone, Integrity = integrity };
@@ -634,7 +637,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         };
         var serialized = SerializeBounded(candidate);
         ValidateReservedTraceCapacity(current, candidate, artifact.PersistedUtf8Bytes, serialized.LongLength);
-        await WriteArtifactAsync(matches[0].Path, serialized, overwrite: true, cancellationToken);
+        await WriteArtifactAsync(matches[0].Path, serialized, ToSummary(candidate), overwrite: true, cancellationToken);
         return CustomLoopRunStoreResult.Updated(candidate);
     }
 
@@ -691,7 +694,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         var serialized = SerializeBounded(run);
         ValidateReservedTraceCapacity(current, run, artifact.PersistedUtf8Bytes, serialized.LongLength);
 
-        await WriteArtifactAsync(matches[0].Path, serialized, overwrite: true, cancellationToken);
+        await WriteArtifactAsync(matches[0].Path, serialized, ToSummary(run), overwrite: true, cancellationToken);
         return CustomLoopRunStoreResult.Updated(run);
     }
 
@@ -787,31 +790,251 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         return accumulator.Complete();
     }
 
-    private static int CompareSummaries(CustomLoopRunSummary left, CustomLoopRunSummary right)
+    private async Task<CustomLoopRunDiscoveryIndex> LoadDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
-        var comparison = right.UpdatedAtUtc.CompareTo(left.UpdatedAtUtc);
-        if (comparison != 0)
+        if (!File.Exists(_discoveryIndexPendingPath))
         {
-            return comparison;
+            try
+            {
+                var index = await ReadDiscoveryIndexAsync(cancellationToken);
+                if (index is not null && DiscoveryIndexMatchesArtifacts(index))
+                {
+                    return index;
+                }
+            }
+            catch (FormatException)
+            {
+                // The index is derived evidence. Rebuild it from canonical run artifacts below.
+            }
         }
 
-        comparison = right.CreatedAtUtc.CompareTo(left.CreatedAtUtc);
+        return await RebuildDiscoveryIndexAsync(previousRevision: 0, cancellationToken);
+    }
+
+    private async Task<CustomLoopRunDiscoveryIndex?> ReadCleanDiscoveryIndexAsync(CancellationToken cancellationToken)
+    {
+        if (File.Exists(_discoveryIndexPendingPath))
+        {
+            EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
+            return null;
+        }
+
+        try
+        {
+            var index = await ReadDiscoveryIndexAsync(cancellationToken);
+            return index is not null && DiscoveryIndexMatchesArtifacts(index) ? index : null;
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<CustomLoopRunDiscoveryIndex?> ReadDiscoveryIndexAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_discoveryIndexPath))
+        {
+            return null;
+        }
+
+        var content = await ReadBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes, "Custom loop run discovery index", cancellationToken);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(content, JsonOptions.MaxDepth, "Custom loop run discovery index", _discoveryIndexPath);
+        try
+        {
+            using var document = JsonDocument.Parse(content, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
+            RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
+            RequireCompleteContract(document.RootElement, typeof(CustomLoopRunDiscoveryIndex), "$");
+            var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, JsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
+            ValidateDiscoveryIndex(index);
+            return index;
+        }
+        catch (JsonException exception)
+        {
+            throw new FormatException("The custom loop run discovery index contains invalid JSON, unknown fields, missing fields, or unsupported enum values.", exception);
+        }
+    }
+
+    private async Task<CustomLoopRunDiscoveryIndex> RebuildDiscoveryIndexAsync(long previousRevision, CancellationToken cancellationToken)
+    {
+        var entries = new List<CustomLoopRunDiscoveryIndexEntry>();
+        await ScanArtifactsAsync(artifact =>
+        {
+            var summary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
+            entries.Add(CreateDiscoveryIndexEntry(artifact.Location.Path, summary));
+        }, cancellationToken);
+        entries.Sort(CompareDiscoveryIndexEntries);
+        var index = new CustomLoopRunDiscoveryIndex(CustomLoopRunDiscoveryIndex.CurrentSchemaVersion, checked(previousRevision + 1), entries.ToArray());
+        ValidateDiscoveryIndex(index);
+        await WriteDiscoveryIndexAsync(index, cancellationToken);
+        DeleteDiscoveryIndexPendingMarker();
+        return index;
+    }
+
+    private async Task UpdateDiscoveryIndexAsync(CustomLoopRunDiscoveryIndex? current, string artifactPath, CustomLoopRunSummary summary, CancellationToken cancellationToken)
+    {
+        if (current is null)
+        {
+            await RebuildDiscoveryIndexAsync(previousRevision: 0, cancellationToken);
+            return;
+        }
+
+        var entries = current.Entries
+            .Where(entry => !string.Equals(entry.Summary.Id, summary.Id, StringComparison.Ordinal))
+            .Append(CreateDiscoveryIndexEntry(artifactPath, summary))
+            .OrderBy(entry => entry, Comparer<CustomLoopRunDiscoveryIndexEntry>.Create(CompareDiscoveryIndexEntries))
+            .ToArray();
+        var updated = new CustomLoopRunDiscoveryIndex(CustomLoopRunDiscoveryIndex.CurrentSchemaVersion, checked(current.Revision + 1), entries);
+        ValidateDiscoveryIndex(updated);
+        if (!DiscoveryIndexMatchesArtifacts(updated))
+        {
+            await RebuildDiscoveryIndexAsync(current.Revision, cancellationToken);
+            return;
+        }
+
+        await WriteDiscoveryIndexAsync(updated, cancellationToken);
+        DeleteDiscoveryIndexPendingMarker();
+    }
+
+    private async Task WriteDiscoveryIndexAsync(CustomLoopRunDiscoveryIndex index, CancellationToken cancellationToken)
+    {
+        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(index, JsonOptions, "Custom loop run discovery index", _discoveryIndexPath);
+        if (content.Length + 1 > CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes)
+        {
+            throw new FormatException($"The custom loop run discovery index exceeds {CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes} UTF-8 bytes.");
+        }
+
+        var terminated = new byte[content.Length + 1];
+        content.CopyTo(terminated, 0);
+        terminated[^1] = (byte)'\n';
+        await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, terminated, overwrite: File.Exists(_discoveryIndexPath), cancellationToken);
+    }
+
+    private async Task MarkDiscoveryIndexPendingAsync(CancellationToken cancellationToken)
+    {
+        if (File.Exists(_discoveryIndexPendingPath))
+        {
+            EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
+            return;
+        }
+
+        await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPendingPath, DiscoveryIndexPendingContent, overwrite: false, cancellationToken);
+    }
+
+    private void DeleteDiscoveryIndexPendingMarker()
+    {
+        if (!File.Exists(_discoveryIndexPendingPath))
+        {
+            return;
+        }
+
+        EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
+        File.Delete(_discoveryIndexPendingPath);
+    }
+
+    private bool DiscoveryIndexMatchesArtifacts(CustomLoopRunDiscoveryIndex index)
+    {
+        var locations = EnumerateArtifactLocations();
+        if (locations.Count != index.Entries.Length)
+        {
+            return false;
+        }
+
+        var locationsByIdentity = locations.ToDictionary(location => (location.LoopId, location.RunId));
+        foreach (var entry in index.Entries)
+        {
+            var summary = entry.Summary;
+            if (!locationsByIdentity.TryGetValue((summary.LoopId, summary.Id), out var location))
+            {
+                return false;
+            }
+
+            var info = new FileInfo(location.Path);
+            info.Refresh();
+            if (!info.Exists || info.Length != entry.ArtifactUtf8Bytes || info.LastWriteTimeUtc.Ticks != entry.ArtifactLastWriteUtcTicks)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static CustomLoopRunDiscoveryIndexEntry CreateDiscoveryIndexEntry(string path, CustomLoopRunSummary summary)
+    {
+        var info = new FileInfo(path);
+        info.Refresh();
+        if (!info.Exists)
+        {
+            throw new FileNotFoundException("Custom loop run artifact does not exist.", path);
+        }
+
+        return new CustomLoopRunDiscoveryIndexEntry(summary, info.Length, info.LastWriteTimeUtc.Ticks);
+    }
+
+    private static void ValidateDiscoveryIndex(CustomLoopRunDiscoveryIndex index)
+    {
+        if (index.SchemaVersion != CustomLoopRunDiscoveryIndex.CurrentSchemaVersion || index.Revision < 1 || index.Entries is null)
+        {
+            throw new FormatException("The custom loop run discovery index uses an unsupported schema or revision.");
+        }
+
+        if (index.Entries.Length > CustomLoopLimits.MaxRunTracesPerWorkspace + CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
+        {
+            throw new FormatException("The custom loop run discovery index exceeds its explicit entry limit.");
+        }
+
+        var runIds = new HashSet<string>(StringComparer.Ordinal);
+        var admissionOperationIds = new HashSet<string>(StringComparer.Ordinal);
+        for (var indexPosition = 0; indexPosition < index.Entries.Length; indexPosition++)
+        {
+            var entry = index.Entries[indexPosition] ?? throw new FormatException("The custom loop run discovery index contains a null entry.");
+            var summary = entry.Summary ?? throw new FormatException("The custom loop run discovery index contains a null summary.");
+            CustomLoopArtifactIdentifier.Require(summary.Id, nameof(summary.Id));
+            CustomLoopArtifactIdentifier.Require(summary.LoopId, nameof(summary.LoopId));
+            CustomLoopArtifactIdentifier.Require(summary.AdmissionOperationId, nameof(summary.AdmissionOperationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
+            if (!runIds.Add(summary.Id) || !admissionOperationIds.Add(summary.AdmissionOperationId))
+            {
+                throw new FormatException("The custom loop run discovery index contains duplicate run or admission-operation identities.");
+            }
+
+            var maximumArtifactBytes = summary.IsDeleted ? CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes : CustomLoopLimits.MaxRunTraceUtf8Bytes;
+            if (entry.ArtifactUtf8Bytes is < 1 || entry.ArtifactUtf8Bytes > maximumArtifactBytes
+                || entry.ArtifactLastWriteUtcTicks < DateTimeOffset.UnixEpoch.UtcTicks
+                || summary.DefinitionVersion < 1
+                || summary.CreatedAtUtc < DateTimeOffset.UnixEpoch
+                || summary.UpdatedAtUtc < summary.CreatedAtUtc
+                || summary.CompletedAtUtc < summary.CreatedAtUtc
+                || summary.Iteration < 0
+                || summary.NextStepIndex < 0
+                || summary.IsDeleted && !IsTerminalStatus(summary.Status))
+            {
+                throw new FormatException("The custom loop run discovery index contains invalid bounded metadata.");
+            }
+
+            if (indexPosition > 0 && CompareDiscoveryIndexEntries(index.Entries[indexPosition - 1], entry) >= 0)
+            {
+                throw new FormatException("The custom loop run discovery index is not in canonical immutable order.");
+            }
+        }
+    }
+
+    private static int CompareDiscoveryIndexEntries(CustomLoopRunDiscoveryIndexEntry left, CustomLoopRunDiscoveryIndexEntry right) => CompareSummaries(left.Summary, right.Summary);
+
+    private static bool IsTerminalStatus(CustomLoopRunStatus status) => status is CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview;
+
+    private static int CompareSummaries(CustomLoopRunSummary left, CustomLoopRunSummary right)
+    {
+        var comparison = right.CreatedAtUtc.CompareTo(left.CreatedAtUtc);
         return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left.Id, right.Id);
     }
 
     private static int CompareSummaryToCursor(CustomLoopRunSummary summary, CustomLoopRunPageCursor cursor)
     {
-        var comparison = cursor.UpdatedAtUtc.CompareTo(summary.UpdatedAtUtc);
-        if (comparison != 0)
-        {
-            return comparison;
-        }
-
-        comparison = cursor.CreatedAtUtc.CompareTo(summary.CreatedAtUtc);
+        var comparison = cursor.CreatedAtUtc.CompareTo(summary.CreatedAtUtc);
         return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(summary.Id, cursor.RunId);
     }
 
-    private static CustomLoopRunPageCursor ToCursor(CustomLoopRunSummary summary, string? loopId) => new(summary.UpdatedAtUtc, summary.CreatedAtUtc, summary.Id, loopId);
+    private static CustomLoopRunPageCursor ToCursor(CustomLoopRunSummary summary, string? loopId) => new(summary.CreatedAtUtc, summary.Id, loopId);
 
     private IReadOnlyList<RunArtifactLocation> EnumerateArtifactLocations()
     {
@@ -822,7 +1045,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
         EnsureSafeDirectory(_runsRoot, create: false);
         var rootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
-        if (rootFiles.Any(path => !string.Equals(Path.GetFileName(path), MutationLockFileName, StringComparison.Ordinal)))
+        if (rootFiles.Any(path => !IsAllowedRootArtifact(path)))
         {
             throw new FormatException("Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory.");
         }
@@ -866,6 +1089,15 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         return locations;
+    }
+
+    private static bool IsAllowedRootArtifact(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        return string.Equals(fileName, MutationLockFileName, StringComparison.Ordinal)
+            || string.Equals(fileName, DiscoveryIndexFileName, StringComparison.Ordinal)
+            || string.Equals(fileName, DiscoveryIndexPendingFileName, StringComparison.Ordinal)
+            || IsTemporaryArtifactPath(path);
     }
 
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
@@ -1470,7 +1702,15 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
     }
 
-    private async Task WriteArtifactAsync(string path, byte[] content, bool overwrite, CancellationToken cancellationToken)
+    private async Task WriteArtifactAsync(string path, byte[] content, CustomLoopRunSummary summary, bool overwrite, CancellationToken cancellationToken)
+    {
+        var index = await ReadCleanDiscoveryIndexAsync(cancellationToken);
+        await MarkDiscoveryIndexPendingAsync(cancellationToken);
+        await WriteArtifactContentAsync(path, content, overwrite, cancellationToken);
+        await UpdateDiscoveryIndexAsync(index, path, summary, cancellationToken);
+    }
+
+    private async Task WriteArtifactContentAsync(string path, byte[] content, bool overwrite, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: overwrite);
         var directory = Path.GetDirectoryName(path)!;

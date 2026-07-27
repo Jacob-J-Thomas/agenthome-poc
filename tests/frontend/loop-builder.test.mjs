@@ -560,7 +560,8 @@ test("run discovery progressively loads cursor pages without losing the selected
   const olderSummary = { ...firstSummary, id: "run-older-page", admissionOperationId: "op-run-older-page", createdAtUtc: "2026-07-19T10:00:00Z", updatedAtUtc: "2026-07-19T10:00:00Z" };
   server.runDetails.set(selected.id, selected);
   server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [firstSummary], continuationCursor: "cursor-one" } }));
-  server.on("GET", "/api/loop-runs?maximumCount=50&cursor=cursor-one", () => ({ status: 200, body: { items: [olderSummary], continuationCursor: null } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research", () => ({ status: 200, body: { items: [firstSummary], continuationCursor: "cursor-one" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research&cursor=cursor-one", () => ({ status: 200, body: { items: [olderSummary], continuationCursor: null } }));
   const app = await loadLoopBuilder({ server });
   await selectCustomLoop(app);
 
@@ -580,6 +581,25 @@ test("run discovery progressively loads cursor pages without losing the selected
   assert.equal(pageCall.options.headers["X-EmbodySense-Session"], "loop-test-token");
 });
 
+test("run discovery fetches the selected loop directly when workspace-newest evidence belongs to other loops", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const selected = createRunSnapshot();
+  const selectedSummary = { id: selected.id, loopId: selected.loopId, admissionOperationId: selected.admissionOperationId, definitionVersion: 2, status: selected.status, createdAtUtc: selected.createdAtUtc, updatedAtUtc: selected.updatedAtUtc, completedAtUtc: selected.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  const unrelatedSummary = { ...selectedSummary, id: "run-unrelated-newer", loopId: "loop-other", admissionOperationId: "op-unrelated-newer", createdAtUtc: "2026-07-20T10:00:00Z", updatedAtUtc: "2026-07-20T10:00:00Z" };
+  server.runDetails.set(selected.id, selected);
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [unrelatedSummary], continuationCursor: "workspace-cursor" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research", () => ({ status: 200, body: { items: [selectedSummary], continuationCursor: null } }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  assert.match(app.elements.runTitle.textContent, /run-test/);
+  assert.ok(server.calls.some(call => call.url === "/api/loop-runs?maximumCount=50&loopId=loop-research"));
+  assert.equal(app.elements.loadMoreRunsButton.hidden, true);
+});
+
 test("run monitoring refreshes the newest page without rewinding older-evidence pagination", async () => {
   const server = new FakeFetchServer(createCatalog());
   const selected = createRunSnapshot();
@@ -588,8 +608,9 @@ test("run monitoring refreshes the newest page without rewinding older-evidence 
   const thirdSummary = { ...firstSummary, id: "run-third-page", admissionOperationId: "op-run-third-page", createdAtUtc: "2026-07-18T10:00:00Z", updatedAtUtc: "2026-07-18T10:00:00Z" };
   server.runDetails.set(selected.id, selected);
   server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [firstSummary], continuationCursor: "cursor-one" } }));
-  server.on("GET", "/api/loop-runs?maximumCount=50&cursor=cursor-one", () => ({ status: 200, body: { items: [secondSummary], continuationCursor: "cursor-two" } }));
-  server.on("GET", "/api/loop-runs?maximumCount=50&cursor=cursor-two", () => ({ status: 200, body: { items: [thirdSummary], continuationCursor: null } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research", () => ({ status: 200, body: { items: [firstSummary], continuationCursor: "cursor-one" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research&cursor=cursor-one", () => ({ status: 200, body: { items: [secondSummary], continuationCursor: "cursor-two" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research&cursor=cursor-two", () => ({ status: 200, body: { items: [thirdSummary], continuationCursor: null } }));
   const app = await loadLoopBuilder({ server });
   await selectCustomLoop(app);
   await app.elements.runsTab.click();
@@ -1386,7 +1407,12 @@ class FakeFetchServer {
     if (method === "GET" && url === "/api/session") return responseFrom({ status: 200, body: { token: "loop-test-token" } });
     if (method === "GET" && url === "/api/status") return responseFrom({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } });
     if (method === "GET" && url === "/api/loops") return responseFrom({ status: 200, body: clone(this.catalog) });
-    if (method === "GET" && url === "/api/loop-runs?maximumCount=50") return responseFrom({ status: 200, body: { items: clone(this.runs), continuationCursor: null } });
+    if (method === "GET" && url.startsWith("/api/loop-runs?")) {
+      const query = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+      const loopId = query.get("loopId");
+      const runs = loopId ? this.runs.filter(run => run.loopId === loopId) : this.runs;
+      return responseFrom({ status: 200, body: { items: clone(runs), continuationCursor: null } });
+    }
     if (method === "GET" && url === "/api/loop-runs/quota") return responseFrom({ status: 200, body: clone(this.traceQuota ?? createTraceQuota(this.runs.length)) });
     if (method === "GET" && url.endsWith("/trace") && url.startsWith("/api/loop-runs/")) {
       const runId = decodeURIComponent(url.slice("/api/loop-runs/".length, -"/trace".length));

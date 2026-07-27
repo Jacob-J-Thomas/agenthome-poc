@@ -7,6 +7,7 @@ let dirty = false;
 let currentView = "builder";
 let recentRuns = [];
 let runContinuationCursor = null;
+let runPaginationLoopId = null;
 let runPaginationExtended = false;
 let loadingMoreRuns = false;
 let selectedRunId = null;
@@ -227,15 +228,29 @@ function selectedLoopId() {
 
 async function loadRuns({ silent = false, preferredRunId = null, preferredAdmissionOperationId = null, preserveEmptySelection = false } = {}) {
   if (!catalog) return;
+  const loopId = selectedLoopId();
   try {
-    const [payload, quotaPayload] = await Promise.all([
+    const filteredPageRequest = loopId
+      ? requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}`)
+      : Promise.resolve(null);
+    const [payload, filteredPayload, quotaPayload] = await Promise.all([
       requestJson("/api/loop-runs?maximumCount=50"),
+      filteredPageRequest,
       requestJson("/api/loop-runs/quota")
     ]);
-    const incomingRuns = Array.isArray(payload) ? payload : payload?.items ?? [];
+    if (selectedLoopId() !== loopId) return false;
+    if (runPaginationLoopId !== loopId) {
+      runPaginationLoopId = loopId;
+      runContinuationCursor = null;
+      runPaginationExtended = false;
+    }
+    const workspaceRuns = Array.isArray(payload) ? payload : payload?.items ?? [];
+    const filteredRuns = Array.isArray(filteredPayload) ? filteredPayload : filteredPayload?.items ?? [];
+    const incomingRuns = mergeRunSummaries(filteredRuns, workspaceRuns);
     recentRuns = mergeRunSummaries(incomingRuns, recentRuns);
     if (!runPaginationExtended && !loadingMoreRuns) {
-      runContinuationCursor = Array.isArray(payload) ? null : payload?.continuationCursor ?? null;
+      const pagePayload = filteredPayload ?? payload;
+      runContinuationCursor = Array.isArray(pagePayload) ? null : pagePayload?.continuationCursor ?? null;
     }
     traceQuota = quotaPayload;
     const visible = runsForCurrentLoop();
@@ -279,10 +294,13 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
 
 async function loadMoreRuns() {
   if (!runContinuationCursor || loadingMoreRuns) return;
+  const loopId = runPaginationLoopId;
+  if (!loopId || selectedLoopId() !== loopId) return;
   loadingMoreRuns = true;
   renderRunPagination();
   try {
-    const payload = await requestJson(`/api/loop-runs?maximumCount=50&cursor=${encodeURIComponent(runContinuationCursor)}`);
+    const payload = await requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}&cursor=${encodeURIComponent(runContinuationCursor)}`);
+    if (selectedLoopId() !== loopId) return;
     recentRuns = mergeRunSummaries(recentRuns, payload?.items ?? []);
     runContinuationCursor = payload?.continuationCursor ?? null;
     runPaginationExtended = true;
@@ -695,11 +713,12 @@ function renderList() {
   }
 }
 
-function selectDefinition(definition) {
+async function selectDefinition(definition) {
   if (mutationInFlight) return;
   if (definition.id === currentDefinition?.id && !historicalLoopId) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   applyDefinition(definition);
+  if (currentView === "runs") await loadRuns({ silent: false });
 }
 
 async function selectHistoricalLoop(loopId) {
