@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -20,11 +21,12 @@ public sealed class CustomLoopControlOperationStoreTests
         var first = new CustomLoopControlOperationStore(paths);
 
         var created = await first.BeginAsync(pending);
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
         var replayedPending = await new CustomLoopControlOperationStore(paths).BeginAsync(pending);
         var conflict = await new CustomLoopControlOperationStore(paths).BeginAsync(Pending(pending.OperationId, AuditSchema.Actors.Cli));
-        var completed = pending with
+        var completed = created.Operation! with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = created.Operation.UpdatedAtUtc.AddSeconds(1),
             State = CustomLoopControlOperationState.Complete,
             Outcome = CustomLoopControlStatus.PauseRequested,
             ResultLifecycleVersion = 3,
@@ -38,7 +40,7 @@ public sealed class CustomLoopControlOperationStoreTests
         var replayedComplete = await restarted.BeginAsync(pending);
 
         Assert.Equal(CustomLoopControlOperationStoreStatus.Created, created.Status);
-        Assert.Equal(CustomLoopControlOperationStoreStatus.Replayed, replayedPending.Status);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.OwnershipUnproven, replayedPending.Status);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Conflict, conflict.Status);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, completion.Status);
         Assert.Equal(completed, loaded);
@@ -55,10 +57,11 @@ public sealed class CustomLoopControlOperationStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var pending = Pending("load-failure", AuditSchema.Actors.Web);
         var store = new CustomLoopControlOperationStore(paths);
-        await store.BeginAsync(pending);
-        var failed = pending with
+        var created = await store.BeginAsync(pending);
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        var failed = created.Operation! with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = created.Operation.UpdatedAtUtc.AddSeconds(1),
             State = CustomLoopControlOperationState.Complete,
             Outcome = CustomLoopControlStatus.Failed,
             Detail = "The run could not be loaded safely."
@@ -71,6 +74,90 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Equal(failed, completion.Operation);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Replayed, replay.Status);
         Assert.Equal(failed, replay.Operation);
+    }
+
+    [Fact]
+    public async Task Pending_receipt_is_reowned_only_after_the_previous_execution_lease_is_released()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("pause-orphan-recovery", AuditSchema.Actors.Web);
+        var first = await new CustomLoopControlOperationStore(paths).BeginAsync(pending);
+        var firstLease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(first.Lease);
+        var liveRetry = await new CustomLoopControlOperationStore(paths).BeginAsync(pending);
+
+        Assert.Equal(CustomLoopControlOperationStoreStatus.OwnershipUnproven, liveRetry.Status);
+        Assert.Null(liveRetry.Lease);
+
+        firstLease.Dispose();
+        var recovered = await new CustomLoopControlOperationStore(paths).BeginAsync(pending);
+        using var recoveredLease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(recovered.Lease);
+
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Replayed, recovered.Status);
+        Assert.NotEqual(first.Operation!.OwnerGenerationId, recovered.Operation!.OwnerGenerationId);
+        Assert.Equal(recoveredLease.OwnerGenerationId, recovered.Operation.OwnerGenerationId);
+        Assert.Equal(Environment.ProcessId, recovered.Operation.OwnerProcessId);
+        Assert.Contains("orphaned", recovered.Operation.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Concurrent_same_process_retries_allow_only_one_replacement_owner()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("pause-concurrent-orphan-recovery", AuditSchema.Actors.Web);
+        var first = await new CustomLoopControlOperationStore(paths).BeginAsync(pending);
+        Assert.NotNull(first.Lease);
+        first.Lease.Dispose();
+
+        var retries = await Task.WhenAll(
+            new CustomLoopControlOperationStore(paths).BeginAsync(pending),
+            new CustomLoopControlOperationStore(paths).BeginAsync(pending));
+        var recovered = Assert.Single(retries, result => result.Status == CustomLoopControlOperationStoreStatus.Replayed);
+        var blocked = Assert.Single(retries, result => result.Status == CustomLoopControlOperationStoreStatus.OwnershipUnproven);
+        using var recoveredLease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(recovered.Lease);
+
+        Assert.Null(blocked.Lease);
+        Assert.Equal(recoveredLease.OwnerGenerationId, recovered.Operation!.OwnerGenerationId);
+    }
+
+    [Theory]
+    [InlineData(CustomLoopControlKind.Pause)]
+    [InlineData(CustomLoopControlKind.Cancel)]
+    [InlineData(CustomLoopControlKind.Resume)]
+    public async Task Process_exit_proves_a_pre_transition_receipt_is_orphaned_before_explicit_retry_reowns_it(CustomLoopControlKind kind)
+    {
+        using var workspace = new TestWorkspace();
+        var operationId = $"{kind.ToString().ToLowerInvariant()}-crashed-owner";
+        var pending = Pending(operationId, AuditSchema.Actors.Web) with { Kind = kind };
+        pending = pending with { RequestHash = CustomLoopControlRequestHash.Compute(kind, pending.RunId, pending.ExpectedLifecycleVersion, operationId, pending.Actor) };
+        using var process = StartControlOperationHost(workspace.RootPath, pending);
+        try
+        {
+            Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            var liveRetry = await new CustomLoopControlOperationStore(new WorkspacePaths(workspace.RootPath)).BeginAsync(pending);
+
+            Assert.Equal(CustomLoopControlOperationStoreStatus.OwnershipUnproven, liveRetry.Status);
+            Assert.Equal(process.Id, liveRetry.Operation!.OwnerProcessId);
+            Assert.Null(liveRetry.Lease);
+
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            var recovered = await new CustomLoopControlOperationStore(new WorkspacePaths(workspace.RootPath)).BeginAsync(pending);
+            using var recoveredLease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(recovered.Lease);
+
+            Assert.Equal(CustomLoopControlOperationStoreStatus.Replayed, recovered.Status);
+            Assert.Equal(Environment.ProcessId, recovered.Operation!.OwnerProcessId);
+            Assert.Equal(recoveredLease.OwnerGenerationId, recovered.Operation.OwnerGenerationId);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
     }
 
     [Fact]
@@ -120,4 +207,41 @@ public sealed class CustomLoopControlOperationStoreTests
     }
 
     private static string NestedJson(int depth) => string.Concat(Enumerable.Repeat("{\"nested\":", depth)) + "null" + new string('}', depth);
+
+    private static Process StartControlOperationHost(string workspaceRoot, CustomLoopControlOperation pending)
+    {
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
+        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
+        Assert.True(File.Exists(hostAssembly), $"Control-operation host assembly was not built at `{hostAssembly}`.");
+        var startInfo = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add(hostAssembly);
+        startInfo.ArgumentList.Add("hold-control");
+        startInfo.ArgumentList.Add(workspaceRoot);
+        startInfo.ArgumentList.Add(pending.Kind.ToString());
+        startInfo.ArgumentList.Add(pending.RunId);
+        startInfo.ArgumentList.Add(pending.ExpectedLifecycleVersion.ToString());
+        startInfo.ArgumentList.Add(pending.OperationId);
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("The control-operation owner process could not be started.");
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
+    }
 }

@@ -6,4 +6,4 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops;
 
-public sealed record CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus Status, CustomLoopControlOperation? Operation);
+public sealed record CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus Status, CustomLoopControlOperation? Operation, ICustomLoopControlOperationLease? Lease = null);

@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
@@ -296,21 +295,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
     private static void AcquireHostFileLock(FileStream ownership)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        const int exclusiveNonblocking = 2 | 4;
-        var descriptor = ownership.SafeFileHandle.DangerousGetHandle().ToInt32();
-        if (Flock(descriptor, exclusiveNonblocking) != 0)
+        if (!CustomLoopCrossProcessFileLock.TryAcquire(ownership))
         {
             throw new IOException("Another process owns the custom-loop workspace host lock.");
         }
     }
-
-    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
-    private static extern int Flock(int fileDescriptor, int operation);
 
     private static bool IsHash(string value)
     {

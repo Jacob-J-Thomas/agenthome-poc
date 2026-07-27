@@ -105,11 +105,17 @@ public sealed class CustomLoopLifecycleService
         }
 
         var operation = begun.Operation ?? pending;
+        using var operationLease = begun.Lease;
         var isPendingReplay = begun.Status == CustomLoopControlOperationStoreStatus.Replayed && operation.State == CustomLoopControlOperationState.Pending;
         if (begun.Status == CustomLoopControlOperationStoreStatus.Replayed && operation.State == CustomLoopControlOperationState.Complete)
         {
             var replayRun = await TryLoadAsync(runId, cancellationToken);
             return Result(operation.Outcome, replayRun, operationId, $"The durable {operation.Outcome} control outcome was replayed without another mutation or dispatch.");
+        }
+
+        if (begun.Status == CustomLoopControlOperationStoreStatus.OwnershipUnproven)
+        {
+            return Result(CustomLoopControlStatus.OperationInProgress, null, operationId, "A prior executor may still own the same lifecycle operation, so no run read, lifecycle mutation, cancellation signal, or provider dispatch was attempted.");
         }
 
         CustomLoopRunRecord? run;
@@ -158,7 +164,7 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.Conflict, run, $"Expected lifecycle version {expectedLifecycleVersion}, but the durable run is version {run.LifecycleVersion}.");
         }
 
-        if (isPendingReplay && RequiresLifecycleMutationOrSignal(kind, run))
+        if (isPendingReplay && begun.Lease is null && RequiresLifecycleMutationOrSignal(kind, run))
         {
             return Result(CustomLoopControlStatus.OperationInProgress, run, operationId, "The same lifecycle operation may still be mutating or signalling this run and has not durably committed its transition event.");
         }

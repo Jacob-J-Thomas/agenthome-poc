@@ -419,8 +419,10 @@ public sealed class AgentRuntimeFactoryTests
             false,
             "The control operation is pending.");
         var store = new CustomLoopControlOperationStore(paths);
-        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
-        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(pending with
+        var created = await store.BeginAsync(pending);
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, created.Status);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(created.Operation! with
         {
             State = CustomLoopControlOperationState.Complete,
             Outcome = outcome,

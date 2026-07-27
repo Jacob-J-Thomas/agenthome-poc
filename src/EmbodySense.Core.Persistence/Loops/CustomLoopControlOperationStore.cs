@@ -43,13 +43,47 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             var existing = await ReadIfExistsAsync(operation.OperationId, cancellationToken);
             if (existing is not null)
             {
-                return SameRequest(existing, operation)
-                    ? new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Replayed, existing)
-                    : new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Conflict, existing);
+                if (!SameRequest(existing, operation))
+                {
+                    return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Conflict, existing);
+                }
+
+                if (existing.State == CustomLoopControlOperationState.Complete)
+                {
+                    return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Replayed, existing);
+                }
+
+                var replayLease = TryAcquireOperationOwnership(operation.OperationId);
+                if (replayLease is null)
+                {
+                    return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.OwnershipUnproven, existing);
+                }
+
+                try
+                {
+                    var recovered = WithOwnership(existing, replayLease, "The orphaned custom-loop control operation was claimed by a new bounded execution owner.");
+                    await WriteAsync(recovered, cancellationToken);
+                    return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Replayed, recovered, replayLease);
+                }
+                catch
+                {
+                    replayLease.Dispose();
+                    throw;
+                }
             }
 
-            await WriteAsync(operation, cancellationToken);
-            return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Created, operation);
+            var lease = TryAcquireOperationOwnership(operation.OperationId) ?? throw new InvalidOperationException("The new custom-loop control operation could not acquire its bounded execution ownership.");
+            try
+            {
+                var owned = WithOwnership(operation, lease, operation.Detail);
+                await WriteAsync(owned, cancellationToken);
+                return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Created, owned, lease);
+            }
+            catch
+            {
+                lease.Dispose();
+                throw;
+            }
         }
         finally
         {
@@ -90,6 +124,11 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             }
 
             if (!SameRequest(existing, operation))
+            {
+                return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Conflict, existing);
+            }
+
+            if (existing.OwnerGenerationId is not null && !string.Equals(existing.OwnerGenerationId, operation.OwnerGenerationId, StringComparison.Ordinal))
             {
                 return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.Conflict, existing);
             }
@@ -136,6 +175,11 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
 
         Validate(operation, requirePending: operation?.State == CustomLoopControlOperationState.Pending);
+        if (operation!.OwnerGenerationId is null || operation.OwnerProcessId is null || operation.OwnerAcquiredAtUtc is null)
+        {
+            throw new FormatException("Persisted custom-loop control operation is missing ownership metadata.");
+        }
+
         if (!string.Equals(operation!.OperationId, operationId, StringComparison.Ordinal))
         {
             throw new FormatException($"Custom-loop control operation filename `{operationId}` does not match embedded id `{operation.OperationId}`.");
@@ -163,6 +207,53 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
 
         await _pathGuard.WriteTextAtomicallyAsync(_root, path, json, cancellationToken);
+    }
+
+    private ControlOperationLease? TryAcquireOperationOwnership(string operationId)
+    {
+        var path = _pathGuard.GetFilePath(_root, $".{operationId}.owner.lock");
+        FileStream? ownership = null;
+        try
+        {
+            ownership = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.WriteThrough);
+            _pathGuard.GetFilePath(_root, $".{operationId}.owner.lock");
+            if (!CustomLoopCrossProcessFileLock.TryAcquire(ownership))
+            {
+                ownership.Dispose();
+                return null;
+            }
+
+            return new ControlOperationLease(operationId, "control-owner-" + Guid.NewGuid().ToString("N"), ownership);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            ownership?.Dispose();
+            return null;
+        }
+        catch
+        {
+            ownership?.Dispose();
+            throw;
+        }
+    }
+
+    private static CustomLoopControlOperation WithOwnership(CustomLoopControlOperation operation, ControlOperationLease lease, string detail)
+    {
+        var acquiredAtUtc = DateTimeOffset.UtcNow.ToUniversalTime();
+        if (acquiredAtUtc < operation.CreatedAtUtc)
+        {
+            acquiredAtUtc = operation.CreatedAtUtc;
+        }
+
+        var updatedAtUtc = acquiredAtUtc > operation.UpdatedAtUtc ? acquiredAtUtc : operation.UpdatedAtUtc;
+        return operation with
+        {
+            OwnerGenerationId = lease.OwnerGenerationId,
+            OwnerProcessId = Environment.ProcessId,
+            OwnerAcquiredAtUtc = acquiredAtUtc,
+            UpdatedAtUtc = updatedAtUtc,
+            Detail = detail
+        };
     }
 
     private static bool SameRequest(CustomLoopControlOperation left, CustomLoopControlOperation right)
@@ -219,6 +310,35 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         if (operation.State == CustomLoopControlOperationState.Complete && (operation.Outcome == CustomLoopControlStatus.Unknown || hasLifecycleVersion != hasRunStatus || !hasLifecycleVersion && !allowsMissingRun))
         {
             throw new FormatException("Completed custom-loop control operation is missing its durable outcome.");
+        }
+
+        var hasAnyOwner = operation.OwnerGenerationId is not null || operation.OwnerProcessId is not null || operation.OwnerAcquiredAtUtc is not null;
+        var hasCompleteOwner = operation.OwnerGenerationId is not null && operation.OwnerProcessId is not null && operation.OwnerAcquiredAtUtc is not null;
+        if (hasAnyOwner && (!hasCompleteOwner
+            || !CustomLoopArtifactIdentifier.IsValid(operation.OwnerGenerationId!)
+            || operation.OwnerProcessId <= 0
+            || operation.OwnerAcquiredAtUtc!.Value.Offset != TimeSpan.Zero
+            || operation.OwnerAcquiredAtUtc.Value < operation.CreatedAtUtc
+            || operation.OwnerAcquiredAtUtc.Value > operation.UpdatedAtUtc))
+        {
+            throw new FormatException("Custom-loop control operation ownership metadata is invalid.");
+        }
+    }
+
+    private sealed class ControlOperationLease(string operationId, string ownerGenerationId, FileStream ownership) : ICustomLoopControlOperationLease
+    {
+        private int _disposed;
+
+        public string OperationId { get; } = operationId;
+
+        public string OwnerGenerationId { get; } = ownerGenerationId;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                ownership.Dispose();
+            }
         }
     }
 }
