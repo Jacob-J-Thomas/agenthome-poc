@@ -65,30 +65,38 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             return null;
         }
 
-        await _runtimeGate.WaitAsync(cancellationToken);
+        await _turnGate.WaitAsync(cancellationToken);
         try
         {
-            if (_discardRuntimeWhenCustomOperationsComplete)
+            await _runtimeGate.WaitAsync(cancellationToken);
+            try
             {
-                return null;
-            }
+                if (_discardRuntimeWhenCustomOperationsComplete)
+                {
+                    return null;
+                }
 
-            await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
-            if (_runtime is null && _loopRecoveryCompleted && _preserveCurrentConversationAfterRecovery)
+                await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
+                if (_runtime is null && _loopRecoveryCompleted && _preserveCurrentConversationAfterRecovery)
+                {
+                    await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+                }
+
+                if (_runtime is null)
+                {
+                    return null;
+                }
+
+                return _runtime.GetActiveConversationTranscript().Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
+            }
+            finally
             {
-                await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+                _runtimeGate.Release();
             }
-
-            if (_runtime is null)
-            {
-                return null;
-            }
-
-            return _runtime.GetActiveConversationTranscript().Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
         }
         finally
         {
-            _runtimeGate.Release();
+            _turnGate.Release();
         }
     }
 

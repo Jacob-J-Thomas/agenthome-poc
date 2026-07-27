@@ -177,6 +177,73 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task Transcript_hydration_waits_for_the_active_turn_and_returns_its_complete_canonical_messages()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+        var deltaObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDelta = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var send = host.SendMessageAsync("hydrate during turn", async (streamEvent, cancellationToken) =>
+        {
+            if (streamEvent.Type == "assistant_delta")
+            {
+                deltaObserved.TrySetResult();
+                await releaseDelta.Task.WaitAsync(cancellationToken);
+            }
+        });
+        await deltaObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var hydration = host.GetCurrentTranscriptAsync();
+        await Task.Delay(100);
+        Assert.False(hydration.IsCompleted);
+
+        releaseDelta.TrySetResult();
+        await send;
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await hydration);
+
+        Assert.Collection(
+            transcript,
+            message =>
+            {
+                Assert.Equal("user", message.Role);
+                Assert.Equal("hydrate during turn", message.Content);
+            },
+            message =>
+            {
+                Assert.Equal("assistant", message.Role);
+                Assert.Equal("web response: hydrate during turn", message.Content);
+            });
+    }
+
+    [Fact]
+    public async Task Transcript_hydration_does_not_cross_even_a_runtime_independent_turn_boundary()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+        var responseObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var send = host.SendMessageAsync("/help", async (_, cancellationToken) =>
+        {
+            responseObserved.TrySetResult();
+            await releaseResponse.Task.WaitAsync(cancellationToken);
+        });
+        await responseObserved.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var hydration = host.GetCurrentTranscriptAsync();
+        await Task.Delay(100);
+        Assert.False(hydration.IsCompleted);
+
+        releaseResponse.TrySetResult();
+        await send;
+        Assert.Null(await hydration);
+    }
+
+    [Fact]
     public async Task SendMessageAsync_surfaces_loop_failure_as_error_event()
     {
         using var workspace = new TestWorkspace();
