@@ -1,6 +1,7 @@
 using EmbodySense.Tests.Support;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.SignalR;
@@ -48,6 +49,7 @@ public sealed class ProgramTests
         Assert.Empty(provider.GetRequiredService<WebApprovalCoordinator>().GetPending());
         Assert.Equal(workspace.RootPath, provider.GetRequiredService<WebAgentRuntimeHost>().GetStatus().WorkspaceRoot);
         Assert.NotNull(provider.GetRequiredService<IWebClientNotifier>());
+        Assert.NotNull(provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>());
         Assert.NotNull(provider.GetRequiredService<IHubContext<WebSessionHub, IWebSessionClient>>());
         var hubOptions = provider.GetRequiredService<IOptions<HubOptions<WebSessionHub>>>().Value;
         Assert.Equal(2, hubOptions.MaximumParallelInvocationsPerClient);

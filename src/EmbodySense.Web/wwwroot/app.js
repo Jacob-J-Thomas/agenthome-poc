@@ -4,6 +4,14 @@ let configuration = null;
 let activeConfigTab = "overview";
 let activeAgentMessage = null;
 let hub = null;
+let conversationSynchronization = Promise.resolve();
+const synchronizedConversationOperations = new Set();
+const synchronizedConversationOperationOrder = [];
+const conversationSynchronizationRetries = new Map();
+const maxSynchronizedConversationOperations = 128;
+const maxConversationSynchronizationRetries = 40;
+const initialConversationSynchronizationRetryMilliseconds = 25;
+const maxConversationSynchronizationRetryMilliseconds = 1000;
 
 const elements = {
   approvals: document.getElementById("approvals"),
@@ -87,6 +95,7 @@ async function connectHub() {
   hub = new JsonSignalRConnection(createHubUrl());
   hub.on("StatusChanged", applyStatus);
   hub.on("ApprovalsChanged", renderApprovals);
+  hub.on("ConversationChanged", queueConversationPublicationSynchronization);
   hub.on("StreamEvent", handleStreamEvent);
   hub.onclose = scheduleReconnect;
   await hub.start();
@@ -97,6 +106,85 @@ async function connectHub() {
     appendMessage("error", `Transcript unavailable: ${error.message}`);
   }
   applyStatus(status);
+}
+
+function queueConversationPublicationSynchronization(notification) {
+  const retry = conversationSynchronizationRetries.get(notification?.operationId);
+  if (retry?.timeoutId != null) {
+    return conversationSynchronization;
+  }
+
+  conversationSynchronization = conversationSynchronization.then(() => synchronizeConversationPublication(notification));
+  return conversationSynchronization;
+}
+
+async function synchronizeConversationPublication(notification) {
+  const operationId = notification?.operationId;
+  if (!operationId || synchronizedConversationOperations.has(operationId)) {
+    return;
+  }
+
+  rememberSynchronizedConversationOperation(operationId);
+
+  try {
+    const currentTranscript = await hub.invoke("GetCurrentTranscript");
+    if (Array.isArray(currentTranscript)) {
+      clearConversationSynchronizationRetry(operationId);
+      replaceTranscript(currentTranscript);
+    } else {
+      forgetSynchronizedConversationOperation(operationId);
+      scheduleConversationSynchronizationRetry(notification, "the retained runtime is temporarily unavailable");
+    }
+  } catch (error) {
+    forgetSynchronizedConversationOperation(operationId);
+    scheduleConversationSynchronizationRetry(notification, error.message);
+  }
+}
+
+function rememberSynchronizedConversationOperation(operationId) {
+  synchronizedConversationOperations.add(operationId);
+  synchronizedConversationOperationOrder.push(operationId);
+  if (synchronizedConversationOperationOrder.length > maxSynchronizedConversationOperations) {
+    synchronizedConversationOperations.delete(synchronizedConversationOperationOrder.shift());
+  }
+}
+
+function forgetSynchronizedConversationOperation(operationId) {
+  synchronizedConversationOperations.delete(operationId);
+  for (let index = synchronizedConversationOperationOrder.length - 1; index >= 0; index -= 1) {
+    if (synchronizedConversationOperationOrder[index] === operationId) {
+      synchronizedConversationOperationOrder.splice(index, 1);
+    }
+  }
+}
+
+function scheduleConversationSynchronizationRetry(notification, detail) {
+  const operationId = notification.operationId;
+  const retry = conversationSynchronizationRetries.get(operationId) ?? { attempts: 0, timeoutId: null };
+  retry.attempts += 1;
+  if (retry.attempts > maxConversationSynchronizationRetries) {
+    conversationSynchronizationRetries.delete(operationId);
+    appendMessage("error", `Conversation synchronization unavailable: ${detail}`);
+    return;
+  }
+
+  const delay = Math.min(
+    initialConversationSynchronizationRetryMilliseconds * (2 ** (retry.attempts - 1)),
+    maxConversationSynchronizationRetryMilliseconds);
+  retry.timeoutId = window.setTimeout(() => {
+    retry.timeoutId = null;
+    queueConversationPublicationSynchronization(notification);
+  }, delay);
+  conversationSynchronizationRetries.set(operationId, retry);
+}
+
+function clearConversationSynchronizationRetry(operationId) {
+  const retry = conversationSynchronizationRetries.get(operationId);
+  if (retry?.timeoutId != null) {
+    window.clearTimeout(retry.timeoutId);
+  }
+
+  conversationSynchronizationRetries.delete(operationId);
 }
 
 function createHubUrl() {

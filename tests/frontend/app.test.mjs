@@ -82,6 +82,55 @@ test("reconnect preserves the visible transcript while runtime hydration is temp
   assert.equal(messageContent(app.elements.transcript.children[0]), "Visible conversation");
 });
 
+test("verified custom-loop publication rehydrates once per operation without appending duplicates", async () => {
+  const app = await loadApp({ activeTranscript: [{ role: "user", content: "Original prompt" }] });
+  const initialHydrations = app.socket.sentInvocations("GetCurrentTranscript").length;
+  FakeWebSocket.currentTranscript = [
+    { role: "user", content: "Original prompt" },
+    { role: "assistant", content: "Published loop output" }
+  ];
+
+  app.socket.serverSendInvocation("ConversationChanged", {
+    operationId: "publication-1",
+    conversationId: "conversation-1",
+    messageCount: 2
+  });
+  await flushAsyncWork();
+  app.socket.serverSendInvocation("ConversationChanged", {
+    operationId: "publication-1",
+    conversationId: "conversation-1",
+    messageCount: 2
+  });
+  await flushAsyncWork();
+
+  assert.equal(app.socket.sentInvocations("GetCurrentTranscript").length, initialHydrations + 1);
+  assert.equal(app.elements.transcript.children.length, 2);
+  assert.equal(messageContent(app.elements.transcript.children[1]), "Published loop output");
+});
+
+test("publication synchronization retries after deferred runtime disposal returns no transcript", async () => {
+  const app = await loadApp({ activeTranscript: [{ role: "user", content: "Original prompt" }] });
+  const initialHydrations = app.socket.sentInvocations("GetCurrentTranscript").length;
+  FakeWebSocket.currentTranscript = null;
+
+  app.socket.serverSendInvocation("ConversationChanged", {
+    operationId: "publication-after-disposal",
+    conversationId: "conversation-1",
+    messageCount: 2
+  });
+  await flushAsyncWork();
+  FakeWebSocket.currentTranscript = [
+    { role: "user", content: "Original prompt" },
+    { role: "assistant", content: "Published after deferred disposal" }
+  ];
+  await flushAsyncWork();
+  await flushAsyncWork();
+
+  assert.equal(app.socket.sentInvocations("GetCurrentTranscript").length, initialHydrations + 2);
+  assert.equal(app.elements.transcript.children.length, 2);
+  assert.equal(messageContent(app.elements.transcript.children[1]), "Published after deferred disposal");
+});
+
 test("assistant deltas update one active message and final text resets the active message", async () => {
   const app = await loadApp();
   app.elements.transcript.replaceChildren();

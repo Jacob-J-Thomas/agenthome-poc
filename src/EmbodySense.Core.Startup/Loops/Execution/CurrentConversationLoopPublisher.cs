@@ -13,20 +13,30 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Workspace;
+using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Runtime.Models;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversationPublisher
 {
     private static readonly TimeSpan ReconciliationTimeout = TimeSpan.FromSeconds(30);
+    private const int MaxRememberedNotificationOperations = 1_024;
     private readonly ConversationRuntimeState _conversationState;
     private readonly IConversationMemoryStore _conversationMemory;
+    private readonly IAgentRuntimeConversationPublicationObserver? _observer;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly Dictionary<string, LinkedListNode<string>> _notifiedOperations = new(StringComparer.Ordinal);
+    private readonly LinkedList<string> _notificationOrder = [];
 
-    public CurrentConversationLoopPublisher(ConversationRuntimeState conversationState, IConversationMemoryStore conversationMemory)
+    public CurrentConversationLoopPublisher(
+        ConversationRuntimeState conversationState,
+        IConversationMemoryStore conversationMemory,
+        IAgentRuntimeConversationPublicationObserver? observer = null)
     {
         _conversationState = conversationState ?? throw new ArgumentNullException(nameof(conversationState));
         _conversationMemory = conversationMemory ?? throw new ArgumentNullException(nameof(conversationMemory));
+        _observer = observer;
     }
 
     public async Task<CustomLoopConversationPublicationResult> PublishAsync(CustomLoopConversationPublicationRequest request, CancellationToken cancellationToken = default)
@@ -114,9 +124,12 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
         try
         {
             var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
-            return string.Equals(persistedConversation.Version, request.ConversationId, StringComparison.Ordinal) && MessagesEqual(persistedConversation.Messages, stateMessages)
-                ? new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.AlreadyPublished, request.OperationId, "The exact expected conversation prefix plus one canonical assistant output was already committed.")
-                : Uncertain(request, "The active conversation contains the canonical output, but durable conversation identity or state does not match it.");
+            if (!string.Equals(persistedConversation.Version, request.ConversationId, StringComparison.Ordinal) || !MessagesEqual(persistedConversation.Messages, stateMessages))
+            {
+                return Uncertain(request, "The active conversation contains the canonical output, but durable conversation identity or state does not match it.");
+            }
+
+            return await CompleteVerifiedPublicationAsync(request, stateMessages.Count, alreadyPublished: true, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -165,12 +178,76 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
                 return Uncertain(request, "The append returned, but the exact expected-prefix-plus-one-output state could not be proven.");
             }
 
-            var outcome = alreadyPublished ? CustomLoopConversationPublicationOutcome.AlreadyPublished : CustomLoopConversationPublicationOutcome.Published;
-            return new CustomLoopConversationPublicationResult(outcome, request.OperationId, alreadyPublished ? "The canonical output was already published." : "The canonical output was appended exactly once and verified.");
+            return await CompleteVerifiedPublicationAsync(request, stateMessages.Count(), alreadyPublished, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             return Uncertain(request, $"The append returned, but post-append state could not be verified: {exception.GetType().Name}.");
+        }
+    }
+
+    private async Task<CustomLoopConversationPublicationResult> CompleteVerifiedPublicationAsync(
+        CustomLoopConversationPublicationRequest request,
+        int messageCount,
+        bool alreadyPublished,
+        CancellationToken cancellationToken)
+    {
+        var notificationFailed = false;
+        if (_observer is not null && TryRememberNotification(request.OperationId))
+        {
+            try
+            {
+                await _observer.PublicationCommittedAsync(
+                    new AgentRuntimeConversationPublication(
+                        request.OperationId,
+                        request.RunId,
+                        request.LoopId,
+                        request.ConversationId,
+                        messageCount,
+                        alreadyPublished),
+                    cancellationToken);
+            }
+            catch (Exception)
+            {
+                ForgetNotification(request.OperationId);
+                notificationFailed = true;
+            }
+        }
+
+        var outcome = alreadyPublished ? CustomLoopConversationPublicationOutcome.AlreadyPublished : CustomLoopConversationPublicationOutcome.Published;
+        var detail = alreadyPublished ? "The canonical output was already published." : "The canonical output was appended exactly once and verified.";
+        if (notificationFailed)
+        {
+            detail += " The surface notification failed, but the durable conversation publication remains verified and a later replay may retry projection.";
+        }
+
+        return new CustomLoopConversationPublicationResult(outcome, request.OperationId, detail);
+    }
+
+    private bool TryRememberNotification(string operationId)
+    {
+        if (_notifiedOperations.ContainsKey(operationId))
+        {
+            return false;
+        }
+
+        var node = _notificationOrder.AddLast(operationId);
+        _notifiedOperations.Add(operationId, node);
+        while (_notifiedOperations.Count > MaxRememberedNotificationOperations)
+        {
+            var oldest = _notificationOrder.First!;
+            _notificationOrder.RemoveFirst();
+            _notifiedOperations.Remove(oldest.Value);
+        }
+
+        return true;
+    }
+
+    private void ForgetNotification(string operationId)
+    {
+        if (_notifiedOperations.Remove(operationId, out var node))
+        {
+            _notificationOrder.Remove(node);
         }
     }
 

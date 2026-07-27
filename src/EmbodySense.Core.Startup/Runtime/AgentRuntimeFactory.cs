@@ -29,16 +29,23 @@ namespace EmbodySense.Core.Startup.Runtime;
 public sealed class AgentRuntimeFactory
 {
     private readonly IToolApprovalPrompt _approvalPrompt;
+    private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
 
-    public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt) : this(new ToolApprovalPromptAdapter(approvalPrompt))
+    public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt) : this(new ToolApprovalPromptAdapter(approvalPrompt), null)
     {
     }
 
-    internal AgentRuntimeFactory(IToolApprovalPrompt approvalPrompt)
+    public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt, IAgentRuntimeConversationPublicationObserver conversationPublicationObserver)
+        : this(new ToolApprovalPromptAdapter(approvalPrompt), conversationPublicationObserver)
+    {
+    }
+
+    internal AgentRuntimeFactory(IToolApprovalPrompt approvalPrompt, IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
 
         _approvalPrompt = approvalPrompt;
+        _conversationPublicationObserver = conversationPublicationObserver;
     }
 
     public Task<AgentRuntime> CreateAsync(
@@ -59,10 +66,30 @@ public sealed class AgentRuntimeFactory
         }, runtimeSurface, cancellationToken);
     }
 
+    public Task<AgentRuntime> CreateAsync(
+        string? model,
+        string workingDirectory,
+        string? codexExecutablePath,
+        string codexSandbox,
+        AgentRuntimeSurface runtimeSurface,
+        bool preserveCurrentConversation,
+        CancellationToken cancellationToken = default)
+    {
+        return CreateAsync(new LlmInferenceClientOptions
+        {
+            Surface = LlmInferenceSurface.OpenAiCodex,
+            Model = model,
+            WorkingDirectory = workingDirectory,
+            CodexExecutablePath = codexExecutablePath,
+            CodexSandbox = codexSandbox
+        }, runtimeSurface, cancellationToken, preserveCurrentConversation);
+    }
+
     internal async Task<AgentRuntime> CreateAsync(
         LlmInferenceClientOptions options,
         AgentRuntimeSurface runtimeSurface,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool preserveCurrentConversation = false)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(runtimeSurface);
@@ -89,7 +116,7 @@ public sealed class AgentRuntimeFactory
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
             var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
             var customExecutionReacquisitionAllowed = recoveryOwnership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
-            var preserveCurrentConversation = !customExecutionAvailable;
+            preserveCurrentConversation |= !customExecutionAvailable;
             using var recoveryLease = recoveryOwnership.Lease;
             if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
             {
@@ -146,7 +173,7 @@ public sealed class AgentRuntimeFactory
             var customToolEvidence = new CustomLoopRunToolEvidenceSink(customRunStore);
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority);
             var customRuntimeContext = new CustomLoopRuntimeContext(paths, conversationState, conversationMemory);
-            var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory);
+            var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
             var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(effectiveOptions, _approvalPrompt, customToolAuthority, customToolEvidence);
             var customRunner = new CustomLoopOrderedRunner(customRunStore, new CustomLoopContextResolver(), customInferenceExecutor, customPublisher, auditLog, customToolAuthority);
             var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, customRunner, customInferenceExecutor, customRunner, auditLog, customExecutionGate);

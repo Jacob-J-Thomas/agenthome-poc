@@ -360,6 +360,8 @@ public sealed class WebSessionHubTests
 
         public List<IReadOnlyList<WebPendingApproval>> ApprovalSnapshots { get; } = [];
 
+        public List<WebConversationChanged> ConversationChanges { get; } = [];
+
         public List<WebStreamEvent> StreamEvents { get; } = [];
 
         public Task StatusChanged(WebStatus status)
@@ -371,6 +373,12 @@ public sealed class WebSessionHubTests
         public Task ApprovalsChanged(IReadOnlyList<WebPendingApproval> approvals)
         {
             ApprovalSnapshots.Add(approvals);
+            return Task.CompletedTask;
+        }
+
+        public Task ConversationChanged(WebConversationChanged notification)
+        {
+            ConversationChanges.Add(notification);
             return Task.CompletedTask;
         }
 

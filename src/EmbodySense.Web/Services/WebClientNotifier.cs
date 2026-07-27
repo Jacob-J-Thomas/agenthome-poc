@@ -16,4 +16,11 @@ public sealed class WebClientNotifier : IWebClientNotifier
 
         return Task.CompletedTask;
     }
+
+    public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(notification);
+
+        return Task.CompletedTask;
+    }
 }

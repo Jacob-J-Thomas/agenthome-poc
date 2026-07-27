@@ -240,6 +240,11 @@ public sealed class WebApprovalCoordinatorTests
             Notifications.Add((ownerConnectionId, approvals));
             return Task.CompletedTask;
         }
+
+        public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class ImmediateTimerTimeProvider(DateTimeOffset utcNow) : TimeProvider
