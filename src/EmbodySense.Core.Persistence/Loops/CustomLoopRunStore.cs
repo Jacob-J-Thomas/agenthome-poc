@@ -30,8 +30,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private readonly string _traceDeletionOperationsRoot;
     private readonly string _mutationLockPath;
     private readonly SemaphoreSlim _processMutationGate;
+    private readonly TimeProvider _timeProvider;
 
-    public CustomLoopRunStore(WorkspacePaths paths)
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
@@ -43,6 +44,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         EnsureContained(_workspaceRoot, _traceDeletionOperationsRoot);
         _mutationLockPath = Path.Combine(_runsRoot, MutationLockFileName);
         _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
@@ -273,18 +275,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
-        var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, safeRunId, StringComparison.Ordinal)).ToArray();
-        if (matches.Length > 1)
-        {
-            throw new FormatException($"Custom loop run id `{safeRunId}` exists in more than one loop directory. The persisted state requires review.");
-        }
-
-        if (matches.Length == 0)
+        var artifact = await ReadArtifactByRunIdAsync(safeRunId, cancellationToken);
+        if (artifact is null)
         {
             return null;
         }
 
-        var artifact = await ReadArtifactAsync(matches[0], cancellationToken);
         if (artifact.Run is not null)
         {
             var run = artifact.Run;
@@ -332,6 +328,72 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
         var operation = await ReadTraceDeletionOperationAsync(safeOperationId, cancellationToken);
         return operation is null ? CustomLoopTraceDeletionLookupResult.NotFound() : CustomLoopTraceDeletionLookupResult.Found(operation);
+    }
+
+    public async Task<CustomLoopTraceDeletionReservationResult> ReserveTraceDeletionOperationAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
+    {
+        ValidateDeletionMutation(mutation);
+        await using var lease = await AcquireMutationLockAsync(cancellationToken);
+        var existingOperation = await ReadTraceDeletionOperationAsync(mutation.Request.OperationId, cancellationToken);
+        if (existingOperation is not null)
+        {
+            if (!DeletionRequestMatches(existingOperation, mutation))
+            {
+                return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.OperationConflict, existingOperation);
+            }
+
+            var existingStatus = existingOperation.State == CustomLoopTraceDeletionOperationState.PendingMutation
+                ? CustomLoopTraceDeletionReservationStatus.Pending
+                : CustomLoopTraceDeletionReservationStatus.OutcomeCommitted;
+            return new CustomLoopTraceDeletionReservationResult(existingStatus, existingOperation);
+        }
+
+        var artifact = await ReadArtifactByRunIdAsync(mutation.Request.RunId, cancellationToken);
+        var deletionOperationCount = EnumerateTraceDeletionOperationPaths().Count;
+        var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;
+        if (deletionOperationCount >= CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace
+            || (deletionOperationCount >= generalOperationCapacity && !CanUseTombstoneDeletionOperationReservation(artifact, mutation.Request)))
+        {
+            return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.DeletionOperationLimitExceeded, null);
+        }
+
+        var reservedAtUtc = Max(mutation.RequestedAtUtc, _timeProvider.GetUtcNow().ToUniversalTime());
+        var operation = new CustomLoopTraceDeletionOperation(
+            CustomLoopTraceDeletionOperation.CurrentSchemaVersion,
+            mutation.Request.OperationId,
+            mutation.RequestHash,
+            mutation.Request,
+            mutation.RequestedAtUtc,
+            reservedAtUtc,
+            CustomLoopTraceDeletionOperationState.PendingMutation,
+            CustomLoopTraceDeletionStoreStatus.Unknown,
+            null,
+            CustomLoopTraceDeletionIntegrity.Unknown);
+        await WriteTraceDeletionOperationAsync(operation, overwrite: false, cancellationToken);
+        return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.Reserved, operation);
+    }
+
+    public async Task<CustomLoopTraceDeletionStoreResult> CommitTraceDeletionAuditFailureAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
+    {
+        ValidateDeletionMutation(mutation);
+        await using var lease = await AcquireMutationLockAsync(cancellationToken);
+        var operation = await ReadTraceDeletionOperationAsync(mutation.Request.OperationId, cancellationToken);
+        if (operation is null)
+        {
+            return new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Unknown, null, CustomLoopTraceDeletionIntegrity.Unknown);
+        }
+
+        if (!DeletionRequestMatches(operation, mutation))
+        {
+            return new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.OperationConflict, operation.Tombstone, operation.Integrity);
+        }
+
+        if (operation.State == CustomLoopTraceDeletionOperationState.OutcomeCommitted)
+        {
+            return operation.ToStoreResult() with { Status = operation.Outcome == CustomLoopTraceDeletionStoreStatus.Deleted ? CustomLoopTraceDeletionStoreStatus.AlreadyDeleted : operation.Outcome };
+        }
+
+        return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.AuditUnavailable, null, cancellationToken);
     }
 
     public async Task<CustomLoopTraceDeletionStoreResult> DeleteTerminalTraceAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
@@ -414,7 +476,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var completedAtUtc = run.CompletedAtUtc ?? throw new FormatException("A terminal custom-loop run must have a completion timestamp before trace deletion.");
-        var deletedAtUtc = operation.RequestedAtUtc < completedAtUtc ? completedAtUtc : operation.RequestedAtUtc;
+        var mutationAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
+        var deletedAtUtc = mutationAtUtc < completedAtUtc ? completedAtUtc : mutationAtUtc;
         var tombstone = new CustomLoopTraceTombstone(
             CustomLoopTraceTombstone.CurrentSchemaVersion,
             CustomLoopTraceTombstone.CurrentArtifactKind,
@@ -474,7 +537,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var tombstone = operation.Tombstone;
-        if (tombstone is not null)
+        if (tombstone is not null && operation.Outcome is CustomLoopTraceDeletionStoreStatus.Deleted or CustomLoopTraceDeletionStoreStatus.AlreadyDeleted)
         {
             tombstone = tombstone with { OutcomeIntegrity = integrity };
             ValidateTombstone(tombstone);
@@ -828,6 +891,17 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
     }
 
+    private async Task<RunArtifact?> ReadArtifactByRunIdAsync(string runId, CancellationToken cancellationToken)
+    {
+        var matches = EnumerateArtifactLocations().Where(location => string.Equals(location.RunId, runId, StringComparison.Ordinal)).ToArray();
+        if (matches.Length > 1)
+        {
+            throw new FormatException($"Custom loop run id `{runId}` exists in more than one loop directory. The persisted state requires review.");
+        }
+
+        return matches.Length == 0 ? null : await ReadArtifactAsync(matches[0], cancellationToken);
+    }
+
     private async Task<byte[]> ReadBoundedArtifactAsync(string path, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: true);
@@ -1097,9 +1171,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private async Task<CustomLoopTraceDeletionStoreResult> CommitDeletionOutcomeAsync(CustomLoopTraceDeletionOperation operation, CustomLoopTraceDeletionStoreStatus status, CustomLoopTraceTombstone? tombstone, CancellationToken cancellationToken)
     {
-        var integrity = status == CustomLoopTraceDeletionStoreStatus.Deleted
-            ? tombstone?.OutcomeIntegrity ?? CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit
-            : CustomLoopTraceDeletionIntegrity.Complete;
+        var integrity = tombstone is not null && status == CustomLoopTraceDeletionStoreStatus.Deleted
+            ? tombstone.OutcomeIntegrity
+            : CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit;
         var updatedAtUtc = tombstone is null ? operation.UpdatedAtUtc : Max(operation.UpdatedAtUtc, tombstone.DeletedAtUtc);
         var completed = operation with
         {
@@ -1632,10 +1706,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             }
         }
 
-        if (operation.Outcome is not CustomLoopTraceDeletionStoreStatus.Deleted and not CustomLoopTraceDeletionStoreStatus.AlreadyDeleted
-            && operation.Integrity != CustomLoopTraceDeletionIntegrity.Complete)
+        if (operation.Integrity is CustomLoopTraceDeletionIntegrity.Unknown)
         {
-            throw new FormatException("A non-mutating trace-deletion outcome must be durably complete.");
+            throw new FormatException("A committed trace-deletion outcome must retain its outcome-audit integrity state.");
         }
     }
 

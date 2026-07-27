@@ -79,6 +79,99 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Reservation_selects_one_intent_owner_and_is_replayable_across_store_instances()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var firstStore = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(firstStore);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await firstStore.InspectTraceAsync(terminal.Id));
+        var mutation = Mutation(Request(terminal.Id, inspection.PersistedArtifactHash));
+        var secondStore = new CustomLoopRunStore(paths);
+
+        var reservations = await Task.WhenAll(firstStore.ReserveTraceDeletionOperationAsync(mutation), secondStore.ReserveTraceDeletionOperationAsync(mutation));
+
+        Assert.Single(reservations, result => result.Status == CustomLoopTraceDeletionReservationStatus.Reserved);
+        Assert.Single(reservations, result => result.Status == CustomLoopTraceDeletionReservationStatus.Pending);
+        Assert.All(reservations, result => Assert.Equal(CustomLoopTraceDeletionOperationState.PendingMutation, result.Operation!.State));
+        Assert.Single(Directory.EnumerateFiles(paths.CustomLoopTraceDeletionOperationsPath, "*.json"));
+
+        var deleted = await secondStore.DeleteTerminalTraceAsync(mutation);
+        var replay = await firstStore.ReserveTraceDeletionOperationAsync(mutation);
+
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, deleted.Status);
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.OutcomeCommitted, replay.Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, replay.Operation!.Outcome);
+    }
+
+    [Fact]
+    public async Task Reservation_uses_acquisition_time_and_does_not_decode_unrelated_run_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var reservedAtUtc = Timestamp.AddHours(1);
+        var store = new CustomLoopRunStore(paths, new FixedTimeProvider(reservedAtUtc));
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var unrelatedLoopRoot = Path.Combine(paths.CustomLoopRunsPath, "loop-unrelated");
+        Directory.CreateDirectory(unrelatedLoopRoot);
+        await File.WriteAllTextAsync(Path.Combine(unrelatedLoopRoot, "run-unrelated.json"), "not-json");
+
+        var reservation = await store.ReserveTraceDeletionOperationAsync(Mutation(Request(terminal.Id, inspection.PersistedArtifactHash)));
+
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, reservation.Status);
+        Assert.Equal(Timestamp.AddMinutes(3), reservation.Operation!.RequestedAtUtc);
+        Assert.Equal(reservedAtUtc, reservation.Operation.UpdatedAtUtc);
+    }
+
+    [Fact]
+    public async Task Deletion_tombstone_uses_the_actual_post_intent_mutation_time()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var time = new MutableTimeProvider(Timestamp.AddHours(1));
+        var store = new CustomLoopRunStore(paths, time);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var mutation = Mutation(Request(terminal.Id, inspection.PersistedArtifactHash));
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
+        time.UtcNow = Timestamp.AddHours(2);
+
+        var deleted = await store.DeleteTerminalTraceAsync(mutation);
+
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, deleted.Status);
+        Assert.Equal(time.UtcNow, deleted.Tombstone!.DeletedAtUtc);
+        Assert.True(deleted.Tombstone.DeletedAtUtc > mutation.RequestedAtUtc);
+    }
+
+    [Fact]
+    public async Task Intent_audit_failure_completion_is_durable_and_does_not_replace_trace_content()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var mutation = Mutation(Request(terminal.Id, inspection.PersistedArtifactHash));
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
+
+        var rejected = await store.CommitTraceDeletionAuditFailureAsync(mutation);
+        var pendingAudit = await new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync(mutation.Request.OperationId);
+
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.AuditUnavailable, rejected.Status);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit, rejected.Integrity);
+        Assert.Equal(CustomLoopTraceDeletionLookupStatus.OutcomeCommitted, pendingAudit.Status);
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.Complete));
+
+        var restarted = new CustomLoopRunStore(paths);
+        var replay = await restarted.CommitTraceDeletionAuditFailureAsync(mutation);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.AuditUnavailable, replay.Status);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.Complete, replay.Integrity);
+        Assert.Equal(CustomLoopTraceArtifactKind.LiveTrace, (await restarted.InspectTraceAsync(terminal.Id))!.Kind);
+    }
+
+    [Fact]
     public async Task Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible()
     {
         using var workspace = new TestWorkspace();
@@ -129,6 +222,7 @@ public sealed class CustomLoopTraceRetentionStoreTests
 
         var nonterminal = await store.DeleteTerminalTraceAsync(Mutation(Request(admitted.Id, inspection.PersistedArtifactHash)));
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Nonterminal, nonterminal.Status);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit, nonterminal.Integrity);
         Assert.NotNull(await store.GetAsync(admitted.Id));
 
         var running = Advance(admitted, CustomLoopRunStatus.Running);
@@ -139,6 +233,7 @@ public sealed class CustomLoopTraceRetentionStoreTests
         var mismatch = await store.DeleteTerminalTraceAsync(Mutation(mismatchRequest));
 
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.HashMismatch, mismatch.Status);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit, mismatch.Integrity);
         Assert.NotNull(await store.GetAsync(terminal.Id));
         Assert.Equal(CustomLoopTraceDeletionOperationState.OutcomeCommitted, (await store.GetTraceDeletionOperationAsync(mismatchRequest.OperationId)).Operation!.State);
     }
@@ -168,7 +263,9 @@ public sealed class CustomLoopTraceRetentionStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new CustomLoopRunStore(paths);
+        var deletionTime = Timestamp.AddHours(1);
+        var timeProvider = new FixedTimeProvider(deletionTime);
+        var store = new CustomLoopRunStore(paths, timeProvider);
         var terminal = await CreateTerminalRunAsync(store);
         var inspection = await store.InspectTraceAsync(terminal.Id);
         Assert.NotNull(inspection);
@@ -178,14 +275,14 @@ public sealed class CustomLoopTraceRetentionStoreTests
         await WriteOperationAsync(paths, pending);
         var retry = mutation with { RequestedAtUtc = mutation.RequestedAtUtc.AddMinutes(10) };
 
-        var recoveredBeforeMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(retry);
+        var recoveredBeforeMutation = await new CustomLoopRunStore(paths, timeProvider).DeleteTerminalTraceAsync(retry);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, recoveredBeforeMutation.Status);
         var firstTombstone = (await store.InspectTraceAsync(terminal.Id))!.Tombstone;
         Assert.NotNull(firstTombstone);
-        Assert.Equal(pending.RequestedAtUtc, firstTombstone.DeletedAtUtc);
+        Assert.Equal(deletionTime, firstTombstone.DeletedAtUtc);
 
         await WriteOperationAsync(paths, pending);
-        var recoveredAfterMutation = await new CustomLoopRunStore(paths).DeleteTerminalTraceAsync(retry);
+        var recoveredAfterMutation = await new CustomLoopRunStore(paths, timeProvider).DeleteTerminalTraceAsync(retry);
 
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, recoveredAfterMutation.Status);
         Assert.Equal(firstTombstone, recoveredAfterMutation.Tombstone);
@@ -238,6 +335,13 @@ public sealed class CustomLoopTraceRetentionStoreTests
 
         var operation = (await store.GetTraceDeletionOperationAsync(conflictRequest.OperationId)).Operation;
         Assert.NotNull(operation?.Tombstone);
+        var originalTombstone = operation!.Tombstone;
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(conflictRequest.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(conflictRequest.OperationId, CustomLoopTraceDeletionIntegrity.Complete));
+        operation = (await store.GetTraceDeletionOperationAsync(conflictRequest.OperationId)).Operation;
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.Complete, operation!.Integrity);
+        Assert.Equal(originalTombstone, operation.Tombstone);
+        Assert.Equal(originalTombstone, (await store.InspectTraceAsync(terminal.Id))!.Tombstone);
         await WriteOperationAsync(paths, operation! with { Tombstone = operation.Tombstone! with { SchemaVersion = 99 } });
 
         var restarted = new CustomLoopRunStore(paths);
@@ -364,6 +468,18 @@ public sealed class CustomLoopTraceRetentionStoreTests
     {
         Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, operation.OperationId + ".json"), JsonSerializer.Serialize(operation, JsonOptions) + "\n");
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => timestamp;
+    }
+
+    private sealed class MutableTimeProvider(DateTimeOffset timestamp) : TimeProvider
+    {
+        public DateTimeOffset UtcNow { get; set; } = timestamp;
+
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 
     private static string Hash(byte[] content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();

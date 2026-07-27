@@ -127,7 +127,7 @@ public sealed class LoopRunsController : ControllerBase
             {
                 "NotFound" => NotFound(response),
                 "Invalid" => BadRequest(response),
-                "Nonterminal" or "HashMismatch" or "Conflict" or "LimitExceeded" or "OperationLimitExceeded" => Conflict(response),
+                "Nonterminal" or "HashMismatch" or "Conflict" or "LimitExceeded" or "OperationLimitExceeded" or "OperationInProgress" => Conflict(response),
                 "AuditUnavailable" => StatusCode(StatusCodes.Status503ServiceUnavailable, response),
                 _ => Ok(response)
             };

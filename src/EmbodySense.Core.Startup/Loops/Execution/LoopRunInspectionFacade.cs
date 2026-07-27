@@ -127,7 +127,7 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         }
 
         var result = await _retention.DeleteAsync(new CustomLoopTraceDeletionRequest(runId, expectedTraceHash, operationId, _actor, _surface), cancellationToken);
-        return new LoopTraceDeletionResponse(result.Status.ToString(), result.IsCommitted, result.Detail, result.Tombstone is null ? null : Map(result.Tombstone));
+        return new LoopTraceDeletionResponse(result.Status.ToString(), result.IsCommitted, result.IsOutcomeCommitted, result.Detail, result.Tombstone is null ? null : Map(result.Tombstone));
     }
 
     private static LoopTraceInspectionSnapshot Map(CustomLoopTraceInspection trace)

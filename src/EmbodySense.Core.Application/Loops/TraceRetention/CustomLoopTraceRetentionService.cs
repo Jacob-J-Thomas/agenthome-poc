@@ -10,6 +10,7 @@ namespace EmbodySense.Core.Application.Loops.TraceRetention;
 public sealed class CustomLoopTraceRetentionService
 {
     private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ReservationOwnershipTimeout = IntegrityWriteTimeout + TimeSpan.FromSeconds(5);
     private readonly ICustomLoopRunStore _store;
     private readonly IAuditLog _auditLog;
     private readonly TimeProvider _timeProvider;
@@ -35,6 +36,7 @@ public sealed class CustomLoopTraceRetentionService
         }
 
         var requestHash = CustomLoopTraceDeletionRequestHash.Compute(request);
+        var mutation = new CustomLoopTraceDeletionMutation(request, requestHash, _timeProvider.GetUtcNow().ToUniversalTime());
         CustomLoopTraceDeletionLookupResult lookup;
         try
         {
@@ -57,109 +59,239 @@ public sealed class CustomLoopTraceRetentionService
                 return await CompleteOutcomeAsync(request, lookup.Operation.ToStoreResult(), isReplay: true, lookup.Operation.UpdatedAtUtc);
             }
 
-            if (lookup.Status != CustomLoopTraceDeletionLookupStatus.PendingMutation)
+            if (lookup.Status == CustomLoopTraceDeletionLookupStatus.PendingMutation)
             {
-                return Result(CustomLoopTraceDeletionStatus.Invalid, null, "The deletion operation ledger contains an unsupported state.");
-            }
-        }
-        else
-        {
-            CustomLoopTraceInspection? inspection;
-            try
-            {
-                inspection = await _store.InspectTraceAsync(request.RunId, cancellationToken);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                return Result(CustomLoopTraceDeletionStatus.Invalid, null, $"The trace could not be inspected safely: {exception.GetType().Name}.");
+                return await RecoverPendingReservationAsync(mutation, lookup.Operation);
             }
 
-            if (inspection is null)
-            {
-                return Result(CustomLoopTraceDeletionStatus.NotFound, null, "The run trace does not exist.");
-            }
-
-            if (inspection.IsDeleted)
-            {
-                return Result(CustomLoopTraceDeletionStatus.Conflict, inspection.Tombstone, "The terminal trace was already deleted by a different confirmed operation.");
-            }
-
-            if (inspection.CompletedAtUtc is null)
-            {
-                return Result(CustomLoopTraceDeletionStatus.Nonterminal, null, "Only terminal run traces can be deleted.");
-            }
-
-            if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(inspection.PersistedArtifactHash), Encoding.ASCII.GetBytes(request.ExpectedTraceHash)))
-            {
-                return Result(CustomLoopTraceDeletionStatus.HashMismatch, null, "The persisted trace changed; inspect it again before deleting sensitive content.");
-            }
-
-            if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopTraceDeletionIntent, AuditSchema.Outcomes.Requested, request, inspection, null), cancellationToken))
-            {
-                return Result(CustomLoopTraceDeletionStatus.AuditUnavailable, null, "The trace was not changed because its deletion-intent audit could not be recorded.");
-            }
+            return Result(CustomLoopTraceDeletionStatus.Invalid, null, "The deletion operation ledger contains an unsupported state.");
         }
 
-        CustomLoopTraceDeletionStoreResult stored;
-        using var mutationIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        CustomLoopTraceInspection? inspection;
         try
         {
-            var mutation = new CustomLoopTraceDeletionMutation(request, requestHash, _timeProvider.GetUtcNow().ToUniversalTime());
-            stored = await _store.DeleteTerminalTraceAsync(mutation, mutationIntegrityWindow.Token);
+            inspection = await _store.InspectTraceAsync(request.RunId, cancellationToken);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return Result(CustomLoopTraceDeletionStatus.Invalid, null, $"The trace could not be inspected safely: {exception.GetType().Name}.");
+        }
+
+        if (inspection is null)
+        {
+            return Result(CustomLoopTraceDeletionStatus.NotFound, null, "The run trace does not exist.");
+        }
+
+        if (inspection.IsDeleted)
+        {
+            return Result(CustomLoopTraceDeletionStatus.Conflict, inspection.Tombstone, "The terminal trace was already deleted by a different confirmed operation.");
+        }
+
+        if (inspection.CompletedAtUtc is null)
+        {
+            return Result(CustomLoopTraceDeletionStatus.Nonterminal, null, "Only terminal run traces can be deleted.");
+        }
+
+        if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(inspection.PersistedArtifactHash), Encoding.ASCII.GetBytes(request.ExpectedTraceHash)))
+        {
+            return Result(CustomLoopTraceDeletionStatus.HashMismatch, null, "The persisted trace changed; inspect it again before deleting sensitive content.");
+        }
+
+        CustomLoopTraceDeletionReservationResult reservation;
+        try
+        {
+            reservation = await _store.ReserveTraceDeletionOperationAsync(mutation, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
             try
             {
                 using var recoveryWindow = new CancellationTokenSource(IntegrityWriteTimeout);
-                var inspection = await _store.InspectTraceAsync(request.RunId, recoveryWindow.Token);
-                if (inspection?.Tombstone is not null
-                    && string.Equals(inspection.Tombstone.DeletionOperationId, request.OperationId, StringComparison.Ordinal)
-                    && string.Equals(inspection.Tombstone.DeletionRequestHash, requestHash, StringComparison.Ordinal))
+                var recovered = await _store.GetTraceDeletionOperationAsync(request.OperationId, recoveryWindow.Token);
+                if (recovered.Operation is not null && OperationMatches(recovered.Operation, request, requestHash))
                 {
-                    return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, inspection.Tombstone, "The trace deletion committed, but its durable operation outcome requires recovery before audit completion.");
+                    return recovered.Status == CustomLoopTraceDeletionLookupStatus.OutcomeCommitted
+                        ? await CompleteOutcomeAsync(request, recovered.Operation.ToStoreResult(), isReplay: true, recovered.Operation.UpdatedAtUtc)
+                        : await RecoverPendingReservationAsync(mutation, recovered.Operation);
                 }
             }
             catch (Exception)
             {
             }
 
+            return Result(CustomLoopTraceDeletionStatus.Invalid, null, $"The deletion operation could not be reserved safely: {exception.GetType().Name}.");
+        }
+
+        if (reservation.Status == CustomLoopTraceDeletionReservationStatus.OperationConflict)
+        {
+            return Result(CustomLoopTraceDeletionStatus.Conflict, reservation.Operation?.Tombstone, "The deletion operation id was reused for a different authenticated request.");
+        }
+
+        if (reservation.Status == CustomLoopTraceDeletionReservationStatus.DeletionOperationLimitExceeded)
+        {
+            return Result(CustomLoopTraceDeletionStatus.OperationLimitExceeded, null, "The explicit trace-deletion operation receipt limit was reached; no trace content was deleted.");
+        }
+
+        if (reservation.Operation is null)
+        {
+            return Result(CustomLoopTraceDeletionStatus.Invalid, null, "The deletion operation reservation did not retain its durable receipt.");
+        }
+
+        if (reservation.Status == CustomLoopTraceDeletionReservationStatus.OutcomeCommitted)
+        {
+            return await CompleteOutcomeAsync(request, reservation.Operation.ToStoreResult(), isReplay: true, reservation.Operation.UpdatedAtUtc);
+        }
+
+        if (reservation.Status == CustomLoopTraceDeletionReservationStatus.Pending)
+        {
+            return await RecoverPendingReservationAsync(mutation, reservation.Operation);
+        }
+
+        if (reservation.Status != CustomLoopTraceDeletionReservationStatus.Reserved)
+        {
+            return Result(CustomLoopTraceDeletionStatus.Invalid, null, "The deletion operation reservation returned an unsupported state.");
+        }
+
+        using var ownerWindow = CreateOwnerWindow(reservation.Operation.UpdatedAtUtc, cancellationToken);
+        if (!await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopTraceDeletionIntent, AuditSchema.Outcomes.Requested, request, inspection, null), ownerWindow.Token))
+        {
+            return await CommitAuditFailureAsync(mutation, "The trace was not changed because its deletion-intent audit could not be recorded.");
+        }
+
+        CustomLoopTraceDeletionStoreResult stored;
+        try
+        {
+            stored = await _store.DeleteTerminalTraceAsync(mutation, ownerWindow.Token);
+        }
+        catch (Exception exception)
+        {
+            var recovered = await TryRecoverCommittedDeletionAsync(mutation);
+            if (recovered is not null)
+            {
+                return recovered;
+            }
+
             return Result(CustomLoopTraceDeletionStatus.Invalid, null, $"The trace deletion could not be persisted safely: {exception.GetType().Name}.");
         }
 
-        if (!stored.IsCommitted)
+        if (!stored.HasCommittedOutcome)
         {
             return MapRejectedStoreResult(stored);
         }
 
-        return await CompleteOutcomeAsync(request, stored, isReplay: lookup.Operation is not null);
+        return await CompleteOutcomeAsync(request, stored, isReplay: false);
+    }
+
+    private async Task<CustomLoopTraceDeletionResult> RecoverPendingReservationAsync(CustomLoopTraceDeletionMutation mutation, CustomLoopTraceDeletionOperation operation)
+    {
+        var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        if (operation.UpdatedAtUtc > now - ReservationOwnershipTimeout)
+        {
+            return Result(CustomLoopTraceDeletionStatus.OperationInProgress, null, "The matching deletion operation is still inside its bounded end-to-end intent/mutation ownership window.");
+        }
+
+        var recovered = await TryRecoverCommittedDeletionAsync(mutation);
+        if (recovered is not null)
+        {
+            return recovered;
+        }
+
+        return await CommitAuditFailureAsync(mutation, "The trace was not changed because a prior deletion owner ended before its intent and mutation could be reconciled safely.");
+    }
+
+    private async Task<CustomLoopTraceDeletionResult?> TryRecoverCommittedDeletionAsync(CustomLoopTraceDeletionMutation mutation)
+    {
+        using var recoveryWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        try
+        {
+            var lookup = await _store.GetTraceDeletionOperationAsync(mutation.Request.OperationId, recoveryWindow.Token);
+            if (lookup.Operation is not null && lookup.Status == CustomLoopTraceDeletionLookupStatus.OutcomeCommitted)
+            {
+                return await CompleteOutcomeAsync(mutation.Request, lookup.Operation.ToStoreResult(), isReplay: true, lookup.Operation.UpdatedAtUtc);
+            }
+
+            var inspection = await _store.InspectTraceAsync(mutation.Request.RunId, recoveryWindow.Token);
+            if (inspection?.Tombstone is null
+                || !string.Equals(inspection.Tombstone.DeletionOperationId, mutation.Request.OperationId, StringComparison.Ordinal)
+                || !string.Equals(inspection.Tombstone.DeletionRequestHash, mutation.RequestHash, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            try
+            {
+                var reconciled = await _store.DeleteTerminalTraceAsync(mutation, recoveryWindow.Token);
+                return reconciled.HasCommittedOutcome
+                    ? await CompleteOutcomeAsync(mutation.Request, reconciled, isReplay: true)
+                    : Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, inspection.Tombstone, "The trace deletion committed, but its durable operation outcome remains pending reconciliation.");
+            }
+            catch (Exception)
+            {
+                return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, inspection.Tombstone, "The trace deletion committed, but its durable operation outcome remains pending reconciliation.");
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private async Task<CustomLoopTraceDeletionResult> CommitAuditFailureAsync(CustomLoopTraceDeletionMutation mutation, string detail)
+    {
+        using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        try
+        {
+            var stored = await _store.CommitTraceDeletionAuditFailureAsync(mutation, integrityWindow.Token);
+            if (!stored.HasCommittedOutcome)
+            {
+                return Result(CustomLoopTraceDeletionStatus.AuditUnavailable, null, detail + " Its durable rejection outcome could not be completed.");
+            }
+
+            return await CompleteOutcomeAsync(mutation.Request, stored, isReplay: false);
+        }
+        catch (Exception)
+        {
+            return Result(CustomLoopTraceDeletionStatus.AuditUnavailable, null, detail + " Its durable rejection outcome requires recovery.");
+        }
     }
 
     private async Task<CustomLoopTraceDeletionResult> CompleteOutcomeAsync(CustomLoopTraceDeletionRequest request, CustomLoopTraceDeletionStoreResult stored, bool isReplay, DateTimeOffset? outcomeAuditStartedAtUtc = null)
     {
-        if (!stored.IsCommitted || stored.Tombstone is null)
+        if (stored.IsCommitted && stored.Tombstone is null)
+        {
+            return Result(CustomLoopTraceDeletionStatus.Invalid, null, "The committed trace deletion did not retain its required tombstone.", outcomeCommitted: true);
+        }
+
+        if (stored.IsCommitted && stored.Integrity == CustomLoopTraceDeletionIntegrity.Unknown)
+        {
+            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed, but its durable audit-integrity state requires review.", outcomeCommitted: true);
+        }
+
+        if (!stored.HasCommittedOutcome)
         {
             return MapRejectedStoreResult(stored);
         }
 
         if (stored.Integrity == CustomLoopTraceDeletionIntegrity.Complete)
         {
-            return Result(CustomLoopTraceDeletionStatus.Replayed, stored.Tombstone, "The confirmed trace deletion was already committed and fully audited.");
+            return ProjectCompletedOutcome(stored, isReplay, auditWarning: false);
         }
 
         if (stored.Integrity == CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning)
         {
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed; its original outcome-audit warning remains visible.");
+            return ProjectCompletedOutcome(stored, isReplay, auditWarning: true);
         }
 
         if (stored.Integrity == CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted)
         {
-            return await ResolveInterruptedOutcomeAuditAsync(request, stored.Tombstone, outcomeAuditStartedAtUtc);
+            return await ResolveInterruptedOutcomeAuditAsync(request, stored, outcomeAuditStartedAtUtc);
         }
 
         if (stored.Integrity != CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit)
         {
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed, but its durable audit-integrity state requires review.");
+            return stored.IsCommitted
+                ? Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed, but its durable audit-integrity state requires review.", outcomeCommitted: true)
+                : Result(CustomLoopTraceDeletionStatus.Invalid, stored.Tombstone, "The trace-deletion rejection has an unsupported durable audit-integrity state.");
         }
 
         using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
@@ -171,60 +303,58 @@ public sealed class CustomLoopTraceRetentionService
                 var existing = await _store.GetTraceDeletionOperationAsync(request.OperationId, integrityWindow.Token);
                 if (existing.Operation?.Integrity == CustomLoopTraceDeletionIntegrity.Complete)
                 {
-                    return Result(CustomLoopTraceDeletionStatus.Replayed, existing.Operation.Tombstone ?? stored.Tombstone, "The confirmed trace deletion was completed by its existing outcome-audit owner.");
+                    return ProjectCompletedOutcome(existing.Operation.ToStoreResult(), isReplay: true, auditWarning: false);
                 }
 
                 if (existing.Operation?.Integrity == CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning)
                 {
-                    return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, existing.Operation.Tombstone ?? stored.Tombstone, "The trace deletion is committed; its original outcome-audit warning remains visible.");
+                    return ProjectCompletedOutcome(existing.Operation.ToStoreResult(), isReplay: true, auditWarning: true);
                 }
 
-                return await ResolveInterruptedOutcomeAuditAsync(request, existing.Operation?.Tombstone ?? stored.Tombstone, existing.Operation?.UpdatedAtUtc);
+                var existingStored = existing.Operation?.ToStoreResult() ?? stored;
+                return await ResolveInterruptedOutcomeAuditAsync(request, existingStored, existing.Operation?.UpdatedAtUtc);
             }
 
             if (started != CustomLoopTraceDeletionAuditMarkStatus.Marked)
             {
-                return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed, but its outcome-audit attempt could not be durably started.");
+                return ProjectCompletedOutcome(stored with { Integrity = CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning }, isReplay, auditWarning: true);
             }
         }
         catch (Exception)
         {
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed, but its outcome-audit attempt could not be durably started.");
+            return ProjectCompletedOutcome(stored with { Integrity = CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning }, isReplay, auditWarning: true);
         }
 
-        var audited = await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopTraceDeletionOutcome, AuditSchema.Outcomes.Succeeded, request, null, stored.Tombstone), integrityWindow.Token);
+        var audited = await TryAppendAuditAsync(CreateAudit(AuditSchema.Actions.LoopTraceDeletionOutcome, AuditOutcome(stored.Status), request, null, stored.Tombstone), integrityWindow.Token);
         var desiredIntegrity = audited ? CustomLoopTraceDeletionIntegrity.Complete : CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning;
         try
         {
             var mark = await _store.MarkTraceDeletionOutcomeAsync(request.OperationId, desiredIntegrity, integrityWindow.Token);
             if (mark is not CustomLoopTraceDeletionAuditMarkStatus.Marked and not CustomLoopTraceDeletionAuditMarkStatus.AlreadyMarked)
             {
-                return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed, but its durable outcome-integrity marker requires review.");
+                return ProjectCompletedOutcome(stored with { Integrity = CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning }, isReplay, auditWarning: true);
             }
 
             var refreshed = await _store.GetTraceDeletionOperationAsync(request.OperationId, integrityWindow.Token);
-            var tombstone = refreshed.Operation?.Tombstone ?? stored.Tombstone;
-            var integrity = refreshed.Operation?.Integrity ?? desiredIntegrity;
-            if (integrity == CustomLoopTraceDeletionIntegrity.Complete)
+            if (refreshed.Operation is not null)
             {
-                var status = isReplay ? CustomLoopTraceDeletionStatus.Replayed : CustomLoopTraceDeletionStatus.Deleted;
-                return Result(status, tombstone, isReplay ? "The confirmed trace deletion was recovered and completed." : "The terminal trace content was replaced by an audited tombstone.");
+                return ProjectCompletedOutcome(refreshed.Operation.ToStoreResult(), isReplay, refreshed.Operation.Integrity != CustomLoopTraceDeletionIntegrity.Complete);
             }
 
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, tombstone, "The terminal trace content was deleted, but its outcome audit could not be recorded.");
+            return ProjectCompletedOutcome(stored with { Integrity = desiredIntegrity }, isReplay, !audited);
         }
         catch (Exception)
         {
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, "The trace deletion is committed, but its durable outcome-integrity marker could not be completed.");
+            return ProjectCompletedOutcome(stored with { Integrity = CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning }, isReplay, auditWarning: true);
         }
     }
 
-    private async Task<CustomLoopTraceDeletionResult> ResolveInterruptedOutcomeAuditAsync(CustomLoopTraceDeletionRequest request, CustomLoopTraceTombstone tombstone, DateTimeOffset? outcomeAuditStartedAtUtc)
+    private async Task<CustomLoopTraceDeletionResult> ResolveInterruptedOutcomeAuditAsync(CustomLoopTraceDeletionRequest request, CustomLoopTraceDeletionStoreResult stored, DateTimeOffset? outcomeAuditStartedAtUtc)
     {
         var now = _timeProvider.GetUtcNow().ToUniversalTime();
         if (outcomeAuditStartedAtUtc is not null && outcomeAuditStartedAtUtc.Value <= now && outcomeAuditStartedAtUtc.Value > now - IntegrityWriteTimeout)
         {
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, tombstone, "The trace deletion is committed and its existing outcome-audit owner is still active; retry after that bounded integrity window completes.");
+            return ProjectCompletedOutcome(stored, isReplay: true, auditWarning: true, "The existing outcome-audit owner is still active; retry after that bounded integrity window completes.");
         }
 
         using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
@@ -234,15 +364,49 @@ public sealed class CustomLoopTraceRetentionService
             var refreshed = await _store.GetTraceDeletionOperationAsync(request.OperationId, integrityWindow.Token);
             if (refreshed.Operation?.Integrity == CustomLoopTraceDeletionIntegrity.Complete)
             {
-                return Result(CustomLoopTraceDeletionStatus.Replayed, refreshed.Operation.Tombstone ?? tombstone, "The confirmed trace deletion was completed by its original outcome-audit owner.");
+                return ProjectCompletedOutcome(refreshed.Operation.ToStoreResult(), isReplay: true, auditWarning: false);
             }
 
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, refreshed.Operation?.Tombstone ?? tombstone, "The trace deletion is committed; a prior outcome-audit attempt was interrupted, so audit integrity requires review and the audit was not duplicated.");
+            var warning = refreshed.Operation?.ToStoreResult() ?? stored with { Integrity = CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning };
+            return ProjectCompletedOutcome(warning, isReplay: true, auditWarning: true, "A prior outcome-audit attempt was interrupted, so audit integrity requires review and the audit was not duplicated.");
         }
         catch (Exception)
         {
-            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, tombstone, "The trace deletion is committed; an interrupted outcome-audit attempt and its incomplete warning marker require review.");
+            return ProjectCompletedOutcome(stored with { Integrity = CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning }, isReplay: true, auditWarning: true, "An interrupted outcome-audit attempt and its incomplete warning marker require review.");
         }
+    }
+
+    private static CustomLoopTraceDeletionResult ProjectCompletedOutcome(CustomLoopTraceDeletionStoreResult stored, bool isReplay, bool auditWarning, string? detail = null)
+    {
+        if (!stored.IsCommitted)
+        {
+            var rejected = MapRejectedStoreResult(stored);
+            var rejectionDetail = detail ?? (auditWarning ? rejected.Detail + " Its terminal outcome audit requires review." : rejected.Detail);
+            return rejected with { Detail = rejectionDetail, IsOutcomeCommitted = true };
+        }
+
+        if (auditWarning)
+        {
+            return Result(CustomLoopTraceDeletionStatus.CommittedWithAuditWarning, stored.Tombstone, detail ?? "The trace deletion is committed; its outcome-audit warning remains visible.", outcomeCommitted: true);
+        }
+
+        return Result(
+            isReplay ? CustomLoopTraceDeletionStatus.Replayed : CustomLoopTraceDeletionStatus.Deleted,
+            stored.Tombstone,
+            detail ?? (isReplay ? "The confirmed trace deletion was already committed and fully audited." : "The terminal trace content was replaced by an audited tombstone."),
+            outcomeCommitted: true);
+    }
+
+    private static string AuditOutcome(CustomLoopTraceDeletionStoreStatus status)
+    {
+        return status switch
+        {
+            CustomLoopTraceDeletionStoreStatus.Deleted or CustomLoopTraceDeletionStoreStatus.AlreadyDeleted => AuditSchema.Outcomes.Succeeded,
+            CustomLoopTraceDeletionStoreStatus.NotFound => AuditSchema.Outcomes.NotFound,
+            CustomLoopTraceDeletionStoreStatus.OperationConflict => AuditSchema.Outcomes.Conflict,
+            CustomLoopTraceDeletionStoreStatus.AuditUnavailable => AuditSchema.Outcomes.Failed,
+            _ => AuditSchema.Outcomes.Rejected
+        };
     }
 
     private static CustomLoopTraceDeletionResult MapRejectedStoreResult(CustomLoopTraceDeletionStoreResult stored)
@@ -255,6 +419,7 @@ public sealed class CustomLoopTraceRetentionService
             CustomLoopTraceDeletionStoreStatus.OperationConflict => Result(CustomLoopTraceDeletionStatus.Conflict, stored.Tombstone, "The deletion operation id was reused for a different authenticated request."),
             CustomLoopTraceDeletionStoreStatus.TombstoneLimitExceeded => Result(CustomLoopTraceDeletionStatus.LimitExceeded, null, "The explicit terminal-trace tombstone limit was reached; no trace content was deleted."),
             CustomLoopTraceDeletionStoreStatus.DeletionOperationLimitExceeded => Result(CustomLoopTraceDeletionStatus.OperationLimitExceeded, null, "The explicit trace-deletion operation receipt limit was reached; no trace content was deleted."),
+            CustomLoopTraceDeletionStoreStatus.AuditUnavailable => Result(CustomLoopTraceDeletionStatus.AuditUnavailable, null, "The trace was not changed because its deletion-intent audit could not be established safely."),
             _ => Result(CustomLoopTraceDeletionStatus.Invalid, stored.Tombstone, $"The trace store rejected deletion with status `{stored.Status}`.")
         };
     }
@@ -304,6 +469,22 @@ public sealed class CustomLoopTraceRetentionService
         }
     }
 
+    private CancellationTokenSource CreateOwnerWindow(DateTimeOffset reservedAtUtc, CancellationToken cancellationToken)
+    {
+        var ownerWindow = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var remaining = reservedAtUtc + IntegrityWriteTimeout - _timeProvider.GetUtcNow().ToUniversalTime();
+        if (remaining <= TimeSpan.Zero)
+        {
+            ownerWindow.Cancel();
+        }
+        else
+        {
+            ownerWindow.CancelAfter(remaining < IntegrityWriteTimeout ? remaining : IntegrityWriteTimeout);
+        }
+
+        return ownerWindow;
+    }
+
     private static AuditEvent CreateAudit(string action, string outcome, CustomLoopTraceDeletionRequest request, CustomLoopTraceInspection? inspection, CustomLoopTraceTombstone? tombstone)
     {
         var metadata = new Dictionary<string, object?>
@@ -327,6 +508,6 @@ public sealed class CustomLoopTraceRetentionService
 
     private static bool IsSurface(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= CustomLoopLimits.MaxArtifactIdCharacters && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
 
-    private static CustomLoopTraceDeletionResult Result(CustomLoopTraceDeletionStatus status, CustomLoopTraceTombstone? tombstone, string detail) => new(status, tombstone, detail);
+    private static CustomLoopTraceDeletionResult Result(CustomLoopTraceDeletionStatus status, CustomLoopTraceTombstone? tombstone, string detail, bool outcomeCommitted = false) => new(status, tombstone, detail, outcomeCommitted);
 
 }

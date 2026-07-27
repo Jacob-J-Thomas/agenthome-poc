@@ -1184,6 +1184,7 @@ async function deleteSelectedTrace() {
       body: JSON.stringify({ expectedTraceHash, operationId: pendingTraceDeletion.operationId })
     });
   } catch (error) {
+    if (error.payload?.status === "AuditUnavailable" && error.payload?.isOutcomeCommitted === true) pendingTraceDeletion = null;
     showBanner(`Trace deletion failed: ${error.message}`);
     return;
   }

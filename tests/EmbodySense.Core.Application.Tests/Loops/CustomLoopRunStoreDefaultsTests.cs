@@ -21,6 +21,8 @@ public sealed class CustomLoopRunStoreDefaultsTests
         Assert.Equal(CustomLoopTraceQuota.Empty(), await store.GetTraceQuotaAsync());
         Assert.Null(await store.InspectTraceAsync(run.Id));
         Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync(request.OperationId)).Status);
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.DeletionOperationLimitExceeded, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Unknown, (await store.CommitTraceDeletionAuditFailureAsync(mutation)).Status);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.NotFound, (await store.DeleteTerminalTraceAsync(mutation)).Status);
         Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.NotFound, await store.MarkTraceDeletionOutcomeAsync(request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
         Assert.Equal(CustomLoopRunStoreStatus.NotFound, (await store.AppendTerminalIntegrityWarningAsync(run.Id, run.LifecycleVersion, run.Events[0])).Status);
