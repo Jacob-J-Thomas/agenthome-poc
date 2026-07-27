@@ -407,6 +407,13 @@ function renderToolEvidence(evidence, includePayload = true) {
   const outcome = evidence.outcome ? ` · ${formatStatus(evidence.outcome)}` : "";
   details.append(node("summary", "", `Tool request ${evidence.requestOrdinal} · ${formatStatus(evidence.command)} · ${formatStatus(evidence.phase)}${outcome}`));
   const governance = evidence.governance;
+  const governanceDisposition = governance
+    ? `authority ${formatStatus(governance.authorityDecision)} · permission ${governance.permissionDecision ? formatStatus(governance.permissionDecision) : "not evaluated"} · approval ${formatStatus(governance.approvalDecision)}`
+    : evidence.phase === "IntegrityFailed"
+      ? "governance not evaluated · non-actuating integrity failure"
+      : evidence.phase === "RequestReserved"
+        ? "governance pending after durable request reservation"
+        : "governance evidence unavailable";
   const lines = [
     `request ${evidence.requestCorrelationId}`,
     evidence.brokerRequestId ? `broker ${evidence.brokerRequestId}` : null,
@@ -414,7 +421,7 @@ function renderToolEvidence(evidence, includePayload = true) {
     evidence.resolvedTarget ? `resolved ${evidence.resolvedTarget}` : null,
     `returned to model ${evidence.returnedToModel ? "yes" : "no"}`,
     evidence.canonicalResultCharacterCount != null ? `canonical result ${evidence.canonicalResultCharacterCount} chars · ${evidence.canonicalResultHash ?? "hash unavailable"}` : null,
-    governance ? `authority ${formatStatus(governance.authorityDecision)} · permission ${governance.permissionDecision ? formatStatus(governance.permissionDecision) : "not evaluated"} · approval ${formatStatus(governance.approvalDecision)}` : "governance decision not yet recorded",
+    governanceDisposition,
     governance?.authorityDetail ? `authority detail ${governance.authorityDetail}` : null,
     governance?.permissionMatchedPath ? `permission rule ${governance.permissionMatchedPath}` : null,
     governance?.permissionDetail ? `permission detail ${governance.permissionDetail}` : null,

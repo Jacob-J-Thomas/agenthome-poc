@@ -303,6 +303,70 @@ public sealed class PersistencePublicBoundaryCoverageTests
 
         Assert.Equal(JsonSerializer.Serialize(run), JsonSerializer.Serialize(hydrated));
         Assert.Equal(artifact, CustomLoopRunArtifactSerializer.Serialize(hydrated));
+        var legacyIntegrity = Assert.Single(hydrated.Events, item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.IntegrityFailed).ToolEvidence!;
+        Assert.NotNull(legacyIntegrity.BrokerRequestId);
+        Assert.NotNull(legacyIntegrity.Governance);
+        Assert.NotNull(legacyIntegrity.Outcome);
+        Assert.NotNull(legacyIntegrity.CanonicalResultReturnedToModel);
+        Assert.Equal(CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes, legacyIntegrity.ReservedUtf8Bytes);
+    }
+
+    [Fact]
+    public void Tool_evidence_artifact_round_trips_one_exact_standalone_repeated_request_integrity_record()
+    {
+        var run = CreateStandaloneRepeatedIntegrityRun();
+        var validation = CustomLoopRunValidator.Validate(run);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+
+        var artifact = CustomLoopRunArtifactSerializer.Serialize(run);
+        var root = Parse(artifact);
+        Assert.Equal(6, ToolEvidence(root, 6)["shape"]!.GetValue<int>());
+
+        var hydrated = CustomLoopRunArtifactSerializer.Deserialize(artifact);
+
+        Assert.Equal(JsonSerializer.Serialize(run), JsonSerializer.Serialize(hydrated));
+        Assert.Equal(artifact, CustomLoopRunArtifactSerializer.Serialize(hydrated));
+        var integrity = Assert.Single(hydrated.Events, item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.IntegrityFailed).ToolEvidence!;
+        Assert.Equal(2, integrity.RequestOrdinal);
+        Assert.Equal("request-correlation-1", integrity.RequestCorrelationId);
+        Assert.Equal("shared/repeated.txt", integrity.TargetPath);
+        Assert.Equal(CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes, integrity.ReservedUtf8Bytes);
+    }
+
+    [Fact]
+    public void Artifact_serializer_rejects_duplicate_correlation_ids_across_distinct_request_reservations()
+    {
+        var run = CreateToolRun();
+        var reservationEvent = Assert.Single(run.Events, item => item.Kind == CustomLoopRunEventKind.ToolRequestReserved);
+        var reservation = Assert.IsType<CustomLoopToolTraceEvidence>(reservationEvent.ToolEvidence);
+        var duplicateEvidence = reservation with { RequestOrdinal = 2, TargetPath = "shared/duplicate.txt" };
+        var duplicateEvent = ToolEvent(run.Events.Length + 1, "event-duplicate-correlation", CustomLoopRunEventKind.ToolRequestReserved, duplicateEvidence, reservation.Authority);
+        var candidate = run with
+        {
+            LifecycleVersion = run.LifecycleVersion + 1,
+            Events = [.. run.Events, duplicateEvent]
+        };
+
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Serialize(candidate));
+
+        Assert.Contains("unique exact request-and-authority owner", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Run_validator_requires_the_standalone_integrity_reservation_class()
+    {
+        var run = CreateStandaloneRepeatedIntegrityRun();
+        var eventIndex = Array.FindIndex(run.Events, item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.IntegrityFailed);
+        var invalid = run with
+        {
+            Events = run.Events.Select((item, index) => index == eventIndex
+                ? item with { ToolEvidence = item.ToolEvidence! with { ReservedUtf8Bytes = CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes } }
+                : item).ToArray()
+        };
+
+        var validation = CustomLoopRunValidator.Validate(invalid);
+
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_tool_integrity_reservation");
     }
 
     [Fact]
@@ -387,6 +451,16 @@ public sealed class PersistencePublicBoundaryCoverageTests
         RejectTool(root => AppendCompactToolEvent(root, 6, "event-integrity-duplicate"), includeIntegrity: true);
     }
 
+    [Fact]
+    public void Artifact_deserializer_rejects_malformed_or_duplicate_standalone_integrity_owners()
+    {
+        var artifact = CustomLoopRunArtifactSerializer.Serialize(CreateStandaloneRepeatedIntegrityRun());
+
+        Reject(root => ToolEvidence(root, 6)["brokerRequestId"] = "unexpected-broker", artifact);
+        Reject(root => ToolEvidence(root, 6)["phase"] = "requestReserved", artifact);
+        Reject(root => ToolEvidence(root, 6)["toolRequest"] = new JsonObject { ["$toolRequest"] = "q0" }, artifact);
+    }
+
     private static byte[] Artifact() => CustomLoopRunArtifactSerializer.Serialize(CreateRun());
 
     private static CustomLoopControlOperation PendingControl(string operationId, string actor)
@@ -467,13 +541,40 @@ public sealed class PersistencePublicBoundaryCoverageTests
         };
         if (includeIntegrity)
         {
-            var integrity = ToolEvidence(CustomLoopToolEvidencePhase.IntegrityFailed, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, false, authority, targetPath);
+            var integrity = returned with { Phase = CustomLoopToolEvidencePhase.IntegrityFailed, ReturnedToModel = false };
             events.Add(ToolEvent(7, "event-integrity", CustomLoopRunEventKind.ToolIntegrityFailed, integrity, authority));
         }
 
         var checkpoint = CustomLoopRunCheckpoint.Start() with { ToolRequestsUsed = 1 };
         var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-tool-boundary", definition.Id, events.Count, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-tool-boundary", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), checkpoint, events.ToArray(), null, null, null);
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopRunRecord CreateStandaloneRepeatedIntegrityRun()
+    {
+        var run = CreateToolRun();
+        var authority = run.Events[1].ToolAuthority!;
+        var integrity = ToolEvidence(
+            CustomLoopToolEvidencePhase.IntegrityFailed,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            false,
+            authority,
+            "shared/repeated.txt") with
+        {
+            RequestOrdinal = 2,
+            ReservedUtf8Bytes = CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes
+        };
+        var events = run.Events.Append(ToolEvent(7, "event-repeated-integrity", CustomLoopRunEventKind.ToolIntegrityFailed, integrity, authority)).ToArray();
+        return run with
+        {
+            LifecycleVersion = events.Length,
+            Events = events
+        };
     }
 
     private static CustomLoopToolAuthoritySnapshot ToolAuthority()
@@ -550,9 +651,9 @@ public sealed class PersistencePublicBoundaryCoverageTests
         Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString())));
     }
 
-    private static void Reject(Action<JsonObject> mutate)
+    private static void Reject(Action<JsonObject> mutate, byte[]? artifact = null)
     {
-        var root = Parse(Artifact());
+        var root = Parse(artifact ?? Artifact());
         mutate(root);
         Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString())));
     }

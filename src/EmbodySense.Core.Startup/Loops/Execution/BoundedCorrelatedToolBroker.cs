@@ -23,6 +23,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 {
+    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
     private readonly IToolBroker _inner;
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
@@ -34,7 +35,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     private readonly SemaphoreSlim _requestGate = new(1, 1);
     private int _requestsObserved;
     private int _toolRequestsConsumed;
-    private ToolRequest? _overLimitDeniedRequest;
+    private bool _visibleOverLimitDenied;
 
     public BoundedCorrelatedToolBroker(
         IToolBroker inner,
@@ -108,10 +109,24 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 
         var attemptLimitExceeded = requestOrdinal > CustomLoopLimits.MaxGovernedToolRequestsPerAttempt;
         var runLimitExceeded = _toolRequestsUsedInRun + requestOrdinal > CustomLoopLimits.MaxGovernedToolRequestsPerRun;
-        if ((attemptLimitExceeded || runLimitExceeded) && _overLimitDeniedRequest is not null)
+        if ((attemptLimitExceeded || runLimitExceeded) && _visibleOverLimitDenied)
         {
             Interlocked.Increment(ref _toolRequestsConsumed);
-            await _observer.RecordIntegrityAsync(_overLimitDeniedRequest, cancellationToken);
+            var scope = attemptLimitExceeded ? "attempt" : "run";
+            var limit = attemptLimitExceeded ? CustomLoopLimits.MaxGovernedToolRequestsPerAttempt : CustomLoopLimits.MaxGovernedToolRequestsPerRun;
+            await _observer.RecordIntegrityAsync(correlatedRequest, resolvedTarget, authority, requestOrdinal, cancellationToken);
+            using var auditIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+            await RecordAuthorityAsync(
+                null,
+                correlatedRequest,
+                authority,
+                resolvedTarget,
+                requestOrdinal,
+                AuditSchema.Outcomes.Failed,
+                "A governed tool request repeated after the one visible over-limit denial; its exact non-actuating identity was retained and the attempt failed.",
+                scope,
+                limit,
+                auditIntegrityWindow.Token);
             throw new CustomLoopToolEvidenceIntegrityException("A governed tool request repeated after the one visible over-limit denial; the attempt failed without actuation.");
         }
 
@@ -120,7 +135,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 
         if (attemptLimitExceeded || runLimitExceeded)
         {
-            _overLimitDeniedRequest = correlatedRequest;
+            _visibleOverLimitDenied = true;
             var scope = attemptLimitExceeded ? "attempt" : "run";
             var limit = attemptLimitExceeded ? CustomLoopLimits.MaxGovernedToolRequestsPerAttempt : CustomLoopLimits.MaxGovernedToolRequestsPerRun;
             return await DenyAsync(correlatedRequest, authority, resolvedTarget, requestOrdinal, scope, limit, cancellationToken);
@@ -210,7 +225,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         return result;
     }
 
-    private Task RecordAuthorityAsync(string requestId, ToolRequest request, CustomLoopToolAuthoritySnapshot authority, string resolvedTarget, int requestOrdinal, string outcome, string detail, string? limitScope, int? limit, CancellationToken cancellationToken)
+    private Task RecordAuthorityAsync(string? requestId, ToolRequest request, CustomLoopToolAuthoritySnapshot authority, string resolvedTarget, int requestOrdinal, string outcome, string detail, string? limitScope, int? limit, CancellationToken cancellationToken)
     {
         var metadata = new Dictionary<string, object?>
         {

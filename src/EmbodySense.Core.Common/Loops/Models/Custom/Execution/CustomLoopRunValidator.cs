@@ -671,6 +671,7 @@ public static class CustomLoopRunValidator
             }
         }
 
+        ValidateIntegrityReservationScope(run.Events, errors);
         if (run.Events[0] is { Sequence: 1, Kind: not CustomLoopRunEventKind.Admitted })
         {
             Add(errors, "first_event_not_admission", "events[0].kind", "The first run event must be the admission event.");
@@ -697,6 +698,34 @@ public static class CustomLoopRunValidator
                 || marker.Provider is not null || marker.Model is not null || marker.ProviderResponseId is not null || marker.ExitDecision is not null || marker.ToolAuthority is not null || marker.ToolEvidence is not null || marker.TraceReservationUtf8Bytes is not null || marker.ControlExpectedLifecycleVersion is not null)
             {
                 Add(errors, "invalid_admission_audit_marker", $"events[{markerIndex}]", "The admission-audit completion marker cannot carry prompt, output, provider, publication, or node-attempt data.");
+            }
+        }
+    }
+
+    private static void ValidateIntegrityReservationScope(IReadOnlyList<CustomLoopRunEvent> events, List<CustomLoopValidationError> errors)
+    {
+        for (var index = 0; index < events.Count; index++)
+        {
+            if (events[index]?.ToolEvidence is not { Phase: CustomLoopToolEvidencePhase.IntegrityFailed } integrity)
+            {
+                continue;
+            }
+
+            var hasEarlierReservation = events.Take(index).Any(item => item?.ToolEvidence is { Phase: CustomLoopToolEvidencePhase.RequestReserved } reservation
+                && reservation.RequestOrdinal == integrity.RequestOrdinal
+                && string.Equals(reservation.RequestCorrelationId, integrity.RequestCorrelationId, StringComparison.Ordinal));
+            var expected = hasEarlierReservation
+                ? CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes
+                : CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes;
+            if (integrity.ReservedUtf8Bytes != expected)
+            {
+                Add(
+                    errors,
+                    "invalid_tool_integrity_reservation",
+                    $"events[{index}].toolEvidence.reservedUtf8Bytes",
+                    hasEarlierReservation
+                        ? "A compatibility integrity marker attached to an earlier reservation must retain the original full reservation class."
+                        : "A standalone non-actuating integrity marker must use the bounded repeated-request reservation class.");
             }
         }
     }
@@ -907,7 +936,7 @@ public static class CustomLoopRunValidator
             Add(errors, "unsupported_tool_evidence_phase", $"{field}.phase", "Tool evidence phase must be concrete.");
         }
 
-        if (evidence.RequestOrdinal < 1 || evidence.RequestOrdinal > CustomLoopLimits.MaxGovernedToolRequestsPerAttempt + 1)
+        if (evidence.RequestOrdinal < 1 || evidence.RequestOrdinal > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerAttempt)
         {
             Add(errors, "tool_request_ordinal_out_of_range", $"{field}.requestOrdinal", "Tool request ordinal is outside the per-attempt limit.");
         }
@@ -927,7 +956,9 @@ public static class CustomLoopRunValidator
         ValidateOptionalText(evidence.Content, $"{field}.content", CustomLoopLimits.MaxGovernedToolArgumentCharacters, errors, requireNormalized: false);
         ValidateOptionalText(evidence.Pattern, $"{field}.pattern", CustomLoopLimits.MaxGovernedToolArgumentCharacters, errors, requireNormalized: false);
         ValidateOptionalText(evidence.ResolvedTarget, $"{field}.resolvedTarget", CustomLoopLimits.MaxGovernedToolTargetCharacters, errors, requireNormalized: false);
-        if (evidence.ReservedUtf8Bytes != CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes)
+        var isStandaloneIntegrity = evidence.Phase == CustomLoopToolEvidencePhase.IntegrityFailed
+            && evidence.ReservedUtf8Bytes == CustomLoopLimits.MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes;
+        if (!isStandaloneIntegrity && evidence.ReservedUtf8Bytes != CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes)
         {
             Add(errors, "invalid_tool_evidence_reservation", $"{field}.reservedUtf8Bytes", "Every governed request must reserve the server-owned worst-case evidence allowance before dispatch.");
         }
@@ -978,6 +1009,18 @@ public static class CustomLoopRunValidator
                 ValidateContentHash(evidence.CanonicalResultReturnedToModel, evidence.CanonicalResultHash, $"{field}.canonicalResultHash", errors);
             }
         }
+
+        if (isStandaloneIntegrity
+            && (evidence.BrokerRequestId is not null
+                || evidence.Governance is not null
+                || evidence.Outcome is not null
+                || evidence.CanonicalResultReturnedToModel is not null
+                || evidence.CanonicalResultHash is not null
+                || evidence.CanonicalResultCharacterCount is not null
+                || evidence.ReturnedToModel))
+        {
+            Add(errors, "invalid_tool_integrity_payload", field, "A non-actuating tool integrity record may contain only the exact request, authority, correlation, and reserved capacity.");
+        }
     }
 
     private static void ValidateAssignmentSet(CustomLoopToolAssignment[]? assignments, string field, List<CustomLoopValidationError> errors)
@@ -1025,9 +1068,9 @@ public static class CustomLoopRunValidator
             Add(errors, "invalid_pending_exit_checkpoint", "checkpoint.pendingExitDecision", "Pending Exit decision requires all steps complete and remaining repeat authority.");
         }
 
-        if (checkpoint.ToolRequestsUsed < 0 || checkpoint.ToolRequestsUsed > CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun)
+        if (checkpoint.ToolRequestsUsed < 0 || checkpoint.ToolRequestsUsed > CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun)
         {
-            Add(errors, "tool_request_budget_out_of_range", "checkpoint.toolRequestsUsed", $"Persisted tool-request usage must be between 0 and {CustomLoopLimits.MaxRecordedGovernedToolRequestsPerRun}, including the one visible over-limit denial.");
+            Add(errors, "tool_request_budget_out_of_range", "checkpoint.toolRequestsUsed", $"Persisted model-visible tool-request usage must be between 0 and {CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun}, including the one visible over-limit denial.");
         }
 
         if (checkpoint.EarlierRetainedOutputs is null)
