@@ -553,6 +553,59 @@ test("standalone integrity evidence reports governance as intentionally not eval
   assert.doesNotMatch(app.elements.runTimeline.textContent, /governance decision not yet recorded/);
 });
 
+test("run discovery progressively loads cursor pages without losing the selected run", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const selected = createRunSnapshot();
+  const firstSummary = { id: selected.id, loopId: selected.loopId, admissionOperationId: selected.admissionOperationId, definitionVersion: 2, status: selected.status, createdAtUtc: selected.createdAtUtc, updatedAtUtc: selected.updatedAtUtc, completedAtUtc: selected.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  const olderSummary = { ...firstSummary, id: "run-older-page", admissionOperationId: "op-run-older-page", createdAtUtc: "2026-07-19T10:00:00Z", updatedAtUtc: "2026-07-19T10:00:00Z" };
+  server.runDetails.set(selected.id, selected);
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [firstSummary], continuationCursor: "cursor-one" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&cursor=cursor-one", () => ({ status: 200, body: { items: [olderSummary], continuationCursor: null } }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  assert.match(app.elements.runTitle.textContent, /run-test/);
+  assert.equal(app.elements.loadMoreRunsButton.hidden, false);
+
+  await app.elements.loadMoreRunsButton.click();
+  await flushAsyncWork();
+
+  assert.match(app.elements.runList.textContent, /run-older-page/);
+  assert.match(app.elements.runTitle.textContent, /run-test/);
+  assert.equal(app.elements.loadMoreRunsButton.hidden, true);
+  const pageCall = server.calls.find(call => call.url.includes("cursor=cursor-one"));
+  assert.equal(pageCall.options.headers["X-EmbodySense-Session"], "loop-test-token");
+});
+
+test("run monitoring refreshes the newest page without rewinding older-evidence pagination", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const selected = createRunSnapshot();
+  const firstSummary = { id: selected.id, loopId: selected.loopId, admissionOperationId: selected.admissionOperationId, definitionVersion: 2, status: selected.status, createdAtUtc: selected.createdAtUtc, updatedAtUtc: selected.updatedAtUtc, completedAtUtc: selected.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  const secondSummary = { ...firstSummary, id: "run-second-page", admissionOperationId: "op-run-second-page", createdAtUtc: "2026-07-19T10:00:00Z", updatedAtUtc: "2026-07-19T10:00:00Z" };
+  const thirdSummary = { ...firstSummary, id: "run-third-page", admissionOperationId: "op-run-third-page", createdAtUtc: "2026-07-18T10:00:00Z", updatedAtUtc: "2026-07-18T10:00:00Z" };
+  server.runDetails.set(selected.id, selected);
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [firstSummary], continuationCursor: "cursor-one" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&cursor=cursor-one", () => ({ status: 200, body: { items: [secondSummary], continuationCursor: "cursor-two" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&cursor=cursor-two", () => ({ status: 200, body: { items: [thirdSummary], continuationCursor: null } }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  await app.elements.loadMoreRunsButton.click();
+  await flushAsyncWork();
+
+  await vm.runInContext("loadRuns({ silent: true })", app.context);
+  await app.elements.loadMoreRunsButton.click();
+  await flushAsyncWork();
+
+  assert.match(app.elements.runList.textContent, /run-second-page/);
+  assert.match(app.elements.runList.textContent, /run-third-page/);
+  assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-one")).length, 1);
+  assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-two")).length, 1);
+});
+
 test("live run monitoring binds the exact admission operation instead of another recent run", async () => {
   const server = new FakeFetchServer(createCatalog());
   const older = createRunSnapshot();
@@ -1333,7 +1386,7 @@ class FakeFetchServer {
     if (method === "GET" && url === "/api/session") return responseFrom({ status: 200, body: { token: "loop-test-token" } });
     if (method === "GET" && url === "/api/status") return responseFrom({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } });
     if (method === "GET" && url === "/api/loops") return responseFrom({ status: 200, body: clone(this.catalog) });
-    if (method === "GET" && url === "/api/loop-runs?maximumCount=50") return responseFrom({ status: 200, body: clone(this.runs) });
+    if (method === "GET" && url === "/api/loop-runs?maximumCount=50") return responseFrom({ status: 200, body: { items: clone(this.runs), continuationCursor: null } });
     if (method === "GET" && url === "/api/loop-runs/quota") return responseFrom({ status: 200, body: clone(this.traceQuota ?? createTraceQuota(this.runs.length)) });
     if (method === "GET" && url.endsWith("/trace") && url.startsWith("/api/loop-runs/")) {
       const runId = decodeURIComponent(url.slice("/api/loop-runs/".length, -"/trace".length));

@@ -148,6 +148,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--green); box-shad
 .run-item-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .run-id { overflow: hidden; font-family: ui-monospace, "Cascadia Code", monospace; font-size: 9px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
 .run-meta { color: var(--muted); font-size: 8px; }
+.run-list-more { margin: 8px 10px 12px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); background: var(--panel); font-size: 8px; font-weight: 760; }
 .run-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
 .run-status-dot.running { background: var(--blue); animation: pulse 1.3s infinite; }
 .run-status-dot.paused, .run-status-dot.pauserequested, .run-status-dot.needsreview { background: var(--amber); }

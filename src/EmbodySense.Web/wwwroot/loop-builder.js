@@ -6,6 +6,9 @@ let selectedNodeId = "trigger";
 let dirty = false;
 let currentView = "builder";
 let recentRuns = [];
+let runContinuationCursor = null;
+let runPaginationExtended = false;
+let loadingMoreRuns = false;
 let selectedRunId = null;
 let selectedRun = null;
 let selectedTrace = null;
@@ -51,6 +54,7 @@ const elements = {
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
   roleId: document.getElementById("roleId"),
+  loadMoreRunsButton: document.getElementById("loadMoreRunsButton"),
   runActions: document.getElementById("runActions"),
   runCount: document.getElementById("runCount"),
   runList: document.getElementById("runList"),
@@ -111,6 +115,7 @@ function bindStaticEvents() {
     renderCanvas();
     renderInspector();
   });
+  elements.loadMoreRunsButton.addEventListener("click", loadMoreRuns);
   elements.name.addEventListener("input", event => updateDraftValue("displayName", event.target.value));
   elements.description.addEventListener("input", event => updateDraftValue("description", event.target.value));
   window.addEventListener("beforeunload", event => {
@@ -227,7 +232,11 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
       requestJson("/api/loop-runs?maximumCount=50"),
       requestJson("/api/loop-runs/quota")
     ]);
-    recentRuns = Array.isArray(payload) ? payload : payload?.items ?? [];
+    const incomingRuns = Array.isArray(payload) ? payload : payload?.items ?? [];
+    recentRuns = mergeRunSummaries(incomingRuns, recentRuns);
+    if (!runPaginationExtended && !loadingMoreRuns) {
+      runContinuationCursor = Array.isArray(payload) ? null : payload?.continuationCursor ?? null;
+    }
     traceQuota = quotaPayload;
     const visible = runsForCurrentLoop();
     const preferred = visible.find(run => run.id === preferredRunId || run.admissionOperationId === preferredAdmissionOperationId);
@@ -268,8 +277,42 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
   }
 }
 
+async function loadMoreRuns() {
+  if (!runContinuationCursor || loadingMoreRuns) return;
+  loadingMoreRuns = true;
+  renderRunPagination();
+  try {
+    const payload = await requestJson(`/api/loop-runs?maximumCount=50&cursor=${encodeURIComponent(runContinuationCursor)}`);
+    recentRuns = mergeRunSummaries(recentRuns, payload?.items ?? []);
+    runContinuationCursor = payload?.continuationCursor ?? null;
+    runPaginationExtended = true;
+    renderList();
+    renderTabs();
+    if (currentView === "runs") renderRuns();
+  } catch (error) {
+    showBanner(`More run evidence unavailable: ${error.message}`);
+  } finally {
+    loadingMoreRuns = false;
+    renderRunPagination();
+  }
+}
+
+function mergeRunSummaries(primary, secondary) {
+  const byId = new Map();
+  for (const run of [...primary, ...secondary]) {
+    if (!byId.has(run.id)) byId.set(run.id, run);
+  }
+  return [...byId.values()].sort((left, right) => {
+    const updated = String(right.updatedAtUtc).localeCompare(String(left.updatedAtUtc));
+    if (updated !== 0) return updated;
+    const created = String(right.createdAtUtc).localeCompare(String(left.createdAtUtc));
+    return created !== 0 ? created : String(left.id).localeCompare(String(right.id));
+  });
+}
+
 function renderRuns() {
   renderTraceQuota();
+  renderRunPagination();
   elements.runList.replaceChildren();
   const runs = runsForCurrentLoop();
   if (runs.length === 0) {
@@ -326,6 +369,12 @@ function renderRuns() {
   for (const event of selectedRun.events ?? []) timeline.append(renderRunEvent(event));
   if ((selectedRun.events ?? []).length === 0) timeline.append(node("p", "empty-state", "No persisted events were returned."));
   elements.runTimeline.append(timeline);
+}
+
+function renderRunPagination() {
+  elements.loadMoreRunsButton.hidden = !runContinuationCursor;
+  elements.loadMoreRunsButton.disabled = loadingMoreRuns || mutationInFlight;
+  elements.loadMoreRunsButton.textContent = loadingMoreRuns ? "Loading more…" : "Load older evidence";
 }
 
 async function selectRun(runId) {

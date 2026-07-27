@@ -135,11 +135,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _configurationReader.ReadAsync(_options.WorkingDirectory, CreateRuntimeConfiguration(), cancellationToken);
     }
 
-    public async Task<IReadOnlyList<LoopRunSummarySnapshot>> GetLoopRunsAsync(int maximumCount = 50, CancellationToken cancellationToken = default)
+    public async Task<LoopRunSummaryPageSnapshot> GetLoopRunsAsync(int maximumCount = 50, string? loopId = null, string? cursor = null, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop run evidence");
         await EnsureLoopRecoveryAsync(cancellationToken);
-        return await _loopRuns.ListRecentAsync(maximumCount, cancellationToken);
+        return await _loopRuns.ListPageAsync(maximumCount, loopId, cursor, cancellationToken);
     }
 
     public async Task<LoopRunSnapshot?> GetLoopRunAsync(string runId, CancellationToken cancellationToken = default)

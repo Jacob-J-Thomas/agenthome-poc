@@ -659,6 +659,45 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Run_pages_use_stable_filter_bound_cursors_across_concurrent_inserts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha-new", "invoke-alpha-new"), 5));
+        await WriteDirectAsync(paths, At(CreateRun("loop-beta", "run-beta-new", "invoke-beta-new"), 4));
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha-middle", "invoke-alpha-middle"), 3));
+        await WriteDirectAsync(paths, At(CreateRun("loop-beta", "run-beta-old", "invoke-beta-old"), 2));
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha-old", "invoke-alpha-old"), 1));
+        var store = new CustomLoopRunStore(paths);
+
+        var first = await store.ListPageAsync(new CustomLoopRunPageRequest(2));
+        Assert.Equal(["run-alpha-new", "run-beta-new"], first.Items.Select(item => item.Id));
+        Assert.NotNull(first.ContinuationCursor);
+
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-concurrent-new", "invoke-concurrent-new"), 6));
+        var second = await store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: first.ContinuationCursor));
+        var third = await store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: second.ContinuationCursor));
+
+        Assert.Equal(["run-alpha-middle", "run-beta-old"], second.Items.Select(item => item.Id));
+        Assert.Equal(["run-alpha-old"], third.Items.Select(item => item.Id));
+        Assert.DoesNotContain("run-concurrent-new", second.Items.Concat(third.Items).Select(item => item.Id));
+        Assert.Null(third.ContinuationCursor);
+
+        var filtered = await store.ListPageAsync(new CustomLoopRunPageRequest(2, "loop-alpha"));
+        var filteredNext = await store.ListPageAsync(new CustomLoopRunPageRequest(2, "loop-alpha", filtered.ContinuationCursor));
+        Assert.Equal(["run-concurrent-new", "run-alpha-new"], filtered.Items.Select(item => item.Id));
+        Assert.Equal(["run-alpha-middle", "run-alpha-old"], filteredNext.Items.Select(item => item.Id));
+        Assert.All(filtered.Items.Concat(filteredNext.Items), item => Assert.Equal("loop-alpha", item.LoopId));
+        Assert.Null(filteredNext.ContinuationCursor);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: "not-a-cursor")));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, "loop-beta", filtered.ContinuationCursor)));
+        var impossibleCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, updatedAtUtcTicks = Timestamp.UtcTicks, createdAtUtcTicks = Timestamp.AddMinutes(1).UtcTicks, runId = "run-impossible-cursor", loopId = (string?)null });
+        var impossibleCursor = Convert.ToBase64String(impossibleCursorJson).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: impossibleCursor)));
+    }
+
+    [Fact]
     public async Task Strict_reader_rejects_missing_unknown_and_noncanonical_nested_properties_or_enums()
     {
         var mutations = new Action<JsonObject>[]
@@ -942,6 +981,19 @@ public sealed class CustomLoopRunStoreTests
         var context = CustomLoopContextSnapshot.CreateEmpty(Timestamp);
         var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, Timestamp);
         var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopRunRecord At(CustomLoopRunRecord run, int minutes)
+    {
+        var timestamp = Timestamp.AddMinutes(minutes);
+        run = run with
+        {
+            CreatedAtUtc = timestamp,
+            UpdatedAtUtc = timestamp,
+            ContextSnapshot = CustomLoopContextSnapshot.CreateEmpty(timestamp),
+            Events = [run.Events[0] with { TimestampUtc = timestamp }]
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

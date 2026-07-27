@@ -220,22 +220,42 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     public async Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default)
     {
-        if (maximumCount < 1 || maximumCount > CustomLoopLimits.MaxRecentRunsPageSize)
+        return (await ListPageAsync(new CustomLoopRunPageRequest(maximumCount), cancellationToken)).Items;
+    }
+
+    public async Task<CustomLoopRunPage> ListPageAsync(CustomLoopRunPageRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.MaximumCount < 1 || request.MaximumCount > CustomLoopLimits.MaxRecentRunsPageSize)
         {
-            throw new ArgumentOutOfRangeException(nameof(maximumCount), maximumCount, $"Recent run page size must be between 1 and {CustomLoopLimits.MaxRecentRunsPageSize}.");
+            throw new ArgumentOutOfRangeException(nameof(request.MaximumCount), request.MaximumCount, $"Run page size must be between 1 and {CustomLoopLimits.MaxRecentRunsPageSize}.");
         }
 
-        var summaries = new List<CustomLoopRunSummary>(maximumCount + 1);
+        var safeLoopId = request.LoopId is null ? null : CustomLoopArtifactIdentifier.Require(request.LoopId, nameof(request.LoopId));
+        var after = CustomLoopRunPageCursorCodec.Decode(request.Cursor, safeLoopId);
+        var summaries = new List<CustomLoopRunSummary>(request.MaximumCount + 1);
         await ScanArtifactsAsync(artifact =>
         {
-            summaries.Add(artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!));
+            var summary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
+            if (safeLoopId is not null && !string.Equals(summary.LoopId, safeLoopId, StringComparison.Ordinal)
+                || after is not null && CompareSummaryToCursor(summary, after) <= 0)
+            {
+                return;
+            }
+
+            summaries.Add(summary);
             summaries.Sort(CompareSummaries);
-            if (summaries.Count > maximumCount)
+            if (summaries.Count > request.MaximumCount + 1)
             {
                 summaries.RemoveAt(summaries.Count - 1);
             }
         }, cancellationToken);
-        return summaries;
+        var hasMore = summaries.Count > request.MaximumCount;
+        var items = summaries.Take(request.MaximumCount).ToArray();
+        var continuationCursor = hasMore
+            ? CustomLoopRunPageCursorCodec.Encode(ToCursor(items[^1], safeLoopId))
+            : null;
+        return new CustomLoopRunPage(items, continuationCursor);
     }
 
     public async Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
@@ -778,6 +798,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         comparison = right.CreatedAtUtc.CompareTo(left.CreatedAtUtc);
         return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left.Id, right.Id);
     }
+
+    private static int CompareSummaryToCursor(CustomLoopRunSummary summary, CustomLoopRunPageCursor cursor)
+    {
+        var comparison = cursor.UpdatedAtUtc.CompareTo(summary.UpdatedAtUtc);
+        if (comparison != 0)
+        {
+            return comparison;
+        }
+
+        comparison = cursor.CreatedAtUtc.CompareTo(summary.CreatedAtUtc);
+        return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(summary.Id, cursor.RunId);
+    }
+
+    private static CustomLoopRunPageCursor ToCursor(CustomLoopRunSummary summary, string? loopId) => new(summary.UpdatedAtUtc, summary.CreatedAtUtc, summary.Id, loopId);
 
     private IReadOnlyList<RunArtifactLocation> EnumerateArtifactLocations()
     {

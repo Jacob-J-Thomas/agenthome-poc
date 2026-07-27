@@ -33,6 +33,7 @@ public static class CustomLoopLimits
     public const int MaxInvocationValidationErrorFieldCharacters = 128;
     public const int MaxInvocationValidationErrorMessageCharacters = 512;
     public const int MaxRecentRunsPageSize = 50;
+    public const int MaxRunPageCursorCharacters = 1_024;
     public const int MaxRunTraceUtf8Bytes = 16 * 1024 * 1024;
     public const int MaxRunTraceTombstoneUtf8Bytes = 16 * 1024;
     public const int MaxRunTraceDeletionOperationUtf8Bytes = 32 * 1024;

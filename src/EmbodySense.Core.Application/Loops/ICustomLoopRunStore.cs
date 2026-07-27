@@ -15,6 +15,17 @@ public interface ICustomLoopRunStore
 
     Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default);
 
+    async Task<CustomLoopRunPage> ListPageAsync(CustomLoopRunPageRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.LoopId is not null || request.Cursor is not null)
+        {
+            throw new NotSupportedException("This custom-loop run store does not support filtered cursor pagination.");
+        }
+
+        return new CustomLoopRunPage(await ListRecentAsync(request.MaximumCount, cancellationToken), null);
+    }
+
     Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default);
 
     Task<bool> HasSufficientTraceCapacityForDispatchAsync(CustomLoopRunRecord candidate, int expectedLifecycleVersion, CancellationToken cancellationToken = default)

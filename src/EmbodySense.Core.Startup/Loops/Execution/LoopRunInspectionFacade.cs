@@ -91,6 +91,12 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         return summaries.Select(CustomLoopRuntimeFacade.Map).ToArray();
     }
 
+    public async Task<LoopRunSummaryPageSnapshot> ListPageAsync(int maximumCount = CustomLoopLimits.MaxRecentRunsPageSize, string? loopId = null, string? cursor = null, CancellationToken cancellationToken = default)
+    {
+        var page = await _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken);
+        return new LoopRunSummaryPageSnapshot(page.Items.Select(CustomLoopRuntimeFacade.Map).ToArray(), page.ContinuationCursor);
+    }
+
     public async Task<LoopTraceInspectionSnapshot?> GetTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
         var trace = await _runStore.InspectTraceAsync(runId, cancellationToken);
