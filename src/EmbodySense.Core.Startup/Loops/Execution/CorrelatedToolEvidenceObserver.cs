@@ -68,6 +68,20 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
         return RecordAsync(State(result.Request), CustomLoopToolEvidencePhase.OutcomeObserved, result.RequestId, result.Governance, result, true, cancellationToken);
     }
 
+    public void RefreshAuthority(ToolRequest request, CustomLoopToolAuthoritySnapshot authority)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(authority);
+        var correlationId = request.CorrelationId ?? throw new CustomLoopToolEvidenceIntegrityException("Governed tool authority refresh lost its request correlation id.");
+        lock (_gate)
+        {
+            var state = _requests.TryGetValue(correlationId, out var reserved)
+                ? reserved
+                : throw new CustomLoopToolEvidenceIntegrityException("Governed tool authority was refreshed before its exact request reservation.");
+            _requests[correlationId] = state with { Authority = authority };
+        }
+    }
+
     public Task RecordIntegrityAsync(
         ToolRequest request,
         string resolvedTarget,

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
@@ -27,6 +28,7 @@ public sealed class ToolBroker : IToolBroker
     private readonly LoopDefinition _loopDefinition;
     private readonly ToolResultRetentionService _toolResultRetention;
     private readonly IToolGovernanceObserver? _governanceObserver;
+    private readonly IToolActuationAuthorityRevalidator? _actuationAuthorityRevalidator;
     private readonly ToolAuditMetadataFactory _auditMetadataFactory;
     private readonly TimeSpan _postActuationIntegrityTimeout;
 
@@ -39,6 +41,7 @@ public sealed class ToolBroker : IToolBroker
         LoopDefinition loopDefinition,
         IToolResultRetentionStore toolResultRetentionStore,
         IToolGovernanceObserver? governanceObserver = null,
+        IToolActuationAuthorityRevalidator? actuationAuthorityRevalidator = null,
         TimeSpan? postActuationIntegrityTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -57,6 +60,7 @@ public sealed class ToolBroker : IToolBroker
         _loopDefinition = loopDefinition;
         _toolResultRetention = new ToolResultRetentionService(auditLog, loopDefinition, toolResultRetentionStore);
         _governanceObserver = governanceObserver;
+        _actuationAuthorityRevalidator = actuationAuthorityRevalidator;
         AvailableCommands = GetAvailableCommands(_loopDefinition);
         _auditMetadataFactory = new ToolAuditMetadataFactory(_paths, _loopDefinition, AvailableCommands);
         _postActuationIntegrityTimeout = postActuationIntegrityTimeout ?? DefaultPostActuationIntegrityTimeout;
@@ -123,6 +127,24 @@ public sealed class ToolBroker : IToolBroker
         }
 
         var approvalDecision = approvedByHuman ? ToolApprovalDecision.Approved : ToolApprovalDecision.NotRequired;
+        if (_actuationAuthorityRevalidator is not null)
+        {
+            var revalidation = await _actuationAuthorityRevalidator.RevalidateAsync(request, cancellationToken);
+            ArgumentNullException.ThrowIfNull(revalidation);
+            ArgumentException.ThrowIfNullOrWhiteSpace(revalidation.Detail);
+            ArgumentNullException.ThrowIfNull(revalidation.AuditMetadata);
+            await RecordActuationAuthorityAsync(requestId, request, check, revalidation, cancellationToken);
+            if (!revalidation.Allowed)
+            {
+                var evidence = RevalidationDeniedEvidence(check, approvalDecision, approvalResponse, revalidation.Detail);
+                await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
+                var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {revalidation.Detail}", requestId, check.ResolvedPath, request, evidence);
+                result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
+                await RecordExecutionAsync(requestId, request, check, approvedByHuman, AuditSchema.Outcomes.Denied, revalidation.AuditMetadata, cancellationToken);
+                return result;
+            }
+        }
+
         var authorizedEvidence = DecisionEvidence(check, approvalDecision, approvalResponse);
         await RecordExecutionIntentAsync(requestId, request, check, approvedByHuman, cancellationToken);
         await ObserveDecisionAsync(requestId, request, check.ResolvedPath, authorizedEvidence, cancellationToken);
@@ -271,6 +293,20 @@ public sealed class ToolBroker : IToolBroker
             approval?.Detail);
     }
 
+    private static ToolGovernanceEvidence RevalidationDeniedEvidence(ToolPermissionCheck check, ToolApprovalDecision approvalDecision, ToolApprovalResponse? approval, string detail)
+    {
+        return new ToolGovernanceEvidence(
+            ToolAuthorityDecision.Denied,
+            detail,
+            check.Evaluation.Decision,
+            check.Evaluation.MatchedPath,
+            check.Evaluation.Detail,
+            check.PolicyHash,
+            approvalDecision,
+            approval?.DecisionBy,
+            approval?.Detail);
+    }
+
     private Task RecordPermissionAsync(string requestId, ToolRequest request, ToolPermissionCheck check, CancellationToken cancellationToken)
     {
         return AppendAuditAsync(AuditEvent.Create(
@@ -349,6 +385,24 @@ public sealed class ToolBroker : IToolBroker
                 ? $"Loop `{_loopDefinition.Id}` allowed {ToolCommandFormatter.Format(request.Command)} workspace command authority."
                 : $"Loop `{_loopDefinition.Id}` denied {ToolCommandFormatter.Format(request.Command)} workspace command authority.",
             metadata: metadata), cancellationToken);
+    }
+
+    private Task RecordActuationAuthorityAsync(string requestId, ToolRequest request, ToolPermissionCheck check, ToolActuationAuthorityRevalidation revalidation, CancellationToken cancellationToken)
+    {
+        var metadata = _auditMetadataFactory.CreateBase(requestId, request, check);
+        metadata["authority_phase"] = "pre_actuation_revalidation";
+        foreach (var item in revalidation.AuditMetadata)
+        {
+            metadata[item.Key] = item.Value;
+        }
+
+        return AppendAuditAsync(AuditEvent.Create(
+            AuditSchema.Actors.Tool,
+            AuditSchema.Actions.ToolLoopAuthorityEvaluate,
+            check.ResolvedPath,
+            revalidation.Allowed ? AuditSchema.Outcomes.Allowed : AuditSchema.Outcomes.Denied,
+            revalidation.Detail,
+            metadata), cancellationToken);
     }
 
     private bool IsCommandAvailable(ToolCommand command)
