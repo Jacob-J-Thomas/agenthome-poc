@@ -64,6 +64,9 @@ public sealed class LoopRunApiControllerTests
             var missing = await SendAsync(client, "/api/loop-runs/run-missing", token);
             var invalidId = await SendAsync(client, "/api/loop-runs/INVALID%20ID", token);
             var monitoredRun = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths));
+            await CreateCompletedInvocationReceiptAsync(paths, monitoredRun);
+            var invocationReceipt = await SendAsync(client, $"/api/loop-runs/invocations/{monitoredRun.AdmissionOperationId}", token);
+            var invocationSnapshot = await invocationReceipt.Content.ReadFromJsonAsync<LoopInvocationOperationSnapshot>(JsonOptions);
             var monitor = await SendAsync(client, $"/api/loop-runs/{monitoredRun.Id}/monitor", token);
             var monitorSummary = await monitor.Content.ReadFromJsonAsync<LoopRunSummarySnapshot>(JsonOptions);
             var monitorEtag = monitor.Headers.ETag;
@@ -110,6 +113,10 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(HttpStatusCode.BadRequest, invalidLoopFilter.StatusCode);
             Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, invalidId.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, invocationReceipt.StatusCode);
+            Assert.Equal("Complete", invocationSnapshot?.State);
+            Assert.Equal("Admitted", invocationSnapshot?.Outcome);
+            Assert.Equal(monitoredRun.Id, invocationSnapshot?.RunId);
             Assert.Equal(HttpStatusCode.OK, monitor.StatusCode);
             Assert.Equal(monitoredRun.Id, monitorSummary?.Id);
             Assert.Equal(monitoredRun.LifecycleVersion, monitorSummary?.LifecycleVersion);
@@ -359,6 +366,56 @@ public sealed class LoopRunApiControllerTests
     }
 
     private static CustomLoopRunEvent RunEvent(long sequence, string id, CustomLoopRunEventKind kind) => new(sequence, id, Timestamp, kind, null, null, null, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null);
+
+    private static async Task CreateCompletedInvocationReceiptAsync(WorkspacePaths paths, CustomLoopRunRecord run)
+    {
+        var requestHash = CustomLoopInvocationRequestHash.Compute(
+            run.AdmissionOperationId,
+            run.LoopId,
+            run.AdmittedDefinition.DefinitionVersion,
+            run.AdmittedDefinition.ContentHash,
+            run.AdmissionActor,
+            run.Surface,
+            run.AdmittedDefinition.RoleId,
+            run.TriggerPrompt,
+            run.ModelSnapshot.Provider,
+            run.ModelSnapshot.Model);
+        var pending = new CustomLoopInvocationOperation(
+            CustomLoopInvocationOperation.CurrentSchemaVersion,
+            run.AdmissionOperationId,
+            requestHash,
+            run.LoopId,
+            run.AdmittedDefinition.DefinitionVersion,
+            run.AdmittedDefinition.ContentHash,
+            run.AdmissionActor,
+            run.Surface,
+            run.AdmittedDefinition.RoleId,
+            CustomLoopInvocationRequestHash.ComputePromptHash(run.TriggerPrompt),
+            run.ModelSnapshot.Provider,
+            run.ModelSnapshot.Model,
+            CustomLoopInvocationBindingState.Unbound,
+            null,
+            null,
+            run.CreatedAtUtc,
+            run.CreatedAtUtc,
+            CustomLoopInvocationOperationState.Pending,
+            CustomLoopInvocationOutcome.Unknown,
+            string.Empty,
+            null,
+            [],
+            "The invocation is pending.");
+        var store = new CustomLoopInvocationOperationStore(paths);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(pending with
+        {
+            UpdatedAtUtc = run.UpdatedAtUtc,
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Admitted,
+            AdmissionStatus = "Admitted",
+            RunId = run.Id,
+            Detail = "The run was admitted."
+        })).Status);
+    }
 
     private static async Task<HttpResponseMessage> SendAsync(HttpClient client, string path, string token, HttpMethod? method = null)
     {

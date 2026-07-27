@@ -93,7 +93,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return Invalid($"The invocation receipt could not be read safely: {exception.GetType().Name}.");
+            return ReceiptUnavailable($"The invocation receipt could not be read safely: {exception.GetType().Name}.");
         }
 
         if (existingOperation is not null)
@@ -215,7 +215,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                return Invalid($"The invocation receipt could not be started safely: {exception.GetType().Name}.");
+                return ReceiptUnavailable($"The invocation receipt could not be started safely: {exception.GetType().Name}.");
             }
 
             CustomLoopRunRecord? admittedByInterruptedOwner;
@@ -225,7 +225,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                return Invalid($"The invocation admission state could not be reconciled safely: {exception.GetType().Name}.");
+                return ReceiptUnavailable($"The invocation admission state could not be reconciled safely: {exception.GetType().Name}.");
             }
 
             CustomLoopContextSnapshot contextSnapshot;
@@ -767,7 +767,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return Invalid($"The pending invocation receipt could not reconcile its prior admission safely: {exception.GetType().Name}; no provider request was dispatched.");
+            return ReceiptUnavailable($"The pending invocation receipt could not reconcile its prior admission safely: {exception.GetType().Name}; no provider request was dispatched.");
         }
 
         if (run is null)
@@ -1074,7 +1074,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                return Invalid($"The invocation receipt was found, but its run could not be read safely: {exception.GetType().Name}.");
+                return ReceiptUnavailable($"The invocation receipt was found, but its run could not be read safely: {exception.GetType().Name}.");
             }
         }
 
@@ -1088,6 +1088,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
         if (operation.RunId is not null && durableRun is null && deletedTrace is null)
         {
+            if (operation.Outcome == CustomLoopInvocationOutcome.Admitted)
+            {
+                return ReceiptUnavailable("The durable admitted invocation receipt refers to a missing run; no provider request was dispatched.");
+            }
+
             return Invalid($"The durable {operation.AdmissionStatus} invocation receipt refers to a missing run; no provider request was dispatched.");
         }
 
@@ -1186,6 +1191,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private static LoopRunInvocationResponse Invalid(string detail)
     {
         return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.Invalid.ToString(), null, false, null, [], detail);
+    }
+
+    private static LoopRunInvocationResponse ReceiptUnavailable(string detail)
+    {
+        return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.ReceiptUnavailable.ToString(), null, false, null, [], detail);
     }
 
     private static LoopValidationError Map(CustomLoopValidationError error)

@@ -14,6 +14,7 @@ let workspaceRunPaginationExtended = false;
 let loadingMoreRuns = false;
 let loadingMoreRunsLoopId = null;
 let runEvidenceRequestGeneration = 0;
+let runSelectionGeneration = 0;
 let selectedRunId = null;
 let selectedRun = null;
 let selectedTrace = null;
@@ -34,11 +35,22 @@ let pendingCreateOperationId = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
+let invocationInFlight = false;
+const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v2";
+const pendingInvocationRegistryLockNamePrefix = "embodysense.pending-loop-invocations";
+let pendingInvocationStorageKey = null;
+let pendingInvocationRegistryLockName = null;
+const maximumPendingInvocationRequests = 100;
+const pendingInvocationRequests = new Map();
 
 const signalRRecordSeparator = "\u001e";
 const signalRKeepAliveMilliseconds = 10000;
 const selectedRunMonitorFallbackBaseDelayMilliseconds = 5000;
 const selectedRunMonitorFallbackMaximumDelayMilliseconds = 30000;
+const invocationReconciliationMaximumAttempts = 20;
+const invocationReconciliationDelayMilliseconds = 500;
+const invocationReconciliationDeadlineMilliseconds = invocationReconciliationMaximumAttempts * invocationReconciliationDelayMilliseconds;
+const pendingInvocationRegistryReconciliationDeadlineMilliseconds = 2000;
 
 const elements = {
   addStepButton: document.getElementById("addStepButton"),
@@ -93,6 +105,13 @@ async function boot() {
     const session = await requestJson("/api/session");
     sessionToken = session.token;
     const status = await requestJson("/api/status");
+    try {
+      await configurePendingInvocationRegistry(status.workspaceRoot);
+    } catch {
+      pendingInvocationStorageKey = null;
+      pendingInvocationRegistryLockName = null;
+      pendingInvocationRequests.clear();
+    }
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
     elements.connectionDot.classList.toggle("ready", status.initialized);
@@ -139,6 +158,15 @@ function bindStaticEvents() {
   });
   window.addEventListener("keydown", event => {
     if (event.key === "Escape" && elements.invokeModal.className.split(/\s+/).includes("open")) closeInvokeModal();
+  });
+  window.addEventListener("storage", event => {
+    if (pendingInvocationStorageKey && event.key === pendingInvocationStorageKey) {
+      try {
+        synchronizePendingInvocationRequestsFromStorage();
+      } catch {
+        // Retain the last verified in-memory view and fail closed on the next reservation attempt.
+      }
+    }
   });
 }
 
@@ -421,6 +449,24 @@ function tombstoneRunSummary(trace) {
   };
 }
 
+function liveRunSummary(run) {
+  return {
+    id: run.id,
+    loopId: run.loopId,
+    admissionOperationId: run.admissionOperationId,
+    definitionVersion: run.admittedDefinition?.definitionVersion,
+    lifecycleVersion: run.lifecycleVersion,
+    status: run.status,
+    createdAtUtc: run.createdAtUtc,
+    updatedAtUtc: run.updatedAtUtc,
+    completedAtUtc: run.completedAtUtc,
+    iteration: run.checkpoint?.iteration ?? 0,
+    nextStepIndex: run.checkpoint?.nextStepIndex ?? 0,
+    failureCode: run.failureCode,
+    isDeleted: false
+  };
+}
+
 function bindSelectedRunMonitor(runId) {
   if (selectedRunMonitorId === runId) return;
   selectedRunMonitorId = runId;
@@ -566,6 +612,7 @@ function renderRunPagination() {
 }
 
 async function selectRun(runId) {
+  runSelectionGeneration++;
   const requestGeneration = ++runEvidenceRequestGeneration;
   selectedRunId = runId;
   selectedRun = null;
@@ -881,6 +928,7 @@ async function selectDefinition(definition) {
   if (mutationInFlight) return;
   if (definition.id === currentDefinition?.id && !historicalLoopId) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  runSelectionGeneration++;
   applyDefinition(definition);
   if (currentView === "runs") await loadRuns({ silent: false });
 }
@@ -888,6 +936,7 @@ async function selectDefinition(definition) {
 async function selectHistoricalLoop(loopId) {
   if (mutationInFlight) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  runSelectionGeneration++;
   runEvidenceRequestGeneration++;
   historicalLoopId = loopId;
   currentDefinition = null;
@@ -1236,11 +1285,12 @@ async function deleteLoop() {
 }
 
 function openInvokeModal() {
-  if (!draft || isSystemLoop() || dirty) return;
+  if (!draft || isSystemLoop() || dirty || invocationInFlight) return;
   invokeReturnFocus = document.activeElement ?? elements.invokeButton;
   const trigger = draft.triggerPolicy;
   const promptRequired = trigger.promptSource === "invocation";
-  elements.invocationPrompt.value = "";
+  const pendingRetry = findLatestPendingInvocationRequest(draft);
+  elements.invocationPrompt.value = pendingRetry?.invocationPrompt ?? "";
   elements.invocationPrompt.maxLength = catalog.limits.maxTriggerPromptCharacters;
   elements.invocationPromptField.hidden = !promptRequired;
   elements.invokeSummary.textContent = `${draft.displayName} v${draft.definitionVersion} will run the saved definition with ${draft.inferenceSteps.length} ordered inference step${draft.inferenceSteps.length === 1 ? "" : "s"} using ${catalog.runtimeModel?.provider ?? "the configured provider"} · ${catalog.runtimeModel?.model || "provider default model"}. Trigger source: ${promptSourceLabel(trigger.promptSource)}. Invoking conversation: ${trigger.includeInvokingConversation ? "admitted as a bounded snapshot" : "excluded from model context"}.`;
@@ -1260,25 +1310,68 @@ function closeInvokeModal() {
 }
 
 async function startRun() {
-  if (!draft || dirty || isSystemLoop()) return;
-  const invocationPrompt = draft.triggerPolicy.promptSource === "invocation" ? elements.invocationPrompt.value : null;
+  if (!draft || dirty || isSystemLoop() || invocationInFlight) return;
+  const invocationPrompt = draft.triggerPolicy.promptSource === "invocation" ? elements.invocationPrompt.value.normalize("NFC") : null;
   if (draft.triggerPolicy.promptSource === "invocation" && !invocationPrompt.trim()) {
     showBanner("This loop requires an initial user prompt.");
     return;
   }
 
+  const invocationRequest = {
+    loopId: draft.id,
+    expectedDefinitionVersion: draft.definitionVersion,
+    expectedDefinitionHash: draft.contentHash,
+    invocationPrompt,
+    runtimeProvider: catalog.runtimeModel?.provider,
+    runtimeModel: catalog.runtimeModel?.model ?? null
+  };
+  invocationInFlight = true;
   elements.startRunButton.disabled = true;
   elements.startRunButton.textContent = "Running";
+  let requestKey = null;
   let operationId = null;
+  let reservationId = null;
+  let reservationIdsBeforeDispatch = [];
+  let dispatchAttempted = false;
+  let wasPreviouslyDispatched = false;
   try {
+    try {
+      requestKey = await invocationRequestKey(invocationRequest);
+    } catch (error) {
+      showBanner(`Run could not be prepared safely: ${error.message}`);
+      return;
+    }
+
     const connection = await getHub();
-    operationId = newOperationId();
+    let reservedInvocationRequest;
+    try {
+      reservedInvocationRequest = await reservePendingInvocationRequest(requestKey, invocationRequest);
+    } catch (error) {
+      showBanner(`Run was not sent because unresolved invocation identity could not be coordinated safely across browser tabs: ${error.message}`);
+      return;
+    }
+    if (!reservedInvocationRequest) {
+      showBanner(`Run was not started because ${maximumPendingInvocationRequests} invocation outcomes are still unresolved. Reconcile or definitively reject an existing operation before starting another.`);
+      return;
+    }
+    operationId = reservedInvocationRequest.operationId;
+    reservationId = reservedInvocationRequest.reservationId;
+    reservationIdsBeforeDispatch = reservedInvocationRequest.reservationIds;
+    wasPreviouslyDispatched = reservedInvocationRequest.dispatchAttempted;
+    try {
+      await markPendingInvocationDispatched(requestKey, operationId, reservationId);
+    } catch (error) {
+      await releasePendingInvocationReservation(requestKey, operationId, reservationId);
+      showBanner(`Run was not sent because its dispatch state could not be persisted safely: ${error.message}`);
+      return;
+    }
+    dispatchAttempted = true;
     const invocation = connection.invoke("InvokeLoop", {
-      loopId: draft.id,
-      expectedDefinitionVersion: draft.definitionVersion,
-      expectedDefinitionHash: draft.contentHash,
+      loopId: invocationRequest.loopId,
+      expectedDefinitionVersion: invocationRequest.expectedDefinitionVersion,
+      expectedDefinitionHash: invocationRequest.expectedDefinitionHash,
       operationId,
-      invocationPrompt
+      invocationPrompt: invocationRequest.invocationPrompt
     });
     closeInvokeModal();
     currentView = "runs";
@@ -1288,38 +1381,492 @@ async function startRun() {
     renderAll();
     const response = await waitForRunOperation(invocation, { preferredAdmissionOperationId: operationId, preserveEmptySelection: true });
     if (response?.admissionStatus === "AuditUnavailable" && response?.run) {
-      selectedRunId = response.run.id;
-      selectedRun = response.run;
-      await loadRuns({ silent: true, preferredRunId: response.run.id });
+      const matchingRun = await selectExactInvocationRun(response.run, invocationRequest.loopId, operationId);
+      if (!matchingRun) {
+        clearSelectedRunEvidence();
+        showBanner(`The audit-unavailable response named ${response.run.id}, but its exact durable run evidence could not be verified. The start outcome remains unknown; retrying the exact request will reuse operation ${operationId}.`);
+        return;
+      }
+      await forgetPendingInvocationRequest(requestKey, operationId);
       renderAll();
       showBanner(response.detail ?? "Run admission was parked because its invocation audit could not be completed. Inspect the durable run evidence before resuming.");
       return;
     }
+    if (["OperationInProgress", "Conflict", "ReceiptUnavailable"].includes(response?.admissionStatus)
+      || response?.admissionStatus === "WorkspaceHostUnavailable" && wasPreviouslyDispatched) {
+      await reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId);
+      return;
+    }
     if (response?.admissionStatus !== "Admitted" || !response?.run) {
+      await forgetPendingInvocationRequest(requestKey, operationId);
       await loadRuns({ silent: true, preserveEmptySelection: true });
       renderAll();
       showBanner(`Run was not admitted: ${response?.detail ?? "The runtime rejected the invocation."}`);
       return;
     }
-    selectedRunId = response.run.id;
-    selectedRun = response.run;
-    await loadRuns({ silent: true, preferredRunId: response.run.id });
+    const matchingRun = await selectExactInvocationRun(response.run, invocationRequest.loopId, operationId);
+    if (!matchingRun) {
+      clearSelectedRunEvidence();
+      showBanner(`The admitted response named ${response.run.id}, but its exact durable run evidence could not be verified. The start outcome remains unknown; retrying the exact request will reuse operation ${operationId}.`);
+      return;
+    }
+    await forgetPendingInvocationRequest(requestKey, operationId);
     renderAll();
     showToast(response?.detail ?? "Run finished. Durable evidence is available in Runs.");
   } catch (error) {
-    const reconciled = operationId
-      ? await loadRuns({ silent: true, preferredAdmissionOperationId: operationId, preserveEmptySelection: true })
-      : false;
-    if (reconciled && selectedRun?.admissionOperationId === operationId) {
-      renderAll();
-      showBanner("The live connection was lost after admission. Durable run evidence was recovered; monitoring continues while the run remains active.");
-    } else {
-      showBanner(`Run could not start: ${error.message}`);
+    if (!dispatchAttempted) {
+      if (requestKey && operationId && reservationId) await releasePendingInvocationReservation(requestKey, operationId, reservationId);
+      showBanner(`Run could not be sent because the live connection was not established: ${error.message}`);
+      return;
     }
+    if (error?.name === "SignalRPreDispatchError") {
+      await rollbackPendingInvocationDispatch(requestKey, operationId, reservationId, reservationIdsBeforeDispatch, wasPreviouslyDispatched);
+      showBanner(`Run could not be sent because the live connection was not established: ${error.message}`);
+      return;
+    }
+    await reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId);
   } finally {
+    invocationInFlight = false;
     elements.startRunButton.disabled = false;
     elements.startRunButton.textContent = "Start run";
   }
+}
+
+async function invocationRequestKey(request) {
+  if (!globalThis.crypto?.subtle || typeof TextEncoder !== "function") throw new Error("Secure request identity hashing is unavailable.");
+  if (typeof request.runtimeProvider !== "string" || !request.runtimeProvider || request.runtimeProvider.length > 512
+    || request.runtimeModel !== null && (typeof request.runtimeModel !== "string" || !request.runtimeModel || request.runtimeModel.length > 512)) {
+    throw new Error("The configured provider and model identity is unavailable.");
+  }
+  const canonicalRequest = JSON.stringify([request.loopId, request.expectedDefinitionVersion, request.expectedDefinitionHash, request.invocationPrompt, request.runtimeProvider, request.runtimeModel]);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonicalRequest));
+  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+
+function rememberPendingInvocationRequest(requestKey, request) {
+  const next = new Map(pendingInvocationRequests);
+  next.delete(requestKey);
+  next.set(requestKey, normalizePendingInvocationRequest(request));
+  commitPendingInvocationRequests(next);
+}
+
+async function reservePendingInvocationRequest(requestKey, request) {
+  return withPendingInvocationRegistryLock(async () => {
+    synchronizePendingInvocationRequestsFromStorage();
+    let pending = pendingInvocationRequests.get(requestKey);
+    if (!pending && pendingInvocationRequests.size >= maximumPendingInvocationRequests) {
+      await reconcileStoredPendingInvocationRequests();
+      pending = pendingInvocationRequests.get(requestKey);
+    }
+    if (!pending && pendingInvocationRequests.size >= maximumPendingInvocationRequests) return null;
+    if (pending?.reservationIds.length >= maximumPendingInvocationRequests) {
+      throw new Error(`The unresolved invocation already has ${maximumPendingInvocationRequests} active browser reservations.`);
+    }
+    const reservationId = newOperationId();
+    const reserved = pending
+      ? { ...pending, reservationIds: [...new Set([...pending.reservationIds, reservationId])] }
+      : { ...request, operationId: newOperationId(), reservationIds: [reservationId], dispatchAttempted: false };
+    rememberPendingInvocationRequest(requestKey, reserved);
+    return { ...reserved, reservationId };
+  });
+}
+
+async function forgetPendingInvocationRequest(requestKey, operationId) {
+  if (!requestKey) return;
+  try {
+    await withPendingInvocationRegistryLock(async () => {
+      synchronizePendingInvocationRequestsFromStorage();
+      const pending = pendingInvocationRequests.get(requestKey);
+      if (!pending || operationId && pending.operationId !== operationId) return;
+      const next = new Map(pendingInvocationRequests);
+      next.delete(requestKey);
+      tryCommitPendingInvocationRequests(next);
+    });
+  } catch {
+    // Retaining an already resolved identity is safe when shared storage cannot be updated.
+  }
+}
+
+async function releasePendingInvocationReservation(requestKey, operationId, reservationId) {
+  try {
+    await withPendingInvocationRegistryLock(async () => {
+      synchronizePendingInvocationRequestsFromStorage();
+      const pending = pendingInvocationRequests.get(requestKey);
+      if (!pending || pending.operationId !== operationId || !pending.reservationIds.includes(reservationId)) return;
+      const next = new Map(pendingInvocationRequests);
+      const remainingReservationIds = pending.reservationIds.filter(value => value !== reservationId);
+      if (remainingReservationIds.length || pending.dispatchAttempted) next.set(requestKey, { ...pending, reservationIds: remainingReservationIds });
+      else next.delete(requestKey);
+      tryCommitPendingInvocationRequests(next);
+    });
+  } catch {
+    // Retaining the reservation is the fail-closed result when shared storage cannot be updated.
+  }
+}
+
+async function markPendingInvocationDispatched(requestKey, operationId, reservationId) {
+  await withPendingInvocationRegistryLock(async () => {
+    synchronizePendingInvocationRequestsFromStorage();
+    const pending = pendingInvocationRequests.get(requestKey);
+    if (!pending || pending.operationId !== operationId || !pending.reservationIds.includes(reservationId)) {
+      throw new Error("The reserved invocation identity is no longer available.");
+    }
+    const next = new Map(pendingInvocationRequests);
+    next.set(requestKey, { ...pending, dispatchAttempted: true, reservationIds: pending.reservationIds.filter(value => value !== reservationId) });
+    commitPendingInvocationRequests(next);
+  });
+}
+
+async function rollbackPendingInvocationDispatch(requestKey, operationId, reservationId, reservationIdsBeforeDispatch, wasPreviouslyDispatched) {
+  try {
+    await withPendingInvocationRegistryLock(async () => {
+      synchronizePendingInvocationRequestsFromStorage();
+      const pending = pendingInvocationRequests.get(requestKey);
+      if (!pending || pending.operationId !== operationId || wasPreviouslyDispatched) return;
+      const expectedReservationIds = reservationIdsBeforeDispatch.filter(value => value !== reservationId);
+      const dispatchStateIsUnchanged = pending.dispatchAttempted
+        && pending.reservationIds.length === expectedReservationIds.length
+        && expectedReservationIds.every(value => pending.reservationIds.includes(value));
+      if (!dispatchStateIsUnchanged) return;
+      const next = new Map(pendingInvocationRequests);
+      if (expectedReservationIds.length) next.set(requestKey, { ...pending, dispatchAttempted: false, reservationIds: expectedReservationIds });
+      else next.delete(requestKey);
+      tryCommitPendingInvocationRequests(next);
+    });
+  } catch {
+    // Retaining an uncertain dispatch is the fail-closed result when rollback cannot be proved or persisted.
+  }
+}
+
+async function reconcileStoredPendingInvocationRequests() {
+  const deadline = performance.now() + pendingInvocationRegistryReconciliationDeadlineMilliseconds;
+  const completedRequestKeys = await Promise.all([...pendingInvocationRequests.entries()].map(async ([requestKey, request]) => {
+    try {
+      const receipt = await requestJsonBeforeDeadline(`/api/loop-runs/invocations/${encodeURIComponent(request.operationId)}`, deadline);
+      if (receipt?.operationId !== request.operationId || receipt.loopId !== request.loopId || receipt.state !== "Complete") return null;
+      if (receipt.admissionStatus === "AuditUnavailable") {
+        if (!receipt.runId) return receipt.outcome === "Rejected" ? requestKey : null;
+        const evidence = await requestExactInvocationEvidence(receipt.runId, request.loopId, request.operationId, deadline);
+        return evidence ? requestKey : null;
+      }
+      if (["Rejected", "WorkspaceExecutionBusy"].includes(receipt.outcome)) return requestKey;
+      if (receipt.outcome === "Admitted" && receipt.runId) {
+        const evidence = await requestExactInvocationEvidence(receipt.runId, request.loopId, request.operationId, deadline);
+        return evidence ? requestKey : null;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }));
+  const next = new Map(pendingInvocationRequests);
+  for (const requestKey of completedRequestKeys) if (requestKey) next.delete(requestKey);
+  tryCommitPendingInvocationRequests(next);
+}
+
+async function withPendingInvocationRegistryLock(callback) {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request) throw new Error("This browser does not provide the required cross-tab lock service.");
+  if (!pendingInvocationRegistryLockName) throw new Error("The workspace-scoped invocation registry is unavailable.");
+  return locks.request(pendingInvocationRegistryLockName, { mode: "exclusive" }, callback);
+}
+
+async function configurePendingInvocationRegistry(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot) throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  pendingInvocationStorageKey = `${pendingInvocationStorageKeyPrefix}.${scope}`;
+  pendingInvocationRegistryLockName = `${pendingInvocationRegistryLockNamePrefix}.${scope}`;
+  synchronizePendingInvocationRequestsFromStorage();
+}
+
+function synchronizePendingInvocationRequestsFromStorage() {
+  const stored = restorePendingInvocationRequests();
+  const current = new Map(pendingInvocationRequests);
+  pendingInvocationRequests.clear();
+  for (const [requestKey, request] of stored) {
+    const local = current.get(requestKey);
+    const invocationPrompt = local?.operationId === request.operationId ? local.invocationPrompt : null;
+    pendingInvocationRequests.set(requestKey, { ...request, invocationPrompt });
+  }
+}
+
+function restorePendingInvocationRequests() {
+  if (!pendingInvocationStorageKey || !window.localStorage) throw new Error("Shared invocation storage is unavailable.");
+  const stored = window.localStorage.getItem(pendingInvocationStorageKey);
+  if (!stored) return new Map();
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    throw new Error("The shared invocation registry is corrupt.");
+  }
+  if (payload?.schemaVersion !== 2 || !Array.isArray(payload.requests)) throw new Error("The shared invocation registry schema is unsupported.");
+  const requests = new Map();
+  for (const entry of payload.requests) {
+    if (!isStoredPendingInvocationRequest(entry) || requests.has(entry.requestKey)) throw new Error("The shared invocation registry contains invalid entries.");
+    requests.set(entry.requestKey, normalizePendingInvocationRequest({
+      loopId: entry.loopId,
+      expectedDefinitionVersion: entry.expectedDefinitionVersion,
+      expectedDefinitionHash: entry.expectedDefinitionHash,
+      invocationPrompt: null,
+      runtimeProvider: entry.runtimeProvider,
+      runtimeModel: entry.runtimeModel,
+      operationId: entry.operationId,
+      reservationIds: entry.reservationIds,
+      dispatchAttempted: entry.dispatchAttempted
+    }));
+  }
+  return requests;
+}
+
+function persistPendingInvocationRequests(requests) {
+  if (!pendingInvocationStorageKey || !window.localStorage) throw new Error("Shared invocation storage is unavailable.");
+  if (!requests.size) {
+    window.localStorage.removeItem(pendingInvocationStorageKey);
+    return;
+  }
+  const storedRequests = [...requests.entries()].map(([requestKey, request]) => ({
+    requestKey,
+    loopId: request.loopId,
+    expectedDefinitionVersion: request.expectedDefinitionVersion,
+    expectedDefinitionHash: request.expectedDefinitionHash,
+    runtimeProvider: request.runtimeProvider,
+    runtimeModel: request.runtimeModel,
+    operationId: request.operationId,
+    reservationIds: request.reservationIds,
+    dispatchAttempted: request.dispatchAttempted
+  }));
+  window.localStorage.setItem(pendingInvocationStorageKey, JSON.stringify({ schemaVersion: 2, requests: storedRequests }));
+}
+
+function commitPendingInvocationRequests(next) {
+  persistPendingInvocationRequests(next);
+  pendingInvocationRequests.clear();
+  for (const [requestKey, request] of next) pendingInvocationRequests.set(requestKey, request);
+}
+
+function tryCommitPendingInvocationRequests(next) {
+  try {
+    commitPendingInvocationRequests(next);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isStoredPendingInvocationRequest(entry) {
+  return entry
+    && /^[a-f0-9]{64}$/.test(entry.requestKey)
+    && typeof entry.loopId === "string" && entry.loopId.length > 0 && entry.loopId.length <= 200
+    && Number.isInteger(entry.expectedDefinitionVersion) && entry.expectedDefinitionVersion > 0
+    && typeof entry.expectedDefinitionHash === "string" && entry.expectedDefinitionHash.length > 0 && entry.expectedDefinitionHash.length <= 256
+    && typeof entry.runtimeProvider === "string" && entry.runtimeProvider.length > 0 && entry.runtimeProvider.length <= 512
+    && (entry.runtimeModel === null || typeof entry.runtimeModel === "string" && entry.runtimeModel.length > 0 && entry.runtimeModel.length <= 512)
+    && typeof entry.operationId === "string" && /^[a-z0-9-]{8,128}$/.test(entry.operationId)
+    && typeof entry.dispatchAttempted === "boolean"
+    && Array.isArray(entry.reservationIds) && entry.reservationIds.length <= 100
+    && entry.reservationIds.every(value => typeof value === "string" && /^[a-z0-9-]{8,128}$/.test(value))
+    && new Set(entry.reservationIds).size === entry.reservationIds.length
+    && (entry.dispatchAttempted || entry.reservationIds.length > 0);
+}
+
+function normalizePendingInvocationRequest(request) {
+  const hasReservationState = Array.isArray(request.reservationIds) || typeof request.dispatchAttempted === "boolean";
+  const runtimeProvider = Object.hasOwn(request, "runtimeProvider") ? request.runtimeProvider : catalog?.runtimeModel?.provider;
+  const runtimeModel = Object.hasOwn(request, "runtimeModel") ? request.runtimeModel : catalog?.runtimeModel?.model ?? null;
+  return {
+    ...request,
+    invocationPrompt: request.invocationPrompt ?? null,
+    runtimeProvider,
+    runtimeModel,
+    reservationIds: request.reservationIds ? [...new Set(request.reservationIds)] : [],
+    dispatchAttempted: hasReservationState ? request.dispatchAttempted === true : true
+  };
+}
+
+function findLatestPendingInvocationRequest(definition) {
+  const requests = [...pendingInvocationRequests.values()];
+  for (let index = requests.length - 1; index >= 0; index--) {
+    const request = requests[index];
+    if (request.loopId === definition.id
+      && request.expectedDefinitionVersion === definition.definitionVersion
+      && request.expectedDefinitionHash === definition.contentHash) return request;
+  }
+  return null;
+}
+
+async function reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId) {
+  const evidenceSelectionGeneration = runSelectionGeneration;
+  const reconciliation = await reconcileInvocationOperation(operationId, invocationRequest.loopId);
+  await applyInvocationReconciliation(reconciliation, invocationRequest, requestKey, operationId, evidenceSelectionGeneration);
+}
+
+async function applyInvocationReconciliation(reconciliation, invocationRequest, requestKey, operationId, evidenceSelectionGeneration = runSelectionGeneration) {
+  if (reconciliation.kind === "admitted" || reconciliation.kind === "audit-unavailable") {
+    let evidence = null;
+    try {
+      evidence = await requestExactInvocationEvidence(reconciliation.receipt.runId, invocationRequest.loopId, operationId);
+    } catch {
+      // Exact durable evidence is required before a receipt can release the operation identity.
+    }
+    const preserveNewerSelection = runSelectionGeneration !== evidenceSelectionGeneration;
+    const matchingEvidence = evidence && await selectExactInvocationEvidence(evidence, invocationRequest.loopId, operationId, !preserveNewerSelection);
+    if (!matchingEvidence) {
+      if (!preserveNewerSelection) clearSelectedRunEvidence();
+      showBanner(`The durable receipt names ${reconciliation.receipt.runId}, but matching run evidence (live or tombstone) for operation ${operationId} could not be verified. The start outcome remains unknown; retrying the exact request will reuse this operation.`);
+      return;
+    }
+
+    await forgetPendingInvocationRequest(requestKey, operationId);
+    renderAll();
+    if (reconciliation.kind === "audit-unavailable") {
+      showBanner(reconciliation.receipt.detail || "Run admission was parked because its invocation audit could not be completed. Inspect the durable run evidence before resuming.");
+    } else {
+      showBanner("The durable invocation receipt identified the exact admitted run; monitoring continues.");
+    }
+    return;
+  }
+
+  if (reconciliation.kind === "rejected") {
+    await forgetPendingInvocationRequest(requestKey, operationId);
+    await loadRuns({ silent: true, preserveEmptySelection: true });
+    renderAll();
+    showBanner(`Run was not admitted: ${reconciliation.receipt.detail || reconciliation.receipt.admissionStatus || "The durable invocation receipt records a rejection."}`);
+  } else if (reconciliation.kind === "integrity-mismatch") {
+    if (runSelectionGeneration === evidenceSelectionGeneration) clearSelectedRunEvidence();
+    showBanner(`Durable invocation evidence did not match operation ${operationId} and loop ${invocationRequest.loopId}. The start outcome remains unknown; retrying the exact request will reuse this operation.`);
+  } else if (reconciliation.kind === "unavailable") {
+    showBanner(`Durable invocation evidence is unavailable, so the start outcome is unknown. Retrying the exact request will reuse operation ${operationId}.`);
+  } else {
+    showBanner(`No definitive invocation outcome appeared within ${invocationReconciliationDeadlineMilliseconds / 1000} seconds. The start outcome remains unknown; retrying the exact request will reuse operation ${operationId}.`);
+  }
+}
+
+async function selectExactInvocationRun(run, expectedLoopId, expectedOperationId) {
+  if (!run || run.loopId !== expectedLoopId || run.admissionOperationId !== expectedOperationId) return false;
+  recentRuns = mergeRunSummaries([liveRunSummary(run)], recentRuns);
+  selectedRunId = run.id;
+  selectedRun = run;
+  selectedTrace = null;
+  bindSelectedRunMonitor(run.id);
+  renderAll();
+  const hydrationSelectionGeneration = runSelectionGeneration;
+  const loaded = await loadRuns({ silent: true, preferredRunId: run.id, preserveEmptySelection: true });
+  if (runSelectionGeneration !== hydrationSelectionGeneration || selectedRunId !== run.id) return true;
+  if (!loaded || selectedRun?.id !== run.id || selectedRun.loopId !== expectedLoopId || selectedRun.admissionOperationId !== expectedOperationId) {
+    recentRuns = mergeRunSummaries([liveRunSummary(run)], recentRuns);
+    selectedRunId = run.id;
+    selectedRun = run;
+    selectedTrace = null;
+    bindSelectedRunMonitor(run.id);
+    renderAll();
+    scheduleSelectedRunRefresh();
+  }
+  return true;
+}
+
+async function selectExactInvocationEvidence(evidence, expectedLoopId, expectedOperationId, selectEvidence = true) {
+  if (evidence.run) {
+    if (evidence.run.loopId !== expectedLoopId || evidence.run.admissionOperationId !== expectedOperationId) return false;
+    if (selectEvidence) return selectExactInvocationRun(evidence.run, expectedLoopId, expectedOperationId);
+    recentRuns = mergeRunSummaries([liveRunSummary(evidence.run)], recentRuns);
+    return true;
+  }
+  if (!matchesExactInvocationTombstone(evidence.trace, evidence.runId, expectedLoopId, expectedOperationId)) return false;
+  recentRuns = mergeRunSummaries([tombstoneRunSummary(evidence.trace)], recentRuns.filter(run => run.id !== evidence.runId));
+  if (!selectEvidence) return true;
+  selectedRunId = evidence.runId;
+  selectedRun = null;
+  selectedTrace = evidence.trace;
+  bindSelectedRunMonitor(null);
+  renderAll();
+  return true;
+}
+
+async function requestExactInvocationEvidence(runId, expectedLoopId, expectedOperationId, deadline = null) {
+  const request = url => deadline === null ? requestJson(url) : requestJsonBeforeDeadline(url, deadline);
+  try {
+    const run = await request(`/api/loop-runs/${encodeURIComponent(runId)}`);
+    return run?.id === runId && run.loopId === expectedLoopId && run.admissionOperationId === expectedOperationId
+      ? { runId, run, trace: null }
+      : null;
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+
+  const trace = await request(`/api/loop-runs/${encodeURIComponent(runId)}/trace`);
+  return matchesExactInvocationTombstone(trace, runId, expectedLoopId, expectedOperationId)
+    ? { runId, run: null, trace }
+    : null;
+}
+
+function matchesExactInvocationTombstone(trace, runId, expectedLoopId, expectedOperationId) {
+  return trace?.isDeleted === true
+    && trace.runId === runId
+    && trace.loopId === expectedLoopId
+    && trace.tombstone?.runId === runId
+    && trace.tombstone.loopId === expectedLoopId
+    && trace.tombstone.admissionOperationId === expectedOperationId;
+}
+
+function clearSelectedRunEvidence() {
+  selectedRunId = null;
+  selectedRun = null;
+  selectedTrace = null;
+  bindSelectedRunMonitor(null);
+  renderAll();
+}
+
+async function reconcileInvocationOperation(operationId, expectedLoopId = null, timeoutMilliseconds = invocationReconciliationDeadlineMilliseconds) {
+  if (typeof expectedLoopId === "number") {
+    timeoutMilliseconds = expectedLoopId;
+    expectedLoopId = null;
+  }
+  const deadline = performance.now() + timeoutMilliseconds;
+  for (let attempt = 0; attempt < invocationReconciliationMaximumAttempts; attempt++) {
+    try {
+      const receipt = await requestJsonBeforeDeadline(`/api/loop-runs/invocations/${encodeURIComponent(operationId)}`, deadline);
+      if (receipt && (receipt.operationId !== operationId || expectedLoopId && receipt.loopId !== expectedLoopId)) return { kind: "integrity-mismatch", receipt };
+      if (receipt?.state === "Complete" && receipt.outcome === "Admitted" && receipt.runId) return { kind: "admitted", receipt };
+      if (receipt?.state === "Complete" && receipt.admissionStatus === "AuditUnavailable" && receipt.runId) return { kind: "audit-unavailable", receipt };
+      if (receipt?.state === "Complete" && ["Rejected", "WorkspaceExecutionBusy"].includes(receipt.outcome)) return { kind: "rejected", receipt };
+    } catch (error) {
+      if (error.name === "InvocationReconciliationDeadlineExceeded") return { kind: "unknown" };
+      if (error.status !== 404) return { kind: "unavailable", detail: error.message };
+    }
+
+    if (attempt + 1 < invocationReconciliationMaximumAttempts) {
+      const remainingMilliseconds = deadline - performance.now();
+      if (remainingMilliseconds <= 0) break;
+      await new Promise(resolve => setTimeout(resolve, Math.min(invocationReconciliationDelayMilliseconds, remainingMilliseconds)));
+    }
+  }
+
+  return { kind: "unknown" };
+}
+
+async function requestJsonBeforeDeadline(url, deadline) {
+  const remainingMilliseconds = deadline - performance.now();
+  if (remainingMilliseconds <= 0) throw invocationReconciliationDeadlineError();
+  const abortController = new AbortController();
+  let timeoutHandle = null;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        abortController.abort();
+        reject(invocationReconciliationDeadlineError());
+      }, remainingMilliseconds);
+    });
+    return await Promise.race([requestJson(url, { signal: abortController.signal }), timeout]);
+  } finally {
+    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+  }
+}
+
+function invocationReconciliationDeadlineError() {
+  const error = new Error("The invocation reconciliation deadline elapsed.");
+  error.name = "InvocationReconciliationDeadlineExceeded";
+  return error;
 }
 
 async function controlRun(action) {
@@ -1709,6 +2256,13 @@ function formatDuration(value) {
   return [hours ? `${hours}h` : null, minutes ? `${minutes}m` : null, seconds || (!hours && !minutes) ? `${seconds}s` : null].filter(Boolean).join(" ");
 }
 
+class SignalRPreDispatchError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SignalRPreDispatchError";
+  }
+}
+
 class JsonSignalRConnection {
   constructor(url) {
     this.url = url;
@@ -1753,10 +2307,15 @@ class JsonSignalRConnection {
   }
 
   async invoke(target, ...args) {
-    if (!this.connected || !this.socket || this.socket.readyState !== WebSocket.OPEN) throw new Error("SignalR connection is not available.");
+    if (!this.connected || !this.socket || this.socket.readyState !== WebSocket.OPEN) throw new SignalRPreDispatchError("SignalR connection is not available.");
     const invocationId = String(this.nextInvocationId++);
     const completion = new Promise((resolve, reject) => this.invocations.set(invocationId, { resolve, reject }));
-    this.sendRaw({ type: 1, invocationId, target, arguments: args });
+    try {
+      this.sendRaw({ type: 1, invocationId, target, arguments: args });
+    } catch (error) {
+      this.invocations.delete(invocationId);
+      throw new SignalRPreDispatchError(error?.message ?? "SignalR invocation could not be sent.");
+    }
     return await completion;
   }
 
