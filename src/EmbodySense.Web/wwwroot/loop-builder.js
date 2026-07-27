@@ -9,8 +9,11 @@ let recentRuns = [];
 let runContinuationCursor = null;
 let runPaginationLoopId = null;
 let runPaginationExtended = false;
+let workspaceRunContinuationCursor = null;
+let workspaceRunPaginationExtended = false;
 let loadingMoreRuns = false;
 let loadingMoreRunsLoopId = null;
+let runEvidenceRequestGeneration = 0;
 let selectedRunId = null;
 let selectedRun = null;
 let selectedTrace = null;
@@ -167,6 +170,7 @@ function allDefinitions() {
 }
 
 function applyDefinition(definition) {
+  runEvidenceRequestGeneration++;
   historicalLoopId = null;
   currentDefinition = definition;
   draft = definition ? clone(definition) : null;
@@ -229,6 +233,7 @@ function selectedLoopId() {
 
 async function loadRuns({ silent = false, preferredRunId = null, preferredAdmissionOperationId = null, preserveEmptySelection = false } = {}) {
   if (!catalog) return;
+  const requestGeneration = ++runEvidenceRequestGeneration;
   const loopId = selectedLoopId();
   try {
     const filteredPageRequest = loopId
@@ -239,7 +244,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
       filteredPageRequest,
       requestJson("/api/loop-runs/quota")
     ]);
-    if (selectedLoopId() !== loopId) return false;
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId) return false;
     if (runPaginationLoopId !== loopId) {
       runPaginationLoopId = loopId;
       runContinuationCursor = null;
@@ -249,6 +254,9 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     const filteredRuns = Array.isArray(filteredPayload) ? filteredPayload : filteredPayload?.items ?? [];
     const incomingRuns = mergeRunSummaries(filteredRuns, workspaceRuns);
     recentRuns = mergeRunSummaries(incomingRuns, recentRuns);
+    if (!workspaceRunPaginationExtended && !loadingMoreRuns) {
+      workspaceRunContinuationCursor = Array.isArray(payload) ? null : payload?.continuationCursor ?? null;
+    }
     if (!runPaginationExtended && (!loadingMoreRuns || loadingMoreRunsLoopId !== loopId)) {
       const pagePayload = filteredPayload ?? payload;
       runContinuationCursor = Array.isArray(pagePayload) ? null : pagePayload?.continuationCursor ?? null;
@@ -272,7 +280,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
           requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}/trace`)
         ]);
       }
-      if (selectedRunId !== requestedRunId) return false;
+      if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return false;
       selectedRun = nextRun;
       selectedTrace = nextTrace;
     } else {
@@ -288,30 +296,45 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     scheduleSelectedRunRefresh();
     return true;
   } catch (error) {
-    if (!silent) showBanner(`Run evidence unavailable: ${error.message}`);
+    if (requestGeneration === runEvidenceRequestGeneration && selectedLoopId() === loopId && !silent) showBanner(`Run evidence unavailable: ${error.message}`);
     return false;
   }
 }
 
 async function loadMoreRuns() {
-  if (!runContinuationCursor) return;
   const loopId = runPaginationLoopId;
-  if (!loopId || selectedLoopId() !== loopId || loadingMoreRuns && loadingMoreRunsLoopId === loopId) return;
-  const cursor = runContinuationCursor;
+  if (!runContinuationCursor && !workspaceRunContinuationCursor) return;
+  if (!loopId || selectedLoopId() !== loopId || loadingMoreRuns) return;
+  const requestGeneration = ++runEvidenceRequestGeneration;
+  const loopCursor = runContinuationCursor;
+  const workspaceCursor = workspaceRunContinuationCursor;
   loadingMoreRuns = true;
   loadingMoreRunsLoopId = loopId;
   renderRunPagination();
   try {
-    const payload = await requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}&cursor=${encodeURIComponent(cursor)}`);
-    if (selectedLoopId() !== loopId || runPaginationLoopId !== loopId) return;
-    recentRuns = mergeRunSummaries(recentRuns, payload?.items ?? []);
-    runContinuationCursor = payload?.continuationCursor ?? null;
-    runPaginationExtended = true;
+    const [workspacePayload, loopPayload] = await Promise.all([
+      workspaceCursor
+        ? requestJson(`/api/loop-runs?maximumCount=50&cursor=${encodeURIComponent(workspaceCursor)}`)
+        : Promise.resolve(null),
+      loopCursor
+        ? requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}&cursor=${encodeURIComponent(loopCursor)}`)
+        : Promise.resolve(null)
+    ]);
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || runPaginationLoopId !== loopId) return;
+    recentRuns = mergeRunSummaries(loopPayload?.items ?? [], mergeRunSummaries(workspacePayload?.items ?? [], recentRuns));
+    if (workspacePayload) {
+      workspaceRunContinuationCursor = workspacePayload.continuationCursor ?? null;
+      workspaceRunPaginationExtended = true;
+    }
+    if (loopPayload) {
+      runContinuationCursor = loopPayload.continuationCursor ?? null;
+      runPaginationExtended = true;
+    }
     renderList();
     renderTabs();
     if (currentView === "runs") renderRuns();
   } catch (error) {
-    showBanner(`More run evidence unavailable: ${error.message}`);
+    if (requestGeneration === runEvidenceRequestGeneration && selectedLoopId() === loopId) showBanner(`More run evidence unavailable: ${error.message}`);
   } finally {
     if (loadingMoreRunsLoopId === loopId) {
       loadingMoreRuns = false;
@@ -397,12 +420,13 @@ function renderRuns() {
 
 function renderRunPagination() {
   const loadingCurrentLoop = loadingMoreRuns && loadingMoreRunsLoopId === runPaginationLoopId;
-  elements.loadMoreRunsButton.hidden = !runContinuationCursor;
+  elements.loadMoreRunsButton.hidden = !runContinuationCursor && !workspaceRunContinuationCursor;
   elements.loadMoreRunsButton.disabled = loadingCurrentLoop || mutationInFlight;
   elements.loadMoreRunsButton.textContent = loadingCurrentLoop ? "Loading more…" : "Load older evidence";
 }
 
 async function selectRun(runId) {
+  const requestGeneration = ++runEvidenceRequestGeneration;
   selectedRunId = runId;
   selectedRun = null;
   selectedTrace = null;
@@ -421,14 +445,14 @@ async function selectRun(runId) {
         requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`)
       ]);
     }
-    if (selectedRunId !== runId) return;
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedRunId !== runId) return;
     selectedRun = nextRun;
     selectedTrace = nextTrace;
     renderRuns();
     renderRunEvidence();
     scheduleSelectedRunRefresh();
   } catch (error) {
-    if (selectedRunId !== runId) return;
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedRunId !== runId) return;
     showBanner(`Run detail unavailable: ${error.message}`);
   }
 }
@@ -731,6 +755,7 @@ async function selectDefinition(definition) {
 async function selectHistoricalLoop(loopId) {
   if (mutationInFlight) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  runEvidenceRequestGeneration++;
   historicalLoopId = loopId;
   currentDefinition = null;
   draft = null;

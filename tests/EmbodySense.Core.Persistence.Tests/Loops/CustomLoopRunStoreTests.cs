@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -772,6 +773,34 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Run_page_index_rebuilds_when_a_modified_summary_recomputes_its_public_binding_hash()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Status);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        var entry = index["entries"]![0]!.AsObject();
+        entry["summary"]!["status"] = "failed";
+        var modifiedSummary = entry["summary"]!.Deserialize<CustomLoopRunSummary>(ArtifactJsonOptions)!;
+        var artifactHash = entry["artifactHash"]!.GetValue<string>();
+        using var bindingHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        bindingHash.AppendData(Convert.FromHexString(artifactHash));
+        bindingHash.AppendData(JsonSerializer.SerializeToUtf8Bytes(modifiedSummary, ArtifactJsonOptions));
+        entry["summaryBindingHash"] = Convert.ToHexString(bindingHash.GetHashAndReset()).ToLowerInvariant();
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+
+        var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single(repaired.Items).Status);
+        var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        Assert.Equal("admitted", repairedIndex["entries"]![0]!["summary"]!["status"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Run_page_index_rebuilds_invalid_derived_identifiers_for_reads_and_lifecycle_writes()
     {
         using var workspace = new TestWorkspace();
@@ -826,6 +855,55 @@ public sealed class CustomLoopRunStoreTests
 
         var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         Assert.NotEqual(originalHash, repairedIndex["entries"]![0]!["artifactHash"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Run_page_rejects_unrelated_root_level_temporary_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var unrelatedTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, $".unrelated.json.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(unrelatedTemporaryPath, "unaccounted");
+
+        await Assert.ThrowsAsync<FormatException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(50)));
+
+        Assert.True(File.Exists(unrelatedTemporaryPath));
+    }
+
+    [Fact]
+    public async Task Run_page_uses_an_in_memory_rebuilt_index_when_derived_storage_is_read_only()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        File.Delete(indexPath);
+        var originalMode = File.GetUnixFileMode(paths.CustomLoopRunsPath);
+        try
+        {
+            File.SetUnixFileMode(paths.CustomLoopRunsPath, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+            var page = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+            Assert.Equal(run.Id, Assert.Single(page.Items).Id);
+            Assert.False(File.Exists(indexPath));
+        }
+        finally
+        {
+            File.SetUnixFileMode(paths.CustomLoopRunsPath, originalMode);
+        }
     }
 
     [Fact]

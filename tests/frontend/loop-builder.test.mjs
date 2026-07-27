@@ -640,7 +640,69 @@ test("run discovery fetches the selected loop directly when workspace-newest evi
 
   assert.match(app.elements.runTitle.textContent, /run-test/);
   assert.ok(server.calls.some(call => call.url === "/api/loop-runs?maximumCount=50&loopId=loop-research"));
-  assert.equal(app.elements.loadMoreRunsButton.hidden, true);
+  assert.equal(app.elements.loadMoreRunsButton.hidden, false);
+});
+
+test("workspace pagination discovers archived loops older than the first global page", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const active = createRunSnapshot();
+  const activeSummary = { id: active.id, loopId: active.loopId, admissionOperationId: active.admissionOperationId, definitionVersion: 2, status: active.status, createdAtUtc: active.createdAtUtc, updatedAtUtc: active.updatedAtUtc, completedAtUtc: active.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  const archivedSummary = { ...activeSummary, id: "run-archived", loopId: "loop-deleted", admissionOperationId: "op-run-archived", createdAtUtc: "2026-07-01T10:00:00Z", updatedAtUtc: "2026-07-01T10:00:00Z" };
+  server.runDetails.set(active.id, active);
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [activeSummary], continuationCursor: "workspace-cursor" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research", () => ({ status: 200, body: { items: [activeSummary], continuationCursor: null } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&cursor=workspace-cursor", () => ({ status: 200, body: { items: [archivedSummary], continuationCursor: null } }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  assert.doesNotMatch(app.elements.loopList.textContent, /loop-deleted/);
+  assert.equal(app.elements.loadMoreRunsButton.hidden, false);
+  await app.elements.loadMoreRunsButton.click();
+
+  assert.match(app.elements.loopList.textContent, /Deleted loop · loop-deleted/);
+  assert.ok(server.calls.some(call => call.url === "/api/loop-runs?maximumCount=50&cursor=workspace-cursor"));
+});
+
+test("run discovery rejects stale responses from an earlier visit to the same loop", async () => {
+  const catalog = createCatalog();
+  const secondDefinition = createCustomDefinition({ id: "loop-second", displayName: "Second pass", contentHash: "sha256:second" });
+  catalog.customDefinitions.push(secondDefinition);
+  const server = new FakeFetchServer(catalog);
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  const staleSummary = { id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: "Admitted", createdAtUtc: run.createdAtUtc, updatedAtUtc: run.createdAtUtc, completedAtUtc: null, iteration: 0, nextStepIndex: 0, failureCode: null, isDeleted: false };
+  const currentSummary = { ...staleSummary, status: "Running", updatedAtUtc: "2026-07-20T12:00:02Z", iteration: 1, nextStepIndex: 1 };
+  server.runDetails.set(run.id, run);
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [], continuationCursor: null } }));
+  let alphaReads = 0;
+  let releaseStale;
+  const staleReleased = new Promise(resolve => { releaseStale = resolve; });
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research", async () => {
+    alphaReads++;
+    if (alphaReads === 2) {
+      await staleReleased;
+      return { status: 200, body: { items: [staleSummary], continuationCursor: "stale-cursor" } };
+    }
+    return { status: 200, body: { items: [alphaReads === 1 ? staleSummary : currentSummary], continuationCursor: alphaReads === 1 ? null : "current-cursor" } };
+  });
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-second", () => ({ status: 200, body: { items: [], continuationCursor: null } }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  const staleLoad = app.context.loadRuns({ silent: true });
+  await Promise.resolve();
+  const secondLoopButton = app.elements.loopList.children.find(item => item.textContent.includes("Second pass"));
+  await secondLoopButton.click();
+  const firstLoopButton = app.elements.loopList.children.find(item => item.textContent.includes("Research pass"));
+  await firstLoopButton.click();
+  releaseStale();
+  await staleLoad;
+
+  assert.match(app.elements.runSubtitle.textContent, /Running/);
+  assert.equal(vm.runInContext("runContinuationCursor", app.context), "current-cursor");
 });
 
 test("run monitoring refreshes the newest page without rewinding older-evidence pagination", async () => {
@@ -666,8 +728,8 @@ test("run monitoring refreshes the newest page without rewinding older-evidence 
 
   assert.match(app.elements.runList.textContent, /run-second-page/);
   assert.match(app.elements.runList.textContent, /run-third-page/);
-  assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-one")).length, 1);
-  assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-two")).length, 1);
+  assert.equal(server.calls.filter(call => call.url.includes("loopId=loop-research&cursor=cursor-one")).length, 1);
+  assert.equal(server.calls.filter(call => call.url.includes("loopId=loop-research&cursor=cursor-two")).length, 1);
 });
 
 test("deleting a trace loaded from a continuation page keeps its tombstone selected", async () => {
@@ -725,7 +787,7 @@ test("deleting a trace loaded from a continuation page keeps its tombstone selec
 
   assert.match(app.elements.runTitle.textContent, /Deleted trace run-older-page/);
   assert.equal(app.elements.runList.children.find(item => item.className.includes("selected")).textContent.includes("trace deleted"), true);
-  assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-one")).length, 1);
+  assert.equal(server.calls.filter(call => call.url.includes("loopId=loop-research&cursor=cursor-one")).length, 1);
 });
 
 test("live run monitoring binds the exact admission operation instead of another recent run", async () => {
