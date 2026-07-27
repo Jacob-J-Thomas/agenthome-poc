@@ -83,7 +83,8 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         }
         catch (TimeoutException)
         {
-            return Owned(CustomLoopAttemptCancellationStatus.SignalDelivered, "The workspace-host owner signalled the active provider attempt, but interruption was not confirmed before the acknowledgement deadline.");
+            var result = attempt.CreateUnconfirmedResult();
+            return result with { OwnerId = _ownerId, OwnerProcessId = Environment.ProcessId };
         }
     }
 
@@ -322,7 +323,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     {
         var pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
         var path = pathGuard.GetFilePath(paths.LoopRunsPath, Path.GetFileName(paths.CustomLoopCancellationOwnerPath));
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 4 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         if (stream.Length <= 0 || stream.Length > MaxWireUtf8Bytes)
         {
             throw new FormatException("The workspace-host owner descriptor is outside its bounded size.");
@@ -462,11 +463,21 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         public void CompleteWithoutConfirmedInterruption()
         {
-            var status = Volatile.Read(ref _signalQueued) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.SignalDelivered;
+            Completion.TrySetResult(CreateUnconfirmedResult());
+        }
+
+        public CustomLoopAttemptCancellationResult CreateUnconfirmedResult()
+        {
+            if (Volatile.Read(ref _routedSignalDelivered) != 0)
+            {
+                return new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "The cancellation signal was delivered, but the active operation completed or the acknowledgement window elapsed without confirmed provider interruption.");
+            }
+
+            var status = Volatile.Read(ref _signalQueued) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.OwnerUnavailable;
             var detail = status == CustomLoopAttemptCancellationStatus.NoActiveAttempt
-                ? "The provider attempt completed before cancellation was routed."
-                : "The cancellation signal was delivered, but the provider attempt completed without a confirmed cancellation exception.";
-            Completion.TrySetResult(new CustomLoopAttemptCancellationResult(status, detail));
+                ? "The active operation completed before cancellation was routed."
+                : "The cancellation signal was queued, but delivery was not observed before the active operation completed or the acknowledgement window elapsed.";
+            return new CustomLoopAttemptCancellationResult(status, detail);
         }
 
         public void CompleteOwnerUnavailable()

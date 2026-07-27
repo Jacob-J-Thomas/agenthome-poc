@@ -948,10 +948,22 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         run = intentPersisted.Run!;
         CustomLoopConversationPublicationResult publication;
         var publicationDispatched = false;
+        ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
         using var publicationToken = new CancellationTokenSource(IntegrityWriteTimeout);
         if (!_activeAttemptCancellations.TryAdd(run.Id, publicationToken))
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "publication_registration_failed", "Conversation publication could not be registered with the active cancellation protocol, so no append was attempted.");
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
+        try
+        {
+            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, publicationToken);
+        }
+        catch (Exception exception)
+        {
+            _activeAttemptCancellations.TryRemove(run.Id, out _);
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "publication_registration_failed", $"Conversation publication could not register with the workspace-host cancellation broker, so no append was attempted: {SafeExceptionClass(exception)}.");
             return new RunAdvance(terminal.Run, terminal);
         }
 
@@ -995,6 +1007,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         finally
         {
+            cancellationRegistration?.Dispose();
             _activeAttemptCancellations.TryRemove(run.Id, out _);
         }
 

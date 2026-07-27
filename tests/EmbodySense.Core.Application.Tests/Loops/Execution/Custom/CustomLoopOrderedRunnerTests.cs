@@ -542,6 +542,46 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Routed_cancellation_reaches_conversation_publication_before_append()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            maxAdditionalIterations: 0,
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var store = new FakeRunStore(run);
+        var broker = new RecordingAttemptCancellationBroker();
+        CustomLoopOrderedRunner? runner = null;
+        Task<CustomLoopAttemptCancellationResult>? signal = null;
+        var publisher = new RecordingPublisher
+        {
+            BeforePublish = request =>
+            {
+                signal = runner!.RequestActiveAttemptCancellationAsync(request.RunId, "cancel-publication");
+                return Task.CompletedTask;
+            }
+        };
+        runner = new CustomLoopOrderedRunner(
+            store,
+            new CustomLoopContextResolver(),
+            new QueueExecutor(Result("evidence")),
+            publisher,
+            new RecordingAuditLog(),
+            new TestAuthorityProvider(),
+            new FixedTimeProvider(Now),
+            broker);
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+        var signalResult = await signal!;
+
+        Assert.Equal(2, broker.RegistrationCount);
+        Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, signalResult.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal("publication_cancelled_before_dispatch", result.Run!.FailureCode);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+    }
+
+    [Fact]
     public async Task Missing_started_audit_blocks_provider_dispatch()
     {
         var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))));
@@ -2308,8 +2348,11 @@ public sealed class CustomLoopOrderedRunnerTests
         private TaskCompletionSource<CustomLoopAttemptCancellationResult>? _completion;
         private bool _routedSignalWon;
 
+        public int RegistrationCount { get; private set; }
+
         public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation)
         {
+            RegistrationCount++;
             _cancellation = cancellation;
             _completion = new TaskCompletionSource<CustomLoopAttemptCancellationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             return new Registration(this);

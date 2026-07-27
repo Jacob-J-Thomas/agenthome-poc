@@ -229,7 +229,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
-    public async Task Already_cancelled_provider_token_cannot_be_claimed_by_a_later_routed_signal()
+    public async Task Already_cancelled_provider_token_is_not_reported_as_delivered_by_a_later_routed_signal()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -243,7 +243,27 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         registration.Dispose();
         var result = await request;
 
-        Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, result.Status);
+    }
+
+    [Fact]
+    public async Task Windows_descriptor_reader_allows_atomic_owner_generation_replacement()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
+        await using var reader = new FileStream(paths.CustomLoopCancellationOwnerPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+        var replacement = paths.CustomLoopCancellationOwnerPath + ".replacement";
+        await File.WriteAllTextAsync(replacement, "{}");
+
+        File.Move(replacement, paths.CustomLoopCancellationOwnerPath, overwrite: true);
+
+        Assert.Equal("{}", await File.ReadAllTextAsync(paths.CustomLoopCancellationOwnerPath));
     }
 
     [Fact]
