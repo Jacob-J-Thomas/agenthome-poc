@@ -463,20 +463,13 @@ async function selectRun(runId) {
   renderRunEvidence();
   try {
     const summary = runsForCurrentLoop().find(run => run.id === runId);
-    let nextRun;
-    let nextTrace;
-    if (summary?.isDeleted) {
-      nextRun = null;
-      nextTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`);
-    } else {
-      [nextRun, nextTrace] = await Promise.all([
-        requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
-        requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`)
-      ]);
+    const evidence = await loadSelectedRunEvidence(runId, summary);
+    if (evidence.trace?.isDeleted) {
+      recentRuns = mergeRunSummaries([tombstoneRunSummary(evidence.trace)], recentRuns.filter(run => run.id !== runId));
     }
     if (requestGeneration !== runEvidenceRequestGeneration || selectedRunId !== runId) return;
-    selectedRun = nextRun;
-    selectedTrace = nextTrace;
+    selectedRun = evidence.run;
+    selectedTrace = evidence.trace;
     renderRuns();
     renderRunEvidence();
     scheduleSelectedRunRefresh();
