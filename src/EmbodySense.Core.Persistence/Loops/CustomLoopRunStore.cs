@@ -1654,7 +1654,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     {
         EnsureSafeDirectory(_runsRoot, create: false);
         var rootFiles = Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).ToArray();
-        if (rootFiles.Any(path => !string.Equals(Path.GetFileName(path), MutationLockFileName, StringComparison.Ordinal)))
+        if (rootFiles.Any(path => !IsAllowedRootArtifact(path)))
         {
             throw new FormatException("Custom loop run storage contains an unexpected root-level artifact; traces must be stored beneath their loop-id directory.");
         }
