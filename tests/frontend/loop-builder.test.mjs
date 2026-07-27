@@ -1124,6 +1124,62 @@ test("terminal trace deletion preserves its operation while audit rejection rema
   assert.match(app.elements.validationBanner.textContent, /requires recovery/);
 });
 
+test("trace deletion completion preserves a newer run selection while caching the tombstone", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const runA = createRunSnapshot();
+  runA.id = "run-a";
+  const runB = createRunSnapshot();
+  runB.id = "run-b";
+  server.runs = [runA, runB].map(run => ({ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: run.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }));
+  server.runDetails.set(runA.id, runA);
+  server.runDetails.set(runB.id, runB);
+  server.traceDetails.set(runA.id, createTraceSnapshot(runA));
+  let releaseDeletion;
+  const deletionReleased = new Promise(resolve => { releaseDeletion = resolve; });
+  server.on("POST", `/api/loop-runs/${runA.id}/trace/delete`, async ({ body }) => {
+    await deletionReleased;
+    const tombstone = {
+      runId: runA.id,
+      loopId: runA.loopId,
+      admissionOperationId: runA.admissionOperationId,
+      terminalStatus: runA.status,
+      definitionVersion: 2,
+      definitionHash: runA.admittedDefinition.contentHash,
+      originalTraceHash: createTraceSnapshot(runA).persistedArtifactHash,
+      originalTraceUtf8Bytes: createTraceSnapshot(runA).persistedArtifactUtf8Bytes,
+      createdAtUtc: runA.createdAtUtc,
+      completedAtUtc: runA.completedAtUtc,
+      deletedAtUtc: "2026-07-16T12:05:00Z",
+      deletionActor: "embodysense.web",
+      deletionSurface: "web",
+      deletionOperationId: body.operationId,
+      intentAuditCorrelationId: "trace-delete-intent-race",
+      outcomeAuditCorrelationId: "trace-delete-outcome-race",
+      outcomeIntegrity: "Complete"
+    };
+    server.traceQuota = createTraceQuota(1, 1, 17408);
+    return { status: 200, body: { status: "Deleted", isCommitted: true, detail: "Deleted.", tombstone } };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const runAButton = app.elements.runList.children.find(item => item.textContent.includes("run-a"));
+  const runBButton = app.elements.runList.children.find(item => item.textContent.includes("run-b"));
+  await runAButton.click();
+  const deleteButton = app.elements.runActions.children.find(child => child.textContent === "Delete sensitive trace");
+
+  const deletingRunA = deleteButton.click();
+  await Promise.resolve();
+  await runBButton.click();
+  releaseDeletion();
+  await deletingRunA;
+
+  assert.match(app.elements.runTitle.textContent, /run-b/);
+  assert.equal(app.elements.runList.children.find(item => item.className.includes("selected")).textContent.includes("run-b"), true);
+  assert.match(app.elements.runList.children.find(item => item.textContent.includes("run-a")).textContent, /trace deleted/i);
+  assert.match(app.elements.traceQuota.textContent, /1\/250 live/);
+});
+
 test("Run confirmation exposes real governed limits and never reintroduces fixed context", async () => {
   const app = await loadLoopBuilder();
   await selectCustomLoop(app);

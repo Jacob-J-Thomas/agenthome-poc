@@ -248,12 +248,22 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
         var index = await LoadDiscoveryIndexAsync(cancellationToken);
-        var summaries = index.Entries
-            .Select(entry => entry.Summary)
-            .Where(summary => safeLoopId is null || string.Equals(summary.LoopId, safeLoopId, StringComparison.Ordinal))
-            .Where(summary => after is null || CompareSummaryToCursor(summary, after) > 0)
+        var pageEntries = index.Entries
+            .Where(entry => safeLoopId is null || string.Equals(entry.Summary.LoopId, safeLoopId, StringComparison.Ordinal))
+            .Where(entry => after is null || CompareSummaryToCursor(entry.Summary, after) > 0)
             .Take(request.MaximumCount + 1)
             .ToArray();
+        if (!await DiscoveryIndexPageMatchesArtifactsAsync(pageEntries, cancellationToken))
+        {
+            index = await RebuildDiscoveryIndexAsync(index.Revision, cancellationToken);
+            pageEntries = index.Entries
+                .Where(entry => safeLoopId is null || string.Equals(entry.Summary.LoopId, safeLoopId, StringComparison.Ordinal))
+                .Where(entry => after is null || CompareSummaryToCursor(entry.Summary, after) > 0)
+                .Take(request.MaximumCount + 1)
+                .ToArray();
+        }
+
+        var summaries = pageEntries.Select(entry => entry.Summary).ToArray();
         var hasMore = summaries.Length > request.MaximumCount;
         var items = summaries.Take(request.MaximumCount).ToArray();
         var continuationCursor = hasMore
@@ -942,7 +952,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         EnsureSafeDirectory(_runsRoot, create: false);
-        foreach (var path in Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).Where(IsDiscoveryIndexPendingTemporaryArtifactPath))
+        foreach (var path in Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).Where(IsDiscoveryIndexTemporaryArtifactPath))
         {
             EnsureSafeArtifactPath(_runsRoot, path, mustExist: true);
             File.Delete(path);
@@ -982,6 +992,23 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         return true;
     }
 
+    private async Task<bool> DiscoveryIndexPageMatchesArtifactsAsync(IEnumerable<CustomLoopRunDiscoveryIndexEntry> entries, CancellationToken cancellationToken)
+    {
+        foreach (var entry in entries)
+        {
+            var summary = entry.Summary;
+            var path = GetRunPath(summary.LoopId, summary.Id);
+            var maximumBytes = summary.IsDeleted ? CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes : CustomLoopLimits.MaxRunTraceUtf8Bytes;
+            var content = await ReadBoundedJsonArtifactAsync(_runsRoot, path, maximumBytes, "Custom loop run artifact", cancellationToken);
+            if (!string.Equals(ComputeHash(content), entry.ArtifactHash, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static CustomLoopRunDiscoveryIndexEntry CreateDiscoveryIndexEntry(string path, CustomLoopRunSummary summary, string artifactHash)
     {
         var info = new FileInfo(path);
@@ -1013,9 +1040,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         {
             var entry = index.Entries[indexPosition] ?? throw new FormatException("The custom loop run discovery index contains a null entry.");
             var summary = entry.Summary ?? throw new FormatException("The custom loop run discovery index contains a null summary.");
-            CustomLoopArtifactIdentifier.Require(summary.Id, nameof(summary.Id));
-            CustomLoopArtifactIdentifier.Require(summary.LoopId, nameof(summary.LoopId));
-            CustomLoopArtifactIdentifier.Require(summary.AdmissionOperationId, nameof(summary.AdmissionOperationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
+            if (!CustomLoopArtifactIdentifier.IsValid(summary.Id)
+                || !CustomLoopArtifactIdentifier.IsValid(summary.LoopId)
+                || !CustomLoopArtifactIdentifier.IsValid(summary.AdmissionOperationId, CustomLoopLimits.MaxMutationOperationIdCharacters))
+            {
+                throw new FormatException("The custom loop run discovery index contains an invalid run, loop, or admission-operation identifier.");
+            }
+
             RequireHash(entry.ArtifactHash, nameof(entry.ArtifactHash));
             RequireHash(entry.SummaryBindingHash, nameof(entry.SummaryBindingHash));
             if (!string.Equals(entry.SummaryBindingHash, ComputeSummaryBindingHash(summary, entry.ArtifactHash), StringComparison.Ordinal))
@@ -1667,11 +1698,17 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         return true;
     }
 
-    private static bool IsDiscoveryIndexPendingTemporaryArtifactPath(string path)
+    private static bool IsDiscoveryIndexTemporaryArtifactPath(string path)
     {
         var fileName = Path.GetFileName(path);
-        var prefix = "." + DiscoveryIndexPendingFileName + ".";
-        if (!fileName.StartsWith(prefix, StringComparison.Ordinal) || !fileName.EndsWith(".tmp", StringComparison.Ordinal))
+        var indexPrefix = "." + DiscoveryIndexFileName + ".";
+        var pendingPrefix = "." + DiscoveryIndexPendingFileName + ".";
+        var prefix = fileName.StartsWith(indexPrefix, StringComparison.Ordinal)
+            ? indexPrefix
+            : fileName.StartsWith(pendingPrefix, StringComparison.Ordinal)
+                ? pendingPrefix
+                : null;
+        if (prefix is null || !fileName.EndsWith(".tmp", StringComparison.Ordinal))
         {
             return false;
         }

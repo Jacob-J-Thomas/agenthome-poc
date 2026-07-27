@@ -736,8 +736,10 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
         var pendingPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending");
         var orphanedPendingTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, $"..custom-loop-run-index.pending.{Guid.NewGuid():N}.tmp");
+        var orphanedIndexTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, $"..custom-loop-run-index.json.{Guid.NewGuid():N}.tmp");
         await File.WriteAllTextAsync(pendingPath, "pending\n");
         await File.WriteAllTextAsync(orphanedPendingTemporaryPath, "partial");
+        await File.WriteAllTextAsync(orphanedIndexTemporaryPath, "partial");
         await WriteDirectAsync(paths, At(CreateRun("loop-beta", "run-beta", "invoke-beta"), 2));
 
         var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
@@ -745,6 +747,7 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(["run-beta", "run-alpha"], repaired.Items.Select(item => item.Id));
         Assert.False(File.Exists(pendingPath));
         Assert.False(File.Exists(orphanedPendingTemporaryPath));
+        Assert.False(File.Exists(orphanedIndexTemporaryPath));
     }
 
     [Fact]
@@ -766,6 +769,63 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single(repaired.Items).Status);
         var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         Assert.Equal("admitted", repairedIndex["entries"]![0]!["summary"]!["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_invalid_derived_identifiers_for_reads_and_lifecycle_writes()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"]![0]!["summary"]!["id"] = "../unsafe";
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+
+        Assert.Equal(run.Id, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+
+        index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"]![0]!["summary"]!["admissionOperationId"] = "../unsafe";
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        var updated = Advance(run, CustomLoopRunStatus.Running);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(updated, run.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStatus.Running, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Status);
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_a_same_metadata_canonical_replacement()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var originalIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        var originalHash = originalIndex["entries"]![0]!["artifactHash"]!.GetValue<string>();
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        var originalInfo = new FileInfo(artifactPath);
+        var originalLength = originalInfo.Length;
+        var originalLastWriteUtc = originalInfo.LastWriteTimeUtc;
+        using var replacementWorkspace = new TestWorkspace();
+        var replacementPaths = new WorkspacePaths(replacementWorkspace.RootPath);
+        var replacement = CustomLoopAdmissionRequestHash.Apply(run with { TriggerPrompt = "Altered prompt" });
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await new CustomLoopRunStore(replacementPaths).CreateAsync(replacement)).Status);
+        var replacementPath = Path.Combine(replacementPaths.CustomLoopRunsPath, replacement.LoopId, replacement.Id + ".json");
+        var replacementContent = await File.ReadAllBytesAsync(replacementPath);
+        Assert.Equal(originalLength, replacementContent.Length);
+        await File.WriteAllBytesAsync(artifactPath, replacementContent);
+        File.SetLastWriteTimeUtc(artifactPath, originalLastWriteUtc);
+
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+
+        var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        Assert.NotEqual(originalHash, repairedIndex["entries"]![0]!["artifactHash"]!.GetValue<string>());
     }
 
     [Fact]

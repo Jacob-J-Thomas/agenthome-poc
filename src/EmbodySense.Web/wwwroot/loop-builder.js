@@ -1248,6 +1248,7 @@ async function deleteSelectedTrace() {
   if (!confirmed) return;
 
   const runId = selectedRun.id;
+  const loopId = selectedRun.loopId;
   const expectedTraceHash = selectedTrace.persistedArtifactHash;
   if (pendingTraceDeletion?.runId !== runId || pendingTraceDeletion.expectedTraceHash !== expectedTraceHash) {
     pendingTraceDeletion = { runId, expectedTraceHash, operationId: newOperationId() };
@@ -1281,6 +1282,20 @@ async function deleteSelectedTrace() {
     isDeleted: true
   };
   recentRuns = mergeRunSummaries([tombstoneSummary], recentRuns.filter(run => run.id !== runId));
+  if (selectedLoopId() !== loopId || selectedRunId !== runId) {
+    let quotaRefreshed = true;
+    try {
+      traceQuota = await requestJson("/api/loop-runs/quota");
+    } catch {
+      quotaRefreshed = false;
+    }
+    renderAll();
+    const warning = deletion.status === "CommittedWithAuditWarning" ? " The deletion committed, but its outcome audit has an integrity warning." : "";
+    showToast(`Sensitive trace content deleted; the audited tombstone remains.${warning}`);
+    if (!quotaRefreshed) showBanner("Trace deletion committed, but refreshed quota evidence could not be loaded. Reload Runs to inspect the durable outcome.");
+    return;
+  }
+
   selectedRunId = runId;
   selectedRun = null;
   selectedTrace = null;
