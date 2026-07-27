@@ -60,15 +60,43 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
         var serialized = SerializeBounded(run);
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
-        var artifacts = await ReadAllArtifactsAsync(cancellationToken);
-        var persistedRuns = artifacts.Where(item => item.Run is not null).Select(item => item.Run!).ToArray();
-        var deletedOperation = artifacts.SingleOrDefault(item => item.Tombstone is not null && string.Equals(item.Tombstone.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal));
-        if (deletedOperation is not null)
+        CustomLoopRunRecord? operationMatch = null;
+        CustomLoopRunRecord? runIdMatch = null;
+        CustomLoopRunRecord? activeLoopRun = null;
+        var multipleActiveLoopRuns = false;
+        var deletedOperation = false;
+        var deletedRunId = false;
+        var scan = await ScanArtifactsAsync(artifact =>
+        {
+            if (artifact.Tombstone is { } tombstone)
+            {
+                deletedOperation |= string.Equals(tombstone.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal);
+                deletedRunId |= string.Equals(tombstone.RunId, run.Id, StringComparison.Ordinal);
+                return;
+            }
+
+            var persisted = artifact.Run!;
+            if (string.Equals(persisted.AdmissionOperationId, run.AdmissionOperationId, StringComparison.Ordinal))
+            {
+                operationMatch = persisted;
+            }
+
+            if (string.Equals(persisted.Id, run.Id, StringComparison.Ordinal))
+            {
+                runIdMatch = persisted;
+            }
+
+            if (string.Equals(persisted.LoopId, run.LoopId, StringComparison.Ordinal) && !persisted.IsTerminal)
+            {
+                multipleActiveLoopRuns |= activeLoopRun is not null;
+                activeLoopRun ??= persisted;
+            }
+        }, cancellationToken);
+        if (deletedOperation)
         {
             return new CustomLoopRunStoreResult(CustomLoopRunStoreStatus.DeletedIdentityConflict, null, null);
         }
 
-        var operationMatch = FindUniqueByOperation(persistedRuns, run.AdmissionOperationId);
         if (operationMatch is not null)
         {
             return SameAdmissionRequest(operationMatch, run)
@@ -76,25 +104,21 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                 : CustomLoopRunStoreResult.OperationConflict(operationMatch);
         }
 
-        var deletedRunId = artifacts.SingleOrDefault(item => item.Tombstone is not null && string.Equals(item.Tombstone.RunId, run.Id, StringComparison.Ordinal));
-        if (deletedRunId is not null)
+        if (deletedRunId)
         {
             return new CustomLoopRunStoreResult(CustomLoopRunStoreStatus.DeletedIdentityConflict, null, null);
         }
 
-        var runIdMatch = FindUniqueByRunId(persistedRuns, run.Id);
         if (runIdMatch is not null)
         {
             return CustomLoopRunStoreResult.VersionConflict(runIdMatch, expectedLifecycleVersion: 0);
         }
 
-        var activeLoopRuns = persistedRuns.Where(item => string.Equals(item.LoopId, run.LoopId, StringComparison.Ordinal) && !item.IsTerminal).ToArray();
-        if (activeLoopRuns.Length > 1)
+        if (multipleActiveLoopRuns)
         {
             throw new FormatException($"Custom loop `{run.LoopId}` has more than one nonterminal run. The persisted state requires review.");
         }
 
-        var activeLoopRun = activeLoopRuns.SingleOrDefault();
         if (activeLoopRun is not null)
         {
             return CustomLoopRunStoreResult.NonterminalRunExists(activeLoopRun);
@@ -105,7 +129,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return CustomLoopRunStoreResult.LimitExceeded();
         }
 
-        var quota = CalculateQuota(artifacts);
+        var quota = scan.Quota;
         if (quota.RetainedTraceCount >= quota.MaximumTraceCount
             || quota.AccountedTraceUtf8Bytes > quota.MaximumWorkspaceUtf8Bytes - quota.MaximumPerTraceUtf8Bytes)
         {
@@ -171,13 +195,25 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     public async Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default)
     {
         var safeLoopId = CustomLoopArtifactIdentifier.Require(loopId, nameof(loopId));
-        var matches = (await ReadAllRunsAsync(cancellationToken)).Where(run => string.Equals(run.LoopId, safeLoopId, StringComparison.Ordinal) && !run.IsTerminal).ToArray();
-        if (matches.Length > 1)
+        CustomLoopRunRecord? match = null;
+        var multipleMatches = false;
+        await ScanArtifactsAsync(artifact =>
+        {
+            var run = artifact.Run;
+            if (run is null || run.IsTerminal || !string.Equals(run.LoopId, safeLoopId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            multipleMatches |= match is not null;
+            match ??= run;
+        }, cancellationToken);
+        if (multipleMatches)
         {
             throw new FormatException($"Custom loop `{safeLoopId}` has more than one nonterminal run. The persisted state requires review.");
         }
 
-        return matches.SingleOrDefault();
+        return match;
     }
 
     public async Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default)
@@ -187,21 +223,30 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new ArgumentOutOfRangeException(nameof(maximumCount), maximumCount, $"Recent run page size must be between 1 and {CustomLoopLimits.MaxRecentRunsPageSize}.");
         }
 
-        var summaries = (await ReadAllArtifactsAsync(cancellationToken))
-            .Select(artifact => artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!));
-        return summaries
-            .OrderByDescending(summary => summary.UpdatedAtUtc)
-            .ThenByDescending(summary => summary.CreatedAtUtc)
-            .ThenBy(summary => summary.Id, StringComparer.Ordinal)
-            .Take(maximumCount)
-            .ToArray();
+        var summaries = new List<CustomLoopRunSummary>(maximumCount + 1);
+        await ScanArtifactsAsync(artifact =>
+        {
+            summaries.Add(artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!));
+            summaries.Sort(CompareSummaries);
+            if (summaries.Count > maximumCount)
+            {
+                summaries.RemoveAt(summaries.Count - 1);
+            }
+        }, cancellationToken);
+        return summaries;
     }
 
     public async Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
     {
-        var runs = await ReadAllRunsAsync(cancellationToken);
+        var runs = new List<CustomLoopRunRecord>();
+        await ScanArtifactsAsync(artifact =>
+        {
+            if (artifact.Run is { IsTerminal: false } run)
+            {
+                runs.Add(run);
+            }
+        }, cancellationToken);
         return runs
-            .Where(run => !run.IsTerminal)
             .OrderBy(run => run.CreatedAtUtc)
             .ThenBy(run => run.Id, StringComparer.Ordinal)
             .ToArray();
@@ -215,7 +260,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
-        return CalculateQuota(await ReadAllArtifactsAsync(cancellationToken));
+        return (await ScanArtifactsAsync(null, cancellationToken)).Quota;
     }
 
     public async Task<CustomLoopTraceInspection?> InspectTraceAsync(string runId, CancellationToken cancellationToken = default)
@@ -323,19 +368,19 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return existingOperation.ToStoreResult() with { Status = existingOperation.Outcome == CustomLoopTraceDeletionStoreStatus.Deleted ? CustomLoopTraceDeletionStoreStatus.AlreadyDeleted : existingOperation.Outcome };
         }
 
-        var artifacts = await ReadAllArtifactsAsync(cancellationToken);
-        var matches = artifacts.Where(artifact => string.Equals(artifact.Location.RunId, mutation.Request.RunId, StringComparison.Ordinal)).ToArray();
-        if (matches.Length > 1)
+        RunArtifact? artifact = null;
+        var scan = await ScanArtifactsAsync(candidate =>
         {
-            throw new FormatException($"Custom loop run id `{mutation.Request.RunId}` exists in more than one loop directory. The persisted state requires review.");
-        }
-
-        if (matches.Length == 0)
+            if (string.Equals(candidate.Location.RunId, mutation.Request.RunId, StringComparison.Ordinal))
+            {
+                artifact = candidate;
+            }
+        }, cancellationToken);
+        if (artifact is null)
         {
             return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.NotFound, null, cancellationToken);
         }
 
-        var artifact = matches[0];
         if (artifact.Tombstone is not null)
         {
             if (string.Equals(artifact.Tombstone.DeletionOperationId, operation.OperationId, StringComparison.Ordinal)
@@ -358,8 +403,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.HashMismatch, null, cancellationToken);
         }
 
-        var tombstoneCount = artifacts.Count(item => item.Tombstone is not null);
-        if (tombstoneCount >= CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
+        if (scan.Quota.TombstoneCount >= CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
         {
             return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.TombstoneLimitExceeded, null, cancellationToken);
         }
@@ -639,97 +683,32 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             && right.ControlExpectedLifecycleVersion is null;
     }
 
-    private async Task<IReadOnlyList<CustomLoopRunRecord>> ReadAllRunsAsync(CancellationToken cancellationToken)
-    {
-        return (await ReadAllArtifactsAsync(cancellationToken)).Where(artifact => artifact.Run is not null).Select(artifact => artifact.Run!).ToArray();
-    }
-
-    private async Task<IReadOnlyList<RunArtifact>> ReadAllArtifactsAsync(CancellationToken cancellationToken)
+    private async Task<ArtifactScanResult> ScanArtifactsAsync(Action<RunArtifact>? visitor, CancellationToken cancellationToken)
     {
         var locations = EnumerateArtifactLocations();
-        var artifacts = new List<RunArtifact>(locations.Count);
-        var runIds = new HashSet<string>(StringComparer.Ordinal);
-        var operationIds = new HashSet<string>(StringComparer.Ordinal);
+        var accumulator = new ArtifactScanAccumulator();
         foreach (var location in locations)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var artifact = await ReadArtifactAsync(location, cancellationToken);
-            var runId = artifact.Run?.Id ?? artifact.Tombstone?.RunId ?? throw new FormatException($"Custom loop trace `{location.Path}` contains an unsupported artifact.");
-            var admissionOperationId = artifact.Run?.AdmissionOperationId ?? artifact.Tombstone!.AdmissionOperationId;
-            if (!runIds.Add(runId))
-            {
-                throw new FormatException($"Custom loop run id `{runId}` is duplicated. The persisted state requires review.");
-            }
-
-            if (!operationIds.Add(admissionOperationId))
-            {
-                throw new FormatException($"Admission operation id `{admissionOperationId}` is duplicated. The persisted state requires review.");
-            }
-
-            artifacts.Add(artifact);
+            RunArtifact? artifact = await ReadArtifactAsync(location, cancellationToken);
+            accumulator.Add(artifact);
+            visitor?.Invoke(artifact);
+            artifact = null;
         }
 
-        if (artifacts.Count(artifact => artifact.Run is not null) > CustomLoopLimits.MaxRunTracesPerWorkspace)
-        {
-            throw new FormatException($"Custom loop run storage contains more than {CustomLoopLimits.MaxRunTracesPerWorkspace} live traces. No trace was pruned automatically.");
-        }
-
-        if (artifacts.Count(artifact => artifact.Tombstone is not null) > CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
-        {
-            throw new FormatException($"Custom loop run storage contains more than {CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace} terminal-trace tombstones.");
-        }
-
-        return artifacts;
+        return accumulator.Complete();
     }
 
-    private static CustomLoopTraceQuota CalculateQuota(IReadOnlyList<RunArtifact> artifacts)
+    private static int CompareSummaries(CustomLoopRunSummary left, CustomLoopRunSummary right)
     {
-        long liveTraceBytes = 0;
-        long tombstoneBytes = 0;
-        long accountedBytes = 0;
-        var activeReservations = 0;
-        var liveTraceCount = 0;
-        var tombstoneCount = 0;
-        foreach (var artifact in artifacts)
+        var comparison = right.UpdatedAtUtc.CompareTo(left.UpdatedAtUtc);
+        if (comparison != 0)
         {
-            if (artifact.Tombstone is not null)
-            {
-                tombstoneCount++;
-                tombstoneBytes = checked(tombstoneBytes + artifact.PersistedUtf8Bytes);
-                accountedBytes = checked(accountedBytes + artifact.PersistedUtf8Bytes);
-                continue;
-            }
-
-            var run = artifact.Run ?? throw new FormatException($"Custom loop trace `{artifact.Location.Path}` contains an unsupported artifact.");
-            liveTraceCount++;
-            liveTraceBytes = checked(liveTraceBytes + artifact.PersistedUtf8Bytes);
-            if (run.IsTerminal)
-            {
-                var warningReservation = HasTerminalIntegrityWarning(run) ? 0 : CustomLoopLimits.MaxTraceControlEventUtf8Bytes;
-                accountedBytes = checked(accountedBytes + artifact.PersistedUtf8Bytes + warningReservation);
-                if (warningReservation > 0)
-                {
-                    activeReservations++;
-                }
-            }
-            else
-            {
-                activeReservations++;
-                accountedBytes = checked(accountedBytes + CustomLoopLimits.MaxRunTraceUtf8Bytes);
-            }
+            return comparison;
         }
 
-        return new CustomLoopTraceQuota(
-            liveTraceCount,
-            liveTraceBytes,
-            accountedBytes,
-            activeReservations,
-            CustomLoopLimits.MaxRunTracesPerWorkspace,
-            CustomLoopLimits.MaxRunTraceWorkspaceUtf8Bytes,
-            CustomLoopLimits.MaxRunTraceUtf8Bytes,
-            tombstoneCount,
-            tombstoneBytes,
-            CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace);
+        comparison = right.CreatedAtUtc.CompareTo(left.CreatedAtUtc);
+        return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left.Id, right.Id);
     }
 
     private IReadOnlyList<RunArtifactLocation> EnumerateArtifactLocations()
@@ -818,7 +797,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                         throw new FormatException($"Custom loop trace tombstone `{location.Path}` exceeds {CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes} UTF-8 bytes.");
                     }
 
-                    return new RunArtifact(location, null, tombstone, persistedHash, utf8Json.LongLength, utf8Json);
+                    return new RunArtifact(location, null, tombstone, persistedHash, utf8Json.LongLength);
                 }
 
                 if (CustomLoopRunArtifactCodec.IsEnvelope(document.RootElement))
@@ -830,7 +809,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                         throw new FormatException($"Custom loop run `{location.Path}` identity does not match its containing directory and filename.");
                     }
 
-                    return new RunArtifact(location, run, null, persistedHash, utf8Json.LongLength, utf8Json);
+                    return new RunArtifact(location, run, null, persistedHash, utf8Json.LongLength);
                 }
 
                 throw new FormatException($"Custom loop trace `{location.Path}` has an unsupported artifact kind.");
@@ -1627,16 +1606,6 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private static DateTimeOffset Max(DateTimeOffset left, DateTimeOffset right) => left >= right ? left : right;
 
-    private static CustomLoopRunRecord? FindUniqueByRunId(IReadOnlyList<CustomLoopRunRecord> runs, string runId)
-    {
-        return runs.SingleOrDefault(run => string.Equals(run.Id, runId, StringComparison.Ordinal));
-    }
-
-    private static CustomLoopRunRecord? FindUniqueByOperation(IReadOnlyList<CustomLoopRunRecord> runs, string operationId)
-    {
-        return runs.SingleOrDefault(run => string.Equals(run.AdmissionOperationId, operationId, StringComparison.Ordinal));
-    }
-
     private static bool SameAdmissionRequest(CustomLoopRunRecord existing, CustomLoopRunRecord candidate)
     {
         return string.Equals(existing.AdmissionOperationId, candidate.AdmissionOperationId, StringComparison.Ordinal)
@@ -1760,7 +1729,87 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private sealed record RunArtifactLocation(string Path, string LoopId, string RunId);
 
-    private sealed record RunArtifact(RunArtifactLocation Location, CustomLoopRunRecord? Run, CustomLoopTraceTombstone? Tombstone, string PersistedHash, long PersistedUtf8Bytes, byte[] PersistedBytes);
+    private sealed record RunArtifact(RunArtifactLocation Location, CustomLoopRunRecord? Run, CustomLoopTraceTombstone? Tombstone, string PersistedHash, long PersistedUtf8Bytes);
+
+    private sealed record ArtifactScanResult(CustomLoopTraceQuota Quota);
+
+    private sealed class ArtifactScanAccumulator
+    {
+        private readonly HashSet<string> _runIds = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _operationIds = new(StringComparer.Ordinal);
+        private long _liveTraceBytes;
+        private long _tombstoneBytes;
+        private long _accountedBytes;
+        private int _activeReservations;
+        private int _liveTraceCount;
+        private int _tombstoneCount;
+
+        public void Add(RunArtifact artifact)
+        {
+            var runId = artifact.Run?.Id ?? artifact.Tombstone?.RunId ?? throw new FormatException($"Custom loop trace `{artifact.Location.Path}` contains an unsupported artifact.");
+            var admissionOperationId = artifact.Run?.AdmissionOperationId ?? artifact.Tombstone!.AdmissionOperationId;
+            if (!_runIds.Add(runId))
+            {
+                throw new FormatException($"Custom loop run id `{runId}` is duplicated. The persisted state requires review.");
+            }
+
+            if (!_operationIds.Add(admissionOperationId))
+            {
+                throw new FormatException($"Admission operation id `{admissionOperationId}` is duplicated. The persisted state requires review.");
+            }
+
+            if (artifact.Tombstone is not null)
+            {
+                _tombstoneCount++;
+                if (_tombstoneCount > CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
+                {
+                    throw new FormatException($"Custom loop run storage contains more than {CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace} terminal-trace tombstones.");
+                }
+
+                _tombstoneBytes = checked(_tombstoneBytes + artifact.PersistedUtf8Bytes);
+                _accountedBytes = checked(_accountedBytes + artifact.PersistedUtf8Bytes);
+                return;
+            }
+
+            var run = artifact.Run ?? throw new FormatException($"Custom loop trace `{artifact.Location.Path}` contains an unsupported artifact.");
+            _liveTraceCount++;
+            if (_liveTraceCount > CustomLoopLimits.MaxRunTracesPerWorkspace)
+            {
+                throw new FormatException($"Custom loop run storage contains more than {CustomLoopLimits.MaxRunTracesPerWorkspace} live traces. No trace was pruned automatically.");
+            }
+
+            _liveTraceBytes = checked(_liveTraceBytes + artifact.PersistedUtf8Bytes);
+            if (run.IsTerminal)
+            {
+                var warningReservation = HasTerminalIntegrityWarning(run) ? 0 : CustomLoopLimits.MaxTraceControlEventUtf8Bytes;
+                _accountedBytes = checked(_accountedBytes + artifact.PersistedUtf8Bytes + warningReservation);
+                if (warningReservation > 0)
+                {
+                    _activeReservations++;
+                }
+            }
+            else
+            {
+                _activeReservations++;
+                _accountedBytes = checked(_accountedBytes + CustomLoopLimits.MaxRunTraceUtf8Bytes);
+            }
+        }
+
+        public ArtifactScanResult Complete()
+        {
+            return new ArtifactScanResult(new CustomLoopTraceQuota(
+                _liveTraceCount,
+                _liveTraceBytes,
+                _accountedBytes,
+                _activeReservations,
+                CustomLoopLimits.MaxRunTracesPerWorkspace,
+                CustomLoopLimits.MaxRunTraceWorkspaceUtf8Bytes,
+                CustomLoopLimits.MaxRunTraceUtf8Bytes,
+                _tombstoneCount,
+                _tombstoneBytes,
+                CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace));
+        }
+    }
 
     private sealed record TraceReservation(long Utf8Bytes, long? EarliestSequence);
 
