@@ -206,7 +206,7 @@ public sealed class CliBehaviorTests
     {
         using var workspace = new TestWorkspace();
 
-        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, removedOption);
+        var result = await RunCliAsync("run", "--workdir", workspace.RootPath, removedOption);
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains($"unsupported run option: {removedOption}", result.Error);

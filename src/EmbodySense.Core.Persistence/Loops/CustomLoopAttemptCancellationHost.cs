@@ -282,7 +282,14 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
                 stream.Flush(flushToDisk: true);
             }
 
-            File.Move(tempPath, path, true);
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
         }
         finally
         {

@@ -284,7 +284,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         var replacement = paths.CustomLoopCancellationOwnerPath + ".replacement";
         await File.WriteAllTextAsync(replacement, "{}");
 
-        File.Move(replacement, paths.CustomLoopCancellationOwnerPath, overwrite: true);
+        File.Replace(replacement, paths.CustomLoopCancellationOwnerPath, destinationBackupFileName: null);
 
         Assert.Equal("{}", await File.ReadAllTextAsync(paths.CustomLoopCancellationOwnerPath));
     }

@@ -73,10 +73,9 @@ public sealed class AuditLog : IAuditLog
         await using var stream = new FileStream(_paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         using var reader = new StreamReader(stream);
 
-        while (!reader.EndOfStream)
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var line = await reader.ReadLineAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(line))
             {
                 continue;
