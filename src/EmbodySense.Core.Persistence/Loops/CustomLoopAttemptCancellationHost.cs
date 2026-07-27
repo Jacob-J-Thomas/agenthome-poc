@@ -12,6 +12,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 {
     private static readonly TimeSpan AcknowledgementTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ConnectionIoTimeout = TimeSpan.FromSeconds(1);
     private static readonly JsonSerializerOptions WireJsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaxWireUtf8Bytes = 4 * 1024;
 
@@ -214,6 +215,10 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             {
                 return;
             }
+            catch (OperationCanceledException)
+            {
+                // An incomplete client frame or blocked response is abandoned at its bounded I/O deadline.
+            }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
             {
                 // A malformed or disconnected caller cannot terminate the bounded owner broker.
@@ -223,11 +228,15 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
     private async Task HandleConnectionAsync(Stream stream, CancellationToken cancellationToken)
     {
-        var request = await ReadFrameAsync<CancellationWireRequest>(stream, cancellationToken);
+        using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        readTimeout.CancelAfter(ConnectionIoTimeout);
+        var request = await ReadFrameAsync<CancellationWireRequest>(stream, readTimeout.Token);
         var result = !IsAuthenticated(request)
             ? new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.Invalid, "The cancellation request did not authenticate to the current workspace-host generation.")
             : await RequestCancellationAsync(request.RunId, cancellationToken);
-        await WriteFrameAsync(stream, new CancellationWireResponse(1, result.Status, result.Detail, _ownerId, Environment.ProcessId), cancellationToken);
+        using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        writeTimeout.CancelAfter(ConnectionIoTimeout);
+        await WriteFrameAsync(stream, new CancellationWireResponse(1, result.Status, result.Detail, _ownerId, Environment.ProcessId), writeTimeout.Token);
     }
 
     private CustomLoopAttemptCancellationResult Owned(CustomLoopAttemptCancellationStatus status, string detail)
@@ -262,13 +271,25 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             throw new FormatException("The workspace-host owner descriptor exceeds its bounded size.");
         }
 
-        var tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var tempPath = pathGuard.GetFilePath(_paths.LoopRunsPath, Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            File.WriteAllBytes(tempPath, payload);
+            var options = new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                Options = FileOptions.WriteThrough
+            };
             if (!OperatingSystem.IsWindows())
             {
-                File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            }
+
+            using (var stream = new FileStream(tempPath, options))
+            {
+                stream.Write(payload);
+                stream.Flush(flushToDisk: true);
             }
 
             File.Move(tempPath, path, true);

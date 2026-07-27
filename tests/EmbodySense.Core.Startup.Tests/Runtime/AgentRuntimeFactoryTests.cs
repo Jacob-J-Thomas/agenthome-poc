@@ -158,9 +158,9 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("Cancellation was already completed durably.", replayedCancel.Detail);
         Assert.Equal("WorkspaceHostUnavailable", blockedResume.Status);
         Assert.Equal("resume-one", blockedResume.OperationId);
-        Assert.Equal("WorkspaceHostUnavailable", blockedCancel.Status);
+        Assert.Equal("NotFound", blockedCancel.Status);
         Assert.Equal("cancel-one", blockedCancel.OperationId);
-        Assert.Null(await new CustomLoopControlOperationStore(paths).GetAsync(blockedCancel.OperationId));
+        Assert.Equal(CustomLoopControlOperationState.Complete, (await new CustomLoopControlOperationStore(paths).GetAsync(blockedCancel.OperationId))!.State);
         Assert.Equal("NotFound", afterRelease.AdmissionStatus);
         Assert.Contains(transcriptAfterReacquisition, message => message.Content == "preserved external-host transcript");
         Assert.Contains(transcriptAfterReacquisition, message => message.Content == "hello");

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -217,25 +218,55 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
+    public async Task Unix_owner_capability_is_published_with_owner_only_permissions()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
+
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(paths.CustomLoopCancellationOwnerPath));
+    }
+
+    [Fact]
+    public async Task Incomplete_client_frame_is_abandoned_before_a_later_authenticated_cancel()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
+        using var cancellation = new CancellationTokenSource();
+        using var registration = owner.RegisterActiveAttempt("run-incomplete-client", cancellation);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        using var incomplete = new NamedPipeClientStream(".", descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, PipeOptions.Asynchronous);
+        await incomplete.ConnectAsync();
+        await incomplete.WriteAsync(new byte[] { 1 });
+        await incomplete.FlushAsync();
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+        var confirmation = Task.Run(async () =>
+        {
+            while (!cancellation.IsCancellationRequested)
+            {
+                await Task.Delay(10);
+            }
+
+            registration.ConfirmProviderInterruption();
+        });
+
+        var result = await owner.RequestCancellationAsync("run-incomplete-client", "cancel-after-incomplete-client");
+        await confirmation;
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, result.Status);
+    }
+
+    [Fact]
     public async Task Child_process_owner_authenticates_and_confirms_provider_interruption()
     {
         using var workspace = new TestWorkspace();
-        var projectRoot = FindRepositoryRoot();
-        var hostAssembly = Path.Combine(projectRoot, "tests", "EmbodySense.CancellationHost", "bin", "Debug", "net8.0", "EmbodySense.CancellationHost.dll");
-        Assert.True(File.Exists(hostAssembly), $"Cancellation host assembly was not built at `{hostAssembly}`.");
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add(hostAssembly);
-        startInfo.ArgumentList.Add(workspace.RootPath);
-        startInfo.ArgumentList.Add("run-cross-process-owner");
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("The cancellation owner process could not be started.");
+        using var process = StartCancellationHost(workspace.RootPath, "run-cross-process-owner");
         try
         {
             Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
@@ -377,7 +408,10 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
     private static Process StartCancellationHost(string workspaceRoot, string runId)
     {
-        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", "Debug", "net8.0", "EmbodySense.CancellationHost.dll");
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
+        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
         Assert.True(File.Exists(hostAssembly), $"Cancellation host assembly was not built at `{hostAssembly}`.");
         var startInfo = new ProcessStartInfo("dotnet")
         {

@@ -421,12 +421,6 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return replay;
         }
 
-        var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
-        if (!availability.Available)
-        {
-            return new LoopRunControlResponse(availability.Status, null, input.OperationId, availability.Detail);
-        }
-
         return await ExecuteControlAsync(awaitable: _lifecycleService.CancelAsync(new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
     }
 
