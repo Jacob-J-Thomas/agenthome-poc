@@ -254,13 +254,14 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     public async Task<CustomLoopTraceQuota> GetTraceQuotaAsync(CancellationToken cancellationToken = default)
     {
-        if (!Directory.Exists(_runsRoot))
+        if (!Directory.Exists(_runsRoot) && !Directory.Exists(_traceDeletionOperationsRoot))
         {
             return CustomLoopTraceQuota.Empty();
         }
 
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
-        return (await ScanArtifactsAsync(null, cancellationToken)).Quota;
+        var quota = (await ScanArtifactsAsync(null, cancellationToken)).Quota;
+        return quota with { DeletionOperationCount = EnumerateTraceDeletionOperationPaths().Count };
     }
 
     public async Task<CustomLoopTraceInspection?> InspectTraceAsync(string runId, CancellationToken cancellationToken = default)
@@ -354,16 +355,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             CustomLoopTraceDeletionStoreStatus.Unknown,
             null,
             CustomLoopTraceDeletionIntegrity.Unknown);
-        if (existingOperation is null)
-        {
-            if (EnumerateTraceDeletionOperationPaths().Count >= CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
-            {
-                return new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.TombstoneLimitExceeded, null, CustomLoopTraceDeletionIntegrity.Complete);
-            }
-
-            await WriteTraceDeletionOperationAsync(operation, overwrite: false, cancellationToken);
-        }
-        else if (existingOperation.State == CustomLoopTraceDeletionOperationState.OutcomeCommitted)
+        if (existingOperation?.State == CustomLoopTraceDeletionOperationState.OutcomeCommitted)
         {
             return existingOperation.ToStoreResult() with { Status = existingOperation.Outcome == CustomLoopTraceDeletionStoreStatus.Deleted ? CustomLoopTraceDeletionStoreStatus.AlreadyDeleted : existingOperation.Outcome };
         }
@@ -376,6 +368,19 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                 artifact = candidate;
             }
         }, cancellationToken);
+        if (existingOperation is null)
+        {
+            var deletionOperationCount = EnumerateTraceDeletionOperationPaths().Count;
+            var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;
+            if (deletionOperationCount >= CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace
+                || (deletionOperationCount >= generalOperationCapacity && !CanUseTombstoneDeletionOperationReservation(artifact, mutation.Request)))
+            {
+                return new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.DeletionOperationLimitExceeded, null, CustomLoopTraceDeletionIntegrity.Complete);
+            }
+
+            await WriteTraceDeletionOperationAsync(operation, overwrite: false, cancellationToken);
+        }
+
         if (artifact is null)
         {
             return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.NotFound, null, cancellationToken);
@@ -1154,9 +1159,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         var paths = Directory.EnumerateFiles(_traceDeletionOperationsRoot, "*", SearchOption.TopDirectoryOnly).Where(path => !IsTemporaryArtifactPath(path)).OrderBy(path => path, PathComparer).ToArray();
-        if (paths.Length > CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace)
+        if (paths.Length > CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace)
         {
-            throw new FormatException($"Custom loop trace-deletion operation storage exceeds its explicit {CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace}-artifact limit.");
+            throw new FormatException($"Custom loop trace-deletion operation storage exceeds its explicit {CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace}-artifact limit.");
         }
 
         foreach (var path in paths)
@@ -1170,6 +1175,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         }
 
         return paths;
+    }
+
+    private static bool CanUseTombstoneDeletionOperationReservation(RunArtifact? artifact, CustomLoopTraceDeletionRequest request)
+    {
+        return artifact?.Run is { IsTerminal: true }
+            && string.Equals(artifact.PersistedHash, request.ExpectedTraceHash, StringComparison.Ordinal);
     }
 
     private static bool IsTemporaryArtifactPath(string path)
@@ -1826,7 +1837,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
                 CustomLoopLimits.MaxRunTraceUtf8Bytes,
                 _tombstoneCount,
                 _tombstoneBytes,
-                CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace));
+                CustomLoopLimits.MaxRunTraceTombstonesPerWorkspace,
+                0,
+                CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace));
         }
     }
 

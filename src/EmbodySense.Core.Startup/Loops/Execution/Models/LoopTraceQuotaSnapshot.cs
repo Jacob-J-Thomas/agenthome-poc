@@ -14,4 +14,6 @@ public sealed record LoopTraceQuotaSnapshot(
     int MaximumTombstoneCount,
     long MaximumWorkspaceUtf8Bytes,
     int MaximumPerTraceUtf8Bytes,
+    int DeletionOperationCount,
+    int MaximumDeletionOperationCount,
     bool IsOverLimit);

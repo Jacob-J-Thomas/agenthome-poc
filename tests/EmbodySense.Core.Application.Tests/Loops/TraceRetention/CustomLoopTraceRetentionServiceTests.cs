@@ -290,6 +290,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
     [InlineData(CustomLoopTraceDeletionStoreStatus.HashMismatch, CustomLoopTraceDeletionStatus.HashMismatch)]
     [InlineData(CustomLoopTraceDeletionStoreStatus.OperationConflict, CustomLoopTraceDeletionStatus.Conflict)]
     [InlineData(CustomLoopTraceDeletionStoreStatus.TombstoneLimitExceeded, CustomLoopTraceDeletionStatus.LimitExceeded)]
+    [InlineData(CustomLoopTraceDeletionStoreStatus.DeletionOperationLimitExceeded, CustomLoopTraceDeletionStatus.OperationLimitExceeded)]
     [InlineData(CustomLoopTraceDeletionStoreStatus.Unknown, CustomLoopTraceDeletionStatus.Invalid)]
     public async Task Store_rejections_are_mapped_without_outcome_audit(CustomLoopTraceDeletionStoreStatus storeStatus, CustomLoopTraceDeletionStatus expectedStatus)
     {

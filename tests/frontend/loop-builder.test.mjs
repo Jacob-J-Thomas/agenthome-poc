@@ -519,6 +519,7 @@ test("Runs projects durable timeline and context evidence from the authenticated
   assert.match(app.elements.inspectorContent.textContent, /8\.0+ KiB reserved across 1 trace reservation/);
   assert.doesNotMatch(app.elements.inspectorContent.textContent, /active run/i);
   assert.match(app.elements.traceQuota.textContent, /1\/250 live/);
+  assert.match(app.elements.traceQuota.textContent, /0\/20000 deletion receipts/);
   assert.match(app.elements.traceQuota.textContent, /reserved/);
   assert.doesNotMatch(app.elements.inspectorContent.textContent, /chain-of-thought/i);
 });
@@ -1247,6 +1248,8 @@ function createTraceQuota(liveTraceCount = 0, tombstoneCount = 0, actualStoredUt
     maximumTombstoneCount: 10000,
     maximumWorkspaceUtf8Bytes: 1073741824,
     maximumPerTraceUtf8Bytes: 16777216,
+    deletionOperationCount: 0,
+    maximumDeletionOperationCount: 20000,
     isOverLimit: false
   };
 }

@@ -114,6 +114,8 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
             quota.MaximumTombstoneCount,
             quota.MaximumWorkspaceUtf8Bytes,
             quota.MaximumPerTraceUtf8Bytes,
+            quota.DeletionOperationCount,
+            quota.MaximumDeletionOperationCount,
             quota.IsOverLimit);
     }
 

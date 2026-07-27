@@ -142,6 +142,8 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(trace.PersistedArtifactHash, tombstone.OriginalTraceHash);
             Assert.Equal(0, quotaAfterDeletion!.LiveTraceCount);
             Assert.Equal(1, quotaAfterDeletion.TombstoneCount);
+            Assert.Equal(1, quotaAfterDeletion.DeletionOperationCount);
+            Assert.Equal(CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace, quotaAfterDeletion.MaximumDeletionOperationCount);
             Assert.IsAssignableFrom<IWebLoopRuntimeInvoker>(host);
             Assert.Same(host, app.Services.GetRequiredService<IWebLoopRuntimeInvoker>());
         }
