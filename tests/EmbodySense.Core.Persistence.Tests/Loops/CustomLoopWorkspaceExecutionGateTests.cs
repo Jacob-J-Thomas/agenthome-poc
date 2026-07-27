@@ -247,6 +247,29 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
+    public async Task Competing_cancellation_prevents_routed_provider_interruption_confirmation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
+        using var competing = new CancellationTokenSource();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(competing.Token);
+        var registration = gate.RegisterActiveAttempt("run-competing-cancellation", cancellation, competing.Token);
+        var request = gate.RequestCancellationAsync("run-competing-cancellation", "cancel-competing");
+        while (!cancellation.IsCancellationRequested)
+        {
+            await Task.Delay(10);
+        }
+
+        competing.Cancel();
+        Assert.False(registration.TryConfirmProviderInterruption(cancellation.Token));
+        registration.Dispose();
+        var result = await request;
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, result.Status);
+    }
+
+    [Fact]
     public async Task Windows_descriptor_reader_allows_atomic_owner_generation_replacement()
     {
         if (!OperatingSystem.IsWindows())

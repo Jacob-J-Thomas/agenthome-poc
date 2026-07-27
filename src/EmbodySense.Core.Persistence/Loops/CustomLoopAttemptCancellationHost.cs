@@ -40,7 +40,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         _server = Task.Run(RunServerAsync);
     }
 
-    public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation)
+    public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation, CancellationToken competingCancellationToken)
     {
         lock (_gate)
         {
@@ -50,7 +50,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
                 throw new InvalidOperationException("An active provider attempt is already registered for this run in the workspace host.");
             }
 
-            var attempt = new ActiveAttempt(cancellation, ++_attemptGeneration);
+            var attempt = new ActiveAttempt(cancellation, competingCancellationToken, ++_attemptGeneration);
             _activeAttempts.Add(runId, attempt);
             return new ActiveAttemptRegistration(this, runId, attempt);
         }
@@ -196,12 +196,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         {
             try
             {
-                var options = PipeOptions.Asynchronous;
-                if (OperatingSystem.IsWindows())
-                {
-                    options |= PipeOptions.CurrentUserOnly;
-                }
-
+                var options = PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
                 await using var server = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, options);
                 await server.WaitForConnectionAsync(_shutdown.Token);
                 await HandleConnectionAsync(server, _shutdown.Token);
@@ -427,12 +422,14 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private sealed class ActiveAttempt
     {
         private readonly CancellationTokenSource _cancellation;
+        private readonly CancellationToken _competingCancellationToken;
         private int _signalQueued;
         private int _routedSignalDelivered;
 
-        public ActiveAttempt(CancellationTokenSource cancellation, long generation)
+        public ActiveAttempt(CancellationTokenSource cancellation, CancellationToken competingCancellationToken, long generation)
         {
             _cancellation = cancellation;
+            _competingCancellationToken = competingCancellationToken;
             Generation = generation;
         }
 
@@ -451,6 +448,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         public bool CanConfirmProviderInterruption(CancellationToken observedCancellationToken)
         {
             return Volatile.Read(ref _routedSignalDelivered) != 0
+                && !_competingCancellationToken.IsCancellationRequested
                 && observedCancellationToken.CanBeCanceled
                 && observedCancellationToken == _cancellation.Token
                 && _cancellation.IsCancellationRequested;
@@ -468,7 +466,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         public CustomLoopAttemptCancellationResult CreateUnconfirmedResult()
         {
-            if (Volatile.Read(ref _routedSignalDelivered) != 0)
+            if (Volatile.Read(ref _routedSignalDelivered) != 0 && !_competingCancellationToken.IsCancellationRequested)
             {
                 return new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "The cancellation signal was delivered, but the active operation completed or the acknowledgement window elapsed without confirmed provider interruption.");
             }
@@ -476,7 +474,9 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             var status = Volatile.Read(ref _signalQueued) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.OwnerUnavailable;
             var detail = status == CustomLoopAttemptCancellationStatus.NoActiveAttempt
                 ? "The active operation completed before cancellation was routed."
-                : "The cancellation signal was queued, but delivery was not observed before the active operation completed or the acknowledgement window elapsed.";
+                : _competingCancellationToken.IsCancellationRequested
+                    ? "A caller or deadline cancellation competed with the routed signal, so routed delivery could not be proved."
+                    : "The cancellation signal was queued, but delivery was not observed before the active operation completed or the acknowledgement window elapsed.";
             return new CustomLoopAttemptCancellationResult(status, detail);
         }
 
@@ -489,7 +489,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         {
             try
             {
-                if (_cancellation.IsCancellationRequested)
+                if (_cancellation.IsCancellationRequested || _competingCancellationToken.IsCancellationRequested)
                 {
                     return;
                 }
@@ -499,6 +499,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             }
             catch (ObjectDisposedException)
             {
+                Volatile.Write(ref _routedSignalDelivered, 0);
                 CompleteWithoutConfirmedInterruption();
             }
             catch (AggregateException)

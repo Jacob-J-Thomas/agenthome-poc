@@ -131,7 +131,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
-    public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation)
+    public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation, CancellationToken competingCancellationToken = default)
     {
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
         ArgumentNullException.ThrowIfNull(cancellation);
@@ -144,7 +144,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
                 throw new InvalidOperationException("The active provider attempt cannot register because this process does not own custom-loop hosting.");
             }
 
-            return host.CancellationHost.RegisterActiveAttempt(runId, cancellation);
+            return host.CancellationHost.RegisterActiveAttempt(runId, cancellation, competingCancellationToken);
         }
     }
 

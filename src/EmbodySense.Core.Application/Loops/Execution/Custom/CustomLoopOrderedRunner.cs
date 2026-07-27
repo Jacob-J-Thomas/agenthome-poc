@@ -436,7 +436,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopInferenceAttemptResult result;
         var providerInvoked = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
-        using var providerToken = CreateProviderToken(run, cancellationToken);
+        using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
+        using var providerToken = CancellationTokenSource.CreateLinkedTokenSource(providerBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
             return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: false, providerWasInvoked: false);
@@ -444,7 +445,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         try
         {
-            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, providerToken);
+            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, providerToken, providerBoundaryToken.Token);
             var dispatchBoundary = await ObserveControlBoundaryAsync(run, actor);
             if (dispatchBoundary.Terminal is not null)
             {
@@ -647,7 +648,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopInferenceAttemptResult result;
         var providerInvoked = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
-        using var providerToken = CreateProviderToken(run, cancellationToken);
+        using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
+        using var providerToken = CancellationTokenSource.CreateLinkedTokenSource(providerBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
             return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: true, providerWasInvoked: false);
@@ -655,7 +657,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         try
         {
-            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, providerToken);
+            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, providerToken, providerBoundaryToken.Token);
             var dispatchBoundary = await ObserveControlBoundaryAsync(run, actor);
             if (dispatchBoundary.Terminal is not null)
             {
@@ -949,7 +951,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopConversationPublicationResult publication;
         var publicationDispatched = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
-        using var publicationToken = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var publicationBoundaryToken = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var publicationToken = CancellationTokenSource.CreateLinkedTokenSource(publicationBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, publicationToken))
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "publication_registration_failed", "Conversation publication could not be registered with the active cancellation protocol, so no append was attempted.");
@@ -958,7 +961,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         try
         {
-            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, publicationToken);
+            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, publicationToken, publicationBoundaryToken.Token);
         }
         catch (Exception exception)
         {

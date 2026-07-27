@@ -2345,15 +2345,17 @@ public sealed class CustomLoopOrderedRunnerTests
     private sealed class RecordingAttemptCancellationBroker : ICustomLoopAttemptCancellationBroker
     {
         private CancellationTokenSource? _cancellation;
+        private CancellationToken _competingCancellationToken;
         private TaskCompletionSource<CustomLoopAttemptCancellationResult>? _completion;
         private bool _routedSignalWon;
 
         public int RegistrationCount { get; private set; }
 
-        public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation)
+        public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation, CancellationToken competingCancellationToken = default)
         {
             RegistrationCount++;
             _cancellation = cancellation;
+            _competingCancellationToken = competingCancellationToken;
             _completion = new TaskCompletionSource<CustomLoopAttemptCancellationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             return new Registration(this);
         }
@@ -2373,7 +2375,7 @@ public sealed class CustomLoopOrderedRunnerTests
         {
             public bool TryConfirmProviderInterruption(CancellationToken observedCancellationToken)
             {
-                if (!owner._routedSignalWon || observedCancellationToken != owner._cancellation!.Token)
+                if (!owner._routedSignalWon || owner._competingCancellationToken.IsCancellationRequested || observedCancellationToken != owner._cancellation!.Token)
                 {
                     return false;
                 }
