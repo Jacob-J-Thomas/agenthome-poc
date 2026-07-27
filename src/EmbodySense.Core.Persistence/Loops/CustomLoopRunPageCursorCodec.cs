@@ -6,6 +6,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 internal static class CustomLoopRunPageCursorCodec
 {
+    // TODO(#71): Reset experimental wire-format versions to 1 and remove pre-1.0 compatibility handling.
     private const int CurrentVersion = 2;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
