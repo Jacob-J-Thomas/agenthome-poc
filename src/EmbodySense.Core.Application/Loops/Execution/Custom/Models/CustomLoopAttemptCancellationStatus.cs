@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Loops.Execution.Custom;
+namespace EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 
 public enum CustomLoopAttemptCancellationStatus
 {

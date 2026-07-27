@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
@@ -830,6 +831,35 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, signal.Status);
         Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
         Assert.Equal("inference_attempt_uncertain", result.Run!.FailureCode);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_that_wins_the_race_is_not_reported_as_routed_provider_interruption()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new RacingCancellationExecutor();
+        var broker = new RecordingAttemptCancellationBroker();
+        var runner = new CustomLoopOrderedRunner(
+            store,
+            new CustomLoopContextResolver(),
+            executor,
+            new RecordingPublisher(),
+            new RecordingAuditLog(),
+            new TestAuthorityProvider(),
+            new FixedTimeProvider(Now),
+            broker);
+        using var callerCancellation = new CancellationTokenSource();
+        var execution = runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), callerCancellation.Token);
+        await executor.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        callerCancellation.Cancel();
+
+        var signal = runner.RequestActiveAttemptCancellationAsync(store.Current.Id, "cancel-after-caller");
+        executor.Release.TrySetResult();
+        var signalResult = await signal;
+        var result = await execution;
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, signalResult.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
     }
 
     [Fact]
@@ -2256,10 +2286,27 @@ public sealed class CustomLoopOrderedRunnerTests
         }
     }
 
+    private sealed class RacingCancellationExecutor : ICustomLoopInferenceAttemptExecutor
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
+        {
+            providerRequestStarted?.Invoke();
+            Started.TrySetResult();
+            await Release.Task;
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new InvalidOperationException("The cancellation race test provider unexpectedly completed.");
+        }
+    }
+
     private sealed class RecordingAttemptCancellationBroker : ICustomLoopAttemptCancellationBroker
     {
         private CancellationTokenSource? _cancellation;
         private TaskCompletionSource<CustomLoopAttemptCancellationResult>? _completion;
+        private bool _routedSignalWon;
 
         public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation)
         {
@@ -2270,15 +2317,26 @@ public sealed class CustomLoopOrderedRunnerTests
 
         public async Task<CustomLoopAttemptCancellationResult> RequestCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
         {
-            _cancellation!.Cancel();
+            _routedSignalWon = !_cancellation!.IsCancellationRequested;
+            if (_routedSignalWon)
+            {
+                _cancellation.Cancel();
+            }
+
             return await _completion!.Task.WaitAsync(cancellationToken);
         }
 
         private sealed class Registration(RecordingAttemptCancellationBroker owner) : ICustomLoopAttemptCancellationRegistration
         {
-            public void ConfirmProviderInterruption()
+            public bool TryConfirmProviderInterruption(CancellationToken observedCancellationToken)
             {
+                if (!owner._routedSignalWon || observedCancellationToken != owner._cancellation!.Token)
+                {
+                    return false;
+                }
+
                 owner._completion!.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, "Confirmed."));
+                return true;
             }
 
             public void Dispose()

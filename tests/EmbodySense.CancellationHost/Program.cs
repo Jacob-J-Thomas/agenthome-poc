@@ -17,9 +17,9 @@ try
 {
     await Task.Delay(Timeout.InfiniteTimeSpan, cancellation.Token);
 }
-catch (OperationCanceledException)
+catch (OperationCanceledException exception)
 {
-    registration.ConfirmProviderInterruption();
+    _ = registration.TryConfirmProviderInterruption(exception.CancellationToken);
     Console.WriteLine("interrupted");
     await Console.Out.FlushAsync();
 }

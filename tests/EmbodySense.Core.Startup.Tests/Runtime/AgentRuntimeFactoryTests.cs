@@ -169,6 +169,37 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Pending_cancel_reacquires_hosting_and_recovers_after_the_external_owner_exits()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runStore = new CustomLoopRunStore(paths);
+        var running = RunningRun("run-owner-exit-recovery");
+        await PersistRunningRunAsync(runStore, running);
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var input = new LoopRunControlInput(running.Id, running.LifecycleVersion, "cancel-owner-exit-recovery");
+
+        var unavailable = await runtime.CancelCustomLoopAsync(input);
+        ownership.Dispose();
+        var recovered = await runtime.CancelCustomLoopAsync(input);
+        var receipt = await new CustomLoopControlOperationStore(paths).GetAsync(input.OperationId);
+
+        Assert.Equal("Failed", unavailable.Status);
+        Assert.Contains("remains pending", unavailable.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("Cancelled", recovered.Status);
+        Assert.Equal("Cancelled", recovered.Run!.Status);
+        Assert.Equal(CustomLoopControlOperationState.Complete, receipt!.State);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, receipt.Outcome);
+    }
+
+    [Fact]
     public async Task CreateAsync_keeps_ordinary_chat_available_while_an_in_process_custom_loop_owns_execution()
     {
         using var workspace = new TestWorkspace();
@@ -308,6 +339,64 @@ public sealed class AgentRuntimeFactoryTests
             AdmissionStatus = "NotFound",
             Detail = "The loop definition does not exist."
         })).Status);
+    }
+
+    private static CustomLoopRunRecord RunningRun(string runId)
+    {
+        var now = DateTimeOffset.Parse("2026-07-26T12:00:00+00:00");
+        var definition = CustomLoopDefinitionContentHash.Apply(CustomLoopDefinition.CreateSeed("loop-owner-exit-recovery", "role-workspace", "step-only", "create-loop-owner-exit-recovery", now) with { ContentHash = string.Empty });
+        CustomLoopRunEvent[] events =
+        [
+            new(1, $"admitted-{runId}", now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null),
+            new(2, $"admission-audit-{runId}", now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null),
+            new(3, $"running-{runId}", now.AddSeconds(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered Running.", [], null, null, null, null, null, null, null, null, null, null)
+        ];
+        var run = new CustomLoopRunRecord(
+            CustomLoopRunRecord.CurrentSchemaVersion,
+            runId,
+            definition.Id,
+            events.Length,
+            CustomLoopRunStatus.Running,
+            now,
+            now.AddSeconds(1),
+            null,
+            "cli",
+            new CustomLoopModelSnapshot("provider", "model"),
+            $"admit-{runId}",
+            WorkspaceActors.Cli,
+            string.Empty,
+            definition,
+            "prompt",
+            null,
+            CustomLoopContextSnapshot.CreateEmpty(now),
+            new CustomLoopExecutionClock(0, now.AddSeconds(1)),
+            CustomLoopRunCheckpoint.Start(),
+            events,
+            null,
+            null,
+            null);
+        return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static async Task PersistRunningRunAsync(CustomLoopRunStore store, CustomLoopRunRecord running)
+    {
+        var admitted = running with
+        {
+            LifecycleVersion = 1,
+            Status = CustomLoopRunStatus.Admitted,
+            UpdatedAtUtc = running.CreatedAtUtc,
+            ExecutionClock = CustomLoopExecutionClock.NotStarted(),
+            Events = [running.Events[0]]
+        };
+        var audited = admitted with
+        {
+            LifecycleVersion = 2,
+            Events = [.. running.Events[..2]]
+        };
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(audited, admitted.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, audited.LifecycleVersion)).Status);
     }
 
     private static async Task PersistCompletedControlAsync(WorkspacePaths paths, CustomLoopControlKind kind, LoopRunControlInput input, CustomLoopControlStatus outcome, string detail)

@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 
@@ -51,7 +52,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
             var attempt = new ActiveAttempt(cancellation, ++_attemptGeneration);
             _activeAttempts.Add(runId, attempt);
-            return new ActiveAttemptRegistration(this, runId, attempt.Generation);
+            return new ActiveAttemptRegistration(this, runId, attempt);
         }
     }
 
@@ -73,14 +74,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             return Owned(CustomLoopAttemptCancellationStatus.NoActiveAttempt, "The workspace-host owner has no active provider attempt for this run.");
         }
 
-        try
-        {
-            attempt.Signal();
-        }
-        catch (ObjectDisposedException)
-        {
-            return Owned(CustomLoopAttemptCancellationStatus.NoActiveAttempt, "The provider attempt completed while cancellation was being routed.");
-        }
+        attempt.Signal();
 
         try
         {
@@ -250,7 +244,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             || !string.Equals(request.OwnerId, _ownerId, StringComparison.Ordinal)
             || !CustomLoopArtifactIdentifier.IsValid(request.RunId)
             || !CustomLoopArtifactIdentifier.IsValid(request.OperationId, CustomLoopLimits.MaxMutationOperationIdCharacters)
-            || request.AuthenticationTag.Length != 64)
+            || request.AuthenticationTag is not { Length: 64 })
         {
             return false;
         }
@@ -432,7 +426,8 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private sealed class ActiveAttempt
     {
         private readonly CancellationTokenSource _cancellation;
-        private int _signalled;
+        private int _signalQueued;
+        private int _routedSignalDelivered;
 
         public ActiveAttempt(CancellationTokenSource cancellation, long generation)
         {
@@ -446,8 +441,18 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         public void Signal()
         {
-            Interlocked.Exchange(ref _signalled, 1);
-            _cancellation.Cancel();
+            if (Interlocked.Exchange(ref _signalQueued, 1) == 0)
+            {
+                ThreadPool.UnsafeQueueUserWorkItem(static attempt => attempt.DeliverSignal(), this, preferLocal: false);
+            }
+        }
+
+        public bool CanConfirmProviderInterruption(CancellationToken observedCancellationToken)
+        {
+            return Volatile.Read(ref _routedSignalDelivered) != 0
+                && observedCancellationToken.CanBeCanceled
+                && observedCancellationToken == _cancellation.Token
+                && _cancellation.IsCancellationRequested;
         }
 
         public void ConfirmProviderInterruption()
@@ -457,7 +462,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         public void CompleteWithoutConfirmedInterruption()
         {
-            var status = Volatile.Read(ref _signalled) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.SignalDelivered;
+            var status = Volatile.Read(ref _signalQueued) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.SignalDelivered;
             var detail = status == CustomLoopAttemptCancellationStatus.NoActiveAttempt
                 ? "The provider attempt completed before cancellation was routed."
                 : "The cancellation signal was delivered, but the provider attempt completed without a confirmed cancellation exception.";
@@ -468,32 +473,57 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         {
             Completion.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.OwnerUnavailable, "The workspace-host owner exited before provider interruption was confirmed."));
         }
+
+        private void DeliverSignal()
+        {
+            try
+            {
+                if (_cancellation.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                Volatile.Write(ref _routedSignalDelivered, 1);
+                _cancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                CompleteWithoutConfirmedInterruption();
+            }
+            catch (AggregateException)
+            {
+                // The cancellation state is already visible even when a provider callback fails.
+            }
+        }
     }
 
-    private sealed class ActiveAttemptRegistration(CustomLoopAttemptCancellationHost host, string runId, long generation) : ICustomLoopAttemptCancellationRegistration
+    private sealed class ActiveAttemptRegistration(CustomLoopAttemptCancellationHost host, string runId, ActiveAttempt attempt) : ICustomLoopAttemptCancellationRegistration
     {
         private int _completed;
 
-        public void ConfirmProviderInterruption()
+        public bool TryConfirmProviderInterruption(CancellationToken observedCancellationToken)
         {
-            if (Interlocked.Exchange(ref _completed, 1) == 0)
+            if (!attempt.CanConfirmProviderInterruption(observedCancellationToken) || Interlocked.Exchange(ref _completed, 1) != 0)
             {
-                host.CompleteAttempt(runId, generation, interrupted: true);
+                return false;
             }
+
+            host.CompleteAttempt(runId, attempt.Generation, interrupted: true);
+            return true;
         }
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _completed, 1) == 0)
             {
-                host.CompleteAttempt(runId, generation, interrupted: false);
+                host.CompleteAttempt(runId, attempt.Generation, interrupted: false);
             }
         }
     }
 
     private sealed record CancellationOwnerDescriptor(int SchemaVersion, string OwnerId, string PipeName, string Secret, int ProcessId, DateTimeOffset StartedAtUtc);
 
-    private sealed record CancellationWireRequest(int SchemaVersion, string OwnerId, string RunId, string OperationId, string AuthenticationTag);
+    private sealed record CancellationWireRequest(int SchemaVersion, string OwnerId, string RunId, string OperationId, string? AuthenticationTag);
 
     private sealed record CancellationWireResponse(int SchemaVersion, CustomLoopAttemptCancellationStatus Status, string Detail, string OwnerId, int OwnerProcessId);
 }

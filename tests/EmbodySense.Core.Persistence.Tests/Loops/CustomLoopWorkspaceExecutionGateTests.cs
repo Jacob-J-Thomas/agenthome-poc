@@ -1,8 +1,11 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -146,7 +149,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
                 await Task.Delay(10);
             }
 
-            registration.ConfirmProviderInterruption();
+            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
         });
 
         var result = await requester.RequestCancellationAsync("run-shared-owner", "cancel-shared-owner");
@@ -198,6 +201,52 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
+    public async Task Blocking_cancellation_callback_cannot_stall_the_remote_broker()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        requester.RelinquishWorkspaceHost();
+        using var cancellation = new CancellationTokenSource();
+        using var callbackRelease = new ManualResetEventSlim();
+        using var callback = cancellation.Token.Register(callbackRelease.Wait);
+        using var registration = owner.RegisterActiveAttempt("run-blocking-callback", cancellation);
+        var startedAt = Stopwatch.GetTimestamp();
+
+        try
+        {
+            var result = await requester.RequestCancellationAsync("run-blocking-callback", "cancel-blocking-callback").WaitAsync(TimeSpan.FromSeconds(4));
+            var elapsed = Stopwatch.GetElapsedTime(startedAt);
+
+            Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
+            Assert.InRange(elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            callbackRelease.Set();
+        }
+    }
+
+    [Fact]
+    public async Task Already_cancelled_provider_token_cannot_be_claimed_by_a_later_routed_signal()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var registration = gate.RegisterActiveAttempt("run-unrelated-cancellation", cancellation);
+        var request = gate.RequestCancellationAsync("run-unrelated-cancellation", "cancel-after-unrelated");
+
+        Assert.False(registration.TryConfirmProviderInterruption(cancellation.Token));
+        registration.Dispose();
+        var result = await request;
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
+    }
+
+    [Fact]
     public async Task Tampered_owner_capability_is_rejected_by_the_live_host()
     {
         using var workspace = new TestWorkspace();
@@ -215,6 +264,44 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.Invalid, result.Status);
         Assert.False(cancellation.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task Null_authentication_tag_is_rejected_without_terminating_the_broker()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
+        using var cancellation = new CancellationTokenSource();
+        using var registration = owner.RegisterActiveAttempt("run-null-authentication", cancellation);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        var invalid = await ExchangePipeFrameAsync(
+            descriptor,
+            new JsonObject
+            {
+                ["schemaVersion"] = 1,
+                ["ownerId"] = descriptor["ownerId"]!.GetValue<string>(),
+                ["runId"] = "run-null-authentication",
+                ["operationId"] = "cancel-null-authentication",
+                ["authenticationTag"] = null
+            });
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        requester.RelinquishWorkspaceHost();
+        var confirmation = Task.Run(async () =>
+        {
+            while (!cancellation.IsCancellationRequested)
+            {
+                await Task.Delay(10);
+            }
+
+            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
+        });
+
+        var result = await requester.RequestCancellationAsync("run-null-authentication", "cancel-after-null-authentication");
+        await confirmation;
+
+        Assert.Equal((int)CustomLoopAttemptCancellationStatus.Invalid, invalid["status"]!.GetValue<int>());
+        Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, result.Status);
     }
 
     [Fact]
@@ -253,7 +340,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
                 await Task.Delay(10);
             }
 
-            registration.ConfirmProviderInterruption();
+            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
         });
 
         var result = await owner.RequestCancellationAsync("run-incomplete-client", "cancel-after-incomplete-client");
@@ -366,7 +453,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
                 await Task.Delay(10);
             }
 
-            registration.ConfirmProviderInterruption();
+            Assert.True(registration.TryConfirmProviderInterruption(cancellation.Token));
         });
         var retried = await requester.RequestCancellationAsync("run-owner-restart", "cancel-owner-restart");
         await confirmation;
@@ -426,6 +513,23 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         startInfo.ArgumentList.Add(runId);
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The cancellation owner process could not be started.");
+    }
+
+    private static async Task<JsonObject> ExchangePipeFrameAsync(JsonObject descriptor, JsonObject request)
+    {
+        using var client = new NamedPipeClientStream(".", descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, PipeOptions.Asynchronous);
+        await client.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        var payload = Encoding.UTF8.GetBytes(request.ToJsonString());
+        var length = new byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(length, payload.Length);
+        await client.WriteAsync(length);
+        await client.WriteAsync(payload);
+        await client.FlushAsync();
+        await client.ReadExactlyAsync(length).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        var responseLength = BinaryPrimitives.ReadInt32LittleEndian(length);
+        var response = new byte[responseLength];
+        await client.ReadExactlyAsync(response).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        return JsonNode.Parse(response)!.AsObject();
     }
 
     private static CustomLoopRunRecord RunningRun(string runId)

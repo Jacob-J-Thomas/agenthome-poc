@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -470,7 +471,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         catch (OperationCanceledException exception)
         {
-            cancellationRegistration?.ConfirmProviderInterruption();
+            cancellationRegistration?.TryConfirmProviderInterruption(exception.CancellationToken);
             return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, exception, isExit: false, providerWasInvoked: true);
         }
         catch (Exception exception)
@@ -681,7 +682,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         catch (OperationCanceledException exception)
         {
-            cancellationRegistration?.ConfirmProviderInterruption();
+            cancellationRegistration?.TryConfirmProviderInterruption(exception.CancellationToken);
             return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, exception, isExit: true, providerWasInvoked: true);
         }
         catch (Exception exception)
