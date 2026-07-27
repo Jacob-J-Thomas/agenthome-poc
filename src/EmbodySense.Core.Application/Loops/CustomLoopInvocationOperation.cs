@@ -27,5 +27,5 @@ public sealed record CustomLoopInvocationOperation(
     CustomLoopValidationError[] ValidationErrors,
     string Detail)
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 1;
 }

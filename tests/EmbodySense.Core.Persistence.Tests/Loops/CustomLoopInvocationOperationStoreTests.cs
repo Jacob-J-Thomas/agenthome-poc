@@ -86,85 +86,6 @@ public sealed class CustomLoopInvocationOperationStoreTests
     }
 
     [Fact]
-    public async Task Version_one_receipts_migrate_and_bind_without_losing_pending_or_completed_outcomes()
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new CustomLoopInvocationOperationStore(paths);
-        var completedPending = Pending("invoke-legacy-complete", "prompt");
-        await store.BeginAsync(completedPending);
-        var completedBound = await BindConversationAsync(store, completedPending, CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy);
-        var completed = completedBound with
-        {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
-            State = CustomLoopInvocationOperationState.Complete,
-            Outcome = CustomLoopInvocationOutcome.WorkspaceExecutionBusy,
-            AdmissionStatus = "WorkspaceExecutionBusy",
-            Detail = "The legacy busy outcome completed."
-        };
-        await store.CompleteAsync(completed);
-        await RewriteAsVersionOneWithoutBindingAsync(paths, completed.OperationId);
-
-        var migratedComplete = Assert.IsType<CustomLoopInvocationOperation>(await store.GetAsync(completed.OperationId));
-        var claimed = migratedComplete with
-        {
-            BindingState = CustomLoopInvocationBindingState.LegacyConversation,
-            InvokingConversationId = new string('d', CustomLoopLimits.Sha256HexCharacters),
-            UpdatedAtUtc = migratedComplete.UpdatedAtUtc.AddSeconds(1)
-        };
-        Assert.Equal(CustomLoopInvocationOperation.CurrentSchemaVersion, migratedComplete.SchemaVersion);
-        Assert.Equal(CustomLoopInvocationBindingState.LegacyUnbound, migratedComplete.BindingState);
-        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(claimed)).Status);
-
-        var pending = Pending("invoke-legacy-pending", "prompt");
-        await store.BeginAsync(pending);
-        await RewriteAsVersionOneWithoutBindingAsync(paths, pending.OperationId);
-        var migratedPending = Assert.IsType<CustomLoopInvocationOperation>(await store.GetAsync(pending.OperationId));
-        Assert.Equal(CustomLoopInvocationBindingState.LegacyUnbound, migratedPending.BindingState);
-        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(ContextBound(migratedPending))).Status);
-        Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, (await store.GetAsync(pending.OperationId))!.BindingState);
-    }
-
-    [Theory]
-    [InlineData("binding-state")]
-    [InlineData("captured-context")]
-    [InlineData("conversation-id")]
-    [InlineData("context-identity")]
-    public async Task Version_one_receipts_reject_every_version_two_binding_field(string injectedField)
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new CustomLoopInvocationOperationStore(paths);
-        var pending = Pending("invoke-legacy-binding-field-" + injectedField, "prompt");
-        await store.BeginAsync(pending);
-        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
-        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        persisted["schemaVersion"] = 1;
-        switch (injectedField)
-        {
-            case "binding-state":
-                persisted["bindingState"] = "unknown";
-                break;
-            case "captured-context":
-                persisted["bindingState"] = "capturedContext";
-                persisted["invokingConversationId"] = new string('b', CustomLoopLimits.Sha256HexCharacters);
-                persisted["contextIdentityHash"] = new string('c', CustomLoopLimits.Sha256HexCharacters);
-                break;
-            case "conversation-id":
-                persisted.Remove("bindingState");
-                persisted["invokingConversationId"] = new string('b', CustomLoopLimits.Sha256HexCharacters);
-                break;
-            case "context-identity":
-                persisted.Remove("bindingState");
-                persisted["contextIdentityHash"] = new string('c', CustomLoopLimits.Sha256HexCharacters);
-                break;
-        }
-        await File.WriteAllTextAsync(path, persisted.ToJsonString());
-
-        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
-    }
-
-    [Fact]
     public async Task Completion_preserves_creation_time_and_rejects_update_time_regression()
     {
         using var workspace = new TestWorkspace();
@@ -476,14 +397,4 @@ public sealed class CustomLoopInvocationOperationStoreTests
         };
     }
 
-    private static async Task RewriteAsVersionOneWithoutBindingAsync(WorkspacePaths paths, string operationId)
-    {
-        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
-        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        persisted["schemaVersion"] = 1;
-        persisted.Remove("bindingState");
-        persisted.Remove("invokingConversationId");
-        persisted.Remove("contextIdentityHash");
-        await File.WriteAllTextAsync(path, persisted.ToJsonString());
-    }
 }

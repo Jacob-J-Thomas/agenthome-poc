@@ -70,8 +70,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             or CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy
             or CustomLoopInvocationBindingState.ConversationInvalid
             or CustomLoopInvocationBindingState.CapturedContext
-            or CustomLoopInvocationBindingState.CapturedContextNotFound
-            or CustomLoopInvocationBindingState.LegacyConversation))
+            or CustomLoopInvocationBindingState.CapturedContextNotFound))
         {
             throw new ArgumentException("Invocation binding must identify its conversation and optional captured context.", nameof(operation));
         }
@@ -91,12 +90,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
 
-            var canBindLegacyPending = existing.State == CustomLoopInvocationOperationState.Pending
-                && existing.BindingState == CustomLoopInvocationBindingState.LegacyUnbound;
-            var canClaimLegacyCompleted = existing.State == CustomLoopInvocationOperationState.Complete
-                && existing.BindingState == CustomLoopInvocationBindingState.LegacyUnbound
-                && operation.BindingState == CustomLoopInvocationBindingState.LegacyConversation;
-            if (existing.BindingState != CustomLoopInvocationBindingState.Unbound && !canBindLegacyPending && !canClaimLegacyCompleted)
+            if (existing.BindingState != CustomLoopInvocationBindingState.Unbound)
             {
                 if (SameBinding(existing, operation))
                 {
@@ -114,21 +108,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
                 }
             }
 
-            if (canClaimLegacyCompleted)
-            {
-                var expected = existing with
-                {
-                    BindingState = operation.BindingState,
-                    InvokingConversationId = operation.InvokingConversationId,
-                    ContextIdentityHash = operation.ContextIdentityHash,
-                    UpdatedAtUtc = operation.UpdatedAtUtc
-                };
-                if (!SameCompletedOperation(expected, operation))
-                {
-                    return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
-                }
-            }
-            else if (existing.State != CustomLoopInvocationOperationState.Pending || operation.State != CustomLoopInvocationOperationState.Pending)
+            if (existing.State != CustomLoopInvocationOperationState.Pending || operation.State != CustomLoopInvocationOperationState.Pending)
             {
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.Conflict, existing);
             }
@@ -238,7 +218,6 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             throw new FormatException($"Custom-loop invocation operation `{path}` is invalid JSON.", exception);
         }
 
-        operation = Migrate(operation, bytes);
         Validate(operation, requirePending: operation?.State == CustomLoopInvocationOperationState.Pending);
         if (!string.Equals(operation!.OperationId, operationId, StringComparison.Ordinal))
         {
@@ -413,8 +392,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
         return operation.Outcome switch
         {
-            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => (operation.BindingState is CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy or CustomLoopInvocationBindingState.CapturedContext || IsLegacyBinding(operation.BindingState)) && operation.RunId is null && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
-            CustomLoopInvocationOutcome.Admitted => (operation.BindingState == CustomLoopInvocationBindingState.CapturedContext || IsLegacyBinding(operation.BindingState)) && CustomLoopArtifactIdentifier.IsValid(operation.RunId) && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.WorkspaceExecutionBusy => (operation.BindingState is CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy or CustomLoopInvocationBindingState.CapturedContext) && operation.RunId is null && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, nameof(CustomLoopInvocationOutcome.WorkspaceExecutionBusy), StringComparison.Ordinal),
+            CustomLoopInvocationOutcome.Admitted => operation.BindingState == CustomLoopInvocationBindingState.CapturedContext && CustomLoopArtifactIdentifier.IsValid(operation.RunId) && operation.ValidationErrors.Length == 0 && string.Equals(operation.AdmissionStatus, CustomLoopAdmissionStatusNames.Admitted, StringComparison.Ordinal),
             CustomLoopInvocationOutcome.Rejected => ValidRejectedOutcome(operation),
             _ => false
         };
@@ -428,20 +407,6 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
 
         var hasValidOptionalRun = operation.RunId is null || CustomLoopArtifactIdentifier.IsValid(operation.RunId);
-        if (IsLegacyBinding(operation.BindingState))
-        {
-            return operation.AdmissionStatus switch
-            {
-                CustomLoopAdmissionStatusNames.Invalid => hasValidOptionalRun,
-                CustomLoopAdmissionStatusNames.Conflict => hasValidOptionalRun,
-                CustomLoopAdmissionStatusNames.NonterminalRunExists => CustomLoopArtifactIdentifier.IsValid(operation.RunId),
-                CustomLoopAdmissionStatusNames.LimitExceeded => operation.RunId is null,
-                CustomLoopAdmissionStatusNames.NotFound => operation.RunId is null,
-                CustomLoopAdmissionStatusNames.AuditUnavailable => hasValidOptionalRun,
-                _ => false
-            };
-        }
-
         return operation.AdmissionStatus switch
         {
             CustomLoopAdmissionStatusNames.Invalid => operation.BindingState == CustomLoopInvocationBindingState.ConversationInvalid
@@ -466,39 +431,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             CustomLoopInvocationBindingState.ConversationInvalid => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             CustomLoopInvocationBindingState.CapturedContext => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
             CustomLoopInvocationBindingState.CapturedContextNotFound => IsHash(operation.InvokingConversationId) && IsHash(operation.ContextIdentityHash),
-            CustomLoopInvocationBindingState.LegacyUnbound => operation.InvokingConversationId is null && operation.ContextIdentityHash is null,
-            CustomLoopInvocationBindingState.LegacyConversation => IsHash(operation.InvokingConversationId) && operation.ContextIdentityHash is null,
             _ => false
         };
-    }
-
-    private static CustomLoopInvocationOperation Migrate(CustomLoopInvocationOperation? operation, ReadOnlyMemory<byte> persistedBytes)
-    {
-        if (operation is null || operation.SchemaVersion != 1)
-        {
-            return operation!;
-        }
-
-        using var document = JsonDocument.Parse(persistedBytes);
-        var root = document.RootElement;
-        if (operation.BindingState != CustomLoopInvocationBindingState.Unknown
-            || root.TryGetProperty("bindingState", out _)
-            || root.TryGetProperty("invokingConversationId", out _)
-            || root.TryGetProperty("contextIdentityHash", out _))
-        {
-            throw new FormatException("Version-one custom-loop invocation operations cannot contain version-two binding fields.");
-        }
-
-        return operation with
-        {
-            SchemaVersion = CustomLoopInvocationOperation.CurrentSchemaVersion,
-            BindingState = CustomLoopInvocationBindingState.LegacyUnbound
-        };
-    }
-
-    private static bool IsLegacyBinding(CustomLoopInvocationBindingState bindingState)
-    {
-        return bindingState is CustomLoopInvocationBindingState.LegacyUnbound or CustomLoopInvocationBindingState.LegacyConversation;
     }
 
     private static bool ValidValidationError(CustomLoopValidationError? error)

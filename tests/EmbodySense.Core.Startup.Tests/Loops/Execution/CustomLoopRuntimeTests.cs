@@ -15,7 +15,6 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
-using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
@@ -159,33 +158,6 @@ public sealed class CustomLoopRuntimeTests
         Assert.False(response.WasDispatched);
         Assert.Equal(CustomLoopInvocationOperationState.Pending, receipt.State);
         Assert.Equal(CustomLoopInvocationBindingState.Unbound, receipt.BindingState);
-    }
-
-    [Fact]
-    public async Task Version_one_completed_receipt_is_claimed_by_the_current_conversation_before_replay()
-    {
-        using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-legacy-complete", "private prompt");
-        Assert.Equal("NotFound", (await runtime.InvokeCustomLoopAsync(input)).AdmissionStatus);
-        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, input.OperationId + ".json");
-        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
-        persisted["schemaVersion"] = 1;
-        persisted.Remove("bindingState");
-        persisted.Remove("invokingConversationId");
-        persisted.Remove("contextIdentityHash");
-        await File.WriteAllTextAsync(path, persisted.ToJsonString());
-
-        var replay = await runtime.InvokeCustomLoopAsync(input);
-        var receipt = Assert.IsType<CustomLoopInvocationOperation>(await new CustomLoopInvocationOperationStore(paths).GetAsync(input.OperationId));
-
-        Assert.Equal("NotFound", replay.AdmissionStatus);
-        Assert.Contains("replayed", replay.Detail, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(CustomLoopInvocationOperation.CurrentSchemaVersion, receipt.SchemaVersion);
-        Assert.Equal(CustomLoopInvocationBindingState.LegacyConversation, receipt.BindingState);
-        Assert.Equal((await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version, receipt.InvokingConversationId);
     }
 
     [Fact]
