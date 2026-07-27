@@ -86,22 +86,20 @@ public sealed class AgentRuntimeFactory
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
             var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
             var preserveCurrentConversation = !customExecutionAvailable;
+            using var recoveryLease = recoveryOwnership.Lease;
             if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
             {
-                using (recoveryOwnership.Lease!)
+                try
                 {
-                    try
-                    {
-                        recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
-                        var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
-                        customExecutionAvailable &= !recoveryFailed;
-                        preserveCurrentConversation |= recoveryFailed;
-                    }
-                    catch (Exception exception) when (exception is not OperationCanceledException)
-                    {
-                        customExecutionAvailable = false;
-                        preserveCurrentConversation = true;
-                    }
+                    recoveryResults = await recovery.RecoverAsync(actor, cancellationToken);
+                    var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
+                    customExecutionAvailable &= !recoveryFailed;
+                    preserveCurrentConversation |= recoveryFailed;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    customExecutionAvailable = false;
+                    preserveCurrentConversation = true;
                 }
             }
 
@@ -116,9 +114,10 @@ public sealed class AgentRuntimeFactory
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
             using (await conversationState.AcquireExclusiveAccessAsync(cancellationToken))
             {
-                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults))
+                var currentConversation = await conversationMemory.LoadCurrentConversationSnapshotAsync(cancellationToken);
+                if (preserveCurrentConversation || ShouldPreserveCurrentConversation(recoveryResults, currentConversation.Version))
                 {
-                    conversationState.SynchronizeConversationTranscript(await conversationMemory.LoadCurrentConversationAsync(cancellationToken));
+                    conversationState.SynchronizeConversationTranscript(currentConversation.Messages);
                 }
                 else
                 {
@@ -188,8 +187,8 @@ public sealed class AgentRuntimeFactory
         return WorkspaceActors.ForSurface(surface.SurfaceId);
     }
 
-    private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults)
+    private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults, string currentConversationIdentity)
     {
-        return recoveryResults.Any(result => result.Run is { Status: CustomLoopRunStatus.Paused, InvokingConversation: not null });
+        return recoveryResults.Any(result => CustomLoopConversationRecoveryPolicy.RequiresCurrentConversation(result.Run, currentConversationIdentity));
     }
 }
