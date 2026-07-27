@@ -735,13 +735,37 @@ public sealed class CustomLoopRunStoreTests
         var store = new CustomLoopRunStore(paths);
         Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
         var pendingPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending");
+        var orphanedPendingTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, $"..custom-loop-run-index.pending.{Guid.NewGuid():N}.tmp");
         await File.WriteAllTextAsync(pendingPath, "pending\n");
+        await File.WriteAllTextAsync(orphanedPendingTemporaryPath, "partial");
         await WriteDirectAsync(paths, At(CreateRun("loop-beta", "run-beta", "invoke-beta"), 2));
 
         var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
 
         Assert.Equal(["run-beta", "run-alpha"], repaired.Items.Select(item => item.Id));
         Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(orphanedPendingTemporaryPath));
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_when_its_summary_is_modified_without_its_canonical_binding()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Status);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"]![0]!["summary"]!["status"] = "failed";
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+
+        var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single(repaired.Items).Status);
+        var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        Assert.Equal("admitted", repairedIndex["entries"]![0]!["summary"]!["status"]!.GetValue<string>());
     }
 
     [Fact]

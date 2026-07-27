@@ -17,6 +17,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
     private static readonly byte[] DiscoveryIndexPendingContent = "pending\n"u8.ToArray();
+    private static readonly TimeSpan DiscoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessMutationGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -792,6 +793,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private async Task<CustomLoopRunDiscoveryIndex> LoadDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
+        DeleteOrphanedDiscoveryIndexTemporaryArtifacts();
         if (!File.Exists(_discoveryIndexPendingPath))
         {
             try
@@ -813,6 +815,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private async Task<CustomLoopRunDiscoveryIndex?> ReadCleanDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
+        DeleteOrphanedDiscoveryIndexTemporaryArtifacts();
         if (File.Exists(_discoveryIndexPendingPath))
         {
             EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
@@ -860,7 +863,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         await ScanArtifactsAsync(artifact =>
         {
             var summary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
-            entries.Add(CreateDiscoveryIndexEntry(artifact.Location.Path, summary));
+            entries.Add(CreateDiscoveryIndexEntry(artifact.Location.Path, summary, artifact.PersistedHash));
         }, cancellationToken);
         entries.Sort(CompareDiscoveryIndexEntries);
         var index = new CustomLoopRunDiscoveryIndex(CustomLoopRunDiscoveryIndex.CurrentSchemaVersion, checked(previousRevision + 1), entries.ToArray());
@@ -870,7 +873,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         return index;
     }
 
-    private async Task UpdateDiscoveryIndexAsync(CustomLoopRunDiscoveryIndex? current, string artifactPath, CustomLoopRunSummary summary, CancellationToken cancellationToken)
+    private async Task UpdateDiscoveryIndexAsync(CustomLoopRunDiscoveryIndex? current, string artifactPath, CustomLoopRunSummary summary, string artifactHash, CancellationToken cancellationToken)
     {
         if (current is null)
         {
@@ -880,7 +883,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
         var entries = current.Entries
             .Where(entry => !string.Equals(entry.Summary.Id, summary.Id, StringComparison.Ordinal))
-            .Append(CreateDiscoveryIndexEntry(artifactPath, summary))
+            .Append(CreateDiscoveryIndexEntry(artifactPath, summary, artifactHash))
             .OrderBy(entry => entry, Comparer<CustomLoopRunDiscoveryIndexEntry>.Create(CompareDiscoveryIndexEntries))
             .ToArray();
         var updated = new CustomLoopRunDiscoveryIndex(CustomLoopRunDiscoveryIndex.CurrentSchemaVersion, checked(current.Revision + 1), entries);
@@ -931,6 +934,21 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         File.Delete(_discoveryIndexPendingPath);
     }
 
+    private void DeleteOrphanedDiscoveryIndexTemporaryArtifacts()
+    {
+        if (!Directory.Exists(_runsRoot))
+        {
+            return;
+        }
+
+        EnsureSafeDirectory(_runsRoot, create: false);
+        foreach (var path in Directory.EnumerateFiles(_runsRoot, "*", SearchOption.TopDirectoryOnly).Where(IsDiscoveryIndexPendingTemporaryArtifactPath))
+        {
+            EnsureSafeArtifactPath(_runsRoot, path, mustExist: true);
+            File.Delete(path);
+        }
+    }
+
     private bool DiscoveryIndexMatchesArtifacts(CustomLoopRunDiscoveryIndex index)
     {
         var locations = EnumerateArtifactLocations();
@@ -954,12 +972,17 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             {
                 return false;
             }
+
+            if (!string.Equals(entry.SummaryBindingHash, ComputeSummaryBindingHash(summary, entry.ArtifactHash), StringComparison.Ordinal))
+            {
+                return false;
+            }
         }
 
         return true;
     }
 
-    private static CustomLoopRunDiscoveryIndexEntry CreateDiscoveryIndexEntry(string path, CustomLoopRunSummary summary)
+    private static CustomLoopRunDiscoveryIndexEntry CreateDiscoveryIndexEntry(string path, CustomLoopRunSummary summary, string artifactHash)
     {
         var info = new FileInfo(path);
         info.Refresh();
@@ -968,7 +991,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             throw new FileNotFoundException("Custom loop run artifact does not exist.", path);
         }
 
-        return new CustomLoopRunDiscoveryIndexEntry(summary, info.Length, info.LastWriteTimeUtc.Ticks);
+        RequireHash(artifactHash, nameof(artifactHash));
+        return new CustomLoopRunDiscoveryIndexEntry(summary, artifactHash, ComputeSummaryBindingHash(summary, artifactHash), info.Length, info.LastWriteTimeUtc.Ticks);
     }
 
     private static void ValidateDiscoveryIndex(CustomLoopRunDiscoveryIndex index)
@@ -992,6 +1016,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             CustomLoopArtifactIdentifier.Require(summary.Id, nameof(summary.Id));
             CustomLoopArtifactIdentifier.Require(summary.LoopId, nameof(summary.LoopId));
             CustomLoopArtifactIdentifier.Require(summary.AdmissionOperationId, nameof(summary.AdmissionOperationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
+            RequireHash(entry.ArtifactHash, nameof(entry.ArtifactHash));
+            RequireHash(entry.SummaryBindingHash, nameof(entry.SummaryBindingHash));
+            if (!string.Equals(entry.SummaryBindingHash, ComputeSummaryBindingHash(summary, entry.ArtifactHash), StringComparison.Ordinal))
+            {
+                throw new FormatException("The custom loop run discovery index contains a summary that is not bound to its canonical artifact.");
+            }
+
             if (!runIds.Add(summary.Id) || !admissionOperationIds.Add(summary.AdmissionOperationId))
             {
                 throw new FormatException("The custom loop run discovery index contains duplicate run or admission-operation identities.");
@@ -1615,11 +1646,39 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             return false;
         }
 
-        var nonceSeparator = fileName.LastIndexOf(".json.", StringComparison.Ordinal);
-        var nonceStart = nonceSeparator + ".json.".Length;
+        var nonceSeparator = fileName.LastIndexOf('.', fileName.Length - ".tmp".Length - 1);
+        var nonceStart = nonceSeparator + 1;
         var nonceLength = fileName.Length - nonceStart - ".tmp".Length;
-        var identifier = nonceSeparator > 1 ? fileName[1..nonceSeparator] : "";
+        var targetFileName = nonceSeparator > 1 ? fileName[1..nonceSeparator] : "";
+        var identifier = targetFileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase) ? targetFileName[..^".json".Length] : "";
         if (!CustomLoopArtifactIdentifier.IsValid(identifier, maximumIdentifierCharacters) || nonceLength != 32)
+        {
+            return false;
+        }
+
+        for (var index = nonceStart; index < nonceStart + nonceLength; index++)
+        {
+            if (fileName[index] is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsDiscoveryIndexPendingTemporaryArtifactPath(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        var prefix = "." + DiscoveryIndexPendingFileName + ".";
+        if (!fileName.StartsWith(prefix, StringComparison.Ordinal) || !fileName.EndsWith(".tmp", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var nonceStart = prefix.Length;
+        var nonceLength = fileName.Length - nonceStart - ".tmp".Length;
+        if (nonceLength != 32)
         {
             return false;
         }
@@ -1707,7 +1766,15 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         var index = await ReadCleanDiscoveryIndexAsync(cancellationToken);
         await MarkDiscoveryIndexPendingAsync(cancellationToken);
         await WriteArtifactContentAsync(path, content, overwrite, cancellationToken);
-        await UpdateDiscoveryIndexAsync(index, path, summary, cancellationToken);
+        using var maintenanceCancellation = new CancellationTokenSource(DiscoveryIndexMaintenanceTimeout);
+        try
+        {
+            await UpdateDiscoveryIndexAsync(index, path, summary, ComputeHash(content), maintenanceCancellation.Token);
+        }
+        catch (Exception exception) when (IsRecoverableDiscoveryIndexMaintenanceFailure(exception))
+        {
+            // Canonical mutation committed. Leave the pending marker so the next indexed read repairs derived evidence.
+        }
     }
 
     private async Task WriteArtifactContentAsync(string path, byte[] content, bool overwrite, CancellationToken cancellationToken)
@@ -2078,6 +2145,26 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private static bool IsSurface(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= CustomLoopLimits.MaxArtifactIdCharacters && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
 
     private static string ComputeHash(byte[] content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+
+    private static string ComputeSummaryBindingHash(CustomLoopRunSummary summary, string artifactHash)
+    {
+        var summaryContent = JsonSerializer.SerializeToUtf8Bytes(summary, JsonOptions);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(Convert.FromHexString(artifactHash));
+        hash.AppendData(summaryContent);
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private static bool IsRecoverableDiscoveryIndexMaintenanceFailure(Exception exception)
+    {
+        return exception is OperationCanceledException
+            or IOException
+            or UnauthorizedAccessException
+            or FormatException
+            or JsonException
+            or InvalidOperationException
+            or OverflowException;
+    }
 
     private static DateTimeOffset Max(DateTimeOffset left, DateTimeOffset right) => left >= right ? left : right;
 

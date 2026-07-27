@@ -10,6 +10,7 @@ let runContinuationCursor = null;
 let runPaginationLoopId = null;
 let runPaginationExtended = false;
 let loadingMoreRuns = false;
+let loadingMoreRunsLoopId = null;
 let selectedRunId = null;
 let selectedRun = null;
 let selectedTrace = null;
@@ -248,7 +249,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     const filteredRuns = Array.isArray(filteredPayload) ? filteredPayload : filteredPayload?.items ?? [];
     const incomingRuns = mergeRunSummaries(filteredRuns, workspaceRuns);
     recentRuns = mergeRunSummaries(incomingRuns, recentRuns);
-    if (!runPaginationExtended && !loadingMoreRuns) {
+    if (!runPaginationExtended && (!loadingMoreRuns || loadingMoreRunsLoopId !== loopId)) {
       const pagePayload = filteredPayload ?? payload;
       runContinuationCursor = Array.isArray(pagePayload) ? null : pagePayload?.continuationCursor ?? null;
     }
@@ -293,14 +294,16 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
 }
 
 async function loadMoreRuns() {
-  if (!runContinuationCursor || loadingMoreRuns) return;
+  if (!runContinuationCursor) return;
   const loopId = runPaginationLoopId;
-  if (!loopId || selectedLoopId() !== loopId) return;
+  if (!loopId || selectedLoopId() !== loopId || loadingMoreRuns && loadingMoreRunsLoopId === loopId) return;
+  const cursor = runContinuationCursor;
   loadingMoreRuns = true;
+  loadingMoreRunsLoopId = loopId;
   renderRunPagination();
   try {
-    const payload = await requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}&cursor=${encodeURIComponent(runContinuationCursor)}`);
-    if (selectedLoopId() !== loopId) return;
+    const payload = await requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}&cursor=${encodeURIComponent(cursor)}`);
+    if (selectedLoopId() !== loopId || runPaginationLoopId !== loopId) return;
     recentRuns = mergeRunSummaries(recentRuns, payload?.items ?? []);
     runContinuationCursor = payload?.continuationCursor ?? null;
     runPaginationExtended = true;
@@ -310,7 +313,10 @@ async function loadMoreRuns() {
   } catch (error) {
     showBanner(`More run evidence unavailable: ${error.message}`);
   } finally {
-    loadingMoreRuns = false;
+    if (loadingMoreRunsLoopId === loopId) {
+      loadingMoreRuns = false;
+      loadingMoreRunsLoopId = null;
+    }
     renderRunPagination();
   }
 }
@@ -390,9 +396,10 @@ function renderRuns() {
 }
 
 function renderRunPagination() {
+  const loadingCurrentLoop = loadingMoreRuns && loadingMoreRunsLoopId === runPaginationLoopId;
   elements.loadMoreRunsButton.hidden = !runContinuationCursor;
-  elements.loadMoreRunsButton.disabled = loadingMoreRuns || mutationInFlight;
-  elements.loadMoreRunsButton.textContent = loadingMoreRuns ? "Loading more…" : "Load older evidence";
+  elements.loadMoreRunsButton.disabled = loadingCurrentLoop || mutationInFlight;
+  elements.loadMoreRunsButton.textContent = loadingCurrentLoop ? "Loading more…" : "Load older evidence";
 }
 
 async function selectRun(runId) {
@@ -1258,12 +1265,36 @@ async function deleteSelectedTrace() {
   }
 
   pendingTraceDeletion = null;
-
+  const tombstone = deletion.tombstone;
+  const tombstoneSummary = {
+    id: tombstone.runId,
+    loopId: tombstone.loopId,
+    admissionOperationId: tombstone.admissionOperationId,
+    definitionVersion: tombstone.definitionVersion,
+    status: tombstone.terminalStatus,
+    createdAtUtc: tombstone.createdAtUtc,
+    updatedAtUtc: tombstone.deletedAtUtc,
+    completedAtUtc: tombstone.completedAtUtc,
+    iteration: 0,
+    nextStepIndex: 0,
+    failureCode: null,
+    isDeleted: true
+  };
+  recentRuns = mergeRunSummaries([tombstoneSummary], recentRuns.filter(run => run.id !== runId));
+  selectedRunId = runId;
   selectedRun = null;
   selectedTrace = null;
-  recentRuns = recentRuns.filter(run => run.id !== runId);
   renderAll();
-  const refreshed = await loadRuns({ silent: true, preferredRunId: runId });
+  let refreshed = true;
+  try {
+    [selectedTrace, traceQuota] = await Promise.all([
+      requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`),
+      requestJson("/api/loop-runs/quota")
+    ]);
+    renderAll();
+  } catch {
+    refreshed = false;
+  }
   const warning = deletion.status === "CommittedWithAuditWarning" ? " The deletion committed, but its outcome audit has an integrity warning." : "";
   showToast(`Sensitive trace content deleted; the audited tombstone remains.${warning}`);
   if (!refreshed) showBanner("Trace deletion committed, but refreshed tombstone and quota evidence could not be loaded. Reload Runs to inspect the durable outcome.");

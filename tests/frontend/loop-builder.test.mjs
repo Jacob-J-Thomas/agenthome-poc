@@ -581,6 +581,49 @@ test("run discovery progressively loads cursor pages without losing the selected
   assert.equal(pageCall.options.headers["X-EmbodySense-Session"], "loop-test-token");
 });
 
+test("run discovery keeps each loop cursor scoped while an older-page request is still pending", async () => {
+  const catalog = createCatalog();
+  const secondDefinition = createCustomDefinition({ id: "loop-second", displayName: "Second pass", contentHash: "sha256:second" });
+  catalog.customDefinitions.push(secondDefinition);
+  const server = new FakeFetchServer(catalog);
+  const firstRun = createRunSnapshot();
+  const secondRun = createRunSnapshot();
+  secondRun.id = "run-second";
+  secondRun.loopId = secondDefinition.id;
+  secondRun.admissionOperationId = "op-run-second";
+  secondRun.admittedDefinition = secondDefinition;
+  const firstSummary = { id: firstRun.id, loopId: firstRun.loopId, admissionOperationId: firstRun.admissionOperationId, definitionVersion: 2, status: firstRun.status, createdAtUtc: firstRun.createdAtUtc, updatedAtUtc: firstRun.updatedAtUtc, completedAtUtc: firstRun.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  const secondSummary = { id: secondRun.id, loopId: secondRun.loopId, admissionOperationId: secondRun.admissionOperationId, definitionVersion: 2, status: secondRun.status, createdAtUtc: secondRun.createdAtUtc, updatedAtUtc: secondRun.updatedAtUtc, completedAtUtc: secondRun.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  server.runDetails.set(firstRun.id, firstRun);
+  server.runDetails.set(secondRun.id, secondRun);
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [], continuationCursor: null } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research", () => ({ status: 200, body: { items: [firstSummary], continuationCursor: "cursor-first" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-second", () => ({ status: 200, body: { items: [secondSummary], continuationCursor: "cursor-second" } }));
+  let releaseFirstPage;
+  const firstPageReleased = new Promise(resolve => { releaseFirstPage = resolve; });
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research&cursor=cursor-first", async () => {
+    await firstPageReleased;
+    return { status: 200, body: { items: [], continuationCursor: null } };
+  });
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-second&cursor=cursor-second", () => ({ status: 200, body: { items: [], continuationCursor: null } }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  const loadingFirstPage = app.elements.loadMoreRunsButton.click();
+  await Promise.resolve();
+  const secondLoopButton = app.elements.loopList.children.find(item => item.textContent.includes("Second pass"));
+  assert.ok(secondLoopButton);
+  await secondLoopButton.click();
+  assert.equal(app.elements.loadMoreRunsButton.hidden, false);
+  assert.equal(app.elements.loadMoreRunsButton.disabled, false);
+  releaseFirstPage();
+  await loadingFirstPage;
+  await app.elements.loadMoreRunsButton.click();
+
+  assert.ok(server.calls.some(call => call.url.endsWith("loopId=loop-second&cursor=cursor-second")));
+});
+
 test("run discovery fetches the selected loop directly when workspace-newest evidence belongs to other loops", async () => {
   const server = new FakeFetchServer(createCatalog());
   const selected = createRunSnapshot();
@@ -625,6 +668,64 @@ test("run monitoring refreshes the newest page without rewinding older-evidence 
   assert.match(app.elements.runList.textContent, /run-third-page/);
   assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-one")).length, 1);
   assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-two")).length, 1);
+});
+
+test("deleting a trace loaded from a continuation page keeps its tombstone selected", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const newest = createRunSnapshot();
+  const older = createRunSnapshot();
+  older.id = "run-older-page";
+  older.admissionOperationId = "op-run-older-page";
+  older.createdAtUtc = "2026-07-15T12:00:00Z";
+  older.updatedAtUtc = older.createdAtUtc;
+  older.completedAtUtc = older.createdAtUtc;
+  const newestSummary = { id: newest.id, loopId: newest.loopId, admissionOperationId: newest.admissionOperationId, definitionVersion: 2, status: newest.status, createdAtUtc: newest.createdAtUtc, updatedAtUtc: newest.updatedAtUtc, completedAtUtc: newest.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  const olderSummary = { id: older.id, loopId: older.loopId, admissionOperationId: older.admissionOperationId, definitionVersion: 2, status: older.status, createdAtUtc: older.createdAtUtc, updatedAtUtc: older.updatedAtUtc, completedAtUtc: older.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  server.runDetails.set(newest.id, newest);
+  server.runDetails.set(older.id, older);
+  server.traceDetails.set(older.id, createTraceSnapshot(older));
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({ status: 200, body: { items: [newestSummary], continuationCursor: "cursor-one" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research", () => ({ status: 200, body: { items: [newestSummary], continuationCursor: "cursor-one" } }));
+  server.on("GET", "/api/loop-runs?maximumCount=50&loopId=loop-research&cursor=cursor-one", () => ({ status: 200, body: { items: [olderSummary], continuationCursor: null } }));
+  server.on("POST", `/api/loop-runs/${older.id}/trace/delete`, ({ body }) => {
+    const tombstone = {
+      runId: older.id,
+      loopId: older.loopId,
+      admissionOperationId: older.admissionOperationId,
+      terminalStatus: older.status,
+      definitionVersion: 2,
+      definitionHash: older.admittedDefinition.contentHash,
+      originalTraceHash: "f".repeat(64),
+      originalTraceUtf8Bytes: 16384,
+      createdAtUtc: older.createdAtUtc,
+      completedAtUtc: older.completedAtUtc,
+      deletedAtUtc: "2026-07-16T12:05:00Z",
+      deletionActor: "embodysense.web",
+      deletionSurface: "web",
+      deletionOperationId: body.operationId,
+      intentAuditCorrelationId: "trace-delete-intent-older",
+      outcomeAuditCorrelationId: "trace-delete-outcome-older",
+      outcomeIntegrity: "Complete"
+    };
+    server.traceDetails.set(older.id, { ...createTraceSnapshot(older), kind: "Tombstone", isDeleted: true, tombstone });
+    server.runDetails.delete(older.id);
+    return { status: 200, body: { status: "Deleted", isCommitted: true, detail: "Deleted.", tombstone } };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  await app.elements.loadMoreRunsButton.click();
+  const olderButton = app.elements.runList.children.find(item => item.textContent.includes(older.id));
+  assert.ok(olderButton);
+  await olderButton.click();
+
+  const deleteButton = app.elements.runActions.children.find(child => child.textContent === "Delete sensitive trace");
+  assert.ok(deleteButton);
+  await deleteButton.click();
+
+  assert.match(app.elements.runTitle.textContent, /Deleted trace run-older-page/);
+  assert.equal(app.elements.runList.children.find(item => item.className.includes("selected")).textContent.includes("trace deleted"), true);
+  assert.equal(server.calls.filter(call => call.url.includes("cursor=cursor-one")).length, 1);
 });
 
 test("live run monitoring binds the exact admission operation instead of another recent run", async () => {
