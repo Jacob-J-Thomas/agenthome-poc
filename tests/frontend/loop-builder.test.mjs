@@ -1202,6 +1202,34 @@ test("scheduled monitoring falls back to full evidence with backoff when the end
   assert.match(app.elements.runTitle.textContent, new RegExp(run.id));
 });
 
+test("in-flight monitoring backs off full evidence fallback when the endpoint is unavailable", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => ({ status: 503, body: { detail: "Monitor watcher unavailable." } }));
+  const listCallsBefore = server.calls.filter(call => call.url === "/api/loop-runs?maximumCount=50").length;
+  let completeInvocation;
+  const invocation = new Promise(resolve => { completeInvocation = resolve; });
+  let delayCount = 0;
+  app.context.setTimeout = handler => {
+    delayCount++;
+    if (delayCount === 2) completeInvocation({});
+    queueMicrotask(handler);
+  };
+
+  await app.context.waitForRunOperation(invocation, { preferredRunId: run.id });
+
+  assert.equal(server.calls.filter(call => call.url === `/api/loop-runs/${run.id}/monitor`).length, 2);
+  assert.equal(server.calls.filter(call => call.url === "/api/loop-runs?maximumCount=50").length, listCallsBefore + 1);
+  assert.equal(vm.runInContext("selectedRunMonitorFallbackFailureCount", app.context), 1);
+});
+
 test("a lifecycle-only monitor change invalidates cached full evidence", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();

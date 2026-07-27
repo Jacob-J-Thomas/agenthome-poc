@@ -1371,8 +1371,12 @@ async function waitForRunOperation(invocation, preferredSelection) {
       const selectedMatches = selectedRun
         && (preferredSelection.preferredRunId === selectedRun.id
           || preferredSelection.preferredAdmissionOperationId === selectedRun.admissionOperationId);
-      const monitored = selectedMatches ? await refreshSelectedRunFromMonitor(selectedRun.id) : false;
-      if (!monitored) await loadRuns({ silent: true, ...preferredSelection });
+      const monitoredRunId = selectedMatches ? selectedRun.id : null;
+      const monitored = monitoredRunId ? await refreshSelectedRunFromMonitor(monitoredRunId) : false;
+      if (!monitored) {
+        if (monitoredRunId && selectedRunMonitorFailureKind === "endpoint") await fallbackSelectedRunAfterMonitorFailure(monitoredRunId);
+        else await loadRuns({ silent: true, ...preferredSelection });
+      }
       if (!settled) await new Promise(resolve => setTimeout(resolve, 500));
     }
     return await invocation;
