@@ -559,13 +559,14 @@ public sealed class CustomLoopRuntimeTests
         var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-publication-observer")).Definition);
         var publishInference = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Inference.ContextIn, new LoopContextOutputPolicy(true, true)));
+        var noPublishExit = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Exit.ContextIn, new LoopContextOutputPolicy(false, false)));
         var input = new LoopDefinitionInput(
             "Observed publication loop",
             "Publishes one verified inference output.",
             new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, false),
             [new LoopInferenceStep(created.InferenceSteps.Single().Id, "Publish", "Publish the result.", publishInference)],
             [],
-            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, created.ExitPolicy.ContextPolicy));
+            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, noPublishExit));
         var updated = await facade.UpdateAsync(created.Id, created.DefinitionVersion, "update-runtime-publication-observer", input);
         var definition = Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
         var observer = new RecordingConversationPublicationObserver();

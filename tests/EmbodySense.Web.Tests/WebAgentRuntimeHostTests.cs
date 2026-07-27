@@ -320,12 +320,12 @@ public sealed class WebAgentRuntimeHostTests
             transcript,
             message =>
             {
-                Assert.Equal("user", message.Role);
+                Assert.Equal("User", message.Role);
                 Assert.Equal("hydrate during turn", message.Content);
             },
             message =>
             {
-                Assert.Equal("assistant", message.Role);
+                Assert.Equal("Assistant", message.Role);
                 Assert.Equal("web response: hydrate during turn", message.Content);
             });
     }
