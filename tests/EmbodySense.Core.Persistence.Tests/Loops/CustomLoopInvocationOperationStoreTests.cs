@@ -194,32 +194,27 @@ public sealed class CustomLoopInvocationOperationStoreTests
     }
 
     [Fact]
-    public async Task Retention_abandons_and_reselects_when_a_legacy_completed_receipt_is_concurrently_claimed()
+    public async Task Retention_abandons_and_reselects_when_a_completed_receipt_changes_after_reservation()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var now = Timestamp.AddDays(31);
         var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
-        await PersistCompletedAsync(store, "invoke-legacy-rebound", Timestamp.AddSeconds(1));
-        await RewriteAsVersionOneWithoutBindingAsync(paths, "invoke-legacy-rebound");
+        await PersistCompletedAsync(store, "invoke-changed", Timestamp.AddSeconds(1));
         await PersistCompletedAsync(store, "invoke-still-expired", Timestamp.AddSeconds(2));
         var request = RetentionRequest(now);
         var reserved = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await store.ReserveCompletedReceiptRetentionAsync(request)).Operation);
         await store.MarkReceiptRetentionIntentAuditedAsync(reserved.OperationId, now.AddSeconds(1));
-        var legacy = Assert.IsType<CustomLoopInvocationOperation>(await store.GetAsync("invoke-legacy-rebound"));
-        var claimed = legacy with
-        {
-            BindingState = CustomLoopInvocationBindingState.LegacyConversation,
-            InvokingConversationId = new string('d', CustomLoopLimits.Sha256HexCharacters),
-            UpdatedAtUtc = now
-        };
-
-        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(claimed)).Status);
+        var changedPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, "invoke-changed.json");
+        var changed = JsonNode.Parse(await File.ReadAllTextAsync(changedPath))!.AsObject();
+        changed["updatedAtUtc"] = now;
+        changed["detail"] = "The completed receipt changed after retention reserved it.";
+        await File.WriteAllTextAsync(changedPath, changed.ToJsonString());
         var abandoned = await store.CommitCompletedReceiptRetentionAsync(reserved.OperationId, now.AddSeconds(2));
 
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged, abandoned.State);
         Assert.Equal(0, abandoned.DeletedReceiptCount);
-        Assert.NotNull(await store.GetAsync("invoke-legacy-rebound"));
+        Assert.NotNull(await store.GetAsync("invoke-changed"));
         Assert.NotNull(await store.GetAsync("invoke-still-expired"));
 
         await store.MarkReceiptRetentionConflictAuditStartedAsync(reserved.OperationId, now.AddSeconds(3));
@@ -230,7 +225,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal("invoke-still-expired", Assert.Single(replacement.Candidates).OperationId);
         await store.MarkReceiptRetentionIntentAuditedAsync(replacement.OperationId, now.AddSeconds(5));
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted, (await store.CommitCompletedReceiptRetentionAsync(replacement.OperationId, now.AddSeconds(6))).State);
-        Assert.NotNull(await store.GetAsync("invoke-legacy-rebound"));
+        Assert.NotNull(await store.GetAsync("invoke-changed"));
         Assert.Null(await store.GetAsync("invoke-still-expired"));
     }
 
@@ -645,6 +640,13 @@ public sealed class CustomLoopInvocationOperationStoreTests
             RunId = "run-admitted",
             Detail = "The run was admitted."
         };
+    }
+
+    private sealed class MutableTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        public DateTimeOffset UtcNow { get; set; } = utcNow;
+
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 
 }

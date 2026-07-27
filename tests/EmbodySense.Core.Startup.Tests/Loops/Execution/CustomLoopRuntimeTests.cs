@@ -1088,23 +1088,25 @@ public sealed class CustomLoopRuntimeTests
             Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
         };
         var completedAtUtc = DateTimeOffset.UtcNow.ToUniversalTime() - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration - TimeSpan.FromDays(1);
-        for (var index = 0; index < CustomLoopLimits.MaxInvocationOperationReceiptsPerWorkspace; index++)
+        long retainedBytes = 0;
+        for (var index = 0; retainedBytes <= CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes; index++)
         {
             var operationId = $"invoke-expired-{index:D5}";
             var input = new LoopRunInvocationInput("loop-expired", 1, new string('b', CustomLoopLimits.Sha256HexCharacters), operationId, "expired quota receipt");
             var completed = PendingInvocation(input, "default") with
             {
-                BindingState = CustomLoopInvocationBindingState.LegacyConversation,
+                BindingState = CustomLoopInvocationBindingState.ConversationNotFound,
                 InvokingConversationId = new string('c', CustomLoopLimits.Sha256HexCharacters),
                 CreatedAtUtc = completedAtUtc.AddSeconds(-1),
                 UpdatedAtUtc = completedAtUtc,
                 State = CustomLoopInvocationOperationState.Complete,
                 Outcome = CustomLoopInvocationOutcome.Rejected,
                 AdmissionStatus = CustomLoopAdmissionStatusNames.NotFound,
-                Detail = "The expired invocation was rejected before a run was created."
+                Detail = new string('d', CustomLoopLimits.MaxRunDetailCharacters)
             };
             var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
             await File.WriteAllTextAsync(path, JsonSerializer.Serialize(completed, jsonOptions));
+            retainedBytes += new FileInfo(path).Length;
         }
     }
 
