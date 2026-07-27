@@ -27,6 +27,7 @@ public static class CustomLoopLimits
     public const int MaxInvocationOperationReceiptsPerWorkspace = 10_000;
     public const int MaxInvocationOperationUtf8Bytes = 512 * 1024;
     public const long MaxInvocationOperationWorkspaceUtf8Bytes = 128L * 1024 * 1024;
+    public const int MaxInvocationReceiptRetentionOperationUtf8Bytes = 4 * 1024 * 1024;
     public const int MaxInvocationValidationErrors = 24;
     public const int MaxInvocationValidationErrorCodeCharacters = 64;
     public const int MaxInvocationValidationErrorFieldCharacters = 128;

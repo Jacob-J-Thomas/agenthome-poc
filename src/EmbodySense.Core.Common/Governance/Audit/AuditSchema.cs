@@ -31,6 +31,10 @@ public static class AuditSchema
 
         public const string LoopRunLifecycle = "loop.run.lifecycle";
 
+        public const string LoopInvocationReceiptRetentionIntent = "loop.invocation_receipt.retention.intent";
+
+        public const string LoopInvocationReceiptRetentionOutcome = "loop.invocation_receipt.retention.outcome";
+
         public const string LoopTraceDeletionIntent = "loop.trace.deletion.intent";
 
         public const string LoopTraceDeletionOutcome = "loop.trace.deletion.outcome";

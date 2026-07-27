@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -15,6 +16,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopInvocationOperationStore _invocationOperationStore;
+    private readonly CustomLoopInvocationReceiptRetentionService _invocationReceiptRetention;
     private readonly ICustomLoopControlOperationStore _controlOperationStore;
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly CustomLoopAdmissionService _admissionService;
@@ -35,6 +37,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         ICustomLoopDefinitionStore definitionStore,
         ICustomLoopRunStore runStore,
         ICustomLoopInvocationOperationStore invocationOperationStore,
+        CustomLoopInvocationReceiptRetentionService invocationReceiptRetention,
         ICustomLoopControlOperationStore controlOperationStore,
         ICustomLoopWorkspaceExecutionGate executionGate,
         CustomLoopAdmissionService admissionService,
@@ -53,6 +56,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _invocationOperationStore = invocationOperationStore ?? throw new ArgumentNullException(nameof(invocationOperationStore));
+        _invocationReceiptRetention = invocationReceiptRetention ?? throw new ArgumentNullException(nameof(invocationReceiptRetention));
         _controlOperationStore = controlOperationStore ?? throw new ArgumentNullException(nameof(controlOperationStore));
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _admissionService = admissionService ?? throw new ArgumentNullException(nameof(admissionService));
@@ -180,10 +184,15 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             CustomLoopInvocationOperation operation;
             try
             {
-                var begun = await _invocationOperationStore.BeginAsync(pending, cancellationToken);
+                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(pending, token), cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
+                }
+
+                if (IsReceiptWriteFailureStatus(begun.Status))
+                {
+                    return ReceiptWriteFailure(begun.Status);
                 }
 
                 operation = begun.Operation ?? pending;
@@ -598,10 +607,15 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             var durable = operation;
             if (operation.BindingState == CustomLoopInvocationBindingState.Unbound)
             {
-                var begun = await _invocationOperationStore.BeginAsync(operation, cancellationToken);
+                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(operation, token), cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
+                }
+
+                if (IsReceiptWriteFailureStatus(begun.Status))
+                {
+                    return ReceiptWriteFailure(begun.Status);
                 }
 
                 durable = begun.Operation ?? operation;
@@ -678,7 +692,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         CustomLoopInvocationOperationStoreResult stored;
         try
         {
-            stored = await _invocationOperationStore.BindAsync(bound, cancellationToken);
+            stored = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BindAsync(bound, token), cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -688,6 +702,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         if (stored.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
         {
             return new InvocationBindingResult(null, Conflict("The invocation operation id is already bound to a different logical conversation or captured-context identity."));
+        }
+
+        if (IsReceiptWriteFailureStatus(stored.Status))
+        {
+            return new InvocationBindingResult(null, ReceiptWriteFailure(stored.Status));
         }
 
         if (stored.Status == CustomLoopInvocationOperationStoreStatus.NotFound || stored.Operation is null)
@@ -958,13 +977,58 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
         try
         {
-            var result = await _invocationOperationStore.CompleteAsync(completed, integrity.Token);
+            var result = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.CompleteAsync(completed, token), integrity.Token);
             return result.Status is CustomLoopInvocationOperationStoreStatus.Completed or CustomLoopInvocationOperationStoreStatus.Replayed;
         }
         catch
         {
             return false;
         }
+    }
+
+    private async Task<CustomLoopInvocationOperationStoreResult> WriteReceiptWithRetentionAsync(
+        Func<CancellationToken, Task<CustomLoopInvocationOperationStoreResult>> write,
+        CancellationToken cancellationToken)
+    {
+        var result = await write(cancellationToken);
+        if (result.Status is not (CustomLoopInvocationOperationStoreStatus.LimitExceeded or CustomLoopInvocationOperationStoreStatus.RetentionRequired))
+        {
+            return result;
+        }
+
+        var retention = await _invocationReceiptRetention.PruneForCapacityAsync(_actor, _surface, cancellationToken);
+        if (!retention.AllowsReceiptWrite)
+        {
+            var status = retention.Status switch
+            {
+                CustomLoopInvocationReceiptRetentionStatus.OperationInProgress => CustomLoopInvocationOperationStoreStatus.RetentionRequired,
+                CustomLoopInvocationReceiptRetentionStatus.AuditUnavailable => CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable,
+                CustomLoopInvocationReceiptRetentionStatus.Invalid => CustomLoopInvocationOperationStoreStatus.RetentionInvalid,
+                _ => CustomLoopInvocationOperationStoreStatus.LimitExceeded
+            };
+            return new CustomLoopInvocationOperationStoreResult(status, result.Operation);
+        }
+
+        return await write(cancellationToken);
+    }
+
+    internal static LoopRunInvocationResponse ReceiptWriteFailure(CustomLoopInvocationOperationStoreStatus status)
+    {
+        return status switch
+        {
+            CustomLoopInvocationOperationStoreStatus.RetentionRequired => new LoopRunInvocationResponse("OperationInProgress", null, false, null, [], "A governed completed-receipt retention operation is still inside its bounded ownership window; retry later."),
+            CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable => new LoopRunInvocationResponse("AuditUnavailable", null, false, null, [], "Expired completed invocation receipts were eligible, but governed retention could not establish durable audit integrity; no run or provider request was created."),
+            CustomLoopInvocationOperationStoreStatus.RetentionInvalid => new LoopRunInvocationResponse("Invalid", null, false, null, [], "Invocation receipt retention state is invalid or corrupt and requires operator review; no run or provider request was created."),
+            _ => new LoopRunInvocationResponse("LimitExceeded", null, false, null, [], $"Invocation receipts reached their governed workspace quota and no completed receipt was eligible beyond the {CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration.TotalDays:0}-day replay boundary; no run or provider request was created.")
+        };
+    }
+
+    private static bool IsReceiptWriteFailureStatus(CustomLoopInvocationOperationStoreStatus status)
+    {
+        return status is CustomLoopInvocationOperationStoreStatus.LimitExceeded
+            or CustomLoopInvocationOperationStoreStatus.RetentionRequired
+            or CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable
+            or CustomLoopInvocationOperationStoreStatus.RetentionInvalid;
     }
 
     private async Task<LoopRunInvocationResponse> ReplayOperationAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)

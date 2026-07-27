@@ -1,3 +1,6 @@
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+
 namespace EmbodySense.Core.Application.Loops;
 
 public interface ICustomLoopInvocationOperationStore
@@ -9,4 +12,22 @@ public interface ICustomLoopInvocationOperationStore
     Task<CustomLoopInvocationOperation?> GetAsync(string operationId, CancellationToken cancellationToken = default);
 
     Task<CustomLoopInvocationOperationStoreResult> CompleteAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionReservationResult> ReserveCompletedReceiptRetentionAsync(CustomLoopInvocationReceiptRetentionRequest request, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionIntentAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> CommitCompletedReceiptRetentionAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
+
+    Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default);
 }
