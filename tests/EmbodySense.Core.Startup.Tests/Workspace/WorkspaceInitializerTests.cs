@@ -1,8 +1,11 @@
+using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Workspace;
@@ -77,6 +80,7 @@ public sealed class WorkspaceInitializerTests
 
         var permissionsReadme = await File.ReadAllTextAsync(workspace.File(".agent", "PERMISSIONS.md"));
         Assert.Contains("Agent document writes such as `.agent/MEMORY.md`", permissionsReadme);
+        Assert.Contains("tool-response manifests and chunks", permissionsReadme);
 
         var auditReadme = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "README.md"));
         Assert.Contains("## How agents should reason about audit", auditReadme);
@@ -92,6 +96,7 @@ public sealed class WorkspaceInitializerTests
         Assert.True(Directory.Exists(workspace.File(".agent", "loops")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "definitions")));
         Assert.True(Directory.Exists(workspace.File(".agent", "loops", "runs")));
+        Assert.True(Directory.Exists(workspace.File(".agent", "logs", "tool-responses")));
     }
 
     [Fact]
@@ -104,6 +109,78 @@ public sealed class WorkspaceInitializerTests
         var auditText = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson"));
         Assert.Contains(AuditSchema.Actors.Web, auditText);
         Assert.DoesNotContain(AuditSchema.Actors.Cli, auditText);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_leaves_unsupported_permissions_document_for_explicit_reinitialization()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        const string unsupported = "{\"version\": 2}";
+        await File.WriteAllTextAsync(paths.PermissionsPath, unsupported);
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        Assert.Equal(unsupported, await File.ReadAllTextAsync(paths.PermissionsPath));
+        var evaluation = new PermissionPolicyStore().Load(paths).EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
+        Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_preserves_a_current_policy_that_intentionally_removes_tool_response_inspection()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var permissions = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        await File.WriteAllTextAsync(paths.PermissionsPath, permissions.ToJson());
+
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+        var preserved = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
+        Assert.Equal(PermissionsDocument.CurrentVersion, preserved.Version);
+        Assert.DoesNotContain(preserved.Approved, entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
+        var evaluation = new PermissionPolicyStore().Load(paths).EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
+        Assert.Equal(PermissionDecision.Deny, evaluation.Decision);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_inspects_a_current_read_only_policy_without_requiring_write_access()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var original = await File.ReadAllTextAsync(paths.PermissionsPath);
+        var originalAttributes = File.GetAttributes(paths.PermissionsPath);
+        UnixFileMode? originalMode = OperatingSystem.IsWindows() ? null : File.GetUnixFileMode(paths.PermissionsPath);
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                File.SetAttributes(paths.PermissionsPath, originalAttributes | FileAttributes.ReadOnly);
+            }
+            else
+            {
+                File.SetUnixFileMode(paths.PermissionsPath, UnixFileMode.UserRead);
+            }
+
+            await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+
+            Assert.Equal(original, await File.ReadAllTextAsync(paths.PermissionsPath));
+        }
+        finally
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                File.SetAttributes(paths.PermissionsPath, originalAttributes);
+            }
+            else
+            {
+                File.SetUnixFileMode(paths.PermissionsPath, originalMode!.Value);
+            }
+        }
     }
 
     [Fact]

@@ -2,16 +2,19 @@ using System.Text;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.LocalWorkspace;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Clients.LocalWorkspace.Models;
 
 namespace EmbodySense.Core.Clients.LocalWorkspace;
 
 public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 {
     // TODO: revisit what an appropriate figures should actually be.
+    private const int MaxListEntries = 500;
     private const int MaxReadCharacters = 120_000;
     private const int MaxSearchFiles = 500;
     private const int MaxSearchMatches = 200;
     private const int MaxMatchLineCharacters = 500;
+    private const int MaxSearchOutputCharacters = 120_000;
     private const long MaxSearchFileBytes = 1_048_576;
     private readonly WorkspacePaths _paths;
 
@@ -31,13 +34,33 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             throw new DirectoryNotFoundException($"Directory not found: {resolvedPath}");
         }
 
-        var entries = Directory.EnumerateFileSystemEntries(resolvedPath)
-            .OrderBy(path => Directory.Exists(path) ? 0 : 1)
-            .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .Select(path => Directory.Exists(path) ? Path.GetFileName(path) + Path.DirectorySeparatorChar : Path.GetFileName(path))
-            .ToList();
-        var text = entries.Count == 0 ? "(empty)" : string.Join(Environment.NewLine, entries);
-        return Task.FromResult(new LocalWorkspaceResult(text, new Dictionary<string, object?> { ["entry_count"] = entries.Count }));
+        var entries = new SortedSet<ListEntry>(ListEntryComparer.Instance);
+        var entryCount = 0;
+        foreach (var path in Directory.EnumerateFileSystemEntries(resolvedPath))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            entryCount++;
+            entries.Add(new ListEntry(path, Path.GetFileName(path), Directory.Exists(path)));
+            if (entries.Count > MaxListEntries)
+            {
+                entries.Remove(entries.Max!);
+            }
+        }
+
+        var rendered = entries.Select(entry => entry.IsDirectory ? entry.Name + Path.DirectorySeparatorChar : entry.Name).ToList();
+        var text = rendered.Count == 0 ? "(empty)" : string.Join(Environment.NewLine, rendered);
+        var truncated = entryCount > MaxListEntries;
+        if (truncated)
+        {
+            text += Environment.NewLine + $"[truncated to the first {MaxListEntries} of {entryCount} entries]";
+        }
+
+        return Task.FromResult(new LocalWorkspaceResult(text, new Dictionary<string, object?>
+        {
+            ["entry_count"] = entryCount,
+            ["returned_entry_count"] = rendered.Count,
+            ["truncated"] = truncated
+        }));
     }
 
     public async Task<LocalWorkspaceResult> ReadAsync(string resolvedPath, CancellationToken cancellationToken = default)
@@ -109,6 +132,7 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             text += Environment.NewLine + $"[truncated after {state.FilesScanned} files and {matches.Count} matches]";
         }
 
+        text = ApplySearchOutputLimit(text, state);
         return new LocalWorkspaceResult(text, new Dictionary<string, object?>
         {
             ["match_count"] = matches.Count,
@@ -179,6 +203,11 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         var buffer = new char[MaxReadCharacters + 1];
         var count = await reader.ReadBlockAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
         var take = Math.Min(count, MaxReadCharacters);
+        if (take < count && char.IsHighSurrogate(buffer[take - 1]) && char.IsLowSurrogate(buffer[take]))
+        {
+            take--;
+        }
+
         var text = new string(buffer, 0, take);
         if (text.Contains('\0'))
         {
@@ -232,17 +261,36 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 
     private static string FormatMatchLine(string line)
     {
-        return line.Length <= MaxMatchLineCharacters
-            ? line
-            : line[..MaxMatchLineCharacters] + " [line truncated]";
+        if (line.Length <= MaxMatchLineCharacters)
+        {
+            return line;
+        }
+
+        var retainedCharacterCount = MaxMatchLineCharacters;
+        if (char.IsHighSurrogate(line[retainedCharacterCount - 1]) && char.IsLowSurrogate(line[retainedCharacterCount]))
+        {
+            retainedCharacterCount--;
+        }
+
+        return line[..retainedCharacterCount] + " [line truncated]";
     }
 
-    private sealed class SearchState
+    private static string ApplySearchOutputLimit(string text, SearchState state)
     {
-        public int FilesScanned { get; set; }
+        if (text.Length <= MaxSearchOutputCharacters)
+        {
+            return text;
+        }
 
-        public int SkippedLargeFiles { get; set; }
+        state.Truncated = true;
+        var marker = Environment.NewLine + $"[search output truncated to {MaxSearchOutputCharacters} characters]";
+        var retainedCharacterCount = MaxSearchOutputCharacters - marker.Length;
+        if (char.IsHighSurrogate(text[retainedCharacterCount - 1]))
+        {
+            retainedCharacterCount--;
+        }
 
-        public bool Truncated { get; set; }
+        return text[..retainedCharacterCount] + marker;
     }
+
 }

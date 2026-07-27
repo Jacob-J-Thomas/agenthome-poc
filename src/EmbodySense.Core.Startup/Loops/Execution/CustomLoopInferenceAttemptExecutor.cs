@@ -16,6 +16,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Permissions;
+using EmbodySense.Core.Persistence.ToolResults;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
 
@@ -32,6 +33,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly ICustomLoopToolEvidenceSink _evidenceSink;
+    private readonly ToolResultRetentionStore _toolResultRetentionStore;
 
     public CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
@@ -75,6 +77,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         _auditLog = new AuditLog(_paths);
         _authorityProvider = authorityProvider;
         _evidenceSink = evidenceSink;
+        _toolResultRetentionStore = new ToolResultRetentionStore(_paths);
     }
 
     private static WorkspacePaths CreatePaths(LlmInferenceClientOptions options)
@@ -101,8 +104,9 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var loopDefinition = CreateRunScopedToolDefinition(request);
             var permissionService = new ReloadingToolPermissionService(_paths, new PermissionPolicyStore());
             var observer = new CorrelatedToolEvidenceObserver(_evidenceSink, request);
-            var broker = new ToolBroker(_paths, permissionService, _approvalPrompt, new LocalWorkspaceClient(_paths), _auditLog, loopDefinition, observer);
-            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, observer, _paths, request);
+            var retention = new ToolResultRetentionService(_auditLog, loopDefinition, _toolResultRetentionStore);
+            var broker = new ToolBroker(_paths, permissionService, _approvalPrompt, new LocalWorkspaceClient(_paths), _auditLog, loopDefinition, _toolResultRetentionStore, observer);
+            boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, retention, observer, _paths, request);
             toolBroker = boundedBroker;
         }
 

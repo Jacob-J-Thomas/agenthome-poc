@@ -26,6 +26,7 @@ internal static class WorkspaceDefaults
             paths.LoopRunsPath,
             paths.TasksPath,
             paths.LogsPath,
+            paths.ToolResponsesPath,
             paths.AuditPath,
             paths.ExportsPath,
             paths.SkillsPath,
@@ -417,6 +418,8 @@ internal static class WorkspaceDefaults
 
             The active policy is directory-level only and applies to agent-mediated file-system access in this workspace. It does not grant blanket process access to the host machine.
 
+            POC schema policy: `permissions.json` uses version 1 only. Unsupported shapes require explicit reinitialization or cleanup; do not add automatic migrations, compatibility readers, or legacy aliases without a user-approved release policy.
+
             Default behavior:
 
             - Missing or unsupported permissions require human approval before proceeding.
@@ -431,9 +434,9 @@ internal static class WorkspaceDefaults
             - `denied`: directories the agent should not request again unless the human changes the policy.
             - `operations`: `list`, `read`, `create`, `append`, `modify`, and `delete`.
 
-            Default approved directories include `shared`, `generated`, `system`, `.agent/tasks`, `.agent/exports`, `.agent/skills`, and `.agent/recipes`. Mutable skill and recipe operations require approval by default.
+            Default approved directories include `shared`, `generated`, `system`, `.agent/tasks`, `.agent/exports`, `.agent/skills`, and `.agent/recipes`. Mutable skill and recipe operations require approval by default. Exact retained tool-response manifests and chunks under `.agent/logs/tool-responses` are readable only after human approval.
 
-            Default denied directories include `private`, `.agent/audit`, `.agent/logs`, and `.agent/hooks`. Use `embodysense audit` to inspect audit events instead of reading raw audit files.
+            Default denied directories include `private`, `.agent/audit`, the rest of `.agent/logs`, and `.agent/hooks`. The more-specific approved tool-response path is the only default exception under logs. Use `embodysense audit` to inspect audit events instead of reading raw audit files.
 
             Agent document writes such as `.agent/MEMORY.md`, `.agent/CONTEXT.md`, `.agent/SOUL.md`, and `.agent/PERSONALITY.md` are not broadly pre-approved by the default directory-level policy. If an agent needs to update them through governed workspace tools, missing policy should route to human approval unless a future dedicated memory or document command exists.
 

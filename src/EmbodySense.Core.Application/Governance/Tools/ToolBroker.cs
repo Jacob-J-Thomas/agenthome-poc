@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
@@ -14,15 +16,19 @@ namespace EmbodySense.Core.Application.Governance.Tools;
 
 public sealed class ToolBroker : IToolBroker
 {
+    private const int MaxCorrelationCharacters = 512;
     private static readonly ToolCommand[] AllCommands = Enum.GetValues<ToolCommand>();
+    private static readonly TimeSpan DefaultPostActuationIntegrityTimeout = TimeSpan.FromSeconds(30);
     private readonly WorkspacePaths _paths;
     private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
     private readonly IWorkspaceToolExecutor _workspaceToolExecutor;
     private readonly IAuditLog _auditLog;
     private readonly LoopDefinition _loopDefinition;
+    private readonly ToolResultRetentionService _toolResultRetention;
     private readonly IToolGovernanceObserver? _governanceObserver;
     private readonly ToolAuditMetadataFactory _auditMetadataFactory;
+    private readonly TimeSpan _postActuationIntegrityTimeout;
 
     public ToolBroker(
         WorkspacePaths paths,
@@ -31,7 +37,9 @@ public sealed class ToolBroker : IToolBroker
         IWorkspaceToolExecutor workspaceToolExecutor,
         IAuditLog auditLog,
         LoopDefinition loopDefinition,
-        IToolGovernanceObserver? governanceObserver = null)
+        IToolResultRetentionStore toolResultRetentionStore,
+        IToolGovernanceObserver? governanceObserver = null,
+        TimeSpan? postActuationIntegrityTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(permissionService);
@@ -39,6 +47,7 @@ public sealed class ToolBroker : IToolBroker
         ArgumentNullException.ThrowIfNull(workspaceToolExecutor);
         ArgumentNullException.ThrowIfNull(auditLog);
         ArgumentNullException.ThrowIfNull(loopDefinition);
+        ArgumentNullException.ThrowIfNull(toolResultRetentionStore);
 
         _paths = paths;
         _permissionService = permissionService;
@@ -46,9 +55,15 @@ public sealed class ToolBroker : IToolBroker
         _workspaceToolExecutor = workspaceToolExecutor;
         _auditLog = auditLog;
         _loopDefinition = loopDefinition;
+        _toolResultRetention = new ToolResultRetentionService(auditLog, loopDefinition, toolResultRetentionStore);
         _governanceObserver = governanceObserver;
         AvailableCommands = GetAvailableCommands(_loopDefinition);
         _auditMetadataFactory = new ToolAuditMetadataFactory(_paths, _loopDefinition, AvailableCommands);
+        _postActuationIntegrityTimeout = postActuationIntegrityTimeout ?? DefaultPostActuationIntegrityTimeout;
+        if (_postActuationIntegrityTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(postActuationIntegrityTimeout), "Post-actuation integrity timeout must be positive.");
+        }
     }
 
     public IReadOnlyList<ToolCommand> AvailableCommands { get; }
@@ -56,6 +71,7 @@ public sealed class ToolBroker : IToolBroker
     public async Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        request = BoundCorrelation(request);
         var requestId = Guid.NewGuid().ToString("N");
         if (!IsCommandAvailable(request.Command))
         {
@@ -64,8 +80,7 @@ public sealed class ToolBroker : IToolBroker
             var evidence = AuthorityDenied(detail);
             await ObserveDecisionAsync(requestId, request, request.TargetPath, evidence, cancellationToken);
             var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {detail}", requestId, request.TargetPath, request, evidence);
-            await ObserveOutcomeAsync(result, cancellationToken);
-            return result;
+            return await RetainAndObserveOutcomeAsync(result, cancellationToken);
         }
 
         var check = _permissionService.Evaluate(request);
@@ -78,7 +93,7 @@ public sealed class ToolBroker : IToolBroker
             var evidence = DecisionEvidence(check, ToolApprovalDecision.NotEvaluated, null);
             await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
             var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {check.Evaluation.Detail}", requestId, check.ResolvedPath, request, evidence);
-            await ObserveOutcomeAsync(result, cancellationToken);
+            result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
             await RecordExecutionAsync(requestId, request, check, false, AuditSchema.Outcomes.Denied, new Dictionary<string, object?>(), cancellationToken);
             return result;
         }
@@ -99,7 +114,7 @@ public sealed class ToolBroker : IToolBroker
                 var evidence = DecisionEvidence(check, ToolApprovalDecision.Rejected, approvalResponse);
                 await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
                 var result = new ToolResult(ToolExecutionOutcome.ApprovalRejected, $"rejected: {approvalResponse.Detail}", requestId, check.ResolvedPath, request, evidence);
-                await ObserveOutcomeAsync(result, cancellationToken);
+                result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
                 await RecordExecutionAsync(requestId, request, check, false, AuditSchema.Outcomes.ApprovalRejected, new Dictionary<string, object?>(), cancellationToken);
                 return result;
             }
@@ -116,6 +131,9 @@ public sealed class ToolBroker : IToolBroker
 
     private async Task<ToolResult> ExecuteAuthorizedAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, ToolGovernanceEvidence governance, CancellationToken cancellationToken)
     {
+        ToolResult result;
+        IReadOnlyDictionary<string, object?> executionMetadata;
+        string executionOutcome;
         try
         {
             var output = request.Command switch
@@ -129,25 +147,46 @@ public sealed class ToolBroker : IToolBroker
                 _ => throw new ArgumentOutOfRangeException(nameof(request), request.Command, "Unsupported tool command.")
             };
 
-            var result = new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance);
-            await ObserveOutcomeAsync(result, cancellationToken);
-            await RecordExecutionAsync(requestId, request, check, approvedByHuman, AuditSchema.Outcomes.Succeeded, output.Metadata, cancellationToken);
-            return result;
+            result = new ToolResult(ToolExecutionOutcome.Succeeded, output.Text, requestId, check.ResolvedPath, request, governance);
+            executionMetadata = output.Metadata;
+            executionOutcome = AuditSchema.Outcomes.Succeeded;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
         {
-            var result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {exception.Message}", requestId, check.ResolvedPath, request, governance);
-            await ObserveOutcomeAsync(result, cancellationToken);
-            await RecordExecutionAsync(
-                requestId,
-                request,
-                check,
-                approvedByHuman,
-                AuditSchema.Outcomes.Failed,
-                ToolAuditMetadataFactory.ForError(exception),
-                cancellationToken);
-            return result;
+            result = new ToolResult(ToolExecutionOutcome.Failed, $"failed: {exception.Message}", requestId, check.ResolvedPath, request, governance);
+            executionMetadata = ToolAuditMetadataFactory.ForError(exception);
+            executionOutcome = AuditSchema.Outcomes.Failed;
         }
+
+        using var integrity = new CancellationTokenSource(_postActuationIntegrityTimeout);
+        try
+        {
+            result = await _toolResultRetention.RetainAsync(result, cancellationToken: integrity.Token);
+        }
+        catch (Exception exception)
+        {
+            result = WithPostActuationIntegrityWarning(result, "full-response retention", exception);
+        }
+
+        try
+        {
+            await ObserveOutcomeAsync(result, integrity.Token);
+        }
+        catch (Exception exception)
+        {
+            result = WithPostActuationIntegrityWarning(result, "outcome observation", exception);
+        }
+
+        try
+        {
+            await RecordExecutionAsync(requestId, request, check, approvedByHuman, executionOutcome, executionMetadata, integrity.Token);
+        }
+        catch (Exception exception)
+        {
+            result = WithPostActuationIntegrityWarning(result, "execution audit", exception);
+        }
+
+        return result;
     }
 
     private Task RecordExecutionIntentAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, CancellationToken cancellationToken)
@@ -178,9 +217,44 @@ public sealed class ToolBroker : IToolBroker
         return _governanceObserver?.ObserveOutcomeAsync(result, cancellationToken) ?? Task.CompletedTask;
     }
 
+    private async Task<ToolResult> RetainAndObserveOutcomeAsync(ToolResult result, CancellationToken cancellationToken)
+    {
+        result = await _toolResultRetention.RetainAsync(result, cancellationToken: cancellationToken);
+        await ObserveOutcomeAsync(result, cancellationToken);
+        return result;
+    }
+
     private static ToolGovernanceEvidence AuthorityDenied(string detail)
     {
         return new ToolGovernanceEvidence(ToolAuthorityDecision.Denied, detail, null, null, null, null, ToolApprovalDecision.NotEvaluated, null, null);
+    }
+
+    private static ToolRequest BoundCorrelation(ToolRequest request)
+    {
+        if (request.CorrelationId is null || request.CorrelationId.Length <= MaxCorrelationCharacters)
+        {
+            return request;
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.CorrelationId))).ToLowerInvariant();
+        return request with { CorrelationId = $"sha256:{hash}" };
+    }
+
+    private static ToolResult WithPostActuationIntegrityWarning(ToolResult result, string phase, Exception exception)
+    {
+        var disposition = exception is OperationCanceledException ? "timed out" : "failed";
+        var warning = $"Post-actuation {phase} {disposition} ({exception.GetType().Name}). The workspace operation already finished, so this result must not be retried under a new operation id; inspect the workspace before any follow-up mutation.";
+        var retention = result.Retention ?? new ToolResultRetentionReference(
+            ToolResultRetentionStatus.Unavailable,
+            null,
+            null,
+            result.OutputText.Length,
+            null,
+            null,
+            null,
+            0,
+            "Durable full-response retention did not produce a reference.");
+        return result with { Retention = retention with { Detail = $"{retention.Detail} {warning}" } };
     }
 
     private static ToolGovernanceEvidence DecisionEvidence(ToolPermissionCheck check, ToolApprovalDecision approvalDecision, ToolApprovalResponse? approval)

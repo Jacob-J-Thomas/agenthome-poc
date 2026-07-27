@@ -67,6 +67,7 @@ public sealed class WorkspaceConfigurationReader
             PathItem("Skills", "Agent", paths.SkillsPath, "Agent skill path."),
             PathItem("Hooks", "Agent", paths.HooksPath, "Hook configuration path."),
             PathItem("Recipes", "Agent", paths.RecipesPath, "Agent recipe path."),
+            PathItem("Retained tool responses", "Governance", paths.ToolResponsesPath, "Sensitive complete governed responses; model-facing references require approval before agent inspection."),
             PathItem("Logs", "Governance", paths.LogsPath, "Harness log path denied to agent tools by default.")
         ];
     }
@@ -109,7 +110,7 @@ public sealed class WorkspaceConfigurationReader
             document = PermissionsDocument.FromJson(rawJsonForParsing);
             if (document is null)
             {
-                problems.Add("permissions.json is unsupported or does not declare version 2.");
+                problems.Add("permissions.json is unsupported or does not declare version 1.");
             }
         }
         catch (JsonException exception)

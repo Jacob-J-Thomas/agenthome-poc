@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -7,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;

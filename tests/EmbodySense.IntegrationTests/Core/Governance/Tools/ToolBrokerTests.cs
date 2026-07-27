@@ -1,12 +1,18 @@
+using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.LocalWorkspace;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Permissions;
+using EmbodySense.Core.Persistence.ToolResults;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Tests.Support;
@@ -28,9 +34,158 @@ public sealed class ToolBrokerTests
 
         Assert.True(result.Succeeded);
         Assert.Equal("hello from shared", result.OutputText);
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        Assert.True(File.Exists(workspace.File(result.Retention!.ManifestPath!.Replace('/', Path.DirectorySeparatorChar))));
         var events = await ReadAuditAsync(workspace);
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.permission.evaluate" && auditEvent.Outcome == "allowed");
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.response.retain" && auditEvent.Outcome == "succeeded");
         Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "succeeded");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_bounds_an_untrusted_correlation_before_actuation_and_retention()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "bounded");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/note.txt", CorrelationId: new string('x', 70_000)));
+
+        Assert.True(result.Succeeded);
+        Assert.StartsWith("sha256:", result.Request.CorrelationId, StringComparison.Ordinal);
+        Assert.Equal(71, result.Request.CorrelationId!.Length);
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(workspace.File(result.Retention!.ManifestPath!.Replace('/', Path.DirectorySeparatorChar))));
+        Assert.Equal(result.Request.CorrelationId, manifest.RootElement.GetProperty("toolRequestCorrelationId").GetString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_finishes_mutation_evidence_after_the_caller_is_cancelled_post_actuation()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var executor = new CancellingWorkspaceToolExecutor(new LocalWorkspaceClient(paths), cancellation);
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), workspaceToolExecutor: executor);
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"), cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.True(result.Succeeded);
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        var events = await ReadAuditAsync(workspace);
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.response.retain" && auditEvent.Outcome == "succeeded");
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.execute" && auditEvent.Outcome == "succeeded");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_returns_the_completed_mutation_when_full_response_retention_times_out()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), retentionStore: new BlockingRetentionStore(), postActuationIntegrityTimeout: TimeSpan.FromMilliseconds(25));
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, result.Retention?.Status);
+        Assert.Contains("full-response retention timed out", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("already finished", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("must not be retried", result.Retention?.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_returns_the_retained_mutation_with_an_explicit_audit_gap_when_retention_audit_times_out()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var audit = new BlockingRetentionAuditLog(new AuditLog(paths));
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), auditLog: audit, postActuationIntegrityTimeout: TimeSpan.FromMilliseconds(25));
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("first second", await File.ReadAllTextAsync(workspace.File("shared", "note.txt")));
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        Assert.Contains("retention audit could not be appended", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("execution audit timed out", result.Retention?.Detail, StringComparison.Ordinal);
+        Assert.Contains("must not be retried", result.Retention?.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_retains_a_complete_long_response_before_model_facing_truncation()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var fullOutput = "private-result-marker-" + new string('x', ToolResultFormatter.MaxFormattedCharacters + 20_000);
+        await File.WriteAllTextAsync(workspace.File("shared", "long.txt"), fullOutput);
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/long.txt", CorrelationId: "provider-call-1"));
+        var formatted = ToolResultFormatter.FormatResults([result]);
+
+        Assert.Equal(fullOutput, result.OutputText);
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        Assert.Equal(ToolResultFormatter.MaxFormattedCharacters, formatted.Length);
+        Assert.Contains($"full_response_manifest: {result.Retention!.ManifestPath}", formatted, StringComparison.Ordinal);
+        Assert.EndsWith($"[formatted tool results truncated to the {ToolResultFormatter.MaxFormattedCharacters}-character limit]", formatted, StringComparison.Ordinal);
+        var manifestPath = workspace.File(result.Retention.ManifestPath!.Replace('/', Path.DirectorySeparatorChar));
+        using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(manifestPath));
+        var artifactDirectory = Path.GetDirectoryName(manifestPath)!;
+        var reconstructed = string.Concat(manifest.RootElement.GetProperty("chunks").EnumerateArray()
+            .Select(chunk => File.ReadAllText(Path.Combine(artifactDirectory, chunk.GetProperty("path").GetString()!))));
+        Assert.Equal(fullOutput, reconstructed);
+        var firstChunkName = manifest.RootElement.GetProperty("chunks")[0].GetProperty("path").GetString()!;
+        var firstChunkTarget = Path.Combine(Path.GetDirectoryName(result.Retention.ManifestPath)!, firstChunkName);
+        var approval = new FixedApprovalPrompt(ToolApprovalResponse.Approve("test", "approved retained evidence inspection"));
+        var inspected = await CreateBroker(workspace, approval).ExecuteAsync(new ToolRequest(ToolCommand.Read, firstChunkTarget));
+        Assert.True(inspected.Succeeded);
+        Assert.Equal(File.ReadAllText(Path.Combine(artifactDirectory, firstChunkName)), inspected.OutputText);
+        Assert.Single(approval.Requests);
+        Assert.DoesNotContain("private-result-marker", await File.ReadAllTextAsync(new WorkspacePaths(workspace.RootPath).EventsLogPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_retains_a_utf16_safe_response_when_read_truncation_meets_a_surrogate_pair()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "surrogate-boundary.txt"), new string('a', 119_999) + "\U0001F600" + "tail");
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/surrogate-boundary.txt", CorrelationId: "surrogate-boundary"));
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(ToolResultRetentionStatus.Retained, result.Retention?.Status);
+        Assert.DoesNotContain("\uD83D", result.OutputText, StringComparison.Ordinal);
+        Assert.Contains("[truncated after 120000 characters]", result.OutputText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_reports_a_retention_failure_before_truncated_content_without_claiming_an_artifact()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("shared", "long.txt"), new string('x', ToolResultFormatter.MaxFormattedCharacters + 20_000));
+        var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), retentionStore: new ThrowingRetentionStore());
+
+        var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/long.txt"));
+        var formatted = ToolResultFormatter.FormatResults([result]);
+
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, result.Retention?.Status);
+        Assert.Null(result.Retention?.ManifestPath);
+        Assert.Contains("full_response_manifest: unavailable", formatted, StringComparison.Ordinal);
+        Assert.Contains("retention failed with IOException", formatted, StringComparison.Ordinal);
+        var events = await ReadAuditAsync(workspace);
+        Assert.Contains(events, auditEvent => auditEvent.Action == "tool.response.retain" && auditEvent.Outcome == "failed");
     }
 
     [Fact]
@@ -246,14 +401,74 @@ public sealed class ToolBrokerTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
 
-        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), new LocalWorkspaceClient(paths), new AuditLog(paths), null!));
+        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), new LocalWorkspaceClient(paths), new AuditLog(paths), null!, new ToolResultRetentionStore(paths)));
+        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), new LocalWorkspaceClient(paths), new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), null!));
     }
 
-    private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)
+    private static ToolBroker CreateBroker(
+        TestWorkspace workspace,
+        IToolApprovalPrompt prompt,
+        LoopDefinition? loopDefinition = null,
+        IToolResultRetentionStore? retentionStore = null,
+        IWorkspaceToolExecutor? workspaceToolExecutor = null,
+        IAuditLog? auditLog = null,
+        TimeSpan? postActuationIntegrityTimeout = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation());
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? new LocalWorkspaceClient(paths), auditLog ?? new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths), postActuationIntegrityTimeout: postActuationIntegrityTimeout);
+    }
+
+    private sealed class CancellingWorkspaceToolExecutor(IWorkspaceToolExecutor inner, CancellationTokenSource cancellation) : IWorkspaceToolExecutor
+    {
+        public Task<LocalWorkspaceResult> ListAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.ListAsync(resolvedPath, cancellationToken);
+
+        public Task<LocalWorkspaceResult> ReadAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.ReadAsync(resolvedPath, cancellationToken);
+
+        public Task<LocalWorkspaceResult> SearchAsync(string resolvedPath, string? pattern, CancellationToken cancellationToken = default) => inner.SearchAsync(resolvedPath, pattern, cancellationToken);
+
+        public async Task<LocalWorkspaceResult> AppendAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default)
+        {
+            var result = await inner.AppendAsync(resolvedPath, content, cancellationToken);
+            cancellation.Cancel();
+            return result;
+        }
+
+        public Task<LocalWorkspaceResult> WriteAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default) => inner.WriteAsync(resolvedPath, content, cancellationToken);
+
+        public Task<LocalWorkspaceResult> DeleteAsync(string resolvedPath, CancellationToken cancellationToken = default) => inner.DeleteAsync(resolvedPath, cancellationToken);
+    }
+
+    private sealed class ThrowingRetentionStore : IToolResultRetentionStore
+    {
+        public Task<ToolResultRetentionReference> RetainAsync(ToolResult result, LoopDefinition loopDefinition, CancellationToken cancellationToken = default)
+        {
+            throw new IOException("retention unavailable");
+        }
+    }
+
+    private sealed class BlockingRetentionStore : IToolResultRetentionStore
+    {
+        public async Task<ToolResultRetentionReference> RetainAsync(ToolResult result, LoopDefinition loopDefinition, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The cancellation-aware wait returned unexpectedly.");
+        }
+    }
+
+    private sealed class BlockingRetentionAuditLog(IAuditLog inner) : IAuditLog
+    {
+        public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+        {
+            return auditEvent.Action == AuditSchema.Actions.ToolResponseRetain
+                ? Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                : inner.AppendAsync(auditEvent, cancellationToken);
+        }
+
+        public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)
+        {
+            return inner.ReadTailAsync(limit, cancellationToken);
+        }
     }
 
     private static Task<IReadOnlyList<AuditEvent>> ReadAuditAsync(TestWorkspace workspace)
