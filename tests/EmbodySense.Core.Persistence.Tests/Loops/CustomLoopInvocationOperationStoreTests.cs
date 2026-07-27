@@ -43,7 +43,8 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, completion.Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, exactCompletionReplay.Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, changedCompletion.Status);
-        Assert.Equal(completed, loaded);
+        Assert.Equal(completed with { ValidationErrors = loaded!.ValidationErrors }, loaded);
+        Assert.Empty(loaded.ValidationErrors);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, replayedComplete.Status);
         var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
         Assert.True(File.Exists(receiptPath));
@@ -110,7 +111,9 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var expanded = CompletedAdmitted(pending) with { Detail = new string('x', CustomLoopLimits.MaxRunDetailCharacters) };
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => store.CompleteAsync(expanded));
-        Assert.Equal(pending, await store.GetAsync(pending.OperationId));
+        var persistedPending = Assert.IsType<CustomLoopInvocationOperation>(await store.GetAsync(pending.OperationId));
+        Assert.Equal(pending with { ValidationErrors = persistedPending.ValidationErrors }, persistedPending);
+        Assert.Empty(persistedPending.ValidationErrors);
     }
 
     [Fact]
@@ -205,6 +208,74 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(rejected)).Status);
     }
 
+    [Fact]
+    public async Task Rejected_completion_round_trips_bounded_validation_errors()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-validation-errors", "prompt");
+        await store.BeginAsync(pending);
+        var errors = Enumerable.Range(0, CustomLoopLimits.MaxInvocationValidationErrors)
+            .Select(index => new CustomLoopValidationError(
+                new string('c', CustomLoopLimits.MaxInvocationValidationErrorCodeCharacters - 2) + index.ToString("D2"),
+                new string('f', CustomLoopLimits.MaxInvocationValidationErrorFieldCharacters - 2) + index.ToString("D2"),
+                new string('m', CustomLoopLimits.MaxInvocationValidationErrorMessageCharacters - 2) + index.ToString("D2")))
+            .ToArray();
+        var rejected = pending with
+        {
+            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = "Invalid",
+            ValidationErrors = errors,
+            Detail = new string('\u0001', CustomLoopLimits.MaxRunDetailCharacters)
+        };
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(rejected)).Status);
+        var restarted = new CustomLoopInvocationOperationStore(paths);
+        var loaded = Assert.IsType<CustomLoopInvocationOperation>(await restarted.GetAsync(pending.OperationId));
+        Assert.Equal(errors, loaded.ValidationErrors);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await restarted.CompleteAsync(rejected)).Status);
+    }
+
+    [Fact]
+    public async Task Receipt_without_structured_validation_errors_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-incompatible-shape", "prompt");
+        await store.BeginAsync(pending);
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        persisted.Remove("validationErrors");
+        await File.WriteAllTextAsync(path, persisted.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
+    }
+
+    [Fact]
+    public async Task Receipt_validation_rejects_unbounded_or_noncanonical_validation_errors()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var pending = Pending("invoke-invalid-errors", "prompt");
+        await store.BeginAsync(pending);
+        var rejected = pending with
+        {
+            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = "Invalid",
+            ValidationErrors = Enumerable.Range(0, CustomLoopLimits.MaxInvocationValidationErrors + 1).Select(index => new CustomLoopValidationError($"code-{index}", "field", "message")).ToArray(),
+            Detail = "The invocation was rejected."
+        };
+
+        await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(rejected));
+        await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(rejected with { ValidationErrors = [new CustomLoopValidationError("code", "field", "unsafe\nmessage")] }));
+    }
+
     private static CustomLoopInvocationOperation Pending(string operationId, string prompt)
     {
         const string loopId = "loop-store";
@@ -231,6 +302,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
             CustomLoopInvocationOutcome.Unknown,
             string.Empty,
             null,
+            [],
             "The invocation is pending.");
     }
 

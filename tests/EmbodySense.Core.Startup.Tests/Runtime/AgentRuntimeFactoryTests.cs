@@ -279,6 +279,7 @@ public sealed class AgentRuntimeFactoryTests
             CustomLoopInvocationOutcome.Unknown,
             string.Empty,
             null,
+            [],
             "The invocation is pending.");
         var store = new CustomLoopInvocationOperationStore(paths);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);

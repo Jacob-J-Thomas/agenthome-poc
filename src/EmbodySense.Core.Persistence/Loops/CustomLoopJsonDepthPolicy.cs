@@ -4,7 +4,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 internal static class CustomLoopJsonDepthPolicy
 {
-    // Operation receipts are currently flat scalar records. This leaves ample shape-evolution headroom while bounding hostile or corrupt nesting.
+    // Operation receipts contain only shallow scalar fields and bounded validation-error arrays. This leaves shape-evolution headroom while bounding hostile or corrupt nesting.
     internal const int ShallowReceiptMaximumDepth = 32;
 
     // Canonical run artifacts contain bounded nested context, evidence, and projections and therefore use the larger persistence ceiling.
