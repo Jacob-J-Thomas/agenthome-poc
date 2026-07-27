@@ -37,6 +37,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private readonly string _discoveryIndexPendingPath;
     private readonly SemaphoreSlim _processMutationGate;
     private readonly TimeProvider _timeProvider;
+    private readonly Func<string, FileSystemWatcher> _monitorWatcherFactory;
     private readonly object _monitorCacheGate = new();
     private readonly Dictionary<string, long> _monitorArtifactChangeVersions;
     private readonly HashSet<string> _monitorArtifactPaths;
@@ -50,9 +51,18 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private long _monitorArtifactTopologyVersion;
     private long _monitorRunOwnershipVersion = -1;
 
-    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null) : this(paths, timeProvider, static path => new FileSystemWatcher(path))
+    {
+    }
+
+    public CustomLoopRunStore(WorkspacePaths paths, Func<string, FileSystemWatcher> monitorWatcherFactory) : this(paths, null, monitorWatcherFactory)
+    {
+    }
+
+    private CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<string, FileSystemWatcher> monitorWatcherFactory)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(monitorWatcherFactory);
 
         _paths = paths;
         _workspaceRoot = Path.GetFullPath(paths.RootPath);
@@ -65,6 +75,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         _discoveryIndexPendingPath = Path.Combine(_runsRoot, DiscoveryIndexPendingFileName);
         _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _monitorWatcherFactory = monitorWatcherFactory;
         _monitorArtifactChangeVersions = new Dictionary<string, long>(PathComparer);
         _monitorArtifactPaths = new HashSet<string>(PathComparer);
     }
@@ -1197,11 +1208,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                 return;
             }
 
-            var watcher = new FileSystemWatcher(_runsRoot)
-            {
-                IncludeSubdirectories = true,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.Security
-            };
+            var watcher = _monitorWatcherFactory(_runsRoot);
+            watcher.IncludeSubdirectories = true;
+            watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.Security;
             watcher.Changed += MonitorArtifactChanged;
             watcher.Created += MonitorArtifactTopologyChanged;
             watcher.Deleted += MonitorArtifactTopologyChanged;

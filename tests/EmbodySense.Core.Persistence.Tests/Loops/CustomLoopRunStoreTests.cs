@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -939,25 +938,28 @@ public sealed class CustomLoopRunStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
         await WriteDirectAsync(paths, run);
-        using var store = new CustomLoopRunStore(paths);
+        var watchers = new List<ControllableFileSystemWatcher>();
+        using var store = new CustomLoopRunStore(paths, path =>
+        {
+            var watcher = new ControllableFileSystemWatcher(path);
+            watchers.Add(watcher);
+            return watcher;
+        });
         Assert.NotNull(await store.GetMonitorAsync(run.Id));
-        var watcherField = typeof(CustomLoopRunStore).GetField("_monitorWatcher", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var uncertainField = typeof(CustomLoopRunStore).GetField("_monitorWatcherUncertain", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var bindingsField = typeof(CustomLoopRunStore).GetField("_verifiedMonitorSummaryBindings", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var errorMethod = typeof(CustomLoopRunStore).GetMethod("MonitorWatcherError", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var failedWatcher = Assert.IsType<FileSystemWatcher>(watcherField.GetValue(store));
+        var failedWatcher = Assert.Single(watchers);
+        failedWatcher.RaiseError(new InternalBufferOverflowException("Simulated watcher overflow."));
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        using (new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            await Assert.ThrowsAsync<IOException>(() => store.GetMonitorAsync(run.Id));
+        }
 
-        errorMethod.Invoke(store, [failedWatcher, new ErrorEventArgs(new InternalBufferOverflowException("Simulated watcher overflow."))]);
-
-        Assert.Null(watcherField.GetValue(store));
-        Assert.True(Assert.IsType<bool>(uncertainField.GetValue(store)));
-        Assert.Empty(Assert.IsType<HashSet<string>>(bindingsField.GetValue(store)));
         var recovered = await store.GetMonitorAsync(run.Id);
-
         Assert.Equal(run.Id, recovered?.Summary.Id);
-        Assert.False(Assert.IsType<bool>(uncertainField.GetValue(store)));
-        Assert.NotSame(failedWatcher, Assert.IsType<FileSystemWatcher>(watcherField.GetValue(store)));
-        Assert.Single(Assert.IsType<HashSet<string>>(bindingsField.GetValue(store)));
+        Assert.Equal(2, watchers.Count);
+        Assert.NotSame(failedWatcher, watchers[1]);
+        using var exclusiveArtifactLease = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        Assert.Equal(run.Id, (await store.GetMonitorAsync(run.Id))?.Summary.Id);
     }
 
     [Fact]
@@ -1472,5 +1474,17 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(expected.AdmissionOperationId, actual.AdmissionOperationId);
         Assert.Equal(expected.AdmittedDefinition.ContentHash, actual.AdmittedDefinition.ContentHash);
         Assert.Equal(expected.Events.Select(item => item.EventId), actual.Events.Select(item => item.EventId));
+    }
+
+    private sealed class ControllableFileSystemWatcher : FileSystemWatcher
+    {
+        public ControllableFileSystemWatcher(string path) : base(path)
+        {
+        }
+
+        public void RaiseError(Exception exception)
+        {
+            OnError(new ErrorEventArgs(exception));
+        }
     }
 }

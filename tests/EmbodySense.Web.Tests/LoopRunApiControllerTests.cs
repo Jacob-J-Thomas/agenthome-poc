@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
@@ -30,13 +29,13 @@ public sealed class LoopRunApiControllerTests
     public void Monitor_etag_changes_for_every_previously_omitted_summary_field()
     {
         var summary = new LoopRunSummarySnapshot("run-test", "loop-test", "invoke-test", 1, 2, "Running", Timestamp, Timestamp.AddSeconds(1), null, 1, 2, null, false);
-        var createEtag = typeof(LoopRunsController).GetMethod("CreateMonitorEtag", BindingFlags.NonPublic | BindingFlags.Static)!;
-
-        string Etag(LoopRunSummarySnapshot value, string artifactHash = "a") => Assert.IsType<string>(createEtag.Invoke(null, [value, artifactHash]));
+        string Etag(LoopRunSummarySnapshot value, string artifactHash = "a") => LoopRunMonitorEtag.Create(value, artifactHash);
 
         Assert.NotEqual(Etag(summary), Etag(summary with { DefinitionVersion = 2 }));
         Assert.NotEqual(Etag(summary), Etag(summary with { CreatedAtUtc = summary.CreatedAtUtc.AddTicks(1) }));
         Assert.NotEqual(Etag(summary), Etag(summary, "b"));
+        Assert.Throws<ArgumentNullException>(() => LoopRunMonitorEtag.Create(null!, "a"));
+        Assert.Throws<ArgumentException>(() => LoopRunMonitorEtag.Create(summary, ""));
     }
 
     [Fact]

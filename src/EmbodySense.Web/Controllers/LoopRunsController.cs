@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
@@ -89,7 +87,7 @@ public sealed class LoopRunsController : ControllerBase
                 return NotFound();
             }
 
-            var etag = CreateMonitorEtag(monitor.Summary, monitor.ArtifactHash);
+            var etag = LoopRunMonitorEtag.Create(monitor.Summary, monitor.ArtifactHash);
             var currentEtag = EntityTagHeaderValue.Parse(etag);
             Response.GetTypedHeaders().ETag = currentEtag;
             var candidates = Request.GetTypedHeaders().IfNoneMatch;
@@ -184,26 +182,6 @@ public sealed class LoopRunsController : ControllerBase
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "trace_deletion_unavailable", detail = "The trace deletion request could not be processed safely. The retained artifact and local audit log remain authoritative." });
         }
-    }
-
-    private static string CreateMonitorEtag(LoopRunSummarySnapshot summary, string artifactHash)
-    {
-        var identity = string.Join('\n',
-            artifactHash,
-            summary.Id,
-            summary.LoopId,
-            summary.AdmissionOperationId,
-            summary.DefinitionVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            summary.LifecycleVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            summary.Status,
-            summary.CreatedAtUtc.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            summary.UpdatedAtUtc.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            summary.CompletedAtUtc?.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
-            summary.Iteration.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            summary.NextStepIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            summary.FailureCode ?? string.Empty,
-            summary.IsDeleted ? "1" : "0");
-        return $"\"{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))).ToLowerInvariant()}\"";
     }
 
     [HttpPost("{runId}/pause")]
