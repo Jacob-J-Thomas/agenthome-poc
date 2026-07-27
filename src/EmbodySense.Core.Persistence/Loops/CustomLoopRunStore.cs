@@ -11,7 +11,7 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
-public sealed class CustomLoopRunStore : ICustomLoopRunStore
+public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 {
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
@@ -37,6 +37,18 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private readonly string _discoveryIndexPendingPath;
     private readonly SemaphoreSlim _processMutationGate;
     private readonly TimeProvider _timeProvider;
+    private readonly object _monitorCacheGate = new();
+    private readonly Dictionary<string, long> _monitorArtifactChangeVersions;
+    private readonly HashSet<string> _monitorArtifactPaths;
+    private readonly HashSet<string> _verifiedMonitorSummaryBindings = new(StringComparer.Ordinal);
+    private IReadOnlyDictionary<string, MonitorRunOwnership>? _monitorRunOwnerships;
+    private DiscoveryIndexFileFingerprint? _monitorCacheFingerprint;
+    private IReadOnlyDictionary<string, CustomLoopRunDiscoveryIndexEntry>? _monitorCache;
+    private FileSystemWatcher? _monitorWatcher;
+    private bool _monitorWatcherUncertain;
+    private long _monitorArtifactChangeVersion;
+    private long _monitorArtifactTopologyVersion;
+    private long _monitorRunOwnershipVersion = -1;
 
     public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
@@ -53,6 +65,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         _discoveryIndexPendingPath = Path.Combine(_runsRoot, DiscoveryIndexPendingFileName);
         _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _monitorArtifactChangeVersions = new Dictionary<string, long>(PathComparer);
+        _monitorArtifactPaths = new HashSet<string>(PathComparer);
     }
 
     public async Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
@@ -170,6 +184,83 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
         var artifact = await ReadArtifactAsync(matches[0], cancellationToken);
         return artifact.Run;
+    }
+
+    public async Task<CustomLoopRunMonitor?> GetMonitorAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
+        if (!Directory.Exists(_runsRoot))
+        {
+            return null;
+        }
+
+        EnsureMonitorWatcher();
+        if (!File.Exists(_discoveryIndexPendingPath))
+        {
+            try
+            {
+                var fingerprint = GetDiscoveryIndexFingerprint();
+                var cached = fingerprint is null ? null : await TryGetCachedMonitorAsync(fingerprint, safeRunId, cancellationToken);
+                if (cached is not null)
+                {
+                    return new CustomLoopRunMonitor(cached.Summary, cached.ArtifactHash);
+                }
+
+                var candidateIndex = fingerprint is null ? null : await ReadDiscoveryIndexAsync(cancellationToken);
+                var confirmedFingerprint = GetDiscoveryIndexFingerprint();
+                if (candidateIndex is not null
+                    && confirmedFingerprint is not null
+                    && fingerprint == confirmedFingerprint
+                    && !File.Exists(_discoveryIndexPendingPath))
+                {
+                    CacheDiscoveryIndex(candidateIndex, confirmedFingerprint);
+                    cached = await TryGetCachedMonitorAsync(confirmedFingerprint, safeRunId, cancellationToken);
+                    if (cached is not null)
+                    {
+                        return new CustomLoopRunMonitor(cached.Summary, cached.ArtifactHash);
+                    }
+                }
+            }
+            catch (FormatException)
+            {
+                // Fall through to locked repair from canonical artifacts.
+            }
+        }
+
+        CustomLoopRunDiscoveryIndex index;
+        await using (var mutation = await AcquireMutationLockAsync(cancellationToken))
+        {
+            index = await LoadDiscoveryIndexAsync(cancellationToken);
+            CacheDiscoveryIndex(index, GetDiscoveryIndexFingerprint());
+        }
+
+        var entry = index.Entries.SingleOrDefault(candidate => string.Equals(candidate.Summary.Id, safeRunId, StringComparison.Ordinal));
+        if (entry is null)
+        {
+            return null;
+        }
+
+        var verified = await ValidateMonitorEntryAsync(entry, cancellationToken);
+        if (verified is not null)
+        {
+            return new CustomLoopRunMonitor(verified.Summary, verified.ArtifactHash);
+        }
+
+        await using (var mutation = await AcquireMutationLockAsync(cancellationToken))
+        {
+            index = await RebuildDiscoveryIndexAsync(index.Revision, cancellationToken);
+            CacheDiscoveryIndex(index, GetDiscoveryIndexFingerprint());
+            entry = index.Entries.SingleOrDefault(candidate => string.Equals(candidate.Summary.Id, safeRunId, StringComparison.Ordinal));
+            if (entry is null)
+            {
+                return null;
+            }
+
+            verified = await ValidateMonitorEntryAsync(entry, cancellationToken);
+            return verified is null
+                ? throw new FormatException($"Custom loop run `{safeRunId}` changed independently of its discovery metadata and could not be repaired.")
+                : new CustomLoopRunMonitor(verified.Summary, verified.ArtifactHash);
+        }
     }
 
     public async Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default)
@@ -946,6 +1037,321 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
         content.CopyTo(terminated, 0);
         terminated[^1] = (byte)'\n';
         await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, terminated, overwrite: File.Exists(_discoveryIndexPath), cancellationToken);
+        CacheDiscoveryIndex(index, GetDiscoveryIndexFingerprint());
+    }
+
+    private DiscoveryIndexFileFingerprint? GetDiscoveryIndexFingerprint()
+    {
+        if (!File.Exists(_discoveryIndexPath))
+        {
+            return null;
+        }
+
+        EnsureSafeArtifactPath(_runsRoot, _discoveryIndexPath, mustExist: true);
+        var info = new FileInfo(_discoveryIndexPath);
+        info.Refresh();
+        return info.Exists ? new DiscoveryIndexFileFingerprint(info.Length, info.CreationTimeUtc.Ticks, info.LastWriteTimeUtc.Ticks) : null;
+    }
+
+    private async Task<CachedMonitorResult?> TryGetCachedMonitorAsync(DiscoveryIndexFileFingerprint fingerprint, string runId, CancellationToken cancellationToken)
+    {
+        CustomLoopRunDiscoveryIndexEntry? entry;
+        lock (_monitorCacheGate)
+        {
+            if (_monitorCacheFingerprint != fingerprint || _monitorCache is null)
+            {
+                return null;
+            }
+
+            if (!_monitorCache.TryGetValue(runId, out entry))
+            {
+                return null;
+            }
+        }
+
+        return await ValidateMonitorEntryAsync(entry, cancellationToken);
+    }
+
+    private async Task<CachedMonitorResult?> ValidateMonitorEntryAsync(CustomLoopRunDiscoveryIndexEntry entry, CancellationToken cancellationToken)
+    {
+        ThrowIfRunIdentityIsAmbiguous(entry.Summary.Id, entry.Summary.LoopId);
+        var path = GetRunPath(entry.Summary.LoopId, entry.Summary.Id);
+        var info = new FileInfo(path);
+        info.Refresh();
+        if (!info.Exists || info.Length != entry.ArtifactUtf8Bytes || info.LastWriteTimeUtc.Ticks != entry.ArtifactLastWriteUtcTicks)
+        {
+            return null;
+        }
+
+        EnsureSafeArtifactPath(path, mustExist: true);
+        bool summaryWasVerified;
+        long observedChangeVersion;
+        lock (_monitorCacheGate)
+        {
+            _monitorArtifactChangeVersions.TryGetValue(path, out observedChangeVersion);
+            summaryWasVerified = !_monitorWatcherUncertain
+                && observedChangeVersion == 0
+                && _verifiedMonitorSummaryBindings.Contains(entry.SummaryBindingHash);
+        }
+
+        try
+        {
+            if (summaryWasVerified)
+            {
+                ThrowIfRunIdentityIsAmbiguous(entry.Summary.Id, entry.Summary.LoopId);
+                return new CachedMonitorResult(entry.Summary, entry.ArtifactHash);
+            }
+
+            var artifact = await ReadArtifactAsync(new RunArtifactLocation(path, entry.Summary.LoopId, entry.Summary.Id), cancellationToken);
+            var canonicalSummary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
+            if (!string.Equals(artifact.PersistedHash, entry.ArtifactHash, StringComparison.Ordinal) || canonicalSummary != entry.Summary)
+            {
+                return null;
+            }
+
+            lock (_monitorCacheGate)
+            {
+                if (!_monitorWatcherUncertain && _monitorWatcher is not null)
+                {
+                    _verifiedMonitorSummaryBindings.Add(entry.SummaryBindingHash);
+                }
+                if (observedChangeVersion != 0
+                    && _monitorArtifactChangeVersions.TryGetValue(path, out var currentChangeVersion)
+                    && currentChangeVersion == observedChangeVersion)
+                {
+                    _monitorArtifactChangeVersions.Remove(path);
+                }
+            }
+            ThrowIfRunIdentityIsAmbiguous(entry.Summary.Id, entry.Summary.LoopId);
+            return new CachedMonitorResult(canonicalSummary, artifact.PersistedHash);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    private void ThrowIfRunIdentityIsAmbiguous(string runId, string expectedLoopId)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            long observedTopologyVersion;
+            MonitorRunOwnership? ownership;
+            lock (_monitorCacheGate)
+            {
+                observedTopologyVersion = _monitorArtifactTopologyVersion;
+                if (_monitorRunOwnerships is not null && _monitorRunOwnershipVersion == observedTopologyVersion)
+                {
+                    _monitorRunOwnerships.TryGetValue(runId, out ownership);
+                    ThrowIfRunOwnershipIsAmbiguous(runId, expectedLoopId, ownership);
+                    return;
+                }
+            }
+
+            var ownerships = ReadMonitorRunOwnerships();
+            lock (_monitorCacheGate)
+            {
+                if (_monitorArtifactTopologyVersion != observedTopologyVersion)
+                {
+                    continue;
+                }
+
+                _monitorRunOwnerships = ownerships;
+                _monitorRunOwnershipVersion = observedTopologyVersion;
+                ownerships.TryGetValue(runId, out ownership);
+            }
+
+            ThrowIfRunOwnershipIsAmbiguous(runId, expectedLoopId, ownership);
+            return;
+        }
+
+        throw new FormatException($"Custom loop run identity ownership changed repeatedly while `{runId}` was being monitored. The persisted state requires review.");
+    }
+
+    private IReadOnlyDictionary<string, MonitorRunOwnership> ReadMonitorRunOwnerships()
+    {
+        var ownerships = new Dictionary<string, MonitorRunOwnership>(StringComparer.Ordinal);
+        foreach (var location in EnumerateArtifactLocations())
+        {
+            ownerships[location.RunId] = ownerships.TryGetValue(location.RunId, out var existing)
+                ? new MonitorRunOwnership(existing.LoopId, checked(existing.ArtifactCount + 1))
+                : new MonitorRunOwnership(location.LoopId, 1);
+        }
+        return ownerships;
+    }
+
+    private static void ThrowIfRunOwnershipIsAmbiguous(string runId, string expectedLoopId, MonitorRunOwnership? ownership)
+    {
+        if (ownership is not null && (ownership.ArtifactCount != 1 || !string.Equals(ownership.LoopId, expectedLoopId, StringComparison.Ordinal)))
+        {
+            throw new FormatException($"Custom loop run id `{runId}` exists in more than one canonical artifact location. The persisted state requires review.");
+        }
+    }
+
+    private void EnsureMonitorWatcher()
+    {
+        lock (_monitorCacheGate)
+        {
+            if (_monitorWatcher is not null)
+            {
+                return;
+            }
+
+            var watcher = new FileSystemWatcher(_runsRoot)
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.Security
+            };
+            watcher.Changed += MonitorArtifactChanged;
+            watcher.Created += MonitorArtifactTopologyChanged;
+            watcher.Deleted += MonitorArtifactTopologyChanged;
+            watcher.Renamed += MonitorArtifactRenamed;
+            watcher.Error += MonitorWatcherError;
+            watcher.EnableRaisingEvents = true;
+            _monitorWatcher = watcher;
+            _monitorWatcherUncertain = false;
+        }
+    }
+
+    private void MonitorArtifactChanged(object sender, FileSystemEventArgs eventArgs)
+    {
+        RecordMonitorArtifactChange(eventArgs.FullPath);
+    }
+
+    private void MonitorArtifactTopologyChanged(object sender, FileSystemEventArgs eventArgs)
+    {
+        RecordMonitorArtifactChange(eventArgs.FullPath);
+        RecordMonitorArtifactTopologyChange(eventArgs.FullPath);
+    }
+
+    private void MonitorArtifactRenamed(object sender, RenamedEventArgs eventArgs)
+    {
+        RecordMonitorArtifactChange(eventArgs.OldFullPath);
+        RecordMonitorArtifactChange(eventArgs.FullPath);
+        RecordMonitorArtifactTopologyChange(eventArgs.OldFullPath);
+        RecordMonitorArtifactTopologyChange(eventArgs.FullPath);
+    }
+
+    private void MonitorWatcherError(object sender, ErrorEventArgs eventArgs)
+    {
+        FileSystemWatcher? watcher;
+        lock (_monitorCacheGate)
+        {
+            if (!ReferenceEquals(sender, _monitorWatcher))
+            {
+                return;
+            }
+
+            watcher = _monitorWatcher;
+            _monitorWatcher = null;
+            _monitorWatcherUncertain = true;
+            _monitorArtifactTopologyVersion++;
+            _monitorRunOwnerships = null;
+            _monitorRunOwnershipVersion = -1;
+            _verifiedMonitorSummaryBindings.Clear();
+        }
+        watcher.Dispose();
+    }
+
+    private void RecordMonitorArtifactChange(string path)
+    {
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            lock (_monitorCacheGate)
+            {
+                _monitorWatcherUncertain = true;
+            }
+            return;
+        }
+
+        lock (_monitorCacheGate)
+        {
+            if (!_monitorArtifactPaths.Contains(fullPath))
+            {
+                return;
+            }
+
+            _monitorArtifactChangeVersions[fullPath] = ++_monitorArtifactChangeVersion;
+        }
+    }
+
+    private void RecordMonitorArtifactTopologyChange(string path)
+    {
+        if (!IsPotentialMonitorArtifactTopologyPath(path))
+        {
+            return;
+        }
+
+        lock (_monitorCacheGate)
+        {
+            _monitorArtifactTopologyVersion++;
+        }
+    }
+
+    private bool IsPotentialMonitorArtifactTopologyPath(string path)
+    {
+        string relative;
+        try
+        {
+            relative = Path.GetRelativePath(_runsRoot, Path.GetFullPath(path));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return true;
+        }
+
+        if (Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, PathComparison) || relative.StartsWith(".." + Path.AltDirectorySeparatorChar, PathComparison))
+        {
+            return true;
+        }
+
+        var parts = relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 1)
+        {
+            return CustomLoopArtifactIdentifier.IsValid(parts[0]);
+        }
+
+        return parts.Length == 2
+            && CustomLoopArtifactIdentifier.IsValid(parts[0])
+            && string.Equals(Path.GetExtension(parts[1]), ".json", StringComparison.OrdinalIgnoreCase)
+            && CustomLoopArtifactIdentifier.IsValid(Path.GetFileNameWithoutExtension(parts[1]));
+    }
+
+    public void Dispose()
+    {
+        lock (_monitorCacheGate)
+        {
+            _monitorWatcher?.Dispose();
+            _monitorWatcher = null;
+        }
+    }
+
+    private void CacheDiscoveryIndex(CustomLoopRunDiscoveryIndex index, DiscoveryIndexFileFingerprint? fingerprint)
+    {
+        if (fingerprint is null)
+        {
+            return;
+        }
+
+        var summaries = index.Entries.ToDictionary(entry => entry.Summary.Id, entry => entry, StringComparer.Ordinal);
+        var artifactPaths = index.Entries.Select(entry => GetRunPath(entry.Summary.LoopId, entry.Summary.Id)).ToHashSet(PathComparer);
+        lock (_monitorCacheGate)
+        {
+            _monitorCache = summaries;
+            _monitorCacheFingerprint = fingerprint;
+            _monitorArtifactPaths.Clear();
+            _monitorArtifactPaths.UnionWith(artifactPaths);
+            foreach (var stalePath in _monitorArtifactChangeVersions.Keys.Where(path => !_monitorArtifactPaths.Contains(path)).ToArray())
+            {
+                _monitorArtifactChangeVersions.Remove(stalePath);
+            }
+            _verifiedMonitorSummaryBindings.IntersectWith(index.Entries.Select(entry => entry.SummaryBindingHash));
+        }
     }
 
     private async Task MarkDiscoveryIndexPendingAsync(CancellationToken cancellationToken)
@@ -1122,6 +1528,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
             if (entry.ArtifactUtf8Bytes is < 1 || entry.ArtifactUtf8Bytes > maximumArtifactBytes
                 || entry.ArtifactLastWriteUtcTicks < DateTimeOffset.UnixEpoch.UtcTicks
                 || summary.DefinitionVersion < 1
+                || summary.IsDeleted && summary.LifecycleVersion != 0
+                || !summary.IsDeleted && summary.LifecycleVersion < 1
                 || summary.CreatedAtUtc < DateTimeOffset.UnixEpoch
                 || summary.UpdatedAtUtc < summary.CreatedAtUtc
                 || summary.CompletedAtUtc < summary.CreatedAtUtc
@@ -2286,12 +2694,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
 
     private static CustomLoopRunSummary ToSummary(CustomLoopRunRecord run)
     {
-        return new CustomLoopRunSummary(run.Id, run.LoopId, run.AdmissionOperationId, run.AdmittedDefinition.DefinitionVersion, run.Status, run.CreatedAtUtc, run.UpdatedAtUtc, run.CompletedAtUtc, run.Checkpoint.Iteration, run.Checkpoint.NextStepIndex, run.FailureCode, IsDeleted: false);
+        return new CustomLoopRunSummary(run.Id, run.LoopId, run.AdmissionOperationId, run.AdmittedDefinition.DefinitionVersion, run.LifecycleVersion, run.Status, run.CreatedAtUtc, run.UpdatedAtUtc, run.CompletedAtUtc, run.Checkpoint.Iteration, run.Checkpoint.NextStepIndex, run.FailureCode, IsDeleted: false);
     }
 
     private static CustomLoopRunSummary ToSummary(CustomLoopTraceTombstone tombstone)
     {
-        return new CustomLoopRunSummary(tombstone.RunId, tombstone.LoopId, tombstone.AdmissionOperationId, tombstone.DefinitionVersion, tombstone.TerminalStatus, tombstone.CreatedAtUtc, tombstone.DeletedAtUtc, tombstone.CompletedAtUtc, 0, 0, null, IsDeleted: true);
+        return new CustomLoopRunSummary(tombstone.RunId, tombstone.LoopId, tombstone.AdmissionOperationId, tombstone.DefinitionVersion, 0, tombstone.TerminalStatus, tombstone.CreatedAtUtc, tombstone.DeletedAtUtc, tombstone.CompletedAtUtc, 0, 0, null, IsDeleted: true);
     }
 
     private static void RejectDuplicateProperties(JsonElement element, string path, HashSet<string> names)
@@ -2402,6 +2810,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore
     private sealed record RunArtifactLocation(string Path, string LoopId, string RunId);
 
     private sealed record RunArtifact(RunArtifactLocation Location, CustomLoopRunRecord? Run, CustomLoopTraceTombstone? Tombstone, string PersistedHash, long PersistedUtf8Bytes);
+
+    private sealed record DiscoveryIndexFileFingerprint(long Utf8Bytes, long CreationTimeUtcTicks, long LastWriteTimeUtcTicks);
+
+    private sealed record CachedMonitorResult(CustomLoopRunSummary Summary, string ArtifactHash);
+
+    private sealed record MonitorRunOwnership(string LoopId, int ArtifactCount);
 
     private sealed record ArtifactScanResult(CustomLoopTraceQuota Quota);
 

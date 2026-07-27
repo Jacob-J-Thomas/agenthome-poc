@@ -1200,6 +1200,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             summary.LoopId,
             summary.AdmissionOperationId,
             summary.DefinitionVersion,
+            summary.LifecycleVersion,
             summary.Status.ToString(),
             summary.CreatedAtUtc,
             summary.UpdatedAtUtc,

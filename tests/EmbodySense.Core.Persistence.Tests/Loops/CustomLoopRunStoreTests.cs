@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -911,6 +912,149 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Repeated_exact_monitor_reads_use_the_unchanged_index_cache_without_rescanning_unrelated_storage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        var first = await store.GetMonitorAsync(run.Id);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, ".unrelated-root-artifact"), "not part of the indexed run");
+
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        using var exclusiveArtifactLease = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        var second = await store.GetMonitorAsync(run.Id);
+
+        Assert.Equal(run.LifecycleVersion, first?.Summary.LifecycleVersion);
+        Assert.Equal(run.LifecycleVersion, second?.Summary.LifecycleVersion);
+        Assert.Equal(first?.ArtifactHash, second?.ArtifactHash);
+        await Assert.ThrowsAsync<FormatException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(50)));
+    }
+
+    [Fact]
+    public async Task Exact_monitor_recreates_its_watcher_and_reestablishes_cache_certainty_after_an_error()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        using var store = new CustomLoopRunStore(paths);
+        Assert.NotNull(await store.GetMonitorAsync(run.Id));
+        var watcherField = typeof(CustomLoopRunStore).GetField("_monitorWatcher", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var uncertainField = typeof(CustomLoopRunStore).GetField("_monitorWatcherUncertain", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var bindingsField = typeof(CustomLoopRunStore).GetField("_verifiedMonitorSummaryBindings", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var errorMethod = typeof(CustomLoopRunStore).GetMethod("MonitorWatcherError", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var failedWatcher = Assert.IsType<FileSystemWatcher>(watcherField.GetValue(store));
+
+        errorMethod.Invoke(store, [failedWatcher, new ErrorEventArgs(new InternalBufferOverflowException("Simulated watcher overflow."))]);
+
+        Assert.Null(watcherField.GetValue(store));
+        Assert.True(Assert.IsType<bool>(uncertainField.GetValue(store)));
+        Assert.Empty(Assert.IsType<HashSet<string>>(bindingsField.GetValue(store)));
+        var recovered = await store.GetMonitorAsync(run.Id);
+
+        Assert.Equal(run.Id, recovered?.Summary.Id);
+        Assert.False(Assert.IsType<bool>(uncertainField.GetValue(store)));
+        Assert.NotSame(failedWatcher, Assert.IsType<FileSystemWatcher>(watcherField.GetValue(store)));
+        Assert.Single(Assert.IsType<HashSet<string>>(bindingsField.GetValue(store)));
+    }
+
+    [Fact]
+    public async Task Exact_monitor_cache_rejects_an_unindexed_duplicate_run_id_in_another_loop()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.NotNull(await store.GetMonitorAsync(run.Id));
+        await WriteDirectAsync(paths, CreateRun("loop-beta", run.Id, "invoke-beta"));
+        var duplicatePath = Path.Combine(paths.CustomLoopRunsPath, "loop-beta", run.Id + ".json");
+        var caseVariantDuplicatePath = Path.Combine(paths.CustomLoopRunsPath, "loop-beta", run.Id + ".JSON");
+        File.Move(duplicatePath, caseVariantDuplicatePath);
+
+        FormatException? failure = null;
+        for (var attempt = 0; attempt < 20 && failure is null; attempt++)
+        {
+            await Task.Delay(25);
+            try
+            {
+                await store.GetMonitorAsync(run.Id);
+            }
+            catch (FormatException exception)
+            {
+                failure = exception;
+            }
+        }
+
+        Assert.NotNull(failure);
+        Assert.Contains(run.Id, failure.Message, StringComparison.Ordinal);
+        Assert.Contains("duplicat", failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Exact_monitor_cache_repairs_when_the_selected_canonical_artifact_disappears()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.NotNull(await store.GetMonitorAsync(run.Id));
+        File.Delete(Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json"));
+
+        var missing = await store.GetMonitorAsync(run.Id);
+
+        Assert.Null(missing);
+        Assert.Empty((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+    }
+
+    [Fact]
+    public async Task Exact_monitor_cache_repairs_a_same_metadata_canonical_replacement()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(seed)).Status);
+        var running = Advance(seed, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, seed.LifecycleVersion)).Status);
+        var first = await store.GetMonitorAsync(seed.Id);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, seed.LoopId, seed.Id + ".json");
+        var originalInfo = new FileInfo(artifactPath);
+        var originalLength = originalInfo.Length;
+        var originalLastWriteUtc = originalInfo.LastWriteTimeUtc;
+        using var replacementWorkspace = new TestWorkspace();
+        var replacementPaths = new WorkspacePaths(replacementWorkspace.RootPath);
+        var replacementStore = new CustomLoopRunStore(replacementPaths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await replacementStore.CreateAsync(seed)).Status);
+        var replacementTimestamp = running.UpdatedAtUtc.AddMinutes(1);
+        var replacement = running with
+        {
+            UpdatedAtUtc = replacementTimestamp,
+            ExecutionClock = running.ExecutionClock with { ActiveSinceUtc = replacementTimestamp },
+            Events = [.. running.Events[..^1], running.Events[^1] with { TimestampUtc = replacementTimestamp }]
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await replacementStore.UpdateAsync(replacement, seed.LifecycleVersion)).Status);
+        var replacementPath = Path.Combine(replacementPaths.CustomLoopRunsPath, seed.LoopId, seed.Id + ".json");
+        var replacementContent = await File.ReadAllBytesAsync(replacementPath);
+        Assert.Equal(originalLength, replacementContent.Length);
+        await File.WriteAllBytesAsync(artifactPath, replacementContent);
+        File.SetLastWriteTimeUtc(artifactPath, originalLastWriteUtc);
+
+        CustomLoopRunMonitor? repaired = null;
+        for (var attempt = 0; attempt < 20 && repaired?.Summary.UpdatedAtUtc != replacementTimestamp; attempt++)
+        {
+            await Task.Delay(25);
+            repaired = await store.GetMonitorAsync(seed.Id);
+        }
+
+        Assert.Equal(running.UpdatedAtUtc, first?.Summary.UpdatedAtUtc);
+        Assert.Equal(replacementTimestamp, repaired?.Summary.UpdatedAtUtc);
+    }
+
+    [Fact]
     public async Task Strict_reader_rejects_missing_unknown_and_noncanonical_nested_properties_or_enums()
     {
         var mutations = new Action<JsonObject>[]
@@ -1020,8 +1164,12 @@ public sealed class CustomLoopRunStoreTests
         }
 
         var extra = CreateRun("loop-extra", "run-extra", "invoke-extra");
-        var result = await new CustomLoopRunStore(paths).CreateAsync(extra);
+        var store = new CustomLoopRunStore(paths);
+        var monitor = await store.GetMonitorAsync("run-249");
+        var result = await store.CreateAsync(extra);
 
+        Assert.Equal("run-249", monitor?.Summary.Id);
+        Assert.Equal(CustomLoopRunStatus.Admitted, monitor?.Summary.Status);
         Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, result.Status);
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, extra.LoopId, extra.Id + ".json")));
         Assert.Equal(CustomLoopLimits.MaxRunTracesPerWorkspace, Directory.EnumerateFiles(paths.CustomLoopRunsPath, "*.json", SearchOption.AllDirectories).Count(path => !string.Equals(Path.GetDirectoryName(path), paths.CustomLoopRunsPath, StringComparison.Ordinal)));

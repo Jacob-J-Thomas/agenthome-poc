@@ -9,6 +9,14 @@ public interface ICustomLoopRunStore
 
     Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default);
 
+    async Task<CustomLoopRunMonitor?> GetMonitorAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        var run = await GetAsync(runId, cancellationToken);
+        return run is null
+            ? null
+            : new CustomLoopRunMonitor(new CustomLoopRunSummary(run.Id, run.LoopId, run.AdmissionOperationId, run.AdmittedDefinition.DefinitionVersion, run.LifecycleVersion, run.Status, run.CreatedAtUtc, run.UpdatedAtUtc, run.CompletedAtUtc, run.Checkpoint.Iteration, run.Checkpoint.NextStepIndex, run.FailureCode, IsDeleted: false), string.Empty);
+    }
+
     Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default);
 
     Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default);

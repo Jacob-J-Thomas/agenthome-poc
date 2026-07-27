@@ -43,10 +43,15 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Equal("Admitted", (await facade.GetAsync(interrupted.Id))!.Status);
         var recovery = await facade.RecoverInterruptedRunsAsync();
         var recovered = await facade.GetAsync(interrupted.Id);
+        var monitor = await facade.GetMonitorAsync(interrupted.Id);
 
         Assert.True(recovery.Completed);
         Assert.False(recovery.PreserveCurrentConversation);
         Assert.Equal("Paused", recovered!.Status);
+        Assert.Equal(recovered.Status, monitor?.Summary.Status);
+        Assert.Equal(recovered.LifecycleVersion, monitor?.Summary.LifecycleVersion);
+        Assert.Equal(recovered.UpdatedAtUtc, monitor?.Summary.UpdatedAtUtc);
+        Assert.Matches("^[a-f0-9]{64}$", monitor?.ArtifactHash);
         Assert.Equal(interrupted.LifecycleVersion + 1, recovered.LifecycleVersion);
         Assert.Contains("Restart recovery parked the admitted run", await File.ReadAllTextAsync(paths.EventsLogPath), StringComparison.Ordinal);
     }

@@ -75,6 +75,10 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var artifactPath = await WriteArtifactAsync(paths, terminal, encoded);
         var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        var monitor = await restarted.GetMonitorAsync(terminal.Id);
+        Assert.Equal(terminal.Id, monitor?.Summary.Id);
+        Assert.Equal(terminal.Status, monitor?.Summary.Status);
+        Assert.Equal(terminal.UpdatedAtUtc, monitor?.Summary.UpdatedAtUtc);
         var publicReload = await restarted.GetAsync(terminal.Id);
         Assert.NotNull(publicReload);
         Assert.Equal(JsonSerializer.Serialize(terminal), JsonSerializer.Serialize(publicReload));

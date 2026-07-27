@@ -17,6 +17,12 @@ let runEvidenceRequestGeneration = 0;
 let selectedRunId = null;
 let selectedRun = null;
 let selectedTrace = null;
+let selectedRunMonitorId = null;
+let selectedRunMonitorEtag = null;
+let selectedRunMonitorMissCount = 0;
+let selectedRunMonitorFailureKind = null;
+let selectedRunMonitorFallbackFailureCount = 0;
+let selectedRunMonitorNextFallbackAt = 0;
 let traceQuota = null;
 let hub = null;
 let invokeReturnFocus = null;
@@ -31,6 +37,8 @@ let pendingTraceDeletion = null;
 
 const signalRRecordSeparator = "\u001e";
 const signalRKeepAliveMilliseconds = 10000;
+const selectedRunMonitorFallbackBaseDelayMilliseconds = 5000;
+const selectedRunMonitorFallbackMaximumDelayMilliseconds = 30000;
 
 const elements = {
   addStepButton: document.getElementById("addStepButton"),
@@ -152,6 +160,28 @@ async function requestJson(url, options = {}) {
     throw error;
   }
   return payload;
+}
+
+async function requestRunMonitor(runId) {
+  const headers = {};
+  if (sessionToken) headers["X-EmbodySense-Session"] = sessionToken;
+  if (selectedRunMonitorId === runId && selectedRunMonitorEtag) headers["If-None-Match"] = selectedRunMonitorEtag;
+  const response = await fetch(`/api/loop-runs/${encodeURIComponent(runId)}/monitor`, { headers });
+  const etag = response.headers?.get?.("ETag") ?? selectedRunMonitorEtag;
+  if (response.status === 304) return { notModified: true, summary: null, etag };
+  const text = await response.text();
+  let payload = null;
+  if (text) {
+    try { payload = JSON.parse(text); } catch { payload = text; }
+  }
+  if (!response.ok) {
+    const detail = typeof payload === "string" ? payload : payload?.detail ?? payload?.title ?? `Request failed (${response.status})`;
+    const error = new Error(detail);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
+  return { notModified: false, summary: payload, etag };
 }
 
 async function loadCatalog(preferredLoopId) {
@@ -276,9 +306,13 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
       if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return false;
       selectedRun = evidence.run;
       selectedTrace = evidence.trace;
+      bindSelectedRunMonitor(selectedRun?.id ?? null);
+      selectedRunMonitorMissCount = 0;
     } else {
       selectedRun = null;
       selectedTrace = null;
+      bindSelectedRunMonitor(null);
+      selectedRunMonitorMissCount = 0;
     }
     if (currentView === "runs") {
       renderRuns();
@@ -375,6 +409,7 @@ function tombstoneRunSummary(trace) {
     loopId: tombstone.loopId,
     admissionOperationId: tombstone.admissionOperationId,
     definitionVersion: tombstone.definitionVersion,
+    lifecycleVersion: 0,
     status: tombstone.terminalStatus,
     createdAtUtc: tombstone.createdAtUtc,
     updatedAtUtc: tombstone.deletedAtUtc,
@@ -384,6 +419,82 @@ function tombstoneRunSummary(trace) {
     failureCode: null,
     isDeleted: true
   };
+}
+
+function bindSelectedRunMonitor(runId) {
+  if (selectedRunMonitorId === runId) return;
+  selectedRunMonitorId = runId;
+  selectedRunMonitorEtag = null;
+  selectedRunMonitorMissCount = 0;
+  selectedRunMonitorFailureKind = null;
+  resetSelectedRunMonitorFallback();
+}
+
+async function refreshSelectedRunFromMonitor(runId) {
+  if (selectedRun?.id !== runId) return false;
+  bindSelectedRunMonitor(runId);
+  const previousEtag = selectedRunMonitorEtag;
+  try {
+    const monitor = await requestRunMonitor(runId);
+    if (selectedRun?.id !== runId) return false;
+    if (monitor.notModified) {
+      selectedRunMonitorMissCount = 0;
+      selectedRunMonitorFailureKind = null;
+      resetSelectedRunMonitorFallback();
+      return true;
+    }
+
+    const refreshed = await loadRuns({ silent: true, preferredRunId: runId });
+    if (refreshed && selectedRun?.id === runId) {
+      selectedRunMonitorMissCount = 0;
+      selectedRunMonitorFailureKind = null;
+      selectedRunMonitorEtag = monitor.etag ?? previousEtag;
+      resetSelectedRunMonitorFallback();
+      return true;
+    }
+
+    selectedRunMonitorFailureKind = "full-refresh";
+    selectedRunMonitorEtag = previousEtag;
+    return false;
+  } catch (error) {
+    selectedRunMonitorEtag = previousEtag;
+    if (error.status !== 404 || selectedRun?.id !== runId) {
+      selectedRunMonitorMissCount = 0;
+      selectedRunMonitorFailureKind = "endpoint";
+      return false;
+    }
+    selectedRunMonitorFailureKind = "missing";
+    selectedRunMonitorMissCount++;
+    if (selectedRunMonitorMissCount < 2) return false;
+    recentRuns = recentRuns.filter(run => run.id !== runId);
+    selectedRunId = null;
+    selectedRun = null;
+    selectedTrace = null;
+    bindSelectedRunMonitor(null);
+    await loadRuns({ silent: true, preserveEmptySelection: true });
+    if (currentView === "runs") {
+      renderRuns();
+      renderRunEvidence();
+    }
+    showBanner(`Run evidence unavailable: ${error.message || "The selected run no longer exists."}`);
+    return false;
+  }
+}
+
+async function fallbackSelectedRunAfterMonitorFailure(runId) {
+  if (selectedRunMonitorFailureKind !== "endpoint" || selectedRun?.id !== runId) return false;
+  const now = performance.now();
+  if (now < selectedRunMonitorNextFallbackAt) return false;
+  const refreshed = await loadRuns({ silent: true, preferredRunId: runId });
+  selectedRunMonitorFallbackFailureCount++;
+  const delay = Math.min(selectedRunMonitorFallbackMaximumDelayMilliseconds, selectedRunMonitorFallbackBaseDelayMilliseconds * 2 ** (selectedRunMonitorFallbackFailureCount - 1));
+  selectedRunMonitorNextFallbackAt = now + delay;
+  return refreshed;
+}
+
+function resetSelectedRunMonitorFallback() {
+  selectedRunMonitorFallbackFailureCount = 0;
+  selectedRunMonitorNextFallbackAt = 0;
 }
 
 function renderRuns() {
@@ -1257,7 +1368,11 @@ async function waitForRunOperation(invocation, preferredSelection) {
   invocation.then(() => { settled = true; }, () => { settled = true; });
   try {
     while (!settled) {
-      await loadRuns({ silent: true, ...preferredSelection });
+      const selectedMatches = selectedRun
+        && (preferredSelection.preferredRunId === selectedRun.id
+          || preferredSelection.preferredAdmissionOperationId === selectedRun.admissionOperationId);
+      const monitored = selectedMatches ? await refreshSelectedRunFromMonitor(selectedRun.id) : false;
+      if (!monitored) await loadRuns({ silent: true, ...preferredSelection });
       if (!settled) await new Promise(resolve => setTimeout(resolve, 500));
     }
     return await invocation;
@@ -1278,7 +1393,8 @@ function scheduleSelectedRunRefresh() {
     selectedRunRefreshTimer = null;
     if (currentView !== "runs" || selectedRun?.id !== runId) return;
     try {
-      await loadRuns({ silent: true, preferredRunId: runId });
+      const monitored = await refreshSelectedRunFromMonitor(runId);
+      if (!monitored) await fallbackSelectedRunAfterMonitorFailure(runId);
     } finally {
       if (currentView === "runs" && selectedRun?.id === runId && isNonterminalRun(selectedRun)) scheduleSelectedRunRefresh();
     }

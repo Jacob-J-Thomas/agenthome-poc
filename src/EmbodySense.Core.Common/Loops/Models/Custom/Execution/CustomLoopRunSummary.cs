@@ -5,6 +5,7 @@ public sealed record CustomLoopRunSummary(
     string LoopId,
     string AdmissionOperationId,
     int DefinitionVersion,
+    int LifecycleVersion,
     CustomLoopRunStatus Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,

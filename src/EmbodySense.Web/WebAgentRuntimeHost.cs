@@ -149,6 +149,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.GetAsync(runId, cancellationToken);
     }
 
+    public async Task<LoopRunMonitorSnapshot?> GetLoopRunMonitorAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        EnsureWorkspaceInitialized("monitoring custom-loop run evidence");
+        await EnsureLoopRecoveryAsync(cancellationToken);
+        return await _loopRuns.GetMonitorAsync(runId, cancellationToken);
+    }
+
     public async Task<LoopTraceInspectionSnapshot?> GetLoopTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop trace evidence");

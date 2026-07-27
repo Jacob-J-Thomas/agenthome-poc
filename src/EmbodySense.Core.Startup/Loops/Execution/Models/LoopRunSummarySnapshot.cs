@@ -5,6 +5,7 @@ public sealed record LoopRunSummarySnapshot(
     string LoopId,
     string AdmissionOperationId,
     int DefinitionVersion,
+    int LifecycleVersion,
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,

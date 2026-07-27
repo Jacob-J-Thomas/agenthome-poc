@@ -1120,6 +1120,250 @@ test("opening an existing nonterminal run keeps refreshing independently of its 
   assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
 });
 
+test("long active-run approval waits use conditional monitor reads without reloading full evidence", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const bindingRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  assert.ok(bindingRefresh, "expected an initial validator-binding refresh");
+  bindingRefresh.cancelled = true;
+  await bindingRefresh.handler();
+  const expensiveReadsBefore = server.calls.filter(call => call.url !== `/api/loop-runs/${run.id}/monitor`).length;
+
+  for (let poll = 0; poll < 6; poll++) {
+    const refresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+    assert.ok(refresh, `expected monitor poll ${poll + 1}`);
+    refresh.cancelled = true;
+    await refresh.handler();
+  }
+
+  const monitorCalls = server.calls.filter(call => call.url === `/api/loop-runs/${run.id}/monitor`);
+  assert.equal(monitorCalls.length, 7);
+  assert.ok(monitorCalls.slice(1).every(call => call.options.headers["If-None-Match"]));
+  assert.equal(server.calls.filter(call => call.url !== `/api/loop-runs/${run.id}/monitor`).length, expensiveReadsBefore);
+  assert.match(app.elements.runSubtitle.textContent, /Running/);
+});
+
+test("a changed artifact-bound validator reloads full evidence even when the summary is unchanged", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const bindingRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  bindingRefresh.cancelled = true;
+  await bindingRefresh.handler();
+
+  run.events = run.events.map((event, index) => index === 0 ? { ...event, detail: "Artifact-only event detail changed." } : event);
+  server.runDetails.set(run.id, run);
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => ({ status: 200, body: clone(server.runs[0]), headers: { ETag: "\"artifact-only-change\"" } }));
+  const changedRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  changedRefresh.cancelled = true;
+  await changedRefresh.handler();
+
+  assert.match(app.elements.runTimeline.textContent, /Artifact-only event detail changed/);
+  assert.equal(vm.runInContext("selectedRunMonitorEtag", app.context), "\"artifact-only-change\"");
+});
+
+test("scheduled monitoring falls back to full evidence with backoff when the endpoint is unavailable", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => ({ status: 503, body: { detail: "Monitor watcher unavailable." } }));
+  const listCallsBefore = server.calls.filter(call => call.url === "/api/loop-runs?maximumCount=50").length;
+
+  const firstRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  firstRefresh.cancelled = true;
+  await firstRefresh.handler();
+  const listCallsAfterFallback = server.calls.filter(call => call.url === "/api/loop-runs?maximumCount=50").length;
+  const backoffRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  backoffRefresh.cancelled = true;
+  await backoffRefresh.handler();
+
+  assert.equal(listCallsAfterFallback, listCallsBefore + 1);
+  assert.equal(server.calls.filter(call => call.url === "/api/loop-runs?maximumCount=50").length, listCallsAfterFallback);
+  assert.equal(vm.runInContext("selectedRunMonitorFallbackFailureCount", app.context), 1);
+  assert.match(app.elements.runTitle.textContent, new RegExp(run.id));
+});
+
+test("a lifecycle-only monitor change invalidates cached full evidence", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  run.lifecycleVersion++;
+  server.runs[0].lifecycleVersion = run.lifecycleVersion;
+  server.runDetails.set(run.id, run);
+  const refresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  refresh.cancelled = true;
+  await refresh.handler();
+
+  assert.match(app.elements.inspectorContent.textContent, /lifecycle version 5/);
+  assert.ok(server.calls.some(call => call.url === `/api/loop-runs/${run.id}`));
+});
+
+test("a definition-version-only monitor change invalidates cached full evidence", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  run.admittedDefinition = { ...run.admittedDefinition, definitionVersion: 3 };
+  server.runs[0].definitionVersion = 3;
+  server.runDetails.set(run.id, run);
+  const refresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  refresh.cancelled = true;
+  await refresh.handler();
+
+  assert.match(app.elements.runSubtitle.textContent, /v3/);
+  assert.ok(server.calls.some(call => call.url === `/api/loop-runs/${run.id}`));
+});
+
+test("a changed monitor validator is retained only after full evidence refresh succeeds", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  run.lifecycleVersion++;
+  run.status = "Completed";
+  run.completedAtUtc = "2026-07-16T12:00:03Z";
+  server.runs[0] = { ...server.runs[0], lifecycleVersion: run.lifecycleVersion, status: run.status, completedAtUtc: run.completedAtUtc };
+  server.runDetails.set(run.id, run);
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => ({ status: 200, body: clone(server.runs[0]), headers: { ETag: "\"completed\"" } }));
+  let listAttempts = 0;
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => {
+    listAttempts++;
+    return listAttempts === 1
+      ? { status: 503, body: { detail: "Temporary page failure." } }
+      : { status: 200, body: { items: clone(server.runs), continuationCursor: null } };
+  });
+
+  const firstRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  firstRefresh.cancelled = true;
+  await firstRefresh.handler();
+  const retry = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  retry.cancelled = true;
+  await retry.handler();
+
+  const monitorCalls = server.calls.filter(call => call.url === `/api/loop-runs/${run.id}/monitor`);
+  assert.equal(monitorCalls.length, 2);
+  assert.equal(monitorCalls[1].options.headers["If-None-Match"], undefined);
+  assert.equal(listAttempts, 2);
+  assert.match(app.elements.runSubtitle.textContent, /Completed/);
+});
+
+test("two consecutive monitor misses clear stale active evidence and stop polling", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  server.runs = [];
+  server.runDetails.delete(run.id);
+
+  const firstRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  firstRefresh.cancelled = true;
+  await firstRefresh.handler();
+  assert.match(app.elements.runTitle.textContent, new RegExp(run.id));
+
+  const confirmingRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  confirmingRefresh.cancelled = true;
+  await confirmingRefresh.handler();
+
+  assert.equal(app.elements.runTitle.textContent, "No run selected");
+  assert.match(app.elements.validationBanner.textContent, /Run evidence unavailable/);
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+});
+
+test("a transient monitor miss keeps the active run selected and resumes polling", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  let monitorAttempts = 0;
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => {
+    monitorAttempts++;
+    return monitorAttempts === 1
+      ? { status: 404, body: { detail: "Run artifact is temporarily unavailable." } }
+      : { status: 200, body: clone(server.runs[0]), headers: { ETag: "\"restored\"" } };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  const missingRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  missingRefresh.cancelled = true;
+  await missingRefresh.handler();
+  assert.match(app.elements.runTitle.textContent, new RegExp(run.id));
+
+  const restoredRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  restoredRefresh.cancelled = true;
+  await restoredRefresh.handler();
+
+  assert.equal(monitorAttempts, 2);
+  assert.match(app.elements.runTitle.textContent, new RegExp(run.id));
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 1);
+});
+
+test("a successful full evidence fallback resets a prior monitor miss", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => ({ status: 404, body: { detail: "Run artifact is temporarily unavailable." } }));
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  assert.equal(await app.context.refreshSelectedRunFromMonitor(run.id), false);
+  assert.equal(await app.context.loadRuns({ silent: true, preferredRunId: run.id }), true);
+  assert.equal(await app.context.refreshSelectedRunFromMonitor(run.id), false);
+
+  assert.match(app.elements.runTitle.textContent, new RegExp(run.id));
+  assert.equal(vm.runInContext("selectedRunMonitorMissCount", app.context), 1);
+});
+
 test("a transient live refresh failure schedules another poll and recovers", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();
@@ -1131,12 +1375,12 @@ test("a transient live refresh failure schedules another poll and recovers", asy
   await selectCustomLoop(app);
   await app.elements.runsTab.click();
 
-  let listAttempts = 0;
-  server.on("GET", "/api/loop-runs?maximumCount=50", () => {
-    listAttempts++;
-    return listAttempts === 1
+  let monitorAttempts = 0;
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => {
+    monitorAttempts++;
+    return monitorAttempts === 1
       ? { status: 503, body: { detail: "Temporary run-list failure." } }
-      : { status: 200, body: clone(server.runs) };
+      : { status: 200, body: clone(server.runs[0]), headers: { ETag: "\"completed\"" } };
   });
 
   const failedRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
@@ -1154,7 +1398,7 @@ test("a transient live refresh failure schedules another poll and recovers", asy
   retry.cancelled = true;
   await retry.handler();
 
-  assert.equal(listAttempts, 2);
+  assert.equal(monitorAttempts, 2);
   assert.match(app.elements.runSubtitle.textContent, /Completed/);
   assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
 });
@@ -1440,6 +1684,7 @@ async function loadLoopBuilder(options = {}) {
     crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++operation).padStart(12, "0")}` },
     document,
     fetch: server.fetch.bind(server),
+    performance,
     setTimeout,
     clearTimeout,
     structuredClone,
@@ -1742,6 +1987,17 @@ class FakeFetchServer {
       return responseFrom({ status: 200, body: { items: clone(runs), continuationCursor: null } });
     }
     if (method === "GET" && url === "/api/loop-runs/quota") return responseFrom({ status: 200, body: clone(this.traceQuota ?? createTraceQuota(this.runs.length)) });
+    if (method === "GET" && url.endsWith("/monitor") && url.startsWith("/api/loop-runs/")) {
+      const runId = decodeURIComponent(url.slice("/api/loop-runs/".length, -"/monitor".length));
+      const summary = this.runs.find(run => run.id === runId);
+      if (!summary) return responseFrom({ status: 404, body: { detail: "Run not found." } });
+      const lifecycleVersion = this.runDetails.get(runId)?.lifecycleVersion ?? summary.lifecycleVersion ?? 0;
+      const monitor = { ...summary, lifecycleVersion };
+      const etag = `"${[summary.id, summary.loopId, summary.admissionOperationId, summary.definitionVersion, lifecycleVersion, summary.status, summary.createdAtUtc, summary.updatedAtUtc, summary.completedAtUtc ?? "", summary.iteration, summary.nextStepIndex, summary.failureCode ?? "", summary.isDeleted ? 1 : 0].join("-")}"`;
+      return options.headers?.["If-None-Match"] === etag
+        ? responseFrom({ status: 304, body: null, headers: { ETag: etag } })
+        : responseFrom({ status: 200, body: clone(monitor), headers: { ETag: etag } });
+    }
     if (method === "GET" && url.endsWith("/trace") && url.startsWith("/api/loop-runs/")) {
       const runId = decodeURIComponent(url.slice("/api/loop-runs/".length, -"/trace".length));
       const trace = this.traceDetails.get(runId) ?? (this.runDetails.has(runId) ? createTraceSnapshot(this.runDetails.get(runId)) : null);
@@ -1755,9 +2011,14 @@ class FakeFetchServer {
   }
 }
 
-function responseFrom({ status, body }) {
+function responseFrom({ status, body, headers = {} }) {
   const text = body === null || body === undefined ? "" : JSON.stringify(body);
-  return { ok: status >= 200 && status < 300, status, text: async () => text };
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: name => Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ?? null },
+    text: async () => text
+  };
 }
 
 class FakeDocument {
