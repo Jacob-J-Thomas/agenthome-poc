@@ -11,5 +11,6 @@ public enum CustomLoopContextSource
     TriggerPrompt = 6,
     InvokingConversation = 7,
     EarlierRetainedOutput = 8,
-    PreviousIterationResult = 9
+    PreviousIterationResult = 9,
+    AgentIdentity = 10
 }

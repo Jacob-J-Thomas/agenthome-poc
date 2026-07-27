@@ -9,24 +9,43 @@ namespace EmbodySense.Core.Application.Tests.Context;
 public sealed class AgentContextProviderTests
 {
     [Fact]
-    public async Task LoadAsync_builds_system_message_from_non_empty_agent_documents()
+    public async Task LoadAsync_labels_role_identity_and_context_sections()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new FakeWorkspaceContextStore(
-            new WorkspaceContextDocument(".agent/AGENT.md", "agent guide"),
-            new WorkspaceContextDocument(".agent/MEMORY.md", "memory note"));
+            Document("role", ".agent/ROLE.md", WorkspaceContextDocumentKind.RoleInstruction, "role guide"),
+            Document("soul", ".agent/SOUL.md", WorkspaceContextDocumentKind.AgentIdentity, "stable identity"),
+            Document("memory", ".agent/MEMORY.md", WorkspaceContextDocumentKind.ContextualState, "memory note"));
 
         var messages = await new AgentContextProvider(store).LoadAsync(paths);
 
-        var message = Assert.Single(messages);
-        Assert.Equal(LlmMessageRole.System, message.Role);
-        Assert.Contains(".agent/AGENT.md", message.Content);
-        Assert.Contains("agent guide", message.Content);
-        Assert.Contains(".agent/MEMORY.md", message.Content);
-        Assert.Contains("memory note", message.Content);
-        Assert.Contains("treat `.agent/MEMORY.md` as the primary place", message.Content);
-        Assert.Contains("Query conversation history only for transcript-specific evidence", message.Content);
+        Assert.Collection(
+            messages,
+            policy =>
+            {
+                Assert.Equal(LlmMessageRole.System, policy.Role);
+                Assert.Contains("treat `.agent/MEMORY.md` as the primary place", policy.Content);
+                Assert.Contains("Query conversation history only for transcript-specific evidence", policy.Content);
+            },
+            role =>
+            {
+                Assert.Equal(LlmMessageRole.System, role.Role);
+                Assert.Contains("Trusted role instruction: .agent/ROLE.md", role.Content);
+                Assert.Contains("role guide", role.Content);
+            },
+            identity =>
+            {
+                Assert.Equal(LlmMessageRole.System, identity.Role);
+                Assert.Contains("Trusted durable agent identity: .agent/SOUL.md", identity.Content);
+                Assert.Contains("stable identity", identity.Content);
+            },
+            memory =>
+            {
+                Assert.Equal(LlmMessageRole.User, memory.Role);
+                Assert.Contains("Lower-authority contextual state: .agent/MEMORY.md", memory.Content);
+                Assert.Contains("memory note", memory.Content);
+            });
     }
 
     [Fact]
@@ -34,11 +53,12 @@ public sealed class AgentContextProviderTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new FakeWorkspaceContextStore(new WorkspaceContextDocument("AGENTS.md", "repo guide"));
+        var store = new FakeWorkspaceContextStore(Document("nearest-agents", "AGENTS.md", WorkspaceContextDocumentKind.RoleInstruction, "repo guide"));
 
         var messages = await new AgentContextProvider(store).LoadAsync(paths);
 
-        var message = Assert.Single(messages);
+        Assert.Equal(2, messages.Count);
+        var message = messages[1];
         Assert.Equal(LlmMessageRole.System, message.Role);
         Assert.Contains("AGENTS.md", message.Content);
         Assert.Contains("repo guide", message.Content);
@@ -67,8 +87,9 @@ public sealed class AgentContextProviderTests
 
         var messages = await new AgentContextProvider(store).LoadAsync(paths);
 
-        var message = Assert.Single(messages);
-        Assert.True(message.Content.IndexOf("first guide", StringComparison.Ordinal) < message.Content.IndexOf("second guide", StringComparison.Ordinal));
+        Assert.Equal(3, messages.Count);
+        Assert.Contains("first guide", messages[1].Content);
+        Assert.Contains("second guide", messages[2].Content);
     }
 
     [Fact]
@@ -76,12 +97,17 @@ public sealed class AgentContextProviderTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new FakeWorkspaceContextStore(new WorkspaceContextDocument(".agent/AGENT.md", new string('x', 12_001)));
+        var store = new FakeWorkspaceContextStore(Document("role", ".agent/ROLE.md", WorkspaceContextDocumentKind.RoleInstruction, new string('x', 12_001)));
 
         var messages = await new AgentContextProvider(store).LoadAsync(paths);
 
-        var message = Assert.Single(messages);
+        var message = Assert.Single(messages, item => item.Content.Contains(".agent/ROLE.md", StringComparison.Ordinal));
         Assert.Contains("[truncated after 12000 characters]", message.Content, StringComparison.Ordinal);
+    }
+
+    private static WorkspaceContextDocument Document(string sourceId, string displayPath, WorkspaceContextDocumentKind kind, string content)
+    {
+        return new WorkspaceContextDocument(sourceId, displayPath, displayPath, kind, content, content.Length, null);
     }
 
     private sealed class FakeWorkspaceContextStore(params WorkspaceContextDocument[] documents) : IWorkspaceContextStore

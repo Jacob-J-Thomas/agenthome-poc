@@ -107,7 +107,7 @@ public sealed class CustomLoopContextResolverTests
         Assert.Contains("trusted custom-loop node instruction", assembly.Request.Messages[^1].Content, StringComparison.Ordinal);
         Assert.Equal(policy.ContextOut, assembly.ResolvedOutputPolicy);
         Assert.Equal(expectedSources, assembly.Blocks.Where(block => block.Included).Select(block => block.Source));
-        Assert.Equal(5, assembly.Blocks.Count(block => !block.Included && block.Source is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.ContextualState));
+        Assert.Equal(5, assembly.Blocks.Count(block => !block.Included && block.Source is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity or CustomLoopContextSource.ContextualState));
         foreach (var block in assembly.Blocks.Where(block => block.Included))
         {
             Assert.Null(block.OmissionReason);
@@ -148,6 +148,41 @@ public sealed class CustomLoopContextResolverTests
     }
 
     [Fact]
+    public void Durable_agent_identity_enters_the_trusted_instruction_channel()
+    {
+        var definition = Definition();
+        var run = Run(definition);
+        var identityContent = "[EmbodySense durable agent identity source: .agent/SOUL.md]\nstable purpose";
+        var manifest = run.ContextSnapshot.SourceManifest.ToArray();
+        manifest[2] = new CustomLoopContextManifestSource(
+            3,
+            CustomLoopContextSource.AgentIdentity,
+            "soul",
+            "test/.agent/SOUL.md",
+            CustomLoopContextProvenance.WorkspaceAgentIdentityFile,
+            CustomLoopContextTrustClass.TrustedInstruction,
+            LlmMessageRole.System,
+            identityContent,
+            Hash(identityContent),
+            identityContent.Length,
+            identityContent.Length,
+            false,
+            null,
+            null,
+            Now);
+        run = run with
+        {
+            ContextSnapshot = CustomLoopContextSnapshotHash.Apply(run.ContextSnapshot with { SourceManifest = manifest })
+        };
+
+        var assembly = new CustomLoopContextResolver().ResolveInference(run, definition.InferenceSteps[0]);
+
+        Assert.Contains(assembly.Request.InstructionContext!.TrustedInstructions, instruction => instruction.SourceId == "soul" && instruction.Content == identityContent);
+        Assert.DoesNotContain(assembly.Request.Messages, message => message.Content == identityContent);
+        Assert.Contains(assembly.Blocks, block => block.Source == CustomLoopContextSource.AgentIdentity && block.Included);
+    }
+
+    [Fact]
     public void Custom_policy_can_exclude_every_optional_source_and_preserves_its_output_disposition()
     {
         var outputPolicy = new CustomLoopContextOutputPolicy(RetainForLoopReasoning: false, PublishToInvokingConversation: true);
@@ -176,7 +211,7 @@ public sealed class CustomLoopContextResolverTests
         Assert.Equal(
             [CustomLoopContextSource.HarnessGovernance, CustomLoopContextSource.RunMetadata, CustomLoopContextSource.NodeInstruction],
             assembly.Blocks.Where(block => block.Included).Select(block => block.Source));
-        Assert.Equal(7, assembly.Blocks.Count(block => !block.Included && block.Source is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.ContextualState));
+        Assert.Equal(7, assembly.Blocks.Count(block => !block.Included && block.Source is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity or CustomLoopContextSource.ContextualState));
         Assert.Contains(assembly.Blocks, block => !block.Included && block.Source == CustomLoopContextSource.TriggerPrompt);
         Assert.Contains(assembly.Blocks, block => !block.Included && block.Source == CustomLoopContextSource.InvokingConversation);
         Assert.Contains(assembly.Blocks, block => !block.Included && block.Source == CustomLoopContextSource.EarlierRetainedOutput);
@@ -462,9 +497,9 @@ public sealed class CustomLoopContextResolverTests
         var manifest = new List<CustomLoopContextManifestSource>
         {
             roleInstruction,
-            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "agent", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(3, CustomLoopContextSource.RoleInstruction, "soul", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
-            OmittedSource(4, CustomLoopContextSource.RoleInstruction, "personality", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(2, CustomLoopContextSource.RoleInstruction, "role", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(3, CustomLoopContextSource.AgentIdentity, "soul", CustomLoopContextProvenance.WorkspaceAgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
+            OmittedSource(4, CustomLoopContextSource.AgentIdentity, "personality", CustomLoopContextProvenance.WorkspaceAgentIdentityFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System),
             contextualState,
             OmittedSource(6, CustomLoopContextSource.ContextualState, "memory", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User),
             OmittedSource(7, CustomLoopContextSource.ContextualState, "models", CustomLoopContextProvenance.WorkspaceContextFile, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User)

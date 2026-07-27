@@ -76,23 +76,30 @@ internal sealed class CustomLoopRuntimeContext
         var sourceType = document.Kind switch
         {
             WorkspaceContextDocumentKind.RoleInstruction => CustomLoopContextSource.RoleInstruction,
+            WorkspaceContextDocumentKind.AgentIdentity => CustomLoopContextSource.AgentIdentity,
             WorkspaceContextDocumentKind.ContextualState => CustomLoopContextSource.ContextualState,
             _ => throw new InvalidOperationException($"Workspace context source `{document.SourceId}` has no supported trust classification.")
         };
-        var provenance = document.Kind == WorkspaceContextDocumentKind.RoleInstruction
-            ? CustomLoopContextProvenance.WorkspaceRoleFile
-            : CustomLoopContextProvenance.WorkspaceContextFile;
-        var trustClass = document.Kind == WorkspaceContextDocumentKind.RoleInstruction
-            ? CustomLoopContextTrustClass.TrustedInstruction
-            : CustomLoopContextTrustClass.UntrustedData;
+        var provenance = document.Kind switch
+        {
+            WorkspaceContextDocumentKind.RoleInstruction => CustomLoopContextProvenance.WorkspaceRoleFile,
+            WorkspaceContextDocumentKind.AgentIdentity => CustomLoopContextProvenance.WorkspaceAgentIdentityFile,
+            _ => CustomLoopContextProvenance.WorkspaceContextFile
+        };
+        var trustClass = document.Kind == WorkspaceContextDocumentKind.ContextualState
+            ? CustomLoopContextTrustClass.UntrustedData
+            : CustomLoopContextTrustClass.TrustedInstruction;
         if (document.OmissionReason is not null)
         {
             return CreateManifestSource(order, sourceType, document.SourceId, document.ExactPath, provenance, trustClass, string.Empty, document.OriginalCharacterCount, false, null, document.OmissionReason, capturedAtUtc);
         }
 
-        var label = document.Kind == WorkspaceContextDocumentKind.RoleInstruction
-            ? $"[EmbodySense role instruction source: {document.DisplayPath}]{Environment.NewLine}"
-            : $"[EmbodySense untrusted contextual state source: {document.DisplayPath}]{Environment.NewLine}";
+        var label = document.Kind switch
+        {
+            WorkspaceContextDocumentKind.RoleInstruction => $"[EmbodySense role instruction source: {document.DisplayPath}]{Environment.NewLine}",
+            WorkspaceContextDocumentKind.AgentIdentity => $"[EmbodySense durable agent identity source: {document.DisplayPath}]{Environment.NewLine}",
+            _ => $"[EmbodySense untrusted contextual state source: {document.DisplayPath}]{Environment.NewLine}"
+        };
         var fullContent = label + document.Content;
         if (fullContent.Length <= MaxDirectoryRoleSourceCharacters)
         {
@@ -230,7 +237,7 @@ internal sealed class CustomLoopRuntimeContext
             sourcePath,
             provenance,
             trustClass,
-            sourceType == CustomLoopContextSource.RoleInstruction ? LlmMessageRole.System : LlmMessageRole.User,
+            sourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity ? LlmMessageRole.System : LlmMessageRole.User,
             content,
             CustomLoopTraceContentHash.Compute(content),
             originalCharacterCount,

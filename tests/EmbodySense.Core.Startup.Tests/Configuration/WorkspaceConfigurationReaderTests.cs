@@ -36,7 +36,7 @@ public sealed class WorkspaceConfigurationReaderTests
         Assert.NotEmpty(snapshot.Permissions.Approved);
         Assert.NotEmpty(snapshot.Permissions.Denied);
         Assert.Contains("\"version\": 2", snapshot.Permissions.RawJson);
-        Assert.Contains(snapshot.Documents, document => document.Name == "Agent guide" && document.Exists && document.Content.Contains("Agent operating guide", StringComparison.Ordinal));
+        Assert.Contains(snapshot.Documents, document => document.Name == "Role guide" && document.Category == "Role" && document.Exists && document.Content.Contains("Workspace role guide", StringComparison.Ordinal));
         Assert.Contains(snapshot.Documents, document => document.Name == "Soul" && document.Exists);
         Assert.Contains(snapshot.Documents, document => document.Name == "Personality" && document.Exists);
         Assert.Contains(snapshot.Audit.Events, auditEvent => auditEvent.Actor == "test.actor" && auditEvent.Metadata["count"] == "2");
@@ -55,7 +55,7 @@ public sealed class WorkspaceConfigurationReaderTests
         Assert.False(snapshot.Status.Initialized);
         Assert.False(snapshot.Permissions.Exists);
         Assert.Contains("permissions.json is missing", snapshot.Permissions.ReadProblems.Single());
-        Assert.Contains(snapshot.Documents, document => document.Name == "Agent guide" && !document.Exists);
+        Assert.Contains(snapshot.Documents, document => document.Name == "Role guide" && !document.Exists);
         var current = Assert.Single(snapshot.ConversationHistory.Transcripts);
         Assert.Equal("current", current.ConversationId);
         Assert.False(current.Exists);
@@ -90,7 +90,7 @@ public sealed class WorkspaceConfigurationReaderTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await File.WriteAllTextAsync(paths.PermissionsPath, """{"version":2,"scope":"test","access_token":"secret-value","approved":[],"denied":[]}""");
-        await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "api_key=secret-value" + Environment.NewLine + new string('a', 41_000));
+        await File.WriteAllTextAsync(paths.AgentFile("ROLE.md"), "api_key=secret-value" + Environment.NewLine + new string('a', 41_000));
         await WriteLongTranscriptAsync(paths.CurrentConversationPath);
         var auditLog = new AuditLog(paths);
         for (var i = 0; i < 205; i++)
@@ -101,9 +101,9 @@ public sealed class WorkspaceConfigurationReaderTests
         var snapshot = await new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime());
 
         Assert.Contains("access_token\": [redacted]", snapshot.Permissions.RawJson);
-        var agentGuide = Assert.Single(snapshot.Documents, document => document.Name == "Agent guide");
-        Assert.Contains("api_key= [redacted]", agentGuide.Content);
-        Assert.Contains("[truncated after", agentGuide.Content);
+        var roleGuide = Assert.Single(snapshot.Documents, document => document.Name == "Role guide");
+        Assert.Contains("api_key= [redacted]", roleGuide.Content);
+        Assert.Contains("[truncated after", roleGuide.Content);
         Assert.Equal(200, snapshot.Audit.Events.Count);
         Assert.Contains(snapshot.Audit.ReadProblems, problem => problem.Contains("omits", StringComparison.Ordinal) && problem.Contains("older events", StringComparison.Ordinal));
         var current = Assert.Single(snapshot.ConversationHistory.Transcripts, transcript => transcript.ConversationId == "current");

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -142,6 +143,13 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
 
     private Dictionary<string, object?> CreateBaseMetadata(string requestId, LlmInferenceRequest request)
     {
+        var messageCharacterCount = request.Messages.Sum(message => message.Content.Length);
+        var trustedInstructionCount = request.InstructionContext?.TrustedInstructions.Count ?? 0;
+        var trustedInstructionCharacterCount = request.InstructionContext?.TrustedInstructions.Sum(instruction => instruction.Content.Length) ?? 0;
+        var instructionCharacterCount = request.InstructionContext is null
+            ? 0
+            : EmbodySenseDeveloperInstructions.Compose(request.InstructionContext.Governance, request.InstructionContext.TrustedInstructions).Length;
+
         return new Dictionary<string, object?>
         {
             ["request_id"] = requestId,
@@ -149,7 +157,11 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
             ["model"] = _options.Model,
             ["working_directory"] = _options.WorkingDirectory,
             ["message_count"] = request.Messages.Count,
-            ["input_character_count"] = request.Messages.Sum(message => message.Content.Length)
+            ["message_character_count"] = messageCharacterCount,
+            ["trusted_instruction_count"] = trustedInstructionCount,
+            ["trusted_instruction_character_count"] = trustedInstructionCharacterCount,
+            ["instruction_character_count"] = instructionCharacterCount,
+            ["input_character_count"] = messageCharacterCount + instructionCharacterCount
         };
     }
 }

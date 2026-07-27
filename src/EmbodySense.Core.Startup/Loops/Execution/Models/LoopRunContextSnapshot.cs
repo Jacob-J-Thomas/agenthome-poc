@@ -5,5 +5,5 @@ public sealed record LoopRunContextSnapshot(
     DateTimeOffset CapturedAtUtc,
     string ManifestHash,
     IReadOnlyList<LoopRunContextManifestSourceSnapshot> SourceManifest,
-    IReadOnlyList<LoopRunMessageSnapshot> DirectoryRoleMessages,
+    IReadOnlyList<LoopRunMessageSnapshot> WorkspaceContextMessages,
     IReadOnlyList<LoopRunMessageSnapshot> InvokingConversationMessages);

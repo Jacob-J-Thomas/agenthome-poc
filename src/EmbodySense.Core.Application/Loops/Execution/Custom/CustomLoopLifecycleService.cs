@@ -269,6 +269,15 @@ public sealed class CustomLoopLifecycleService
             return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.InvalidState, run, $"Explicit Resume is allowed only from Paused, not {run.Status}.");
         }
 
+        if (CustomLoopRunValidator.HasLegacyWorkspaceContextManifest(run))
+        {
+            const string detail = "Explicit Resume quarantined a pre-ROLE workspace context manifest as immutable historical evidence; no model check, execution lease, or provider dispatch was attempted.";
+            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, detail);
+            var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
+            var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
+            return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
+        }
+
         if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))
         {
             const string detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";

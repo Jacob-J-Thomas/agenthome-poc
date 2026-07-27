@@ -164,12 +164,12 @@ public sealed class WorkspaceConfigurationReader
         var documentPaths = new[]
         {
             DocumentPath("Nearest AGENTS", "Repository", WorkspaceInstructionLocator.FindNearest(paths.RootPath) ?? Path.Combine(paths.RootPath, WorkspaceInstructionLocator.FileName)),
-            DocumentPath("Agent guide", "Agent", paths.AgentFile("AGENT.md")),
-            DocumentPath("Soul", "Agent", paths.AgentFile("SOUL.md")),
-            DocumentPath("Personality", "Agent", paths.AgentFile("PERSONALITY.md")),
-            DocumentPath("Context", "Agent", paths.AgentFile("CONTEXT.md")),
-            DocumentPath("Memory", "Agent", paths.AgentFile("MEMORY.md")),
-            DocumentPath("Models", "Agent", paths.AgentFile("models.json")),
+            DocumentPath("Role guide", "Role", paths.AgentFile("ROLE.md")),
+            DocumentPath("Soul", "Agent identity", paths.AgentFile("SOUL.md")),
+            DocumentPath("Personality", "Agent identity", paths.AgentFile("PERSONALITY.md")),
+            DocumentPath("Context", "Context", paths.AgentFile("CONTEXT.md")),
+            DocumentPath("Memory", "Memory", paths.AgentFile("MEMORY.md")),
+            DocumentPath("Models", "Configuration", paths.AgentFile("models.json")),
             DocumentPath("Permissions guide", "Governance", paths.PermissionsReadmePath),
             DocumentPath("Memory guide", "Memory", paths.MemoryReadmePath),
             DocumentPath("Audit guide", "Governance", paths.AuditReadmePath)

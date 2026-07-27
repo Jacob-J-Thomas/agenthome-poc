@@ -131,6 +131,43 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Restart_recovery_quarantines_a_legacy_workspace_manifest_without_dispatch()
+    {
+        var legacy = WithLegacyWorkspaceContext(Run("run-legacy-recovery", CustomLoopRunStatus.Admitted));
+        var store = new MultiRunStore([legacy]);
+        var audit = new RecordingAuditLog();
+
+        var result = Assert.Single(await new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(Now.AddMinutes(2))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store[legacy.Id].Status);
+        Assert.Equal("recovery_legacy_workspace_context", store[legacy.Id].FailureCode);
+        Assert.Contains("immutable historical evidence", store[legacy.Id].FailureDetail, StringComparison.Ordinal);
+        Assert.Equal(2, audit.Events.Count);
+        Assert.All(audit.Events, item => Assert.Equal(true, item.Metadata["legacyWorkspaceContext"]));
+    }
+
+    [Fact]
+    public async Task Explicit_resume_quarantines_a_legacy_workspace_manifest_before_model_check_gate_or_dispatch()
+    {
+        var legacy = WithLegacyWorkspaceContext(Run("run-legacy-resume", CustomLoopRunStatus.Paused));
+        var store = new MultiRunStore([legacy]);
+        var executor = new NoopResumeExecutor(CustomLoopOrderedRunStatus.Completed);
+        var availability = new RecordingModelAvailability(available: true);
+        var gate = new TestExecutionGate();
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddMinutes(2)));
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(legacy.Id, legacy.LifecycleVersion, "resume-legacy-context", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store[legacy.Id].Status);
+        Assert.Contains("immutable historical evidence", store[legacy.Id].FailureDetail, StringComparison.Ordinal);
+        Assert.Empty(availability.Requests);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(0, gate.AcquisitionCount);
+    }
+
+    [Fact]
     public async Task Explicit_resume_quarantines_a_legacy_unmarked_paused_artifact_before_model_check_gate_or_dispatch()
     {
         var marked = Run("run-unmarked-paused", CustomLoopRunStatus.Paused);
@@ -898,6 +935,18 @@ public sealed class CustomLoopLifecycleServiceTests
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
         return run;
+    }
+
+    private static CustomLoopRunRecord WithLegacyWorkspaceContext(CustomLoopRunRecord run)
+    {
+        var manifest = run.ContextSnapshot.SourceManifest.ToArray();
+        manifest[1] = manifest[1] with { SourceId = "agent", SourcePath = "C:/workspace/.agent/AGENT.md" };
+        manifest[2] = manifest[2] with { SourceType = CustomLoopContextSource.RoleInstruction, Provenance = CustomLoopContextProvenance.WorkspaceRoleFile };
+        manifest[3] = manifest[3] with { SourceType = CustomLoopContextSource.RoleInstruction, Provenance = CustomLoopContextProvenance.WorkspaceRoleFile };
+        var snapshot = CustomLoopContextSnapshotHash.Apply(run.ContextSnapshot with { SourceManifest = manifest });
+        var legacy = CustomLoopAdmissionRequestHash.Apply(run with { ContextSnapshot = snapshot, AdmissionRequestHash = string.Empty });
+        Assert.True(CustomLoopRunValidator.Validate(legacy).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(legacy).Errors));
+        return legacy;
     }
 
     private static CustomLoopDefinition Definition()

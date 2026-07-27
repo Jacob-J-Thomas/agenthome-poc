@@ -395,7 +395,7 @@ public sealed class CustomLoopAdmissionService
             && string.Equals(left.ManifestHash, right.ManifestHash, StringComparison.Ordinal)
             && CustomLoopContextSnapshotHash.Matches(right)
             && ManifestSourcesEqual(left.SourceManifest, right.SourceManifest)
-            && MessageSnapshotsEqual(left.DirectoryRoleMessages, right.DirectoryRoleMessages)
+            && MessageSnapshotsEqual(left.WorkspaceContextMessages, right.WorkspaceContextMessages)
             && MessageSnapshotsEqual(left.InvokingConversationMessages, right.InvokingConversationMessages);
     }
 

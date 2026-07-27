@@ -8,25 +8,28 @@ namespace EmbodySense.Core.Persistence.Tests.Workspace;
 public sealed class WorkspaceContextStoreTests
 {
     [Fact]
-    public async Task LoadDocumentsAsync_loads_non_empty_agent_documents()
+    public async Task LoadDocumentsAsync_classifies_role_identity_and_context_documents()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.AgentPath);
-        await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "agent guide");
+        await File.WriteAllTextAsync(paths.AgentFile("ROLE.md"), "role guide");
+        await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "obsolete ambiguous guide");
         await File.WriteAllTextAsync(paths.AgentFile("SOUL.md"), "stable purpose");
         await File.WriteAllTextAsync(paths.AgentFile("PERSONALITY.md"), "interaction style");
         await File.WriteAllTextAsync(paths.AgentFile("MEMORY.md"), "memory note");
 
         var documents = await new WorkspaceContextStore().LoadDocumentsAsync(paths);
 
-        Assert.Contains(documents, document => document.DisplayPath == ".agent/AGENT.md" && document.Content == "agent guide");
+        Assert.Contains(documents, document => document.DisplayPath == ".agent/ROLE.md" && document.Content == "role guide");
+        Assert.DoesNotContain(documents, document => document.DisplayPath == ".agent/AGENT.md");
         Assert.Contains(documents, document => document.DisplayPath == ".agent/SOUL.md" && document.Content == "stable purpose");
         Assert.Contains(documents, document => document.DisplayPath == ".agent/PERSONALITY.md" && document.Content == "interaction style");
         Assert.Contains(documents, document => document.DisplayPath == ".agent/MEMORY.md" && document.Content == "memory note");
         Assert.Equal(7, documents.Count);
-        Assert.Equal(["nearest-agents", "agent", "soul", "personality", "context", "memory", "models"], documents.Select(document => document.SourceId));
-        Assert.All(documents.Take(4), document => Assert.Equal(WorkspaceContextDocumentKind.RoleInstruction, document.Kind));
+        Assert.Equal(["nearest-agents", "role", "soul", "personality", "context", "memory", "models"], documents.Select(document => document.SourceId));
+        Assert.All(documents.Take(2), document => Assert.Equal(WorkspaceContextDocumentKind.RoleInstruction, document.Kind));
+        Assert.All(documents.Skip(2).Take(2), document => Assert.Equal(WorkspaceContextDocumentKind.AgentIdentity, document.Kind));
         Assert.All(documents.Skip(4), document => Assert.Equal(WorkspaceContextDocumentKind.ContextualState, document.Kind));
         Assert.All(documents, document => Assert.True(Path.IsPathFullyQualified(document.ExactPath)));
         Assert.All(documents.Where(document => document.Content.Length == 0), document => Assert.NotNull(document.OmissionReason));
