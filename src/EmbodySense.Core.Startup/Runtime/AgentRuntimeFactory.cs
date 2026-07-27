@@ -175,7 +175,7 @@ public sealed class AgentRuntimeFactory
             var customRuntimeContext = new CustomLoopRuntimeContext(paths, conversationState, conversationMemory);
             var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
             var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(effectiveOptions, _approvalPrompt, customToolAuthority, customToolEvidence);
-            var customRunner = new CustomLoopOrderedRunner(customRunStore, new CustomLoopContextResolver(), customInferenceExecutor, customPublisher, auditLog, customToolAuthority);
+            var customRunner = new CustomLoopOrderedRunner(customRunStore, new CustomLoopContextResolver(), customInferenceExecutor, customPublisher, auditLog, customToolAuthority, attemptCancellationBroker: customExecutionGate);
             var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, customRunner, customInferenceExecutor, customRunner, auditLog, customExecutionGate);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(

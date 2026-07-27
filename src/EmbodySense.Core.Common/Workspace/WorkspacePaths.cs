@@ -67,6 +67,8 @@ public sealed class WorkspacePaths
 
     public string CustomLoopHostLockPath => Path.Combine(LoopRunsPath, ".custom-workspace-host.lock");
 
+    public string CustomLoopCancellationOwnerPath => Path.Combine(LoopRunsPath, ".custom-workspace-cancellation-owner.json");
+
     public string DefaultConversationLoopDefinitionPath => Path.Combine(LoopDefinitionsPath, BuiltInLoopIds.DefaultConversation + ".json");
 
     public string TasksPath => Path.Combine(AgentPath, "tasks");

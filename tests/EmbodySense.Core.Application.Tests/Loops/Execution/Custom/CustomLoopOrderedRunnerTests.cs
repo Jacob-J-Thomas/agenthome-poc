@@ -807,6 +807,32 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Routed_provider_cancellation_is_confirmed_only_after_the_attempt_observes_it()
+    {
+        var store = new FakeRunStore(Run(Definition()));
+        var executor = new BlockingCancellationExecutor();
+        var broker = new RecordingAttemptCancellationBroker();
+        var runner = new CustomLoopOrderedRunner(
+            store,
+            new CustomLoopContextResolver(),
+            executor,
+            new RecordingPublisher(),
+            new RecordingAuditLog(),
+            new TestAuthorityProvider(),
+            new FixedTimeProvider(Now),
+            broker);
+        var execution = runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+        await executor.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var signal = await runner.RequestActiveAttemptCancellationAsync(store.Current.Id, "cancel-routed-attempt");
+        var result = await execution;
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, signal.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal("inference_attempt_uncertain", result.Run!.FailureCode);
+    }
+
+    [Fact]
     public async Task Public_execution_registers_local_ownership_before_persisting_running_state()
     {
         CustomLoopOrderedRunner? runner = null;
@@ -2214,6 +2240,51 @@ public sealed class CustomLoopOrderedRunnerTests
             }
 
             return (CustomLoopInferenceAttemptResult)outcome;
+        }
+    }
+
+    private sealed class BlockingCancellationExecutor : ICustomLoopInferenceAttemptExecutor
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
+        {
+            providerRequestStarted?.Invoke();
+            Started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The cancellation test provider unexpectedly completed.");
+        }
+    }
+
+    private sealed class RecordingAttemptCancellationBroker : ICustomLoopAttemptCancellationBroker
+    {
+        private CancellationTokenSource? _cancellation;
+        private TaskCompletionSource<CustomLoopAttemptCancellationResult>? _completion;
+
+        public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation)
+        {
+            _cancellation = cancellation;
+            _completion = new TaskCompletionSource<CustomLoopAttemptCancellationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return new Registration(this);
+        }
+
+        public async Task<CustomLoopAttemptCancellationResult> RequestCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
+        {
+            _cancellation!.Cancel();
+            return await _completion!.Task.WaitAsync(cancellationToken);
+        }
+
+        private sealed class Registration(RecordingAttemptCancellationBroker owner) : ICustomLoopAttemptCancellationRegistration
+        {
+            public void ConfirmProviderInterruption()
+            {
+                owner._completion!.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, "Confirmed."));
+            }
+
+            public void Dispose()
+            {
+                owner._completion!.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "Completed without confirmation."));
+            }
         }
     }
 

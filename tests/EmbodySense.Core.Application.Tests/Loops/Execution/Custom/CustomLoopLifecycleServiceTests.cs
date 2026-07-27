@@ -1168,6 +1168,12 @@ public sealed class CustomLoopLifecycleServiceTests
             RunIds.Add(runId);
         }
 
+        public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
+        {
+            CancelActiveAttempt(runId);
+            return Task.FromResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "The test cancellation signal was delivered."));
+        }
+
         private sealed class Registration(Action release) : IDisposable
         {
             private int _disposed;

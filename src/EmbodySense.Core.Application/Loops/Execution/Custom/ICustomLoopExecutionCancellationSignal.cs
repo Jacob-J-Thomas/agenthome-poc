@@ -7,4 +7,6 @@ public interface ICustomLoopExecutionCancellationSignal
     IDisposable? TryRegisterActiveRun(string runId);
 
     void CancelActiveAttempt(string runId);
+
+    Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default);
 }
