@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -220,12 +221,13 @@ public sealed class CustomLoopLifecycleService
                 return await CompleteAsync(operation, cancelledOutcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
             }
 
-            if (!TryCancelActiveAttempt(run.Id, out var signalFailure))
+            var signal = await TryCancelActiveAttemptAsync(run.Id, operation.OperationId);
+            if (!signal.Succeeded)
             {
-                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, signalFailure);
+                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, signal.Detail);
             }
 
-            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.CancelRequested, run, "Cancellation is already requested; no new provider dispatch is permitted.");
+            return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.CancelRequested, run, $"Cancellation is already requested; no new provider dispatch is permitted. {signal.Detail}");
         }
 
         if (run.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested)
@@ -236,13 +238,14 @@ public sealed class CustomLoopLifecycleService
                 return await CompleteAuditedOutcomeAsync(operation, requested.Status, requested.CurrentRun, requested.Detail);
             }
 
-            if (!TryCancelActiveAttempt(run.Id, out var signalFailure))
+            var signal = await TryCancelActiveAttemptAsync(run.Id, operation.OperationId);
+            if (!signal.Succeeded)
             {
-                return Result(CustomLoopControlStatus.Failed, requested.Run, operation.OperationId, signalFailure);
+                return Result(CustomLoopControlStatus.Failed, requested.Run, operation.OperationId, signal.Detail);
             }
 
             var outcome = requested.AuditRecorded ? CustomLoopControlStatus.CancelRequested : CustomLoopControlStatus.AuditWarning;
-            return await CompleteAsync(operation, outcome, requested.Run, requested.AuditRecorded, requested.Detail);
+            return await CompleteAsync(operation, outcome, requested.Run, requested.AuditRecorded, $"{requested.Detail} {signal.Detail}");
         }
 
         if (run.Status == CustomLoopRunStatus.Admitted)
@@ -399,9 +402,10 @@ public sealed class CustomLoopLifecycleService
                 return await CompleteAsync(operation, cancelledOutcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
             }
 
-            if (!TryCancelActiveAttempt(run.Id, out var signalFailure))
+            var signal = await TryCancelActiveAttemptAsync(run.Id, operation.OperationId);
+            if (!signal.Succeeded)
             {
-                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, signalFailure);
+                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, signal.Detail);
             }
         }
 
@@ -442,18 +446,24 @@ public sealed class CustomLoopLifecycleService
         return Result(CustomLoopControlStatus.NeedsReview, quarantinedRun, operation.OperationId, quarantined.Run is null ? $"{detail} {quarantined.Detail}" : quarantined.Detail);
     }
 
-    private bool TryCancelActiveAttempt(string runId, out string failureDetail)
+    private async Task<CancellationSignalAttempt> TryCancelActiveAttemptAsync(string runId, string operationId)
     {
         try
         {
-            _cancellationSignal.CancelActiveAttempt(runId);
-            failureDetail = string.Empty;
-            return true;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var result = await _cancellationSignal.RequestActiveAttemptCancellationAsync(runId, operationId, timeout.Token);
+            var owner = result.OwnerId is null || result.OwnerProcessId is null ? string.Empty : $" Owner generation `{result.OwnerId}` in process {result.OwnerProcessId} handled the route.";
+            return result.Status switch
+            {
+                CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed => new CancellationSignalAttempt(true, $"The owning runtime confirmed that the provider attempt observed cancellation.{owner}"),
+                CustomLoopAttemptCancellationStatus.SignalDelivered => new CancellationSignalAttempt(true, $"The owning runtime accepted and signalled cancellation, but provider interruption was not confirmed within the bounded acknowledgement window.{owner}"),
+                CustomLoopAttemptCancellationStatus.NoActiveAttempt => new CancellationSignalAttempt(true, $"The owning runtime reported no active provider attempt; the durable cancellation will be enforced at the next safe boundary.{owner}"),
+                _ => new CancellationSignalAttempt(false, $"The cancellation request is durable, but the active-attempt owner did not confirm routing: {result.Detail}{owner} The control receipt remains pending so the same operation can retry.")
+            };
         }
         catch (Exception exception)
         {
-            failureDetail = $"The cancellation request is durable, but signalling the active attempt failed: {SafeExceptionClass(exception)}. The control receipt remains pending so the same operation can retry the signal.";
-            return false;
+            return new CancellationSignalAttempt(false, $"The cancellation request is durable, but routing to the active-attempt owner failed: {SafeExceptionClass(exception)}. The control receipt remains pending so the same operation can retry the signal.");
         }
     }
 
@@ -698,4 +708,6 @@ public sealed class CustomLoopLifecycleService
     }
 
     private sealed record TransitionResult(CustomLoopRunRecord? Run, CustomLoopRunRecord? CurrentRun, CustomLoopControlStatus Status, bool AuditRecorded, string Detail);
+
+    private sealed record CancellationSignalAttempt(bool Succeeded, string Detail);
 }

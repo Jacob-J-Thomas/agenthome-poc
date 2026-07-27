@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -19,6 +20,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly ICustomLoopConversationPublisher _conversationPublisher;
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
+    private readonly ICustomLoopAttemptCancellationBroker? _attemptCancellationBroker;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
@@ -30,7 +32,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         ICustomLoopConversationPublisher conversationPublisher,
         IAuditLog auditLog,
         ICustomLoopToolAuthorityProvider authorityProvider,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ICustomLoopAttemptCancellationBroker? attemptCancellationBroker = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -39,6 +42,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _attemptCancellationBroker = attemptCancellationBroker;
     }
 
     public async Task<CustomLoopOrderedRunResult> RunAsync(CustomLoopOrderedRunRequest request, CancellationToken cancellationToken = default)
@@ -192,6 +196,32 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         throw new InvalidOperationException("The active provider attempt is not owned by this runtime and could not be signalled locally.");
+    }
+
+    public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
+    {
+        CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
+        CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
+        if (_attemptCancellationBroker is not null)
+        {
+            return _attemptCancellationBroker.RequestCancellationAsync(runId, operationId, cancellationToken);
+        }
+
+        try
+        {
+            CancelActiveAttempt(runId);
+            var status = _activeAttemptCancellations.ContainsKey(runId)
+                ? CustomLoopAttemptCancellationStatus.SignalDelivered
+                : CustomLoopAttemptCancellationStatus.NoActiveAttempt;
+            var detail = status == CustomLoopAttemptCancellationStatus.SignalDelivered
+                ? "The active provider attempt cancellation token was signalled in this runtime."
+                : "This runtime owns the run, but no provider attempt was active at the cancellation boundary.";
+            return Task.FromResult(new CustomLoopAttemptCancellationResult(status, detail));
+        }
+        catch (Exception exception)
+        {
+            return Task.FromResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.OwnerUnavailable, $"The active provider attempt owner could not be reached: {SafeExceptionClass(exception)}."));
+        }
     }
 
     private async Task<CustomLoopOrderedRunResult> ContinueRegisteredAsync(CustomLoopRunRecord run, string actor, CancellationToken cancellationToken)
@@ -405,7 +435,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         CustomLoopInferenceAttemptResult result;
         var providerInvoked = false;
-        using var providerToken = CreateProviderToken(run, cancellationToken);
+        ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
+        using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
+        using var providerToken = CancellationTokenSource.CreateLinkedTokenSource(providerBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
             return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: false, providerWasInvoked: false);
@@ -413,6 +445,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         try
         {
+            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, providerToken, providerBoundaryToken.Token);
             var dispatchBoundary = await ObserveControlBoundaryAsync(run, actor);
             if (dispatchBoundary.Terminal is not null)
             {
@@ -437,12 +470,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         {
             return await HandlePreInvocationCancellationAsync(run, actor, cancellationToken);
         }
+        catch (OperationCanceledException exception)
+        {
+            cancellationRegistration?.TryConfirmProviderInterruption(exception.CancellationToken);
+            return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, exception, isExit: false, providerWasInvoked: true);
+        }
         catch (Exception exception)
         {
             return await RecordAttemptFailureAsync(run, actor, step.Id, iteration, correlation, assembly, exception, isExit: false, providerWasInvoked: providerInvoked);
         }
         finally
         {
+            cancellationRegistration?.Dispose();
             _activeAttemptCancellations.TryRemove(run.Id, out _);
         }
 
@@ -608,7 +647,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         CustomLoopInferenceAttemptResult result;
         var providerInvoked = false;
-        using var providerToken = CreateProviderToken(run, cancellationToken);
+        ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
+        using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
+        using var providerToken = CancellationTokenSource.CreateLinkedTokenSource(providerBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, providerToken))
         {
             return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, new InvalidOperationException("A provider attempt is already registered for this run."), isExit: true, providerWasInvoked: false);
@@ -616,6 +657,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         try
         {
+            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, providerToken, providerBoundaryToken.Token);
             var dispatchBoundary = await ObserveControlBoundaryAsync(run, actor);
             if (dispatchBoundary.Terminal is not null)
             {
@@ -640,12 +682,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         {
             return await HandlePreInvocationCancellationAsync(run, actor, cancellationToken);
         }
+        catch (OperationCanceledException exception)
+        {
+            cancellationRegistration?.TryConfirmProviderInterruption(exception.CancellationToken);
+            return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, exception, isExit: true, providerWasInvoked: true);
+        }
         catch (Exception exception)
         {
             return await RecordAttemptFailureAsync(run, actor, "exit", iteration, correlation, assembly, exception, isExit: true, providerWasInvoked: providerInvoked);
         }
         finally
         {
+            cancellationRegistration?.Dispose();
             _activeAttemptCancellations.TryRemove(run.Id, out _);
         }
 
@@ -902,10 +950,23 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         run = intentPersisted.Run!;
         CustomLoopConversationPublicationResult publication;
         var publicationDispatched = false;
-        using var publicationToken = new CancellationTokenSource(IntegrityWriteTimeout);
+        ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
+        using var publicationBoundaryToken = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var publicationToken = CancellationTokenSource.CreateLinkedTokenSource(publicationBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, publicationToken))
         {
             var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "publication_registration_failed", "Conversation publication could not be registered with the active cancellation protocol, so no append was attempted.");
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
+        try
+        {
+            cancellationRegistration = _attemptCancellationBroker?.RegisterActiveAttempt(run.Id, publicationToken, publicationBoundaryToken.Token);
+        }
+        catch (Exception exception)
+        {
+            _activeAttemptCancellations.TryRemove(run.Id, out _);
+            var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "publication_registration_failed", $"Conversation publication could not register with the workspace-host cancellation broker, so no append was attempted: {SafeExceptionClass(exception)}.");
             return new RunAdvance(terminal.Run, terminal);
         }
 
@@ -949,6 +1010,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         finally
         {
+            cancellationRegistration?.Dispose();
             _activeAttemptCancellations.TryRemove(run.Id, out _);
         }
 

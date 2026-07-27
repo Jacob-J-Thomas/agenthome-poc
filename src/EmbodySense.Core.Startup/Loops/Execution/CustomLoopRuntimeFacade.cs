@@ -421,13 +421,20 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return replay;
         }
 
+        var request = new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor);
+        var result = await _lifecycleService.CancelAsync(request, cancellationToken);
+        if (!RequiresCancellationOwnerRecovery(result))
+        {
+            return MapControl(result);
+        }
+
         var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
         if (!availability.Available)
         {
-            return new LoopRunControlResponse(availability.Status, null, input.OperationId, availability.Detail);
+            return MapControl(result with { Detail = $"{result.Detail} Retained-runtime recovery did not acquire hosting: {availability.Detail}" });
         }
 
-        return await ExecuteControlAsync(awaitable: _lifecycleService.CancelAsync(new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
+        return MapControl(await _lifecycleService.CancelAsync(request, cancellationToken));
     }
 
     public async Task<LoopRunControlResponse> ResumeAsync(LoopRunControlInput input, CancellationToken cancellationToken)
@@ -538,8 +545,19 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     private static async Task<LoopRunControlResponse> ExecuteControlAsync(Task<CustomLoopControlResult> awaitable)
     {
-        var result = await awaitable;
+        return MapControl(await awaitable);
+    }
+
+    private static LoopRunControlResponse MapControl(CustomLoopControlResult result)
+    {
         return new LoopRunControlResponse(result.Status.ToString(), result.Run is null ? null : Map(result.Run), result.OperationId, result.Detail);
+    }
+
+    private static bool RequiresCancellationOwnerRecovery(CustomLoopControlResult result)
+    {
+        return result.Status == CustomLoopControlStatus.Failed
+            && result.Run?.Status == CustomLoopRunStatus.CancelRequested
+            && result.Detail.Contains("control receipt remains pending", StringComparison.OrdinalIgnoreCase);
     }
 
     private CustomLoopInvocationOperation CreatePendingOperation(LoopRunInvocationInput input)

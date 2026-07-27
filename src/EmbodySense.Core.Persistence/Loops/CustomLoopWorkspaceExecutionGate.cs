@@ -1,10 +1,13 @@
+using System.Runtime.InteropServices;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
-public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecutionGate
+public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecutionGate, ICustomLoopAttemptCancellationBroker
 {
     private static readonly object HostsSync = new();
     private static readonly Dictionary<string, WorkspaceHost> Hosts = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
@@ -128,6 +131,42 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation, CancellationToken competingCancellationToken = default)
+    {
+        CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
+        ArgumentNullException.ThrowIfNull(cancellation);
+        lock (HostsSync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            var host = _host ??= TryAttachOrAcquireHost();
+            if (host is null)
+            {
+                throw new InvalidOperationException("The active provider attempt cannot register because this process does not own custom-loop hosting.");
+            }
+
+            return host.CancellationHost.RegisterActiveAttempt(runId, cancellation, competingCancellationToken);
+        }
+    }
+
+    public async Task<CustomLoopAttemptCancellationResult> RequestCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
+    {
+        CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
+        CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
+        WorkspaceHost? localHost;
+        lock (HostsSync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            localHost = _host;
+        }
+
+        if (localHost is not null)
+        {
+            return await localHost.CancellationHost.RequestCancellationAsync(runId, cancellationToken);
+        }
+
+        return await CustomLoopAttemptCancellationHost.RequestRemoteCancellationAsync(_paths, runId, operationId, cancellationToken);
+    }
+
     public ValueTask DisposeAsync()
     {
         lock (HostsSync)
@@ -199,7 +238,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
 
         Hosts.Remove(workspaceKey);
-        host.Ownership.Dispose();
+        host.Dispose();
     }
 
     private WorkspaceHost? TryAttachOrAcquireHost()
@@ -217,6 +256,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         {
             var hostLockPath = pathGuard.GetFilePath(_paths.LoopRunsPath, Path.GetFileName(_paths.CustomLoopHostLockPath));
             ownership = new FileStream(hostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.WriteThrough);
+            AcquireHostFileLock(ownership);
             pathGuard.GetFilePath(_paths.LoopRunsPath, Path.GetFileName(_paths.CustomLoopHostLockPath));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -230,7 +270,17 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             throw;
         }
 
-        var host = new WorkspaceHost(ownership);
+        WorkspaceHost host;
+        try
+        {
+            host = new WorkspaceHost(_paths, _workspaceKey, ownership);
+        }
+        catch
+        {
+            ownership.Dispose();
+            throw;
+        }
+
         Hosts.Add(_workspaceKey, host);
         return host;
     }
@@ -243,6 +293,24 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             ? fullPath
             : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
+
+    private static void AcquireHostFileLock(FileStream ownership)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const int exclusiveNonblocking = 2 | 4;
+        var descriptor = ownership.SafeFileHandle.DangerousGetHandle().ToInt32();
+        if (Flock(descriptor, exclusiveNonblocking) != 0)
+        {
+            throw new IOException("Another process owns the custom-loop workspace host lock.");
+        }
+    }
+
+    [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
+    private static extern int Flock(int fileDescriptor, int operation);
 
     private static bool IsHash(string value)
     {
@@ -260,14 +328,17 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
-    private sealed class WorkspaceHost
+    private sealed class WorkspaceHost : IDisposable
     {
-        public WorkspaceHost(FileStream ownership)
+        public WorkspaceHost(WorkspacePaths paths, string workspaceKey, FileStream ownership)
         {
             Ownership = ownership;
+            CancellationHost = new CustomLoopAttemptCancellationHost(paths, workspaceKey);
         }
 
         public FileStream Ownership { get; }
+
+        public CustomLoopAttemptCancellationHost CancellationHost { get; }
 
         public int ReferenceCount { get; set; } = 1;
 
@@ -280,6 +351,12 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         public long BusyOutcomeGeneration { get; set; }
 
         public Dictionary<string, BusyOutcomeReservation> BusyOutcomeReservations { get; } = new(StringComparer.Ordinal);
+
+        public void Dispose()
+        {
+            CancellationHost.Dispose();
+            Ownership.Dispose();
+        }
     }
 
     private sealed record BusyOutcomeReservation(string RequestHash, long Generation);
