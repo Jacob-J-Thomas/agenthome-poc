@@ -38,7 +38,6 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
     public async Task InitializeAsync(string rootPath, CancellationToken cancellationToken = default)
     {
         var paths = new WorkspacePaths(rootPath);
-        await WorkspacePermissionMigrator.MigrateAsync(paths, cancellationToken);
         await _scaffolder.ApplyAsync(paths, WorkspaceDefaults.GetDirectories(paths), WorkspaceDefaults.GetSeedFiles(paths), _actor, cancellationToken);
     }
 }

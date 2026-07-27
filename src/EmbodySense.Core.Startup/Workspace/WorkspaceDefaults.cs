@@ -418,6 +418,8 @@ internal static class WorkspaceDefaults
 
             The active policy is directory-level only and applies to agent-mediated file-system access in this workspace. It does not grant blanket process access to the host machine.
 
+            POC schema policy: `permissions.json` uses version 1 only. Unsupported shapes require explicit reinitialization or cleanup; do not add automatic migrations, compatibility readers, or legacy aliases without a user-approved release policy.
+
             Default behavior:
 
             - Missing or unsupported permissions require human approval before proceeding.

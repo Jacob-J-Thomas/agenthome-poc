@@ -5,8 +5,7 @@ namespace EmbodySense.Core.Common.Governance.Permissions.Models;
 
 public sealed class PermissionsDocument
 {
-    public const int CurrentVersion = 3;
-    public const int ToolResponseInspectionMigrationSourceVersion = 2;
+    public const int CurrentVersion = 1;
     public const string ToolResponseInspectionPath = ".agent/logs/tool-responses";
 
     public int Version { get; init; } = CurrentVersion;
@@ -52,28 +51,10 @@ public sealed class PermissionsDocument
     public static PermissionsDocument? FromJson(string json)
     {
         var document = JsonSerializer.Deserialize<PermissionsDocument>(json, PermissionsJson.Options);
-        return document is { Version: ToolResponseInspectionMigrationSourceVersion or CurrentVersion } ? document : null;
+        return document is { Version: CurrentVersion } ? document : null;
     }
 
     public string ToJson() => JsonSerializer.Serialize(this, PermissionsJson.Options);
-
-    public PermissionsDocument? MigrateToolResponseInspectionPolicy()
-    {
-        if (Version != ToolResponseInspectionMigrationSourceVersion)
-        {
-            return null;
-        }
-
-        var migrated = new PermissionsDocument
-        {
-            Version = CurrentVersion,
-            Scope = Scope,
-            Approved = [.. Approved],
-            Denied = [.. Denied]
-        };
-        migrated.EnsureToolResponseInspectionApproval();
-        return migrated;
-    }
 
     public bool EnsureToolResponseInspectionApproval()
     {

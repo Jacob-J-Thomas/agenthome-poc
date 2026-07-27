@@ -36,36 +36,6 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task CreateAsync_migrates_permissions_for_an_existing_workspace_before_loading_policy()
-    {
-        using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var current = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
-        var permissions = new PermissionsDocument
-        {
-            Version = PermissionsDocument.ToolResponseInspectionMigrationSourceVersion,
-            Scope = current.Scope,
-            Approved = [.. current.Approved],
-            Denied = [.. current.Denied]
-        };
-        permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
-        await File.WriteAllTextAsync(paths.PermissionsPath, permissions.ToJson());
-
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
-            null,
-            workspace.RootPath,
-            "codex-not-used",
-            "read-only",
-            AgentRuntimeSurface.Cli);
-
-        var migrated = new PermissionPolicyStore().Load(paths);
-        Assert.Equal(PermissionsDocument.CurrentVersion, Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath))).Version);
-        var evaluation = migrated.EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
-        Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
-    }
-
-    [Fact]
     public void Agent_runtime_surface_requires_explicit_safe_identifier()
     {
         var web = AgentRuntimeSurface.Create(" web ");

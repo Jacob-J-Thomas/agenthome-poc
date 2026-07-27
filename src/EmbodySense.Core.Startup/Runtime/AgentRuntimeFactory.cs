@@ -71,7 +71,6 @@ public sealed class AgentRuntimeFactory
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
         try
         {
-            await WorkspacePermissionMigrator.MigrateAsync(paths, cancellationToken);
             var permissionPolicy = new PermissionPolicyStore().Load(paths);
             var permissionService = new ToolPermissionService(paths, permissionPolicy);
             var auditLog = new AuditLog(paths);

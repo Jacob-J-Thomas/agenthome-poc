@@ -46,6 +46,7 @@ public static class CustomLoopRunValidator
 
     public static bool HasLegacyWorkspaceContextManifest(CustomLoopRunRecord? run)
     {
+        // TODO(#71): Remove pre-1.0 legacy workspace-manifest recognition and its dependent quarantine behavior.
         return run?.ContextSnapshot?.SourceManifest is { } sources && LooksLikeLegacyWorkspaceManifest(sources);
     }
 

@@ -110,7 +110,7 @@ public sealed class WorkspaceConfigurationReader
             document = PermissionsDocument.FromJson(rawJsonForParsing);
             if (document is null)
             {
-                problems.Add("permissions.json is unsupported or does not declare version 2.");
+                problems.Add("permissions.json is unsupported or does not declare version 1.");
             }
         }
         catch (JsonException exception)
