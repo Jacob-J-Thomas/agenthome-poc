@@ -95,11 +95,7 @@ public sealed class ToolBroker : IToolBroker
         if (check.Evaluation.Decision == PermissionDecision.Deny)
         {
             var evidence = DecisionEvidence(check, ToolApprovalDecision.NotEvaluated, null);
-            await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
-            var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {check.Evaluation.Detail}", requestId, check.ResolvedPath, request, evidence);
-            result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
-            await RecordExecutionAsync(requestId, request, check, false, AuditSchema.Outcomes.Denied, new Dictionary<string, object?>(), cancellationToken);
-            return result;
+            return await FinalizeTerminalOutcomeAsync(requestId, request, check, false, new ToolTerminalOutcome(ToolExecutionOutcome.Denied, $"denied: {check.Evaluation.Detail}", evidence, AuditSchema.Outcomes.Denied, new Dictionary<string, object?>()), cancellationToken);
         }
 
         var approvedByHuman = false;
@@ -116,11 +112,7 @@ public sealed class ToolBroker : IToolBroker
             if (!approvalResponse.Approved)
             {
                 var evidence = DecisionEvidence(check, ToolApprovalDecision.Rejected, approvalResponse);
-                await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
-                var result = new ToolResult(ToolExecutionOutcome.ApprovalRejected, $"rejected: {approvalResponse.Detail}", requestId, check.ResolvedPath, request, evidence);
-                result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
-                await RecordExecutionAsync(requestId, request, check, false, AuditSchema.Outcomes.ApprovalRejected, new Dictionary<string, object?>(), cancellationToken);
-                return result;
+                return await FinalizeTerminalOutcomeAsync(requestId, request, check, false, new ToolTerminalOutcome(ToolExecutionOutcome.ApprovalRejected, $"rejected: {approvalResponse.Detail}", evidence, AuditSchema.Outcomes.ApprovalRejected, new Dictionary<string, object?>()), cancellationToken);
             }
 
             approvedByHuman = true;
@@ -137,11 +129,7 @@ public sealed class ToolBroker : IToolBroker
             if (!revalidation.Allowed)
             {
                 var evidence = RevalidationDeniedEvidence(check, approvalDecision, approvalResponse, revalidation.Detail);
-                await ObserveDecisionAsync(requestId, request, check.ResolvedPath, evidence, cancellationToken);
-                var result = new ToolResult(ToolExecutionOutcome.Denied, $"denied: {revalidation.Detail}", requestId, check.ResolvedPath, request, evidence);
-                result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
-                await RecordExecutionAsync(requestId, request, check, approvedByHuman, AuditSchema.Outcomes.Denied, revalidation.AuditMetadata, cancellationToken);
-                return result;
+                return await FinalizeTerminalOutcomeAsync(requestId, request, check, approvedByHuman, new ToolTerminalOutcome(ToolExecutionOutcome.Denied, $"denied: {revalidation.Detail}", evidence, AuditSchema.Outcomes.Denied, revalidation.AuditMetadata), cancellationToken);
             }
         }
 
@@ -208,6 +196,15 @@ public sealed class ToolBroker : IToolBroker
             result = WithPostActuationIntegrityWarning(result, "execution audit", exception);
         }
 
+        return result;
+    }
+
+    private async Task<ToolResult> FinalizeTerminalOutcomeAsync(string requestId, ToolRequest request, ToolPermissionCheck check, bool approvedByHuman, ToolTerminalOutcome outcome, CancellationToken cancellationToken)
+    {
+        await ObserveDecisionAsync(requestId, request, check.ResolvedPath, outcome.GovernanceEvidence, cancellationToken);
+        var result = new ToolResult(outcome.Outcome, outcome.Detail, requestId, check.ResolvedPath, request, outcome.GovernanceEvidence);
+        result = await RetainAndObserveOutcomeAsync(result, cancellationToken);
+        await RecordExecutionAsync(requestId, request, check, approvedByHuman, outcome.AuditOutcome, outcome.AuditMetadata, cancellationToken);
         return result;
     }
 
