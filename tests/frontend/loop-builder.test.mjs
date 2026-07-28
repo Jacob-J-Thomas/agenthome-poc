@@ -6,7 +6,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const builderSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url), "utf8");
-const loopsHtml = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loops.html", import.meta.url), "utf8");
+const loopsHtml = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url), "utf8");
 
 test("catalog loading is authenticated and projects the system loop as read-only", async () => {
   const app = await loadLoopBuilder();
@@ -26,6 +26,76 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("initialization refresh hydrates a loop builder that booted disabled", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let initialized = false;
+  server.on("GET", "/api/status", () => ({ status: 200, body: { workspaceRoot: "C:/workspace", initialized } }));
+  const app = await loadLoopBuilder({ server });
+
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  assert.match(app.elements.validationBanner.textContent, /Initialize the workspace from Chat/);
+  initialized = true;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+
+  assert.equal(app.elements.createLoopButton.disabled, false);
+  assert.match(app.elements.loopList.textContent, /Default conversation/);
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+});
+
+test("initialization refresh queues behind a stale activation status read", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let releaseStaleStatus;
+  let statusReads = 0;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 1) {
+      return new Promise(resolve => {
+        releaseStaleStatus = () => resolve({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: false } });
+      });
+    }
+    return { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } };
+  });
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+  const activation = app.window.embodySenseLoopBuilder.activate();
+  for (let attempt = 0; attempt < 20 && !releaseStaleStatus; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+
+  const initializationRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  releaseStaleStatus();
+  await Promise.all([activation, initializationRefresh]);
+
+  assert.equal(statusReads, 2);
+  assert.equal(app.elements.createLoopButton.disabled, false);
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+});
+
+test("hidden Loops defers catalog and evidence requests until first activation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+
+  assert.equal(server.calls.some(call => call.url === "/api/loops"), false);
+  assert.equal(server.calls.some(call => call.url.startsWith("/api/loop-runs")), false);
+  await app.window.embodySenseLoopBuilder.activate();
+
+  assert.equal(server.calls.some(call => call.url === "/api/loops"), true);
+  assert.equal(server.calls.some(call => call.url.startsWith("/api/loop-runs")), true);
+});
+
+test("revisiting Loops preserves an unsaved draft without reloading the catalog", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+  await app.window.embodySenseLoopBuilder.activate();
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved reviewer notes";
+  await app.elements.loopDescription.input();
+  const catalogRequests = server.calls.filter(call => call.url === "/api/loops").length;
+
+  await app.window.embodySenseLoopBuilder.activate();
+
+  assert.equal(app.elements.loopDescription.value, "Unsaved reviewer notes");
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.equal(server.calls.filter(call => call.url === "/api/loops").length, catalogRequests);
 });
 
 test("server-controlled loop text is rendered as text and cannot create executable markup", async () => {
@@ -69,6 +139,27 @@ test("trigger controls support invocation, preset, and no-prompt admission with 
   assert.equal(findByTag(app.elements.inspectorContent, "textarea").length, 0);
   assert.match(app.elements.loopCanvas.textContent, /No prompt · conversation included/);
   assert.match(app.elements.inspectorContent.textContent, /Trigger admission does not append it again or write durable memory/);
+});
+
+test("prototype-aligned search, insertion, and zoom controls update the projected builder", async () => {
+  const app = await loadLoopBuilder();
+
+  app.elements.loopSearch.value = "research";
+  await app.elements.loopSearch.input();
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+  assert.doesNotMatch(app.elements.loopList.textContent, /Default conversation/);
+
+  app.elements.loopSearch.value = "";
+  await app.elements.loopSearch.input();
+  await selectCustomLoop(app);
+  const insertionControls = findByClass(app.elements.loopCanvas, "connector-add");
+  assert.equal(insertionControls.length, 2);
+  await insertionControls[1].click();
+
+  assert.match(app.elements.loopCanvas.textContent, /Step 2/);
+  assert.match(app.elements.validationBanner.textContent, /Every inference step needs a name and instruction/);
+  await app.elements.zoomInButton.click();
+  assert.equal(app.elements.zoomLevel.textContent, "110%");
 });
 
 test("Inference and Exit expose inherited or custom context without redundant fixed context", async () => {
@@ -333,10 +424,13 @@ test("client validation blocks incomplete definitions before save", async () => 
   app.elements.loopName.value = "";
   await app.elements.loopName.input();
   assert.equal(app.elements.validationBanner.textContent, "Loop name is required.");
+  assert.equal(app.elements.validationBanner.attributes.get("aria-label"), "Definition needs attention: Loop name is required.");
   assert.equal(app.elements.saveButton.disabled, true);
 
   app.elements.loopName.value = "Research pass";
   await app.elements.loopName.input();
+  assert.match(app.elements.validationBanner.textContent, /Draft is valid and ready to save/);
+  assert.equal(app.elements.validationBanner.attributes.has("aria-label"), false);
   const source = findControlByLabel(app.elements.inspectorContent, "Prompt source", "select");
   source.value = "preset";
   await source.change();
@@ -2948,6 +3042,7 @@ test("owned run approvals expose resolved governance evidence in the loop builde
 
 async function loadLoopBuilder(options = {}) {
   const document = new FakeDocument(loopsHtml);
+  document.elementsObject.loopsView.hidden = options.loopsViewHidden ?? false;
   const server = options.server ?? new FakeFetchServer(options.catalog ?? createCatalog());
   const sessionStorage = options.sessionStorage ?? new FakeStorage();
   const localStorage = options.localStorage ?? new FakeStorage();
@@ -3001,6 +3096,9 @@ async function loadLoopBuilder(options = {}) {
   context.globalThis = context;
   vm.runInNewContext(builderSource, context, { filename: "loop-builder.js" });
   await flushAsyncWork();
+  document.elementsObject.approvalPanel = document.elementsObject.loopApprovalPanel;
+  document.elementsObject.approvalCount = document.elementsObject.loopApprovalCount;
+  document.elementsObject.approvals = document.elementsObject.loopApprovals;
   return { context, document, elements: document.elementsObject, server, window };
 }
 
@@ -3457,6 +3555,7 @@ class FakeElement {
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = []; this._textContent = ""; this.append(...nodes); }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  removeAttribute(name) { this.attributes.delete(name); }
   addEventListener(name, handler) { this.listeners.set(name, handler); }
   async dispatch(name) { return this.listeners.get(name)?.({ target: this, preventDefault() { }, returnValue: undefined }); }
   async click() { if (!this.disabled) return this.dispatch("click"); }
