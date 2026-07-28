@@ -105,6 +105,26 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Reservation_treats_a_malformed_current_schema_discovery_index_as_repairable()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var mutation = Mutation(Request(terminal.Id, inspection.PersistedArtifactHash));
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, "{ malformed");
+
+        var reservation = await store.ReserveTraceDeletionOperationAsync(mutation);
+        var deletion = await store.DeleteTerminalTraceAsync(mutation);
+
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, reservation.Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, deletion.Status);
+        Assert.Equal(1, JsonDocument.Parse(await File.ReadAllTextAsync(indexPath)).RootElement.GetProperty("schemaVersion").GetInt32());
+    }
+
+    [Fact]
     public async Task Reservation_uses_acquisition_time_and_does_not_decode_unrelated_run_artifacts()
     {
         using var workspace = new TestWorkspace();

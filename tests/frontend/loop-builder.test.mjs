@@ -1384,6 +1384,40 @@ test("a cached hub disconnect before invocation send is not reconciled as an amb
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
 });
 
+test("an unsupported persistence schema Hub error preserves cleanup guidance and the operation for retry", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      return Promise.reject(new Error("Failed to invoke 'InvokeLoop': unsupported_loop_persistence_schema: Delete `.custom-loop-run-index.json` and retry the operation."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Retry after cleaning the index.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.validationBanner.textContent, /unsupported_loop_persistence_schema.*Delete `.custom-loop-run-index\.json`.*retrying the exact request/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+
+  app.context.testHub.invoke = (_target, input) => {
+    operationIds.push(input.operationId);
+    return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive retry response." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  await app.elements.startRunButton.click();
+
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /Definitive retry response/);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
 test("unavailable invocation evidence keeps the outcome unknown and reuses the exact operation on retry", async () => {
   const server = new FakeFetchServer(createCatalog());
   const app = await loadLoopBuilder({ server });

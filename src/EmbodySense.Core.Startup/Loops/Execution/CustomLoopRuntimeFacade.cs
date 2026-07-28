@@ -437,7 +437,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         }
 
         var request = new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor);
-        var result = await _lifecycleService.CancelAsync(request, cancellationToken);
+        var result = await ExecuteControlResultAsync(_lifecycleService.CancelAsync(request, cancellationToken));
         if (!RequiresCancellationOwnerRecovery(result))
         {
             return MapControl(result);
@@ -449,7 +449,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return MapControl(result with { Detail = $"{result.Detail} Retained-runtime recovery did not acquire hosting: {availability.Detail}" });
         }
 
-        return MapControl(await _lifecycleService.CancelAsync(request, cancellationToken));
+        return MapControl(await ExecuteControlResultAsync(_lifecycleService.CancelAsync(request, cancellationToken)));
     }
 
     public async Task<LoopRunControlResponse> ResumeAsync(LoopRunControlInput input, CancellationToken cancellationToken)
@@ -520,6 +520,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 {
                     recovery = await _recoveryService.RecoverAsync(_actor, cancellationToken);
                 }
+                catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+                {
+                    throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+                }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     _customExecutionReacquisitionAllowed = false;
@@ -560,7 +564,19 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     private static async Task<LoopRunControlResponse> ExecuteControlAsync(Task<CustomLoopControlResult> awaitable)
     {
-        return MapControl(await awaitable);
+        return MapControl(await ExecuteControlResultAsync(awaitable));
+    }
+
+    private static async Task<CustomLoopControlResult> ExecuteControlResultAsync(Task<CustomLoopControlResult> awaitable)
+    {
+        try
+        {
+            return await awaitable;
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
     }
 
     private static LoopRunControlResponse MapControl(CustomLoopControlResult result)

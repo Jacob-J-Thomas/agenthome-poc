@@ -497,7 +497,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             return new CustomLoopTraceDeletionReservationResult(existingStatus, existingOperation);
         }
 
-        _ = await ReadDiscoveryIndexAsync(cancellationToken);
+        _ = await ReadCleanDiscoveryIndexAsync(cancellationToken);
         var artifact = await ReadArtifactByRunIdAsync(mutation.Request.RunId, cancellationToken);
         var deletionOperationCount = EnumerateTraceDeletionOperationPaths().Count;
         var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;

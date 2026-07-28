@@ -1424,6 +1424,10 @@ async function startRun() {
       showBanner(`Run could not be sent because the live connection was not established: ${error.message}`);
       return;
     }
+    if (error?.message?.includes("unsupported_loop_persistence_schema")) {
+      showBanner(`Run was not admitted: ${error.message} Retrying the exact request after cleanup will reuse operation ${operationId}.`);
+      return;
+    }
     await reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId);
   } finally {
     invocationInFlight = false;

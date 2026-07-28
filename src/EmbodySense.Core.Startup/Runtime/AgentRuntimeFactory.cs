@@ -127,6 +127,12 @@ public sealed class AgentRuntimeFactory
                     customExecutionAvailable &= !recoveryFailed;
                     preserveCurrentConversation |= recoveryFailed;
                 }
+                catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+                {
+                    customExecutionAvailable = false;
+                    customExecutionReacquisitionAllowed = true;
+                    preserveCurrentConversation = true;
+                }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     customExecutionAvailable = false;

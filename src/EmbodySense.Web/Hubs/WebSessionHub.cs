@@ -111,7 +111,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         }
         catch (LoopRunEvidenceUnsupportedSchemaException exception)
         {
-            throw new HubException(exception.Message);
+            throw new HubException($"unsupported_loop_persistence_schema: {exception.Message}");
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or IOException)
         {
@@ -128,6 +128,10 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         catch (OperationCanceledException)
         {
             throw new HubException("The custom-loop Resume operation was cancelled.");
+        }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            throw new HubException($"unsupported_loop_persistence_schema: {exception.Message}");
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or IOException)
         {

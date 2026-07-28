@@ -237,8 +237,10 @@ public sealed class WebSessionHubTests
         Assert.DoesNotContain("sensitive runtime detail", exception.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Invoke_surfaces_unsupported_run_evidence_schema_cleanup_guidance()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Invoke_and_resume_surface_unsupported_run_evidence_schema_cleanup_guidance(bool resume)
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
@@ -246,9 +248,12 @@ public sealed class WebSessionHubTests
         const string guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
         var hub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(guidance));
 
-        var exception = await Assert.ThrowsAsync<HubException>(() => hub.InvokeLoop(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-unsupported-schema", "prompt")));
+        var exception = resume
+            ? await Assert.ThrowsAsync<HubException>(() => hub.ResumeLoop(new LoopRunControlInput("run-one", 1, "resume-unsupported-schema")))
+            : await Assert.ThrowsAsync<HubException>(() => hub.InvokeLoop(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-unsupported-schema", "prompt")));
 
-        Assert.Equal(guidance, exception.Message);
+        Assert.Contains("unsupported_loop_persistence_schema", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(guidance, exception.Message, StringComparison.Ordinal);
     }
 
     private static WebAgentRuntimeHost CreateHost(string rootPath, WebApprovalCoordinator approvals)
@@ -349,7 +354,7 @@ public sealed class WebSessionHubTests
 
         public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
         {
-            throw new NotSupportedException();
+            return Task.FromException<LoopRunControlResponse>(new LoopRunEvidenceUnsupportedSchemaException(guidance));
         }
     }
 

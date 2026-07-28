@@ -250,6 +250,60 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Startup_recovery_preserves_unsupported_discovery_index_guidance_and_retries_after_cleanup()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runStore = new CustomLoopRunStore(paths);
+        await PersistRunningRunAsync(runStore, RunningRun("run-unsupported-startup-recovery"));
+        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-unsupported-startup-recovery", "retry after cleanup");
+
+        var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.InvokeCustomLoopAsync(input));
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+
+        File.Delete(indexPath);
+        var retry = await runtime.InvokeCustomLoopAsync(input);
+
+        Assert.Equal("NotFound", retry.AdmissionStatus);
+    }
+
+    [Fact]
+    public async Task Lifecycle_control_preserves_unsupported_discovery_index_guidance_and_retries_the_same_receipt()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runStore = new CustomLoopRunStore(paths);
+        var running = RunningRun("run-unsupported-control");
+        await PersistRunningRunAsync(runStore, running);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var recovered = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(running.Id));
+        Assert.Equal("Paused", recovered.Status);
+        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        var input = new LoopRunControlInput(recovered.Id, recovered.LifecycleVersion, "cancel-after-unsupported-index");
+
+        var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.CancelCustomLoopAsync(input));
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopControlOperationState.Pending, (await new CustomLoopControlOperationStore(paths).GetAsync(input.OperationId))!.State);
+
+        File.Delete(indexPath);
+        var retry = await runtime.CancelCustomLoopAsync(input);
+
+        Assert.Equal("Cancelled", retry.Status);
+        Assert.Equal(CustomLoopControlOperationState.Complete, (await new CustomLoopControlOperationStore(paths).GetAsync(input.OperationId))!.State);
+    }
+
+    [Fact]
     public async Task RunTurnAsync_returns_failed_runtime_result_with_loop_identity_when_provider_fails()
     {
         using var workspace = new TestWorkspace();
