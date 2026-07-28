@@ -903,7 +903,7 @@ public sealed class CustomLoopRuntimeTests
         Assert.Contains("replayed", nonterminalReplay.Detail, StringComparison.OrdinalIgnoreCase);
 
         File.Delete(workspace.File("custom-attempt-started.marker"));
-        var competitor = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(competingDefinition.Id, competingDefinition.DefinitionVersion, competingDefinition.ContentHash, "invoke-runtime-resume-competitor", "delayed resume competitor"));
+        var competitor = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(competingDefinition.Id, competingDefinition.DefinitionVersion, competingDefinition.ContentHash, "invoke-runtime-resume-competitor", "held resume competitor"));
         await WaitForAttemptStartAsync(workspace);
         var resumeInput = new LoopRunControlInput(paused.Run.Id, paused.Run.LifecycleVersion, "resume-runtime-busy");
         var busy = await runtime.ResumeCustomLoopAsync(resumeInput);
@@ -1316,7 +1316,11 @@ public sealed class CustomLoopRuntimeTests
                     "turn/start" {
                         $turnId = "turn-test"
                         $userText = [string]$message.params.input[0].text
-                        if ($userText.Contains("delayed")) {
+                        if ($userText.Contains("held")) {
+                            [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
+                            Start-Sleep -Seconds 10
+                        }
+                        elseif ($userText.Contains("delayed")) {
                             [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
                             Start-Sleep -Milliseconds 1500
                         }

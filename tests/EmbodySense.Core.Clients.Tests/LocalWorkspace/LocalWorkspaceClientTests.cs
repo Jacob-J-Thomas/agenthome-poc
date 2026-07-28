@@ -140,6 +140,24 @@ public sealed class LocalWorkspaceClientTests
     }
 
     [Fact]
+    public async Task SearchAsync_skips_the_exclusive_custom_loop_host_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var note = workspace.File("workspace", "shared", "note.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(note)!);
+        Directory.CreateDirectory(paths.LoopRunsPath);
+        await File.WriteAllTextAsync(note, "needle remains searchable");
+        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var result = await new LocalWorkspaceClient(paths).SearchAsync(workspace.RootPath, "needle");
+
+        Assert.Contains("workspace" + Path.DirectorySeparatorChar + "shared" + Path.DirectorySeparatorChar + "note.txt:1: needle remains searchable", result.Text);
+        Assert.Equal(1, result.Metadata["skipped_internal_files"]);
+        Assert.Equal(false, result.Metadata["truncated"]);
+    }
+
+    [Fact]
     public async Task SearchAsync_caps_directory_file_enumeration()
     {
         using var workspace = new TestWorkspace();

@@ -338,9 +338,9 @@ public sealed class CodexAppServerInferenceTests
             [LlmMessage.User("explicit current custom-loop turn input")],
             instructionContext: new LlmInferenceInstructionContext(governance, []));
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(request));
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => client.GenerateAsync(request));
 
-        Assert.Contains("does not match", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("altered", exception.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(transport.Writes, IsThreadStart);
     }
 

@@ -23,7 +23,7 @@ The source is organized around project-enforced Core, Web, and CLI boundaries:
 - `src/EmbodySense.Core.Common` owns dependency-free shared primitives and value types for inference, memory, loops, context, audit, permissions, tools, local workspace execution, workspace paths, workspace seed records, and filesystem path comparison.
 - `src/EmbodySense.Core.Application` owns reusable ports plus orchestration and behavior, including the default conversation loop runner, custom-loop authoring/admission/ordered execution, lifecycle and recovery services, trace retention, runtime conversation state, runtime command helpers, context formatting, inference abstractions, and governance services.
 - `src/EmbodySense.Core.Clients` owns edge adapters for provider protocols and local workspace interaction. `CodexAppServer` contains the Codex app-server JSON-RPC adapter; `LocalWorkspace` contains governed local filesystem execution used by model tool requests. It depends on Application ports and Common value types.
-- `src/EmbodySense.Core.Persistence` owns long-lived `.agent/` and workspace state access, including audit events, conversation transcripts, system and custom loop definitions, custom run traces and tombstones, full governed tool-response artifacts, idempotent invocation/control receipts, the custom-loop execution gate and single-host lock, permissions loading, workspace context document reads, and scaffold file writes. It depends on Application storage ports and Common value types.
+- `src/EmbodySense.Core.Persistence` owns long-lived `.agent/` and workspace state access, including audit events, conversation transcripts, system and custom loop definitions, custom run traces and tombstones, full governed tool-response artifacts, idempotent invocation/control receipts, the custom-loop execution gate and exclusive single-host ownership lock, permissions loading, workspace context document reads, and scaffold file writes. Governed recursive workspace searches omit that internal host-lock artifact and report the omission in result metadata, so a live runtime does not make unrelated workspace content unsearchable. It depends on Application storage ports and Common value types.
 - `src/EmbodySense.Core.Startup` owns concrete composition. It wires Application abstractions to Clients and Persistence, owns the runtime and loop-authoring/inspection facades, run-scoped custom inference composition, startup inference wrapper, workspace initializer, interface-client status/audit readers, tool-approval adapter contracts, and default workspace seed content.
 - `src/EmbodySense.Web` owns the primary localhost browser client. It serves the chat and Loops surfaces, binds only to localhost hosts, exposes authenticated session/status/workspace/approval/loop/run endpoints plus a SignalR session hub for browser turns and synchronous custom-loop control, and consumes Core only through the `Core.Startup` API.
 - `src/EmbodySense.Cli.Command` owns human-facing CLI commands, the CLI runtime host, console adapters, and human approval prompts. It consumes Core only through the `Core.Startup` API for runtime, status, audit, workspace, and approval contracts.
@@ -113,6 +113,15 @@ The runtime context tells the agent to store, update, create, and retrieve most 
 
 Newly initialized workspaces seed a fuller `.agent/` home: contextual `ROLE.md` operating guidance, slow-changing identity in `SOUL.md` and `PERSONALITY.md`, a structured `CONTEXT.md` template, primary `MEMORY.md` registry guidance, `models.json` role placeholders, and generated memory, permission, and audit explainers. The ambiguous `.agent/AGENT.md` name is neither seeded nor loaded. Because this project is still a POC, an existing `.agent/` workspace without `ROLE.md` is reported as uninitialized and must be explicitly reinitialized after this shape change; there is no runtime fallback or migration from `AGENT.md`. Experimental persisted schemas and workspace documents remain at version 1: unsupported shapes require explicit reinitialization or cleanup, and this POC does not add automatic migrations, compatibility readers, aliases, or fallbacks. Older custom-loop trace preservation is a scoped pre-existing exception tracked by [#71](https://github.com/Jacob-J-Thomas/agenthome-poc/issues/71). The seeded text encourages agents to grow durable local capability through inspectable memory, skills, recipes, scripts, and configuration notes while being explicit that hooks, subagents, planning, MCP execution, and model routing are not implemented unless the source and configuration make them real. Automatic document-review hooks are not implemented in this status snapshot.
 
+## Prerequisites
+
+- .NET 10 SDK 10.0.302 or a newer 10.0.3xx patch. The root `global.json` selects this feature band with `latestPatch` roll-forward and disallows prerelease SDKs.
+- C# 14 is pinned in `Directory.Build.props`.
+- Node.js 24 for the dependency-free frontend test runner.
+- PowerShell 7 or Windows PowerShell 5.1 for `scripts/verify.ps1`.
+
+Run `dotnet --version` from the repository root to confirm SDK selection. GitHub Actions reads the same `global.json` and runs the normal Release verification workflow on Windows.
+
 ## Run
 
 For scratch-workspace testing, start in `scratch/` and use the project path relative to that directory. The Web UI is the primary local client:
@@ -139,7 +148,7 @@ From the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-The verify script builds the solution, runs the frontend Node tests, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. The installed-browser smoke is opt-in because local Edge/Chrome GPU startup is host-specific:
+The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, runs the frontend Node tests, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. The installed-browser smoke is opt-in because local Edge/Chrome GPU startup is host-specific:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -RunBrowserE2E

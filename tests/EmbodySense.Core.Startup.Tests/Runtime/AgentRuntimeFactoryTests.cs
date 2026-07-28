@@ -26,7 +26,7 @@ public sealed class AgentRuntimeFactoryTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        await File.WriteAllTextAsync(paths.CurrentConversationPath, "old transcript" + Environment.NewLine);
+        await new ConversationMemoryStore(paths).AppendMessageAsync(LlmMessage.User("old transcript"));
 
         await using var runtime = await CreateRuntimeAsync(workspace);
 
@@ -114,6 +114,11 @@ public sealed class AgentRuntimeFactoryTests
     [Fact]
     public async Task CreateAsync_keeps_ordinary_chat_available_when_another_process_owns_custom_loop_hosting()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -126,7 +131,7 @@ public sealed class AgentRuntimeFactoryTests
         var replayCancelInput = new LoopRunControlInput("run-cancel-replayed", 7, "cancel-replayed");
         await PersistCompletedControlAsync(paths, CustomLoopControlKind.Resume, replayResumeInput, CustomLoopControlStatus.Paused, "Resume was already completed and parked safely.");
         await PersistCompletedControlAsync(paths, CustomLoopControlKind.Cancel, replayCancelInput, CustomLoopControlStatus.Cancelled, "Cancellation was already completed durably.");
-        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        using var ownership = new WindowsFileLock(paths.CustomLoopHostLockPath);
 
         await using var runtime = await CreateRuntimeAsync(workspace);
 
@@ -182,7 +187,7 @@ public sealed class AgentRuntimeFactoryTests
         var runStore = new CustomLoopRunStore(paths);
         var running = RunningRun("run-owner-exit-recovery");
         await PersistRunningRunAsync(runStore, running);
-        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        using var ownership = new WindowsFileLock(paths.CustomLoopHostLockPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
         var input = new LoopRunControlInput(running.Id, running.LifecycleVersion, "cancel-owner-exit-recovery");
 

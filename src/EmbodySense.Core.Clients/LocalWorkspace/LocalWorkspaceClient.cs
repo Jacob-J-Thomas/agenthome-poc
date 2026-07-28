@@ -88,7 +88,8 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 
         if (File.Exists(resolvedPath))
         {
-            await SearchFileAsync(resolvedPath, pattern, matches, state, cancellationToken);
+            if (IsSearchExcludedInternalFile(resolvedPath)) state.SkippedInternalFiles++;
+            else await SearchFileAsync(resolvedPath, pattern, matches, state, cancellationToken);
         }
         else if (Directory.Exists(resolvedPath))
         {
@@ -103,6 +104,11 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             foreach (var file in Directory.EnumerateFiles(resolvedPath, "*", options))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (IsSearchExcludedInternalFile(file))
+                {
+                    state.SkippedInternalFiles++;
+                    continue;
+                }
                 if (searchFiles.Count >= MaxSearchFiles)
                 {
                     state.Truncated = true;
@@ -138,6 +144,7 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             ["match_count"] = matches.Count,
             ["pattern_length"] = pattern.Length,
             ["files_scanned"] = state.FilesScanned,
+            ["skipped_internal_files"] = state.SkippedInternalFiles,
             ["skipped_large_files"] = state.SkippedLargeFiles,
             ["truncated"] = state.Truncated
         });
@@ -234,10 +241,9 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
         var lineNumber = 0;
 
-        while (!reader.EndOfStream)
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var line = await reader.ReadLineAsync(cancellationToken) ?? "";
             lineNumber++;
             if (line.Contains('\0'))
             {
@@ -291,6 +297,11 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         }
 
         return text[..retainedCharacterCount] + marker;
+    }
+
+    private bool IsSearchExcludedInternalFile(string file)
+    {
+        return string.Equals(Path.GetFullPath(file), _paths.CustomLoopHostLockPath, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
     }
 
 }

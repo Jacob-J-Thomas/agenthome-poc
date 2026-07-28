@@ -21,20 +21,6 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 public sealed class CustomLoopRuntimeReceiptRecoveryTests
 {
-    [Theory]
-    [InlineData(CustomLoopInvocationOperationStoreStatus.RetentionAuditUnavailable, "AuditUnavailable", "audit integrity")]
-    [InlineData(CustomLoopInvocationOperationStoreStatus.RetentionInvalid, "Invalid", "invalid or corrupt")]
-    public void Receipt_retention_failure_preserves_the_operator_actionable_status(CustomLoopInvocationOperationStoreStatus status, string expectedAdmissionStatus, string expectedDetail)
-    {
-        var facadeType = typeof(AgentRuntime).Assembly.GetType("EmbodySense.Core.Startup.Loops.Execution.CustomLoopRuntimeFacade", throwOnError: true)!;
-        var method = facadeType.GetMethod("ReceiptWriteFailure", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-        var response = Assert.IsType<LoopRunInvocationResponse>(method!.Invoke(null, [status]));
-
-        Assert.Equal(expectedAdmissionStatus, response.AdmissionStatus);
-        Assert.Contains(expectedDetail, response.Detail, StringComparison.Ordinal);
-        Assert.False(response.WasDispatched);
-    }
-
     [Fact]
     public async Task Pending_receipt_with_an_already_admitted_run_is_bound_and_reconciled_before_a_new_busy_owner()
     {

@@ -2456,7 +2456,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         const int sharingViolation = 32;
         const int lockViolation = 33;
         const int resourceDeadlockAvoided = 35;
-        return (exception.HResult & 0xFFFF) is resourceTemporarilyUnavailable or sharingViolation or lockViolation or resourceDeadlockAvoided;
+        var errorCode = exception.HResult & 0xFFFF;
+        return OperatingSystem.IsWindows()
+            ? errorCode is sharingViolation or lockViolation
+            : errorCode is resourceTemporarilyUnavailable or resourceDeadlockAvoided;
     }
 
     private static bool IsReadOnlyLockAccessFailure(Exception exception)

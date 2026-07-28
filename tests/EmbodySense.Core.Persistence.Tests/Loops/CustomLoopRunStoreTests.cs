@@ -1429,6 +1429,7 @@ public sealed class CustomLoopRunStoreTests
         var startInfo = new ProcessStartInfo
         {
             FileName = "dotnet",
+            WorkingDirectory = Path.GetTempPath(),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,

@@ -1,6 +1,6 @@
-using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops.Models;
 
-namespace EmbodySense.Core.Application.Loops.Execution.Custom;
+namespace EmbodySense.Core.Application.Loops;
 
 public interface ICustomLoopAttemptCancellationBroker
 {
