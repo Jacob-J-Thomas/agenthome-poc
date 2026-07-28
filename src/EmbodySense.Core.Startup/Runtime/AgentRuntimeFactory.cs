@@ -116,6 +116,7 @@ public sealed class AgentRuntimeFactory
             IReadOnlyList<CustomLoopRecoveryResult> recoveryResults = [];
             var customExecutionAvailable = recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired;
             var customExecutionReacquisitionAllowed = recoveryOwnership.Status is CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable;
+            var customRecoveryRequired = false;
             preserveCurrentConversation |= !customExecutionAvailable;
             using var recoveryLease = recoveryOwnership.Lease;
             if (recoveryOwnership.Status == CustomLoopExecutionLeaseStatus.Acquired)
@@ -126,6 +127,13 @@ public sealed class AgentRuntimeFactory
                     var recoveryFailed = recoveryResults.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed);
                     customExecutionAvailable &= !recoveryFailed;
                     preserveCurrentConversation |= recoveryFailed;
+                }
+                catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+                {
+                    customExecutionAvailable = false;
+                    customExecutionReacquisitionAllowed = true;
+                    customRecoveryRequired = true;
+                    preserveCurrentConversation = true;
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -192,6 +200,7 @@ public sealed class AgentRuntimeFactory
                 customRuntimeContext,
                 customExecutionAvailable,
                 customExecutionReacquisitionAllowed,
+                customRecoveryRequired,
                 runtimeSurface.Id,
                 actor,
                 defaultLoop.RoleId,

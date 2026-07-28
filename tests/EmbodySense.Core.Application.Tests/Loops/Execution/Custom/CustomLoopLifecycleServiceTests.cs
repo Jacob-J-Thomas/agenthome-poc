@@ -334,6 +334,32 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(kind == CustomLoopControlKind.Resume ? 1 : 0, executor.Requests.Count);
     }
 
+    [Theory]
+    [InlineData(CustomLoopControlKind.Pause, CustomLoopControlStatus.PauseRequested)]
+    [InlineData(CustomLoopControlKind.Cancel, CustomLoopControlStatus.CancelRequested)]
+    [InlineData(CustomLoopControlKind.Resume, CustomLoopControlStatus.Completed)]
+    public async Task Unsupported_discovery_index_schema_preserves_a_retryable_pending_control_receipt(CustomLoopControlKind kind, CustomLoopControlStatus expectedStatus)
+    {
+        var initialStatus = kind == CustomLoopControlKind.Resume ? CustomLoopRunStatus.Paused : CustomLoopRunStatus.Running;
+        var run = Run($"run-unsupported-schema-{kind.ToString().ToLowerInvariant()}", initialStatus);
+        var exception = new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
+        var store = new MultiRunStore([run]) { UpdateException = exception };
+        var operations = new InMemoryOperationStore { RecoverPendingReplays = true };
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var operationId = $"{kind.ToString().ToLowerInvariant()}-unsupported-schema";
+
+        var thrown = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => ExecuteControlAsync(service, kind, run, operationId));
+
+        Assert.Same(exception, thrown);
+        Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(operationId))!.State);
+        store.UpdateException = null;
+
+        var retry = await ExecuteControlAsync(service, kind, run, operationId);
+
+        Assert.Equal(expectedStatus, retry.Status);
+        Assert.Equal(CustomLoopControlOperationState.Complete, (await operations.GetAsync(operationId))!.State);
+    }
+
     [Fact]
     public async Task Pending_receipt_recovers_from_transition_owned_metadata_after_later_multi_event_writes()
     {
@@ -1001,6 +1027,17 @@ public sealed class CustomLoopLifecycleServiceTests
         return CustomLoopDefinitionContentHash.Apply(seed with { ContentHash = string.Empty });
     }
 
+    private static Task<CustomLoopControlResult> ExecuteControlAsync(CustomLoopLifecycleService service, CustomLoopControlKind kind, CustomLoopRunRecord run, string operationId)
+    {
+        return kind switch
+        {
+            CustomLoopControlKind.Pause => service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web)),
+            CustomLoopControlKind.Cancel => service.CancelAsync(new CustomLoopCancelRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web)),
+            CustomLoopControlKind.Resume => service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web)),
+            _ => throw new ArgumentOutOfRangeException(nameof(kind))
+        };
+    }
+
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
@@ -1015,6 +1052,8 @@ public sealed class CustomLoopLifecycleServiceTests
         public bool ThrowOnGet { get; init; }
 
         public bool ThrowOnUpdate { get; init; }
+
+        public Exception? UpdateException { get; set; }
 
         public int UpdateCallCount { get; private set; }
 
@@ -1056,6 +1095,11 @@ public sealed class CustomLoopLifecycleServiceTests
             if (ThrowOnUpdate)
             {
                 throw new IOException("Run store unavailable.");
+            }
+
+            if (UpdateException is not null)
+            {
+                throw UpdateException;
             }
 
             lock (_gate)

@@ -1385,6 +1385,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         {
             throw;
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception) when (outcomeMayExist)
+        {
+            return await EscalatePostOutcomePersistenceUncertaintyAsync(current, $"{exception.Message} An external outcome may exist, but its required trace update could not be committed. Human review is required before resume.");
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (OperationCanceledException)
         {
             return outcomeMayExist
@@ -1453,6 +1461,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, latest, $"{detail} The run trace disappeared during escalation."));
                 }
             }
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(exception.SchemaVersion, $"{detail} The NeedsReview escalation could not be persisted because the run discovery index still has an unsupported schema.", exception);
         }
         catch (Exception exception)
         {

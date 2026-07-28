@@ -1,5 +1,6 @@
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -105,6 +106,10 @@ public sealed class CustomLoopRecoveryService
             stored = await _runStore.UpdateAsync(candidate, run.LifecycleVersion, IntegrityToken());
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
         {
             throw;
         }

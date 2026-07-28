@@ -62,7 +62,16 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
 
         using (ownership.Lease)
         {
-            var results = await _recovery.RecoverAsync(_actor, cancellationToken);
+            IReadOnlyList<CustomLoopRecoveryResult> results;
+            try
+            {
+                results = await _recovery.RecoverAsync(_actor, cancellationToken);
+            }
+            catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+            {
+                throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+            }
+
             if (results.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
             {
                 throw new InvalidOperationException("custom_loop_recovery_failed: one or more interrupted runs could not be parked safely.");
@@ -91,14 +100,20 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
 
     public async Task<LoopRunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken = default)
     {
-        var run = await _runStore.GetAsync(runId, cancellationToken);
-        return run is null ? null : CustomLoopRuntimeFacade.Map(run);
+        return await ReadEvidenceAsync(async () =>
+        {
+            var run = await _runStore.GetAsync(runId, cancellationToken);
+            return run is null ? null : CustomLoopRuntimeFacade.Map(run);
+        });
     }
 
     public async Task<LoopRunMonitorSnapshot?> GetMonitorAsync(string runId, CancellationToken cancellationToken = default)
     {
-        var monitor = await _runStore.GetMonitorAsync(runId, cancellationToken);
-        return monitor is null ? null : new LoopRunMonitorSnapshot(CustomLoopRuntimeFacade.Map(monitor.Summary), monitor.ArtifactHash);
+        return await ReadEvidenceAsync(async () =>
+        {
+            var monitor = await _runStore.GetMonitorAsync(runId, cancellationToken);
+            return monitor is null ? null : new LoopRunMonitorSnapshot(CustomLoopRuntimeFacade.Map(monitor.Summary), monitor.ArtifactHash);
+        });
     }
 
     public async Task<LoopInvocationOperationSnapshot?> GetInvocationOperationAsync(string operationId, CancellationToken cancellationToken = default)
@@ -120,42 +135,50 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
 
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> ListRecentAsync(int maximumCount = CustomLoopLimits.MaxRecentRunsPageSize, CancellationToken cancellationToken = default)
     {
-        var summaries = await _runStore.ListRecentAsync(maximumCount, cancellationToken);
-        return summaries.Select(CustomLoopRuntimeFacade.Map).ToArray();
+        return await ReadEvidenceAsync(async () => (await _runStore.ListRecentAsync(maximumCount, cancellationToken)).Select(CustomLoopRuntimeFacade.Map).ToArray());
     }
 
     public async Task<LoopRunSummaryPageSnapshot> ListPageAsync(int maximumCount = CustomLoopLimits.MaxRecentRunsPageSize, string? loopId = null, string? cursor = null, CancellationToken cancellationToken = default)
     {
-        var page = await _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken);
-        return new LoopRunSummaryPageSnapshot(page.Items.Select(CustomLoopRuntimeFacade.Map).ToArray(), page.ContinuationCursor);
+        return await ReadEvidenceAsync(async () =>
+        {
+            var page = await _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken);
+            return new LoopRunSummaryPageSnapshot(page.Items.Select(CustomLoopRuntimeFacade.Map).ToArray(), page.ContinuationCursor);
+        });
     }
 
     public async Task<LoopTraceInspectionSnapshot?> GetTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
-        var trace = await _runStore.InspectTraceAsync(runId, cancellationToken);
-        return trace is null ? null : Map(trace);
+        return await ReadEvidenceAsync(async () =>
+        {
+            var trace = await _runStore.InspectTraceAsync(runId, cancellationToken);
+            return trace is null ? null : Map(trace);
+        });
     }
 
     public async Task<LoopTraceQuotaSnapshot> GetTraceQuotaAsync(CancellationToken cancellationToken = default)
     {
-        var quota = await _runStore.GetTraceQuotaAsync(cancellationToken);
-        return new LoopTraceQuotaSnapshot(
-            quota.RetainedTraceCount,
-            quota.TombstoneCount,
-            quota.ActualTraceUtf8Bytes,
-            quota.TombstoneUtf8Bytes,
-            quota.ActualStoredUtf8Bytes,
-            quota.ActiveReservationCount,
-            quota.ReservedCapacityUtf8Bytes,
-            quota.AccountedTraceUtf8Bytes,
-            quota.AvailableAccountedUtf8Bytes,
-            quota.MaximumTraceCount,
-            quota.MaximumTombstoneCount,
-            quota.MaximumWorkspaceUtf8Bytes,
-            quota.MaximumPerTraceUtf8Bytes,
-            quota.DeletionOperationCount,
-            quota.MaximumDeletionOperationCount,
-            quota.IsOverLimit);
+        return await ReadEvidenceAsync(async () =>
+        {
+            var quota = await _runStore.GetTraceQuotaAsync(cancellationToken);
+            return new LoopTraceQuotaSnapshot(
+                quota.RetainedTraceCount,
+                quota.TombstoneCount,
+                quota.ActualTraceUtf8Bytes,
+                quota.TombstoneUtf8Bytes,
+                quota.ActualStoredUtf8Bytes,
+                quota.ActiveReservationCount,
+                quota.ReservedCapacityUtf8Bytes,
+                quota.AccountedTraceUtf8Bytes,
+                quota.AvailableAccountedUtf8Bytes,
+                quota.MaximumTraceCount,
+                quota.MaximumTombstoneCount,
+                quota.MaximumWorkspaceUtf8Bytes,
+                quota.MaximumPerTraceUtf8Bytes,
+                quota.DeletionOperationCount,
+                quota.MaximumDeletionOperationCount,
+                quota.IsOverLimit);
+        });
     }
 
     public async Task<LoopTraceDeletionResponse> DeleteTraceAsync(string runId, string expectedTraceHash, string operationId, CancellationToken cancellationToken = default)
@@ -165,8 +188,15 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
             throw new InvalidOperationException("This read-only facade was not constructed with an authenticated trace-management identity.");
         }
 
-        var result = await _retention.DeleteAsync(new CustomLoopTraceDeletionRequest(runId, expectedTraceHash, operationId, _actor, _surface), cancellationToken);
-        return new LoopTraceDeletionResponse(result.Status.ToString(), result.IsCommitted, result.IsOutcomeCommitted, result.Detail, result.Tombstone is null ? null : Map(result.Tombstone));
+        try
+        {
+            var result = await _retention.DeleteAsync(new CustomLoopTraceDeletionRequest(runId, expectedTraceHash, operationId, _actor, _surface), cancellationToken);
+            return new LoopTraceDeletionResponse(result.Status.ToString(), result.IsCommitted, result.IsOutcomeCommitted, result.Detail, result.Tombstone is null ? null : Map(result.Tombstone));
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
     }
 
     private static LoopTraceInspectionSnapshot Map(CustomLoopTraceInspection trace)
@@ -186,6 +216,18 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
             trace.CompletedAtUtc,
             trace.IsDeleted,
             trace.Tombstone is null ? null : Map(trace.Tombstone));
+    }
+
+    private static async Task<T> ReadEvidenceAsync<T>(Func<Task<T>> read)
+    {
+        try
+        {
+            return await read();
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
     }
 
     private static LoopTraceTombstoneSnapshot Map(CustomLoopTraceTombstone tombstone)
