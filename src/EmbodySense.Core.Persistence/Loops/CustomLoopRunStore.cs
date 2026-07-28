@@ -573,13 +573,16 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
 
         RunArtifact? artifact = null;
-        var scan = await ScanArtifactsAsync(candidate =>
-        {
-            if (string.Equals(candidate.Location.RunId, mutation.Request.RunId, StringComparison.Ordinal))
+        var scan = await ExecuteBeforeTraceDeletionMutationAsync(
+            () => ScanArtifactsAsync(candidate =>
             {
-                artifact = candidate;
-            }
-        }, cancellationToken);
+                if (string.Equals(candidate.Location.RunId, mutation.Request.RunId, StringComparison.Ordinal))
+                {
+                    artifact = candidate;
+                }
+            }, cancellationToken),
+            operation,
+            existingOperation is not null);
         if (existingOperation is null)
         {
             var deletionOperationCount = EnumerateTraceDeletionOperationPaths().Count;
@@ -651,7 +654,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             mutation.Request.OperationId,
             CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit);
         ValidateTombstone(tombstone);
-        await WriteArtifactAsync(artifact.Location.Path, SerializeTombstoneBounded(tombstone), ToSummary(tombstone), overwrite: true, cancellationToken);
+        await ExecuteBeforeTraceDeletionMutationAsync(() => WriteArtifactAsync(artifact.Location.Path, SerializeTombstoneBounded(tombstone), ToSummary(tombstone), overwrite: true, cancellationToken), operation);
         return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, cancellationToken);
     }
 
@@ -2240,6 +2243,48 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         content.CopyTo(terminated, 0);
         terminated[^1] = (byte)'\n';
         await WriteBoundedJsonArtifactAsync(_traceDeletionOperationsRoot, path, terminated, overwrite, cancellationToken);
+    }
+
+    private async Task<T> ExecuteBeforeTraceDeletionMutationAsync<T>(Func<Task<T>> action, CustomLoopTraceDeletionOperation operation, bool reservationExists)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            if (reservationExists)
+            {
+                ReleasePendingTraceDeletionReservation(operation);
+            }
+
+            throw;
+        }
+    }
+
+    private async Task ExecuteBeforeTraceDeletionMutationAsync(Func<Task> action, CustomLoopTraceDeletionOperation operation)
+    {
+        try
+        {
+            await action();
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            ReleasePendingTraceDeletionReservation(operation);
+            throw;
+        }
+    }
+
+    private void ReleasePendingTraceDeletionReservation(CustomLoopTraceDeletionOperation operation)
+    {
+        if (operation.State != CustomLoopTraceDeletionOperationState.PendingMutation)
+        {
+            return;
+        }
+
+        var path = GetTraceDeletionOperationPath(operation.OperationId);
+        EnsureSafeArtifactPath(_traceDeletionOperationsRoot, path, mustExist: true);
+        File.Delete(path);
     }
 
     private string GetTraceDeletionOperationPath(string operationId)

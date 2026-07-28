@@ -125,6 +125,32 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Schema_change_after_reservation_releases_the_unmutated_deletion_operation_for_exact_retry()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var mutation = Mutation(Request(terminal.Id, inspection.PersistedArtifactHash));
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+
+        var exception = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => store.DeleteTerminalTraceAsync(mutation));
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync(mutation.Request.OperationId)).Status);
+        Assert.False((await store.InspectTraceAsync(terminal.Id))!.IsDeleted);
+        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+
+        File.Delete(indexPath);
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+    }
+
+    [Fact]
     public async Task Reservation_uses_acquisition_time_and_does_not_decode_unrelated_run_artifacts()
     {
         using var workspace = new TestWorkspace();

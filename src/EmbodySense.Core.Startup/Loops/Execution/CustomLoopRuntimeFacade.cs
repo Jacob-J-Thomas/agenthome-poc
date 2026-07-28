@@ -369,7 +369,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.Admitted.ToString(), admission.Run?.Status.ToString(), false, admission.Run is null ? null : Map(admission.Run), admission.ValidationErrors.Select(Map).ToArray(), "The durable admitted invocation outcome was recovered without another provider dispatch.");
             }
 
-            var execution = await _runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, _actor), cancellationToken);
+            var execution = await ExecuteOrderedRunAsync(_runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, _actor), cancellationToken));
             CustomLoopRunRecord? executedRun = execution.Run;
             var executionDetail = execution.Detail;
             if (executedRun is null)
@@ -568,6 +568,18 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     }
 
     private static async Task<CustomLoopControlResult> ExecuteControlResultAsync(Task<CustomLoopControlResult> awaitable)
+    {
+        try
+        {
+            return await awaitable;
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
+    }
+
+    private static async Task<CustomLoopOrderedRunResult> ExecuteOrderedRunAsync(Task<CustomLoopOrderedRunResult> awaitable)
     {
         try
         {
