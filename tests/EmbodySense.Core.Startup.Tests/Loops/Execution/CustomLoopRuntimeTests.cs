@@ -1321,10 +1321,25 @@ public sealed class CustomLoopRuntimeTests
                         if ($userText.Contains("held")) {
                             [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
                             $releaseMarker = Join-Path $PSScriptRoot "custom-attempt-release.marker"
+                            $releaseDeadline = [DateTime]::UtcNow.AddSeconds(10)
                             while (-not (Test-Path $releaseMarker)) {
+                                if ([DateTime]::UtcNow -ge $releaseDeadline) {
+                                    throw "Timed out waiting for the test to release the held custom-loop attempt."
+                                }
                                 Start-Sleep -Milliseconds 25
                             }
-                            Remove-Item $releaseMarker
+                            while ($true) {
+                                try {
+                                    Remove-Item -LiteralPath $releaseMarker -ErrorAction Stop
+                                    break
+                                }
+                                catch [IO.IOException] {
+                                    if ([DateTime]::UtcNow -ge $releaseDeadline) {
+                                        throw "Timed out consuming the test release marker for the held custom-loop attempt."
+                                    }
+                                    Start-Sleep -Milliseconds 25
+                                }
+                            }
                         }
                         elseif ($userText.Contains("delayed")) {
                             [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
