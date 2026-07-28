@@ -1998,6 +1998,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private sealed record RunAdvance(CustomLoopRunRecord? Run, CustomLoopOrderedRunResult? Terminal);
 
+    // TODO(#90): Extract this synchronization-owning helper into a matching source file. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/90
     private sealed class ProviderDispatchState
     {
         private int _providerWasInvoked;
@@ -2007,6 +2008,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         public void MarkProviderRequestStarted() => Interlocked.Exchange(ref _providerWasInvoked, 1);
     }
 
+    // TODO(#90): Extract this lifecycle-owning helper into a matching source file. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/90
     private sealed class ActiveRunRegistration(ConcurrentDictionary<string, byte> activeRuns, string runId) : IDisposable
     {
         private int _disposed;

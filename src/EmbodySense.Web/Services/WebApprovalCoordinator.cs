@@ -231,6 +231,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         return _pending.TryGetValue(pending.Request.RequestId, out var current) && ReferenceEquals(current, pending);
     }
 
+    // TODO(#90): Extract this lifecycle-owning helper into a matching source file. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/90
     private sealed class ApprovalScope : IDisposable
     {
         private readonly WebApprovalCoordinator _coordinator;
