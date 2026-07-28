@@ -151,6 +151,22 @@ test("initial and user-requested run evidence failures remain visibly unavailabl
   assert.match(requested.elements.validationBanner.textContent, /Run history cannot be read/);
 });
 
+test("unsupported loop persistence schema cleanup guidance remains visible", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({
+    status: 503,
+    body: {
+      error: "unsupported_loop_persistence_schema",
+      detail: "The custom loop run discovery index schema version 2 is unsupported. Delete `.custom-loop-run-index.json` and retry the operation."
+    }
+  }));
+
+  const app = await loadLoopBuilder({ server });
+
+  assert.match(app.elements.validationBanner.textContent, /Run evidence unavailable/);
+  assert.match(app.elements.validationBanner.textContent, /Delete `\.custom-loop-run-index\.json`/);
+});
+
 test("SignalR transport sends keepalives for long-running invocations and stops them on close", async () => {
   const app = await loadLoopBuilder();
   const sockets = [];
