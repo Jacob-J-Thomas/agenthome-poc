@@ -38,6 +38,10 @@ public sealed class LoopRunsController : ControllerBase
         {
             return Ok(await _host.GetLoopRunsAsync(maximumCount, loopId, cursor, cancellationToken));
         }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
+        }
         catch (ArgumentException)
         {
             return BadRequest(new { error = "invalid_run_query", detail = "The loop filter or continuation cursor is invalid." });
@@ -60,6 +64,10 @@ public sealed class LoopRunsController : ControllerBase
         {
             var run = await _host.GetLoopRunAsync(runId, cancellationToken);
             return run is null ? NotFound() : Ok(run);
+        }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
         }
         catch (ArgumentException)
         {
@@ -98,6 +106,10 @@ public sealed class LoopRunsController : ControllerBase
 
             return Ok(monitor.Summary);
         }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
+        }
         catch (ArgumentException)
         {
             return BadRequest(new { error = "invalid_run_id", detail = "The run id is not a valid artifact identifier." });
@@ -121,6 +133,10 @@ public sealed class LoopRunsController : ControllerBase
             var operation = await _host.GetLoopInvocationOperationAsync(operationId, cancellationToken);
             return operation is null ? NotFound() : Ok(operation);
         }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
+        }
         catch (ArgumentException)
         {
             return BadRequest(new { error = "invalid_invocation_operation_id", detail = "The invocation operation id is not a valid artifact identifier." });
@@ -143,6 +159,10 @@ public sealed class LoopRunsController : ControllerBase
         {
             return Ok(await _host.GetLoopTraceQuotaAsync(cancellationToken));
         }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
+        }
         catch (Exception exception) when (IsEvidenceReadFailure(exception))
         {
             return EvidenceUnavailable();
@@ -161,6 +181,10 @@ public sealed class LoopRunsController : ControllerBase
         {
             var trace = await _host.GetLoopTraceAsync(runId, cancellationToken);
             return trace is null ? NotFound() : Ok(trace);
+        }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
         }
         catch (ArgumentException)
         {
@@ -196,6 +220,10 @@ public sealed class LoopRunsController : ControllerBase
                 "AuditUnavailable" => StatusCode(StatusCodes.Status503ServiceUnavailable, response),
                 _ => Ok(response)
             };
+        }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
         }
         catch (ArgumentException)
         {
@@ -249,6 +277,10 @@ public sealed class LoopRunsController : ControllerBase
         {
             return BadRequest(new { error = "invalid_control_request", detail = "The custom-loop lifecycle request is invalid." });
         }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException)
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "loop_control_unavailable", detail = "The lifecycle request could not be processed safely. Check durable run evidence and the local audit log." });
@@ -263,6 +295,11 @@ public sealed class LoopRunsController : ControllerBase
     private ObjectResult EvidenceUnavailable()
     {
         return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "run_evidence_unavailable", detail = "Custom-loop run evidence could not be read safely. Check the local audit log for diagnostics." });
+    }
+
+    private ObjectResult UnsupportedPersistenceSchema(LoopRunEvidenceUnsupportedSchemaException exception)
+    {
+        return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "unsupported_loop_persistence_schema", detail = exception.Message });
     }
 
     private static bool IsEvidenceReadFailure(Exception exception)

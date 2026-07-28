@@ -242,6 +242,22 @@ test("initial and user-requested run evidence failures remain visibly unavailabl
   assert.match(requested.elements.validationBanner.textContent, /Run history cannot be read/);
 });
 
+test("unsupported loop persistence schema cleanup guidance remains visible", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => ({
+    status: 503,
+    body: {
+      error: "unsupported_loop_persistence_schema",
+      detail: "The custom loop run discovery index schema version 2 is unsupported. Delete `.custom-loop-run-index.json` and retry the operation."
+    }
+  }));
+
+  const app = await loadLoopBuilder({ server });
+
+  assert.match(app.elements.validationBanner.textContent, /Run evidence unavailable/);
+  assert.match(app.elements.validationBanner.textContent, /Delete `\.custom-loop-run-index\.json`/);
+});
+
 test("SignalR transport sends keepalives for long-running invocations and stops them on close", async () => {
   const app = await loadLoopBuilder();
   const sockets = [];
@@ -1143,6 +1159,48 @@ test("a committed Resume audit warning refreshes the durable run instead of repo
   assert.match(app.elements.runSubtitle.textContent, /Running/);
 });
 
+test("an unsupported persistence schema Resume error reuses the operation identity after cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const paused = createRunSnapshot();
+  paused.status = "Paused";
+  paused.completedAtUtc = null;
+  server.runs = [{ id: paused.id, loopId: paused.loopId, admissionOperationId: paused.admissionOperationId, definitionVersion: 2, status: paused.status, createdAtUtc: paused.createdAtUtc, updatedAtUtc: paused.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(paused.id, paused);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      if (operationIds.length === 1) return Promise.reject(new Error("Failed to invoke 'ResumeLoop': unsupported_loop_persistence_schema: Delete `.custom-loop-run-index.json` and retry the operation."));
+      if (operationIds.length === 2) return Promise.resolve({ status: "WorkspaceHostUnavailable", run: paused, detail: "Hosting is temporarily unavailable." });
+      return Promise.resolve({ status: "InvalidState", run: paused, detail: "Definitive retry response." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  let resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+  assert.match(app.elements.validationBanner.textContent, /unsupported_loop_persistence_schema.*Delete `.custom-loop-run-index\.json`/i);
+
+  resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+  assert.match(app.elements.validationBanner.textContent, /Hosting is temporarily unavailable/);
+
+  resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+
+  assert.equal(operationIds.length, 3);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.equal(operationIds[2], operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /Definitive retry response/);
+});
+
 test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {
   const server = new FakeFetchServer(createCatalog());
   let invocationOperationId = null;
@@ -1459,6 +1517,42 @@ test("a cached hub disconnect before invocation send is not reconciled as an amb
   assert.match(app.elements.validationBanner.textContent, /could not be sent.*live connection was not established.*connection is not available/i);
   assert.doesNotMatch(app.elements.validationBanner.textContent, /outcome.*unknown/i);
   assert.equal(server.calls.filter(call => call.url.startsWith("/api/loop-runs/invocations/")).length, 0);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("an unsupported persistence schema Hub error preserves cleanup guidance and the operation for retry", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      return Promise.reject(new Error("Failed to invoke 'InvokeLoop': unsupported_loop_persistence_schema: Delete `.custom-loop-run-index.json` and retry the operation."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Retry after cleaning the index.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.validationBanner.textContent, /unsupported_loop_persistence_schema.*Delete `.custom-loop-run-index\.json`.*retrying the exact request/i);
+  assert.match(app.elements.validationBanner.textContent, /Run execution requires persistence cleanup/i);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Run was not admitted/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+
+  app.context.testHub.invoke = (_target, input) => {
+    operationIds.push(input.operationId);
+    return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive retry response." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  await app.elements.startRunButton.click();
+
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /Definitive retry response/);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
 });
 

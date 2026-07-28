@@ -147,6 +147,10 @@ public sealed class CustomLoopAdmissionService
         {
             stored = await _runStore.CreateAsync(run, cancellationToken);
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             var result = Result(CustomLoopAdmissionStatus.Invalid, null, $"The admitted run could not be persisted: {exception.GetType().Name}.");
@@ -182,6 +186,10 @@ public sealed class CustomLoopAdmissionService
             using var markerIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
             run = await CompleteAdmissionAuditAsync(run, markerIntegrityWindow.Token);
             return Result(CustomLoopAdmissionStatus.Admitted, run, "The custom-loop run was admitted and its audit-integrity marker is durable before ordered execution.");
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
         }
         catch (Exception exception)
         {

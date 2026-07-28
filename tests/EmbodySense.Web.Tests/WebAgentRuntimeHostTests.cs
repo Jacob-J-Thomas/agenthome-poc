@@ -1,10 +1,14 @@
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
@@ -423,6 +427,26 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task Evidence_retries_recovery_after_retained_runtime_startup_schema_failure()
+    {
+        using var workspace = new TestWorkspace();
+        await using var host = CreateHost(workspace.RootPath);
+        await host.InitializeWorkspaceAsync();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runStore = new CustomLoopRunStore(paths);
+        var running = RunningRun("run-web-unsupported-startup-recovery");
+        await PersistRunningRunAsync(runStore, running);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
+
+        await host.SetVerboseModeAsync(true, (_, _) => Task.CompletedTask);
+        File.Delete(indexPath);
+        var recovered = await host.GetLoopRunAsync(running.Id);
+
+        Assert.Equal("Paused", recovered?.Status);
+    }
+
+    [Fact]
     public async Task DisposeAsync_cancels_an_active_custom_loop_through_the_host_lifetime()
     {
         using var workspace = new TestWorkspace();
@@ -488,6 +512,64 @@ public sealed class WebAgentRuntimeHostTests
             ? WebRunOptions.FromArguments(["--workdir", rootPath])
             : WebRunOptions.FromArguments(["--workdir", rootPath, "--codex-path", codexPath]);
         return new WebAgentRuntimeHost(options, new WebApprovalCoordinator());
+    }
+
+    private static CustomLoopRunRecord RunningRun(string runId)
+    {
+        var now = DateTimeOffset.Parse("2026-07-26T12:00:00+00:00");
+        var definition = CustomLoopDefinitionContentHash.Apply(CustomLoopDefinition.CreateSeed("loop-web-recovery", "role-workspace", "step-only", "create-loop-web-recovery", now) with { ContentHash = string.Empty });
+        CustomLoopRunEvent[] events =
+        [
+            new(1, $"admitted-{runId}", now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null),
+            new(2, $"admission-audit-{runId}", now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null),
+            new(3, $"running-{runId}", now.AddSeconds(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered Running.", [], null, null, null, null, null, null, null, null, null, null)
+        ];
+        var run = new CustomLoopRunRecord(
+            CustomLoopRunRecord.CurrentSchemaVersion,
+            runId,
+            definition.Id,
+            events.Length,
+            CustomLoopRunStatus.Running,
+            now,
+            now.AddSeconds(1),
+            null,
+            "web",
+            new CustomLoopModelSnapshot("provider", "model"),
+            $"admit-{runId}",
+            WorkspaceActors.Web,
+            string.Empty,
+            definition,
+            "prompt",
+            null,
+            CustomLoopContextSnapshot.CreateEmpty(now),
+            new CustomLoopExecutionClock(0, now.AddSeconds(1)),
+            CustomLoopRunCheckpoint.Start(),
+            events,
+            null,
+            null,
+            null);
+        return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static async Task PersistRunningRunAsync(CustomLoopRunStore store, CustomLoopRunRecord running)
+    {
+        var admitted = running with
+        {
+            LifecycleVersion = 1,
+            Status = CustomLoopRunStatus.Admitted,
+            UpdatedAtUtc = running.CreatedAtUtc,
+            ExecutionClock = CustomLoopExecutionClock.NotStarted(),
+            Events = [running.Events[0]]
+        };
+        var audited = admitted with
+        {
+            LifecycleVersion = 2,
+            Events = [.. running.Events[..2]]
+        };
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(audited, admitted.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, audited.LifecycleVersion)).Status);
     }
 
     private static async Task WriteCurrentTranscriptAsync(TestWorkspace workspace, string prompt, string answer)

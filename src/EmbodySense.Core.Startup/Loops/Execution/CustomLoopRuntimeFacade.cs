@@ -32,6 +32,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private readonly TimeProvider _timeProvider;
     private bool _customExecutionAvailable;
     private bool _customExecutionReacquisitionAllowed;
+    private bool _customRecoveryRequired;
 
     public CustomLoopRuntimeFacade(
         ICustomLoopDefinitionStore definitionStore,
@@ -47,6 +48,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         CustomLoopRuntimeContext runtimeContext,
         bool customExecutionAvailable,
         bool customExecutionReacquisitionAllowed,
+        bool customRecoveryRequired,
         string surface,
         string actor,
         string currentRoleId,
@@ -66,12 +68,15 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         _runtimeContext = runtimeContext ?? throw new ArgumentNullException(nameof(runtimeContext));
         _customExecutionAvailable = customExecutionAvailable;
         _customExecutionReacquisitionAllowed = customExecutionReacquisitionAllowed;
+        _customRecoveryRequired = customRecoveryRequired;
         _surface = string.IsNullOrWhiteSpace(surface) ? throw new ArgumentException("Surface is required.", nameof(surface)) : surface;
         _actor = string.IsNullOrWhiteSpace(actor) ? throw new ArgumentException("Actor is required.", nameof(actor)) : actor;
         _currentRoleId = string.IsNullOrWhiteSpace(currentRoleId) ? throw new ArgumentException("Current role is required.", nameof(currentRoleId)) : currentRoleId;
         _modelSnapshot = modelSnapshot ?? throw new ArgumentNullException(nameof(modelSnapshot));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
+
+    internal bool CustomRecoveryRequired => Volatile.Read(ref _customRecoveryRequired);
 
     public async Task<LoopRunInvocationResponse> InvokeAsync(LoopRunInvocationInput input, CancellationToken cancellationToken)
     {
@@ -111,6 +116,15 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
             if (existingOperation.State == CustomLoopInvocationOperationState.Complete)
             {
+                if (CustomRecoveryRequired)
+                {
+                    var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+                    if (!recovery.Available)
+                    {
+                        return new LoopRunInvocationResponse(recovery.Status, null, false, null, [], recovery.Detail);
+                    }
+                }
+
                 return await ReplayOperationAsync(existingOperation, cancellationToken);
             }
 
@@ -328,7 +342,17 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 _modelSnapshot,
                 conversationReference,
                 contextSnapshot);
-            var admission = await _admissionService.AdmitAsync(request, cancellationToken);
+            CustomLoopAdmissionResult admission;
+            try
+            {
+                admission = await _admissionService.AdmitAsync(request, cancellationToken);
+            }
+            catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+            {
+                MarkCustomRecoveryRequired();
+                throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+            }
+
             if (!admission.IsAdmitted)
             {
                 if (admission.Status == CustomLoopAdmissionStatus.NotFound && operation.BindingState == CustomLoopInvocationBindingState.CapturedContext)
@@ -360,7 +384,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.Admitted.ToString(), admission.Run?.Status.ToString(), false, admission.Run is null ? null : Map(admission.Run), admission.ValidationErrors.Select(Map).ToArray(), "The durable admitted invocation outcome was recovered without another provider dispatch.");
             }
 
-            var execution = await _runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, _actor), cancellationToken);
+            var execution = await ExecuteOrderedRunAsync(_runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, _actor), cancellationToken));
             CustomLoopRunRecord? executedRun = execution.Run;
             var executionDetail = execution.Detail;
             if (executedRun is null)
@@ -394,19 +418,28 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken)
     {
-        var summaries = await _runStore.ListRecentAsync(maximumCount, cancellationToken);
+        var summaries = await ExecuteRunStoreReadAsync(() => _runStore.ListRecentAsync(maximumCount, cancellationToken));
         return summaries.Select(Map).ToArray();
     }
 
     public async Task<LoopRunSummaryPageSnapshot> ListPageAsync(int maximumCount, string? loopId, string? cursor, CancellationToken cancellationToken)
     {
-        var page = await _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken);
+        var page = await ExecuteRunStoreReadAsync(() => _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken));
         return new LoopRunSummaryPageSnapshot(page.Items.Select(Map).ToArray(), page.ContinuationCursor);
     }
 
     public async Task<LoopRunControlResponse> PauseAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
+        if (CustomRecoveryRequired)
+        {
+            var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+            if (!recovery.Available)
+            {
+                return new LoopRunControlResponse(recovery.Status, null, input.OperationId, recovery.Detail);
+            }
+        }
+
         await _executionAvailabilityGate.WaitAsync(cancellationToken);
         try
         {
@@ -427,8 +460,17 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return replay;
         }
 
+        if (CustomRecoveryRequired)
+        {
+            var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+            if (!recovery.Available)
+            {
+                return new LoopRunControlResponse(recovery.Status, null, input.OperationId, recovery.Detail);
+            }
+        }
+
         var request = new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor);
-        var result = await _lifecycleService.CancelAsync(request, cancellationToken);
+        var result = await ExecuteControlResultAsync(_lifecycleService.CancelAsync(request, cancellationToken));
         if (!RequiresCancellationOwnerRecovery(result))
         {
             return MapControl(result);
@@ -440,7 +482,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return MapControl(result with { Detail = $"{result.Detail} Retained-runtime recovery did not acquire hosting: {availability.Detail}" });
         }
 
-        return MapControl(await _lifecycleService.CancelAsync(request, cancellationToken));
+        return MapControl(await ExecuteControlResultAsync(_lifecycleService.CancelAsync(request, cancellationToken)));
     }
 
     public async Task<LoopRunControlResponse> ResumeAsync(LoopRunControlInput input, CancellationToken cancellationToken)
@@ -511,6 +553,11 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 {
                     recovery = await _recoveryService.RecoverAsync(_actor, cancellationToken);
                 }
+                catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+                {
+                    MarkCustomRecoveryRequired();
+                    throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+                }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     _customExecutionReacquisitionAllowed = false;
@@ -541,6 +588,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             }
 
             Volatile.Write(ref _customExecutionAvailable, true);
+            Volatile.Write(ref _customRecoveryRequired, false);
             return CustomExecutionAvailability.AvailableNow;
         }
         finally
@@ -549,9 +597,54 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         }
     }
 
-    private static async Task<LoopRunControlResponse> ExecuteControlAsync(Task<CustomLoopControlResult> awaitable)
+    private async Task<LoopRunControlResponse> ExecuteControlAsync(Task<CustomLoopControlResult> awaitable)
     {
-        return MapControl(await awaitable);
+        return MapControl(await ExecuteControlResultAsync(awaitable));
+    }
+
+    private async Task<CustomLoopControlResult> ExecuteControlResultAsync(Task<CustomLoopControlResult> awaitable)
+    {
+        try
+        {
+            return await awaitable;
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            MarkCustomRecoveryRequired();
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
+    }
+
+    private async Task<CustomLoopOrderedRunResult> ExecuteOrderedRunAsync(Task<CustomLoopOrderedRunResult> awaitable)
+    {
+        try
+        {
+            return await awaitable;
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            MarkCustomRecoveryRequired();
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
+    }
+
+    private void MarkCustomRecoveryRequired()
+    {
+        Volatile.Write(ref _customExecutionAvailable, false);
+        _customExecutionReacquisitionAllowed = true;
+        Volatile.Write(ref _customRecoveryRequired, true);
+    }
+
+    private static async Task<T> ExecuteRunStoreReadAsync<T>(Func<Task<T>> read)
+    {
+        try
+        {
+            return await read();
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
     }
 
     private static LoopRunControlResponse MapControl(CustomLoopControlResult result)

@@ -41,6 +41,8 @@ let pendingCreateOperationId = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
+// TODO(#77): Persist unresolved lifecycle-control identities per workspace and run across reloads and browser tabs.
+let pendingResumeRequest = null;
 let invocationInFlight = false;
 const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix = "embodysense.pending-loop-invocations";
@@ -1685,6 +1687,10 @@ async function startRun() {
       showBanner(`Run could not be sent because the live connection was not established: ${error.message}`);
       return;
     }
+    if (error?.message?.includes("unsupported_loop_persistence_schema")) {
+      showBanner(`Run execution requires persistence cleanup: ${error.message} Retrying the exact request after cleanup will reuse operation ${operationId}.`);
+      return;
+    }
     await reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId);
   } finally {
     invocationInFlight = false;
@@ -2147,17 +2153,22 @@ async function controlRun(action) {
 
 async function resumeRun() {
   if (!selectedRun || selectedRun.status !== "Paused") return;
+  const runId = selectedRun.id;
+  const expectedLifecycleVersion = selectedRun.lifecycleVersion;
+  if (pendingResumeRequest?.runId !== runId || pendingResumeRequest.expectedLifecycleVersion !== expectedLifecycleVersion) {
+    pendingResumeRequest = { runId, expectedLifecycleVersion, operationId: newOperationId() };
+  }
   try {
     const connection = await getHub();
-    const operationId = newOperationId();
     const invocation = connection.invoke("ResumeLoop", {
-      runId: selectedRun.id,
-      expectedLifecycleVersion: selectedRun.lifecycleVersion,
-      operationId
+      runId,
+      expectedLifecycleVersion,
+      operationId: pendingResumeRequest.operationId
     });
-    const response = await waitForRunOperation(invocation, { preferredRunId: selectedRun.id });
+    const response = await waitForRunOperation(invocation, { preferredRunId: runId });
+    if (!["OperationInProgress", "WorkspaceHostUnavailable"].includes(response?.status)) pendingResumeRequest = null;
     if (!["Resumed", "Completed", "Cancelled", "Paused", "NeedsReview", "AuditWarning"].includes(response?.status)) {
-      await loadRuns({ silent: true, preferredRunId: selectedRun.id });
+      await loadRuns({ silent: true, preferredRunId: runId });
       renderAll();
       showBanner(`Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}`);
       return;

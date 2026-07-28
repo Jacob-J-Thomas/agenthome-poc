@@ -924,6 +924,79 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Unsupported_discovery_index_schema_propagates_before_provider_dispatch()
+    {
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (candidate.Status == CustomLoopRunStatus.Running)
+                {
+                    throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
+                }
+            }
+        };
+        var executor = new QueueExecutor(Result("must not run"));
+
+        var exception = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web)));
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(store.Writes);
+    }
+
+    [Fact]
+    public async Task Unsupported_discovery_index_schema_after_provider_dispatch_escalates_to_needs_review()
+    {
+        var schemaFailureInjected = false;
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (!schemaFailureInjected && candidate.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved))
+                {
+                    schemaFailureInjected = true;
+                    throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
+                }
+            }
+        };
+        var executor = new QueueExecutor(Result("provider outcome"));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run?.Status);
+        Assert.Equal("post_outcome_persistence_conflict", result.Run?.FailureCode);
+        Assert.Contains("Delete `.custom-loop-run-index.json`", result.Detail, StringComparison.Ordinal);
+        Assert.Single(executor.Requests);
+    }
+
+    [Fact]
+    public async Task Persistent_unsupported_schema_after_provider_dispatch_propagates_for_cleanup_and_recovery()
+    {
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (candidate.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved)
+                    || candidate.Status == CustomLoopRunStatus.NeedsReview)
+                {
+                    throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
+                }
+            }
+        };
+        var executor = new QueueExecutor(Result("provider outcome"));
+
+        var exception = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web)));
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("external outcome may exist", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NeedsReview escalation could not be persisted", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopRunStatus.Running, store.Current.Status);
+        Assert.Single(executor.Requests);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_during_admitted_run_load_parks_the_run_before_returning()
     {
         using var cancellation = new CancellationTokenSource();

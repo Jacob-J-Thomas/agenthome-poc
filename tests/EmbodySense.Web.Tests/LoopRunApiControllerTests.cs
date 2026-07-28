@@ -141,6 +141,38 @@ public sealed class LoopRunApiControllerTests
     }
 
     [Fact]
+    public async Task Run_evidence_api_surfaces_unsupported_discovery_index_cleanup_without_rewriting_the_index()
+    {
+        using var workspace = new TestWorkspace();
+        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(paths.CustomLoopRunsPath);
+            var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+            const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+            await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+
+            var response = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+            Assert.Contains("unsupported_loop_persistence_schema", body, StringComparison.Ordinal);
+            Assert.Contains("Delete `.custom-loop-run-index.json`", body, StringComparison.Ordinal);
+            Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Host_invocation_requires_server_owned_approval_owner_and_run_api_returns_its_durable_artifact()
     {
         using var workspace = new TestWorkspace();
@@ -246,6 +278,56 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(HttpStatusCode.NotFound, cancel.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, unknownField.StatusCode);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Pause_and_cancel_routes_surface_unsupported_discovery_index_cleanup()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var interrupted = await CreateInterruptedRunAsync(store);
+        var runningAt = interrupted.UpdatedAtUtc.AddSeconds(1);
+        var running = interrupted with
+        {
+            LifecycleVersion = interrupted.LifecycleVersion + 1,
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = runningAt,
+            ExecutionClock = new CustomLoopExecutionClock(0, runningAt),
+            Events = [.. interrupted.Events, RunEvent(interrupted.Events.Length + 1L, "web-unsupported-index-running", CustomLoopRunEventKind.LifecycleChanged) with { TimestampUtc = runningAt }]
+        };
+        Assert.True(CustomLoopRunValidator.Validate(running).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, interrupted.LifecycleVersion)).Status);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+
+            var pause = await SendControlAsync(client, $"/api/loop-runs/{running.Id}/pause", token, new { expectedLifecycleVersion = running.LifecycleVersion, operationId = "pause-unsupported-index" });
+            var cancel = await SendControlAsync(client, $"/api/loop-runs/{running.Id}/cancel", token, new { expectedLifecycleVersion = running.LifecycleVersion, operationId = "cancel-unsupported-index" });
+            var pauseBody = await pause.Content.ReadAsStringAsync();
+            var cancelBody = await cancel.Content.ReadAsStringAsync();
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, pause.StatusCode);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, cancel.StatusCode);
+            Assert.Contains("unsupported_loop_persistence_schema", pauseBody, StringComparison.Ordinal);
+            Assert.Contains("Delete `.custom-loop-run-index.json`", pauseBody, StringComparison.Ordinal);
+            Assert.Contains("unsupported_loop_persistence_schema", cancelBody, StringComparison.Ordinal);
+            Assert.Contains("Delete `.custom-loop-run-index.json`", cancelBody, StringComparison.Ordinal);
+            Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
         }
         finally
         {

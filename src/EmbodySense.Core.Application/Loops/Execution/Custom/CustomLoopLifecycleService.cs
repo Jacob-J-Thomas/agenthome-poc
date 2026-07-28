@@ -473,6 +473,10 @@ public sealed class CustomLoopLifecycleService
         {
             stored = await _runStore.UpdateAsync(candidate, current.LifecycleVersion, IntegrityToken());
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             return new TransitionResult(null, current, CustomLoopControlStatus.Failed, false, $"The lifecycle trace update failed: {SafeExceptionClass(exception)}.");

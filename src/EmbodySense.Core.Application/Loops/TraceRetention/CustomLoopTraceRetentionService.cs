@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -102,6 +103,10 @@ public sealed class CustomLoopTraceRetentionService
         {
             reservation = await _store.ReserveTraceDeletionOperationAsync(mutation, cancellationToken);
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             try
@@ -162,6 +167,10 @@ public sealed class CustomLoopTraceRetentionService
         try
         {
             stored = await _store.DeleteTerminalTraceAsync(mutation, ownerWindow.Token);
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
         }
         catch (Exception exception)
         {
