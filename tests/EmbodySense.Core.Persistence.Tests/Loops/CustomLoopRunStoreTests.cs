@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -659,6 +660,257 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Run_pages_use_stable_filter_bound_cursors_across_concurrent_inserts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha-new", "invoke-alpha-new"), 5));
+        await WriteDirectAsync(paths, At(CreateRun("loop-beta", "run-beta-new", "invoke-beta-new"), 4));
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha-middle", "invoke-alpha-middle"), 3));
+        await WriteDirectAsync(paths, At(CreateRun("loop-beta", "run-beta-old", "invoke-beta-old"), 2));
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha-old", "invoke-alpha-old"), 1));
+        var store = new CustomLoopRunStore(paths);
+
+        var first = await store.ListPageAsync(new CustomLoopRunPageRequest(2));
+        Assert.Equal(["run-alpha-new", "run-beta-new"], first.Items.Select(item => item.Id));
+        Assert.NotNull(first.ContinuationCursor);
+
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-concurrent-new", "invoke-concurrent-new"), 6));
+        var second = await store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: first.ContinuationCursor));
+        var third = await store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: second.ContinuationCursor));
+
+        Assert.Equal(["run-alpha-middle", "run-beta-old"], second.Items.Select(item => item.Id));
+        Assert.Equal(["run-alpha-old"], third.Items.Select(item => item.Id));
+        Assert.DoesNotContain("run-concurrent-new", second.Items.Concat(third.Items).Select(item => item.Id));
+        Assert.Null(third.ContinuationCursor);
+
+        var filtered = await store.ListPageAsync(new CustomLoopRunPageRequest(2, "loop-alpha"));
+        var filteredNext = await store.ListPageAsync(new CustomLoopRunPageRequest(2, "loop-alpha", filtered.ContinuationCursor));
+        Assert.Equal(["run-concurrent-new", "run-alpha-new"], filtered.Items.Select(item => item.Id));
+        Assert.Equal(["run-alpha-middle", "run-alpha-old"], filteredNext.Items.Select(item => item.Id));
+        Assert.All(filtered.Items.Concat(filteredNext.Items), item => Assert.Equal("loop-alpha", item.LoopId));
+        Assert.Null(filteredNext.ContinuationCursor);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: "not-a-cursor")));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, "loop-beta", filtered.ContinuationCursor)));
+        var impossibleCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, createdAtUtcTicks = DateTimeOffset.MinValue.UtcTicks, runId = "run-impossible-cursor", loopId = (string?)null });
+        var impossibleCursor = Convert.ToBase64String(impossibleCursorJson).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: impossibleCursor)));
+    }
+
+    [Fact]
+    public async Task Run_page_index_keeps_unseen_updated_runs_in_immutable_cursor_order()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var newest = At(CreateRun("loop-alpha", "run-newest", "invoke-newest"), 3);
+        var unseen = At(CreateRun("loop-beta", "run-unseen", "invoke-unseen"), 2);
+        var oldest = At(CreateRun("loop-gamma", "run-oldest", "invoke-oldest"), 1);
+        await WriteDirectAsync(paths, newest);
+        await WriteDirectAsync(paths, unseen);
+        await WriteDirectAsync(paths, oldest);
+        var store = new CustomLoopRunStore(paths);
+
+        var first = await store.ListPageAsync(new CustomLoopRunPageRequest(1));
+        var updatedUnseen = Advance(unseen, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(updatedUnseen, unseen.LifecycleVersion)).Status);
+        updatedUnseen = Advance(updatedUnseen, CustomLoopRunStatus.PauseRequested);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(updatedUnseen, updatedUnseen.LifecycleVersion - 1)).Status);
+        var second = await store.ListPageAsync(new CustomLoopRunPageRequest(1, Cursor: first.ContinuationCursor));
+        var third = await store.ListPageAsync(new CustomLoopRunPageRequest(1, Cursor: second.ContinuationCursor));
+
+        Assert.Equal(newest.Id, Assert.Single(first.Items).Id);
+        Assert.Equal(unseen.Id, Assert.Single(second.Items).Id);
+        Assert.Equal(oldest.Id, Assert.Single(third.Items).Id);
+        Assert.Null(third.ContinuationCursor);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_after_a_pending_mutation_marker()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1));
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+        var pendingPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending");
+        var orphanedPendingTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, $"..custom-loop-run-index.pending.{Guid.NewGuid():N}.tmp");
+        var orphanedIndexTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, $"..custom-loop-run-index.json.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(pendingPath, "pending\n");
+        await File.WriteAllTextAsync(orphanedPendingTemporaryPath, "partial");
+        await File.WriteAllTextAsync(orphanedIndexTemporaryPath, "partial");
+        await WriteDirectAsync(paths, At(CreateRun("loop-beta", "run-beta", "invoke-beta"), 2));
+
+        var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+        Assert.Equal(["run-beta", "run-alpha"], repaired.Items.Select(item => item.Id));
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(orphanedPendingTemporaryPath));
+        Assert.False(File.Exists(orphanedIndexTemporaryPath));
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_when_its_summary_is_modified_without_its_canonical_binding()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Status);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"]![0]!["summary"]!["status"] = "failed";
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+
+        var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single(repaired.Items).Status);
+        var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        Assert.Equal("admitted", repairedIndex["entries"]![0]!["summary"]!["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_when_a_modified_summary_recomputes_its_public_binding_hash()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Status);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        var entry = index["entries"]![0]!.AsObject();
+        entry["summary"]!["status"] = "failed";
+        var modifiedSummary = entry["summary"]!.Deserialize<CustomLoopRunSummary>(ArtifactJsonOptions)!;
+        var artifactHash = entry["artifactHash"]!.GetValue<string>();
+        using var bindingHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        bindingHash.AppendData(Convert.FromHexString(artifactHash));
+        bindingHash.AppendData(JsonSerializer.SerializeToUtf8Bytes(modifiedSummary, ArtifactJsonOptions));
+        entry["summaryBindingHash"] = Convert.ToHexString(bindingHash.GetHashAndReset()).ToLowerInvariant();
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+
+        var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+        Assert.Equal(CustomLoopRunStatus.Admitted, Assert.Single(repaired.Items).Status);
+        var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        Assert.Equal("admitted", repairedIndex["entries"]![0]!["summary"]!["status"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_invalid_derived_identifiers_for_reads_and_lifecycle_writes()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"]![0]!["summary"]!["id"] = "../unsafe";
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+
+        Assert.Equal(run.Id, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+
+        index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"]![0]!["summary"]!["admissionOperationId"] = "../unsafe";
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        var updated = Advance(run, CustomLoopRunStatus.Running);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(updated, run.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStatus.Running, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Status);
+    }
+
+    [Fact]
+    public async Task Run_page_index_rebuilds_a_same_metadata_canonical_replacement()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var originalIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        var originalHash = originalIndex["entries"]![0]!["artifactHash"]!.GetValue<string>();
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        var originalInfo = new FileInfo(artifactPath);
+        var originalLength = originalInfo.Length;
+        var originalLastWriteUtc = originalInfo.LastWriteTimeUtc;
+        using var replacementWorkspace = new TestWorkspace();
+        var replacementPaths = new WorkspacePaths(replacementWorkspace.RootPath);
+        var replacement = CustomLoopAdmissionRequestHash.Apply(run with { TriggerPrompt = "Altered prompt" });
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await new CustomLoopRunStore(replacementPaths).CreateAsync(replacement)).Status);
+        var replacementPath = Path.Combine(replacementPaths.CustomLoopRunsPath, replacement.LoopId, replacement.Id + ".json");
+        var replacementContent = await File.ReadAllBytesAsync(replacementPath);
+        Assert.Equal(originalLength, replacementContent.Length);
+        await File.WriteAllBytesAsync(artifactPath, replacementContent);
+        File.SetLastWriteTimeUtc(artifactPath, originalLastWriteUtc);
+
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+
+        var repairedIndex = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        Assert.NotEqual(originalHash, repairedIndex["entries"]![0]!["artifactHash"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Run_page_rejects_unrelated_root_level_temporary_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var unrelatedTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, $".unrelated.json.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(unrelatedTemporaryPath, "unaccounted");
+
+        await Assert.ThrowsAsync<FormatException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(50)));
+
+        Assert.True(File.Exists(unrelatedTemporaryPath));
+    }
+
+    [Fact]
+    public async Task Run_page_uses_an_in_memory_rebuilt_index_when_derived_storage_is_read_only()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var store = new CustomLoopRunStore(paths);
+        Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var lockPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-runs.lock");
+        File.Delete(indexPath);
+        var originalDirectoryMode = File.GetUnixFileMode(paths.CustomLoopRunsPath);
+        var originalLockMode = File.GetUnixFileMode(lockPath);
+        try
+        {
+            File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+            File.SetUnixFileMode(paths.CustomLoopRunsPath, UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+            var page = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
+
+            Assert.Equal(run.Id, Assert.Single(page.Items).Id);
+            Assert.False(File.Exists(indexPath));
+        }
+        finally
+        {
+            File.SetUnixFileMode(lockPath, originalLockMode);
+            File.SetUnixFileMode(paths.CustomLoopRunsPath, originalDirectoryMode);
+        }
+    }
+
+    [Fact]
     public async Task Strict_reader_rejects_missing_unknown_and_noncanonical_nested_properties_or_enums()
     {
         var mutations = new Action<JsonObject>[]
@@ -772,7 +1024,7 @@ public sealed class CustomLoopRunStoreTests
 
         Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, result.Status);
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, extra.LoopId, extra.Id + ".json")));
-        Assert.Equal(CustomLoopLimits.MaxRunTracesPerWorkspace, Directory.EnumerateFiles(paths.CustomLoopRunsPath, "*.json", SearchOption.AllDirectories).Count());
+        Assert.Equal(CustomLoopLimits.MaxRunTracesPerWorkspace, Directory.EnumerateFiles(paths.CustomLoopRunsPath, "*.json", SearchOption.AllDirectories).Count(path => !string.Equals(Path.GetDirectoryName(path), paths.CustomLoopRunsPath, StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -800,7 +1052,7 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(maximumReservations, nonterminal.Count);
         Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, result.Status);
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, extra.LoopId, extra.Id + ".json")));
-        Assert.Equal(maximumReservations, Directory.EnumerateFiles(paths.CustomLoopRunsPath, "*.json", SearchOption.AllDirectories).Count());
+        Assert.Equal(maximumReservations, Directory.EnumerateFiles(paths.CustomLoopRunsPath, "*.json", SearchOption.AllDirectories).Count(path => !string.Equals(Path.GetDirectoryName(path), paths.CustomLoopRunsPath, StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -942,6 +1194,19 @@ public sealed class CustomLoopRunStoreTests
         var context = CustomLoopContextSnapshot.CreateEmpty(Timestamp);
         var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, Timestamp);
         var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopRunRecord At(CustomLoopRunRecord run, int minutes)
+    {
+        var timestamp = Timestamp.AddMinutes(minutes);
+        run = run with
+        {
+            CreatedAtUtc = timestamp,
+            UpdatedAtUtc = timestamp,
+            ContextSnapshot = CustomLoopContextSnapshot.CreateEmpty(timestamp),
+            Events = [run.Events[0] with { TimestampUtc = timestamp }]
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

@@ -21,7 +21,7 @@ public sealed class LoopRunsController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<LoopRunSummarySnapshot>>> List([FromQuery] int maximumCount = MaximumPageSize, CancellationToken cancellationToken = default)
+    public async Task<ActionResult<LoopRunSummaryPageSnapshot>> List([FromQuery] int maximumCount = MaximumPageSize, [FromQuery] string? loopId = null, [FromQuery] string? cursor = null, CancellationToken cancellationToken = default)
     {
         if (!_host.GetStatus().Initialized)
         {
@@ -35,7 +35,11 @@ public sealed class LoopRunsController : ControllerBase
 
         try
         {
-            return Ok(await _host.GetLoopRunsAsync(maximumCount, cancellationToken));
+            return Ok(await _host.GetLoopRunsAsync(maximumCount, loopId, cursor, cancellationToken));
+        }
+        catch (ArgumentException)
+        {
+            return BadRequest(new { error = "invalid_run_query", detail = "The loop filter or continuation cursor is invalid." });
         }
         catch (Exception exception) when (IsEvidenceReadFailure(exception))
         {

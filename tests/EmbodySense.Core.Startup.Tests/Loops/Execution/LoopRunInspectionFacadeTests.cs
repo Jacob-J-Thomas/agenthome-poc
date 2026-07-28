@@ -105,6 +105,7 @@ public sealed class LoopRunInspectionFacadeTests
         var replay = await facade.DeleteTraceAsync(terminal.Id, trace.PersistedArtifactHash, "delete-trace");
         var tombstone = await facade.GetTraceAsync(terminal.Id);
         var recent = Assert.Single(await facade.ListRecentAsync());
+        var page = await facade.ListPageAsync(1, terminal.LoopId);
         var quota = await facade.GetTraceQuotaAsync();
 
         Assert.Equal("Deleted", deleted.Status);
@@ -117,6 +118,8 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.True(replay.IsOutcomeCommitted);
         Assert.True(tombstone!.IsDeleted);
         Assert.True(recent.IsDeleted);
+        Assert.True(Assert.Single(page.Items).IsDeleted);
+        Assert.Null(page.ContinuationCursor);
         Assert.Equal(terminal.Id, recent.Id);
         Assert.Equal(terminal.AdmissionOperationId, recent.AdmissionOperationId);
         Assert.Equal(terminal.Status.ToString(), recent.Status);

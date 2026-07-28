@@ -106,6 +106,11 @@ public sealed class AgentRuntime : IAsyncDisposable
         return _customLoops.ListRecentAsync(maximumCount, cancellationToken);
     }
 
+    public Task<LoopRunSummaryPageSnapshot> ListCustomLoopRunPageAsync(int maximumCount = 50, string? loopId = null, string? cursor = null, CancellationToken cancellationToken = default)
+    {
+        return _customLoops.ListPageAsync(maximumCount, loopId, cursor, cancellationToken);
+    }
+
     public Task<LoopRunControlResponse> PauseCustomLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
     {
         return _customLoops.PauseAsync(input, cancellationToken);

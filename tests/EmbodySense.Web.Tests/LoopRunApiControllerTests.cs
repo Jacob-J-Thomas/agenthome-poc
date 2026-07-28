@@ -43,8 +43,10 @@ public sealed class LoopRunApiControllerTests
             await File.WriteAllTextAsync(paths.CurrentConversationPath, transcriptEvidence);
 
             var list = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
-            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummarySnapshot[]>(JsonOptions);
+            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions);
             var invalidMaximum = await SendAsync(client, "/api/loop-runs?maximumCount=0", token);
+            var invalidCursor = await SendAsync(client, "/api/loop-runs?cursor=not-a-cursor", token);
+            var invalidLoopFilter = await SendAsync(client, "/api/loop-runs?loopId=INVALID%20ID", token);
             var missing = await SendAsync(client, "/api/loop-runs/run-missing", token);
             var invalidId = await SendAsync(client, "/api/loop-runs/INVALID%20ID", token);
             Directory.CreateDirectory(Path.Combine(paths.CustomLoopRunsPath, "loop-corrupt"));
@@ -55,10 +57,13 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.OK, list.StatusCode);
-            Assert.Empty(summaries!);
+            Assert.Empty(summaries!.Items);
+            Assert.Null(summaries.ContinuationCursor);
             Assert.Equal(transcriptEvidence, await File.ReadAllTextAsync(paths.CurrentConversationPath));
             Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
             Assert.Equal(HttpStatusCode.BadRequest, invalidMaximum.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidCursor.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidLoopFilter.StatusCode);
             Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, invalidId.StatusCode);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, corrupt.StatusCode);
@@ -91,7 +96,7 @@ public sealed class LoopRunApiControllerTests
             await Assert.ThrowsAsync<ArgumentException>(() => host.InvokeLoopAsync(input, " "));
             var invocation = await host.InvokeLoopAsync(input, "connection-owned-by-hub");
             var list = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
-            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummarySnapshot[]>(JsonOptions);
+            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions);
             var detailResponse = await SendAsync(client, $"/api/loop-runs/{invocation.Run!.Id}", token);
             var detail = await detailResponse.Content.ReadFromJsonAsync<LoopRunSnapshot>(JsonOptions);
             var quotaResponse = await SendAsync(client, "/api/loop-runs/quota", token);
@@ -107,13 +112,13 @@ public sealed class LoopRunApiControllerTests
             var replay = await replayResponse.Content.ReadFromJsonAsync<LoopTraceDeletionResponse>(JsonOptions);
             var tombstoneResponse = await SendAsync(client, $"/api/loop-runs/{invocation.Run.Id}/trace", token);
             var tombstone = await tombstoneResponse.Content.ReadFromJsonAsync<LoopTraceInspectionSnapshot>(JsonOptions);
-            var summariesAfterDeletion = await (await SendAsync(client, "/api/loop-runs?maximumCount=50", token)).Content.ReadFromJsonAsync<LoopRunSummarySnapshot[]>(JsonOptions);
+            var summariesAfterDeletion = await (await SendAsync(client, $"/api/loop-runs?maximumCount=50&loopId={definition.Id}", token)).Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions);
             var quotaAfterDeletion = await (await SendAsync(client, "/api/loop-runs/quota", token)).Content.ReadFromJsonAsync<LoopTraceQuotaSnapshot>(JsonOptions);
 
             Assert.Equal("Admitted", invocation.AdmissionStatus);
             Assert.Equal("Completed", invocation.ExecutionStatus);
             Assert.Equal(HttpStatusCode.OK, list.StatusCode);
-            Assert.Equal(invocation.Run.Id, Assert.Single(summaries!).Id);
+            Assert.Equal(invocation.Run.Id, Assert.Single(summaries!.Items).Id);
             Assert.Equal(HttpStatusCode.OK, detailResponse.StatusCode);
             Assert.True(detailResponse.Headers.CacheControl?.NoStore == true);
             Assert.Equal(invocation.Run.Id, detail!.Id);
@@ -138,7 +143,7 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal("Replayed", replay!.Status);
             Assert.Equal(HttpStatusCode.OK, tombstoneResponse.StatusCode);
             Assert.True(tombstone!.IsDeleted);
-            Assert.True(Assert.Single(summariesAfterDeletion!).IsDeleted);
+            Assert.True(Assert.Single(summariesAfterDeletion!.Items).IsDeleted);
             Assert.Equal(trace.PersistedArtifactHash, tombstone.OriginalTraceHash);
             Assert.Equal(0, quotaAfterDeletion!.LiveTraceCount);
             Assert.Equal(1, quotaAfterDeletion.TombstoneCount);
@@ -206,7 +211,7 @@ public sealed class LoopRunApiControllerTests
             var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
 
             var response = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
-            var recovered = Assert.Single((await response.Content.ReadFromJsonAsync<LoopRunSummarySnapshot[]>(JsonOptions))!);
+            var recovered = Assert.Single((await response.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions))!.Items);
             var detail = await (await SendAsync(client, $"/api/loop-runs/{interrupted.Id}", token)).Content.ReadFromJsonAsync<LoopRunSnapshot>(JsonOptions);
             var transcript = await app.Services.GetRequiredService<WebAgentRuntimeHost>().GetCurrentTranscriptAsync();
 

@@ -665,7 +665,7 @@ public sealed class WebAgentRuntimeHostTests
     {
         for (var attempt = 0; attempt < 100; attempt++)
         {
-            var summary = (await host.GetLoopRunsAsync()).SingleOrDefault(run => string.Equals(run.AdmissionOperationId, admissionOperationId, StringComparison.Ordinal));
+            var summary = (await host.GetLoopRunsAsync()).Items.SingleOrDefault(run => string.Equals(run.AdmissionOperationId, admissionOperationId, StringComparison.Ordinal));
             if (summary is not null && await host.GetLoopRunAsync(summary.Id) is { } run)
             {
                 return run;

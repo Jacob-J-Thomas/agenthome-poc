@@ -210,6 +210,30 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Concurrent_trace_deletion_does_not_duplicate_a_cursor_item_and_filtered_refresh_discovers_its_tombstone()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var newer = await CreateTerminalRunAsync(store, "run-newer", "invoke-newer", Timestamp);
+        var older = await CreateTerminalRunAsync(store, "run-older", "invoke-older", Timestamp.AddMinutes(-10));
+        var first = await store.ListPageAsync(new CustomLoopRunPageRequest(1, newer.LoopId));
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(newer.Id));
+
+        Assert.Equal(newer.Id, Assert.Single(first.Items).Id);
+        Assert.NotNull(first.ContinuationCursor);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(Mutation(Request(newer.Id, inspection.PersistedArtifactHash)))).Status);
+        var continuation = await store.ListPageAsync(new CustomLoopRunPageRequest(1, newer.LoopId, first.ContinuationCursor));
+        var refreshed = await store.ListPageAsync(new CustomLoopRunPageRequest(1, newer.LoopId));
+
+        Assert.Equal(older.Id, Assert.Single(continuation.Items).Id);
+        Assert.DoesNotContain(newer.Id, continuation.Items.Select(item => item.Id));
+        var tombstone = Assert.Single(refreshed.Items);
+        Assert.Equal(newer.Id, tombstone.Id);
+        Assert.True(tombstone.IsDeleted);
+    }
+
+    [Fact]
     public async Task Deletion_rejects_nonterminal_and_hash_mismatch_without_replacing_trace_content()
     {
         using var workspace = new TestWorkspace();
@@ -421,9 +445,9 @@ public sealed class CustomLoopTraceRetentionStoreTests
         }
     }
 
-    private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store)
+    private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store, string runId = "run-alpha", string operationId = "invoke-alpha", DateTimeOffset? timestamp = null)
     {
-        var admitted = CreateAdmittedRun();
+        var admitted = CreateAdmittedRun(runId, operationId, timestamp);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
         var running = Advance(admitted, CustomLoopRunStatus.Running);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
@@ -432,11 +456,12 @@ public sealed class CustomLoopTraceRetentionStoreTests
         return terminal;
     }
 
-    private static CustomLoopRunRecord CreateAdmittedRun()
+    private static CustomLoopRunRecord CreateAdmittedRun(string runId = "run-alpha", string operationId = "invoke-alpha", DateTimeOffset? timestamp = null)
     {
-        var definition = CustomLoopDefinition.CreateSeed("loop-alpha", "default-role", "step-1", "create-loop", Timestamp);
-        var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, Timestamp);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-alpha", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-alpha", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var createdAt = timestamp ?? Timestamp;
+        var definition = CustomLoopDefinition.CreateSeed("loop-alpha", "default-role", "step-1", "create-loop", createdAt);
+        var admitted = Event(1, $"event-{runId}-1", CustomLoopRunEventKind.Admitted, createdAt);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, definition.Id, 1, CustomLoopRunStatus.Admitted, createdAt, createdAt, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(createdAt), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

@@ -398,6 +398,12 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         return summaries.Select(Map).ToArray();
     }
 
+    public async Task<LoopRunSummaryPageSnapshot> ListPageAsync(int maximumCount, string? loopId, string? cursor, CancellationToken cancellationToken)
+    {
+        var page = await _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken);
+        return new LoopRunSummaryPageSnapshot(page.Items.Select(Map).ToArray(), page.ContinuationCursor);
+    }
+
     public async Task<LoopRunControlResponse> PauseAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);

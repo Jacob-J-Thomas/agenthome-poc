@@ -6,6 +6,14 @@ let selectedNodeId = "trigger";
 let dirty = false;
 let currentView = "builder";
 let recentRuns = [];
+let runContinuationCursor = null;
+let runPaginationLoopId = null;
+let runPaginationExtended = false;
+let workspaceRunContinuationCursor = null;
+let workspaceRunPaginationExtended = false;
+let loadingMoreRuns = false;
+let loadingMoreRunsLoopId = null;
+let runEvidenceRequestGeneration = 0;
 let selectedRunId = null;
 let selectedRun = null;
 let selectedTrace = null;
@@ -51,6 +59,7 @@ const elements = {
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
   roleId: document.getElementById("roleId"),
+  loadMoreRunsButton: document.getElementById("loadMoreRunsButton"),
   runActions: document.getElementById("runActions"),
   runCount: document.getElementById("runCount"),
   runList: document.getElementById("runList"),
@@ -111,6 +120,7 @@ function bindStaticEvents() {
     renderCanvas();
     renderInspector();
   });
+  elements.loadMoreRunsButton.addEventListener("click", loadMoreRuns);
   elements.name.addEventListener("input", event => updateDraftValue("displayName", event.target.value));
   elements.description.addEventListener("input", event => updateDraftValue("description", event.target.value));
   window.addEventListener("beforeunload", event => {
@@ -160,6 +170,7 @@ function allDefinitions() {
 }
 
 function applyDefinition(definition) {
+  runEvidenceRequestGeneration++;
   historicalLoopId = null;
   currentDefinition = definition;
   draft = definition ? clone(definition) : null;
@@ -222,12 +233,34 @@ function selectedLoopId() {
 
 async function loadRuns({ silent = false, preferredRunId = null, preferredAdmissionOperationId = null, preserveEmptySelection = false } = {}) {
   if (!catalog) return;
+  const requestGeneration = ++runEvidenceRequestGeneration;
+  const loopId = selectedLoopId();
   try {
-    const [payload, quotaPayload] = await Promise.all([
+    const filteredPageRequest = loopId
+      ? requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}`)
+      : Promise.resolve(null);
+    const [payload, filteredPayload, quotaPayload] = await Promise.all([
       requestJson("/api/loop-runs?maximumCount=50"),
+      filteredPageRequest,
       requestJson("/api/loop-runs/quota")
     ]);
-    recentRuns = Array.isArray(payload) ? payload : payload?.items ?? [];
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId) return false;
+    if (runPaginationLoopId !== loopId) {
+      runPaginationLoopId = loopId;
+      runContinuationCursor = null;
+      runPaginationExtended = false;
+    }
+    const workspaceRuns = Array.isArray(payload) ? payload : payload?.items ?? [];
+    const filteredRuns = Array.isArray(filteredPayload) ? filteredPayload : filteredPayload?.items ?? [];
+    const incomingRuns = mergeRunSummaries(filteredRuns, workspaceRuns);
+    recentRuns = mergeRunSummaries(incomingRuns, recentRuns);
+    if (!workspaceRunPaginationExtended && !loadingMoreRuns) {
+      workspaceRunContinuationCursor = Array.isArray(payload) ? null : payload?.continuationCursor ?? null;
+    }
+    if (!runPaginationExtended && (!loadingMoreRuns || loadingMoreRunsLoopId !== loopId)) {
+      const pagePayload = filteredPayload ?? payload;
+      runContinuationCursor = Array.isArray(pagePayload) ? null : pagePayload?.continuationCursor ?? null;
+    }
     traceQuota = quotaPayload;
     const visible = runsForCurrentLoop();
     const preferred = visible.find(run => run.id === preferredRunId || run.admissionOperationId === preferredAdmissionOperationId);
@@ -236,20 +269,13 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     if (selectedRunId) {
       const requestedRunId = selectedRunId;
       const summary = visible.find(run => run.id === requestedRunId);
-      let nextRun;
-      let nextTrace;
-      if (summary?.isDeleted) {
-        nextRun = null;
-        nextTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}/trace`);
-      } else {
-        [nextRun, nextTrace] = await Promise.all([
-          requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}`),
-          requestJson(`/api/loop-runs/${encodeURIComponent(requestedRunId)}/trace`)
-        ]);
+      const evidence = await loadSelectedRunEvidence(requestedRunId, summary);
+      if (evidence.trace?.isDeleted) {
+        recentRuns = mergeRunSummaries([tombstoneRunSummary(evidence.trace)], recentRuns.filter(run => run.id !== requestedRunId));
       }
-      if (selectedRunId !== requestedRunId) return false;
-      selectedRun = nextRun;
-      selectedTrace = nextTrace;
+      if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return false;
+      selectedRun = evidence.run;
+      selectedTrace = evidence.trace;
     } else {
       selectedRun = null;
       selectedTrace = null;
@@ -263,13 +289,106 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     scheduleSelectedRunRefresh();
     return true;
   } catch (error) {
-    if (!silent) showBanner(`Run evidence unavailable: ${error.message}`);
+    if (requestGeneration === runEvidenceRequestGeneration && selectedLoopId() === loopId && !silent) showBanner(`Run evidence unavailable: ${error.message}`);
     return false;
   }
 }
 
+async function loadMoreRuns() {
+  const loopId = runPaginationLoopId;
+  if (!runContinuationCursor && !workspaceRunContinuationCursor) return;
+  if (!loopId || selectedLoopId() !== loopId || loadingMoreRuns) return;
+  const requestGeneration = ++runEvidenceRequestGeneration;
+  const loopCursor = runContinuationCursor;
+  const workspaceCursor = workspaceRunContinuationCursor;
+  loadingMoreRuns = true;
+  loadingMoreRunsLoopId = loopId;
+  renderRunPagination();
+  try {
+    const [workspacePayload, loopPayload] = await Promise.all([
+      workspaceCursor
+        ? requestJson(`/api/loop-runs?maximumCount=50&cursor=${encodeURIComponent(workspaceCursor)}`)
+        : Promise.resolve(null),
+      loopCursor
+        ? requestJson(`/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}&cursor=${encodeURIComponent(loopCursor)}`)
+        : Promise.resolve(null)
+    ]);
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || runPaginationLoopId !== loopId) return;
+    recentRuns = mergeRunSummaries(loopPayload?.items ?? [], mergeRunSummaries(workspacePayload?.items ?? [], recentRuns));
+    if (workspacePayload) {
+      workspaceRunContinuationCursor = workspacePayload.continuationCursor ?? null;
+      workspaceRunPaginationExtended = true;
+    }
+    if (loopPayload) {
+      runContinuationCursor = loopPayload.continuationCursor ?? null;
+      runPaginationExtended = true;
+    }
+    renderList();
+    renderTabs();
+    if (currentView === "runs") renderRuns();
+  } catch (error) {
+    if (requestGeneration === runEvidenceRequestGeneration && selectedLoopId() === loopId) showBanner(`More run evidence unavailable: ${error.message}`);
+  } finally {
+    if (loadingMoreRunsLoopId === loopId) {
+      loadingMoreRuns = false;
+      loadingMoreRunsLoopId = null;
+    }
+    renderRunPagination();
+  }
+}
+
+async function loadSelectedRunEvidence(runId, summary) {
+  const traceRequest = requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`);
+  if (summary?.isDeleted) {
+    return { run: null, trace: await traceRequest };
+  }
+
+  const [runResult, traceResult] = await Promise.allSettled([
+    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
+    traceRequest
+  ]);
+  if (traceResult.status === "rejected") throw traceResult.reason;
+  if (runResult.status === "fulfilled") return { run: runResult.value, trace: traceResult.value };
+  if (runResult.reason?.status === 404 && traceResult.value?.isDeleted && traceResult.value.runId === runId) {
+    return { run: null, trace: traceResult.value };
+  }
+  throw runResult.reason;
+}
+
+function mergeRunSummaries(primary, secondary) {
+  const byId = new Map();
+  for (const run of [...primary, ...secondary]) {
+    if (!byId.has(run.id)) byId.set(run.id, run);
+  }
+  return [...byId.values()].sort((left, right) => {
+    const updated = String(right.updatedAtUtc).localeCompare(String(left.updatedAtUtc));
+    if (updated !== 0) return updated;
+    const created = String(right.createdAtUtc).localeCompare(String(left.createdAtUtc));
+    return created !== 0 ? created : String(left.id).localeCompare(String(right.id));
+  });
+}
+
+function tombstoneRunSummary(trace) {
+  const tombstone = trace.tombstone;
+  return {
+    id: tombstone.runId,
+    loopId: tombstone.loopId,
+    admissionOperationId: tombstone.admissionOperationId,
+    definitionVersion: tombstone.definitionVersion,
+    status: tombstone.terminalStatus,
+    createdAtUtc: tombstone.createdAtUtc,
+    updatedAtUtc: tombstone.deletedAtUtc,
+    completedAtUtc: tombstone.completedAtUtc,
+    iteration: 0,
+    nextStepIndex: 0,
+    failureCode: null,
+    isDeleted: true
+  };
+}
+
 function renderRuns() {
   renderTraceQuota();
+  renderRunPagination();
   elements.runList.replaceChildren();
   const runs = runsForCurrentLoop();
   if (runs.length === 0) {
@@ -328,7 +447,15 @@ function renderRuns() {
   elements.runTimeline.append(timeline);
 }
 
+function renderRunPagination() {
+  const loadingCurrentLoop = loadingMoreRuns && loadingMoreRunsLoopId === runPaginationLoopId;
+  elements.loadMoreRunsButton.hidden = !runContinuationCursor && !workspaceRunContinuationCursor;
+  elements.loadMoreRunsButton.disabled = loadingCurrentLoop || mutationInFlight;
+  elements.loadMoreRunsButton.textContent = loadingCurrentLoop ? "Loading more…" : "Load older evidence";
+}
+
 async function selectRun(runId) {
+  const requestGeneration = ++runEvidenceRequestGeneration;
   selectedRunId = runId;
   selectedRun = null;
   selectedTrace = null;
@@ -336,25 +463,18 @@ async function selectRun(runId) {
   renderRunEvidence();
   try {
     const summary = runsForCurrentLoop().find(run => run.id === runId);
-    let nextRun;
-    let nextTrace;
-    if (summary?.isDeleted) {
-      nextRun = null;
-      nextTrace = await requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`);
-    } else {
-      [nextRun, nextTrace] = await Promise.all([
-        requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
-        requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`)
-      ]);
+    const evidence = await loadSelectedRunEvidence(runId, summary);
+    if (evidence.trace?.isDeleted) {
+      recentRuns = mergeRunSummaries([tombstoneRunSummary(evidence.trace)], recentRuns.filter(run => run.id !== runId));
     }
-    if (selectedRunId !== runId) return;
-    selectedRun = nextRun;
-    selectedTrace = nextTrace;
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedRunId !== runId) return;
+    selectedRun = evidence.run;
+    selectedTrace = evidence.trace;
     renderRuns();
     renderRunEvidence();
     scheduleSelectedRunRefresh();
   } catch (error) {
-    if (selectedRunId !== runId) return;
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedRunId !== runId) return;
     showBanner(`Run detail unavailable: ${error.message}`);
   }
 }
@@ -646,16 +766,18 @@ function renderList() {
   }
 }
 
-function selectDefinition(definition) {
+async function selectDefinition(definition) {
   if (mutationInFlight) return;
   if (definition.id === currentDefinition?.id && !historicalLoopId) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   applyDefinition(definition);
+  if (currentView === "runs") await loadRuns({ silent: false });
 }
 
 async function selectHistoricalLoop(loopId) {
   if (mutationInFlight) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  runEvidenceRequestGeneration++;
   historicalLoopId = loopId;
   currentDefinition = null;
   draft = null;
@@ -1173,6 +1295,7 @@ async function deleteSelectedTrace() {
   if (!confirmed) return;
 
   const runId = selectedRun.id;
+  const loopId = selectedRun.loopId;
   const expectedTraceHash = selectedTrace.persistedArtifactHash;
   if (pendingTraceDeletion?.runId !== runId || pendingTraceDeletion.expectedTraceHash !== expectedTraceHash) {
     pendingTraceDeletion = { runId, expectedTraceHash, operationId: newOperationId() };
@@ -1190,12 +1313,37 @@ async function deleteSelectedTrace() {
   }
 
   pendingTraceDeletion = null;
+  const tombstone = deletion.tombstone;
+  const tombstoneSummary = tombstoneRunSummary({ tombstone });
+  recentRuns = mergeRunSummaries([tombstoneSummary], recentRuns.filter(run => run.id !== runId));
+  if (selectedLoopId() !== loopId || selectedRunId !== runId) {
+    let quotaRefreshed = true;
+    try {
+      traceQuota = await requestJson("/api/loop-runs/quota");
+    } catch {
+      quotaRefreshed = false;
+    }
+    renderAll();
+    const warning = deletion.status === "CommittedWithAuditWarning" ? " The deletion committed, but its outcome audit has an integrity warning." : "";
+    showToast(`Sensitive trace content deleted; the audited tombstone remains.${warning}`);
+    if (!quotaRefreshed) showBanner("Trace deletion committed, but refreshed quota evidence could not be loaded. Reload Runs to inspect the durable outcome.");
+    return;
+  }
 
+  selectedRunId = runId;
   selectedRun = null;
   selectedTrace = null;
-  recentRuns = recentRuns.filter(run => run.id !== runId);
   renderAll();
-  const refreshed = await loadRuns({ silent: true, preferredRunId: runId });
+  let refreshed = true;
+  try {
+    [selectedTrace, traceQuota] = await Promise.all([
+      requestJson(`/api/loop-runs/${encodeURIComponent(runId)}/trace`),
+      requestJson("/api/loop-runs/quota")
+    ]);
+    renderAll();
+  } catch {
+    refreshed = false;
+  }
   const warning = deletion.status === "CommittedWithAuditWarning" ? " The deletion committed, but its outcome audit has an integrity warning." : "";
   showToast(`Sensitive trace content deleted; the audited tombstone remains.${warning}`);
   if (!refreshed) showBanner("Trace deletion committed, but refreshed tombstone and quota evidence could not be loaded. Reload Runs to inspect the durable outcome.");
