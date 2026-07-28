@@ -1392,6 +1392,7 @@ function renderToolbar() {
   elements.loopSettingsButton.disabled = mutationInFlight || !draft;
   elements.selectedNodeButton.disabled = mutationInFlight || !draft;
   elements.createLoopButton.disabled = mutationInFlight || !catalog || catalog.customDefinitions.length >= catalog.limits.maxDefinitionsPerWorkspace;
+  elements.loopSearch.disabled = mutationInFlight || !catalog;
   elements.zoomFitButton.disabled = !draft;
   elements.zoomInButton.disabled = !draft || canvasZoom >= 1.3;
   elements.zoomOutButton.disabled = !draft || canvasZoom <= 0.7;

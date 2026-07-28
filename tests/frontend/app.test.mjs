@@ -284,6 +284,8 @@ test("approval panel renders pending requests and dispatches approve and reject 
   assert.match(app.elements.approvals.textContent, /shared\/note\.txt/);
 
   const buttons = findByTag(app.elements.approvals, "button");
+  assert.equal(buttons.find(button => button.textContent === "Approve").attributes.get("aria-label"), "Approve read file for shared/note.txt");
+  assert.equal(buttons.find(button => button.textContent === "Reject").attributes.get("aria-label"), "Reject read file for shared/note.txt");
   await buttons.find(button => button.textContent === "Approve").click();
   await buttons.find(button => button.textContent === "Reject").click();
 
@@ -291,6 +293,40 @@ test("approval panel renders pending requests and dispatches approve and reject 
     ["req-1", { approved: true }],
     ["req-1", { approved: false }]
   ]);
+});
+
+test("pending chat approvals remain visible and actionable outside the Chat view", async () => {
+  const app = await loadApp();
+  const loopsTab = app.appTabs.find(tab => tab.dataset.appView === "loops");
+  await loopsTab.click();
+
+  app.socket.serverSendInvocation("ApprovalsChanged", [{
+    requestId: "req-away",
+    command: "read",
+    operation: "file",
+    targetPath: "shared/note.txt",
+    resolvedPath: "C:/workspace/shared/note.txt",
+    matchedPath: "shared/**",
+    reason: "Need to inspect the note."
+  }]);
+  await flushAsyncWork();
+
+  assert.equal(app.elements.chatView.hidden, true);
+  assert.equal(app.elements.chatApprovalAlert.hidden, false);
+  assert.equal(app.elements.chatApprovalAlert.textContent, "1 chat approval · Review");
+  let focusedApprovalHeading = false;
+  app.elements.chatApprovalsTitle.focus = () => { focusedApprovalHeading = true; };
+
+  await app.elements.chatApprovalAlert.click();
+
+  assert.equal(app.elements.chatView.hidden, false);
+  assert.equal(app.elements.loopsView.hidden, true);
+  assert.match(app.context.window.location.href, /\?view=chat$/);
+  assert.equal(focusedApprovalHeading, true);
+
+  app.socket.serverSendInvocation("ApprovalsChanged", []);
+  await flushAsyncWork();
+  assert.equal(app.elements.chatApprovalAlert.hidden, true);
 });
 
 async function loadApp(overrides = {}) {

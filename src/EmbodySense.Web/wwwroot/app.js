@@ -18,6 +18,8 @@ const elements = {
   approvals: document.getElementById("approvals"),
   approvalCount: document.getElementById("approvalCount"),
   cancelButton: document.getElementById("cancelButton"),
+  chatApprovalAlert: document.getElementById("chatApprovalAlert"),
+  chatApprovalsTitle: document.getElementById("chatApprovalsTitle"),
   cliRole: document.getElementById("cliRole"),
   clientRole: document.getElementById("clientRole"),
   clientStatus: document.getElementById("clientStatus"),
@@ -637,8 +639,11 @@ function groupBy(items, selector) {
 }
 
 function renderApprovals(approvals) {
-  elements.approvalCount.textContent = `${approvals.length} pending`;
-  elements.approvals.replaceChildren(...approvals.map(renderApproval));
+  const pending = Array.isArray(approvals) ? approvals : [];
+  elements.approvalCount.textContent = `${pending.length} pending`;
+  elements.chatApprovalAlert.textContent = `${pending.length} chat approval${pending.length === 1 ? "" : "s"} · Review`;
+  elements.chatApprovalAlert.hidden = pending.length === 0;
+  elements.approvals.replaceChildren(...pending.map(renderApproval));
 }
 
 function renderApproval(approval) {
@@ -667,12 +672,14 @@ function renderApproval(approval) {
   reject.className = "reject";
   reject.type = "button";
   reject.textContent = "Reject";
+  reject.setAttribute("aria-label", `Reject ${approval.command} ${approval.operation} for ${approval.targetPath}`);
   reject.addEventListener("click", () => decideApproval(approval.requestId, false));
 
   const approve = document.createElement("button");
   approve.className = "approve";
   approve.type = "button";
   approve.textContent = "Approve";
+  approve.setAttribute("aria-label", `Approve ${approval.command} ${approval.operation} for ${approval.targetPath}`);
   approve.addEventListener("click", () => decideApproval(approval.requestId, true));
 
   actions.append(reject, approve);
@@ -804,6 +811,12 @@ for (const tab of elements.appTabs) {
   });
   tab.addEventListener("keydown", event => moveAppTabFocus(event, tab));
 }
+
+elements.chatApprovalAlert.addEventListener("click", () => {
+  const chatTab = elements.appTabs.find(tab => tab.dataset.appView === "chat");
+  selectAppView("chat", chatTab);
+  elements.chatApprovalsTitle.focus();
+});
 
 function moveAppTabFocus(event, currentTab) {
   if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;

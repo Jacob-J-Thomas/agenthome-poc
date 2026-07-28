@@ -40,6 +40,7 @@ test("initialization refresh hydrates a loop builder that booted disabled", asyn
   await app.window.embodySenseLoopBuilder.refreshWorkspace();
 
   assert.equal(app.elements.createLoopButton.disabled, false);
+  assert.equal(app.elements.loopSearch.disabled, false);
   assert.match(app.elements.loopList.textContent, /Default conversation/);
   assert.match(app.elements.loopList.textContent, /Research pass/);
 });

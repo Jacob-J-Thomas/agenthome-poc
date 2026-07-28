@@ -32,7 +32,10 @@
     <div class="app-stage">
       <header class="app-statusbar">
         <div class="statusbar-identity"><strong id="surfaceTitle">Chat</strong><span id="workspaceRoot">Workspace loading</span></div>
-        <div class="statusbar-badges"><span id="clientStatus">Web connecting</span><span>Local agent body</span></div>
+        <div class="statusbar-badges">
+          <button id="chatApprovalAlert" class="statusbar-approval" type="button" aria-live="polite" hidden></button>
+          <span id="clientStatus">Web connecting</span><span>Local agent body</span>
+        </div>
       </header>
 
       <main class="app-main">
@@ -56,8 +59,8 @@
               <p class="panel-note">Configuration, permissions, agent documents, audit, and history live in the left navigation.</p>
             </section>
             <section class="panel-section approvals-section">
-              <div class="section-title"><div><p class="eyebrow">Human authority</p><h2>Approvals</h2></div><span id="approvalCount">0 pending</span></div>
-              <div id="approvals" class="approvals"></div>
+              <div class="section-title"><div><p class="eyebrow">Human authority</p><h2 id="chatApprovalsTitle" tabindex="-1">Approvals</h2></div><span id="approvalCount">0 pending</span></div>
+              <div id="approvals" class="approvals" role="region" aria-labelledby="chatApprovalsTitle"></div>
             </section>
           </aside>
         </section>
