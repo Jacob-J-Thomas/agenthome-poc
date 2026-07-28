@@ -403,13 +403,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken)
     {
-        var summaries = await _runStore.ListRecentAsync(maximumCount, cancellationToken);
+        var summaries = await ExecuteRunStoreReadAsync(() => _runStore.ListRecentAsync(maximumCount, cancellationToken));
         return summaries.Select(Map).ToArray();
     }
 
     public async Task<LoopRunSummaryPageSnapshot> ListPageAsync(int maximumCount, string? loopId, string? cursor, CancellationToken cancellationToken)
     {
-        var page = await _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken);
+        var page = await ExecuteRunStoreReadAsync(() => _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken));
         return new LoopRunSummaryPageSnapshot(page.Items.Select(Map).ToArray(), page.ContinuationCursor);
     }
 
@@ -572,6 +572,18 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         try
         {
             return await awaitable;
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
+    }
+
+    private static async Task<T> ExecuteRunStoreReadAsync<T>(Func<Task<T>> read)
+    {
+        try
+        {
+            return await read();
         }
         catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
         {

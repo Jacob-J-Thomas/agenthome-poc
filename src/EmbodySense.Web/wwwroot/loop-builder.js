@@ -35,6 +35,7 @@ let pendingCreateOperationId = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
+let pendingResumeRequest = null;
 let invocationInFlight = false;
 const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix = "embodysense.pending-loop-invocations";
@@ -1890,17 +1891,22 @@ async function controlRun(action) {
 
 async function resumeRun() {
   if (!selectedRun || selectedRun.status !== "Paused") return;
+  const runId = selectedRun.id;
+  const expectedLifecycleVersion = selectedRun.lifecycleVersion;
+  if (pendingResumeRequest?.runId !== runId || pendingResumeRequest.expectedLifecycleVersion !== expectedLifecycleVersion) {
+    pendingResumeRequest = { runId, expectedLifecycleVersion, operationId: newOperationId() };
+  }
   try {
     const connection = await getHub();
-    const operationId = newOperationId();
     const invocation = connection.invoke("ResumeLoop", {
-      runId: selectedRun.id,
-      expectedLifecycleVersion: selectedRun.lifecycleVersion,
-      operationId
+      runId,
+      expectedLifecycleVersion,
+      operationId: pendingResumeRequest.operationId
     });
-    const response = await waitForRunOperation(invocation, { preferredRunId: selectedRun.id });
+    const response = await waitForRunOperation(invocation, { preferredRunId: runId });
+    if (!["OperationInProgress", "WorkspaceHostUnavailable"].includes(response?.status)) pendingResumeRequest = null;
     if (!["Resumed", "Completed", "Cancelled", "Paused", "NeedsReview", "AuditWarning"].includes(response?.status)) {
-      await loadRuns({ silent: true, preferredRunId: selectedRun.id });
+      await loadRuns({ silent: true, preferredRunId: runId });
       renderAll();
       showBanner(`Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}`);
       return;

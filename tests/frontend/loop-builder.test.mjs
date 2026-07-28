@@ -1065,6 +1065,48 @@ test("a committed Resume audit warning refreshes the durable run instead of repo
   assert.match(app.elements.runSubtitle.textContent, /Running/);
 });
 
+test("an unsupported persistence schema Resume error reuses the operation identity after cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const paused = createRunSnapshot();
+  paused.status = "Paused";
+  paused.completedAtUtc = null;
+  server.runs = [{ id: paused.id, loopId: paused.loopId, admissionOperationId: paused.admissionOperationId, definitionVersion: 2, status: paused.status, createdAtUtc: paused.createdAtUtc, updatedAtUtc: paused.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(paused.id, paused);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      if (operationIds.length === 1) return Promise.reject(new Error("Failed to invoke 'ResumeLoop': unsupported_loop_persistence_schema: Delete `.custom-loop-run-index.json` and retry the operation."));
+      if (operationIds.length === 2) return Promise.resolve({ status: "WorkspaceHostUnavailable", run: paused, detail: "Hosting is temporarily unavailable." });
+      return Promise.resolve({ status: "InvalidState", run: paused, detail: "Definitive retry response." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  let resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+  assert.match(app.elements.validationBanner.textContent, /unsupported_loop_persistence_schema.*Delete `.custom-loop-run-index\.json`/i);
+
+  resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+  assert.match(app.elements.validationBanner.textContent, /Hosting is temporarily unavailable/);
+
+  resumeButton = app.elements.runActions.children.find(child => child.textContent === "Resume");
+  assert.ok(resumeButton);
+  await resumeButton.click();
+
+  assert.equal(operationIds.length, 3);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.equal(operationIds[2], operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /Definitive retry response/);
+});
+
 test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {
   const server = new FakeFetchServer(createCatalog());
   let invocationOperationId = null;

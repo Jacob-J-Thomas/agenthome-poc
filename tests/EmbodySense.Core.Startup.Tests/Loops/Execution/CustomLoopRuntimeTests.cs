@@ -135,6 +135,26 @@ public sealed class CustomLoopRuntimeTests
     }
 
     [Fact]
+    public async Task Public_runtime_translates_unsupported_discovery_index_schema_for_run_list_reads()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        Directory.CreateDirectory(paths.CustomLoopRunsPath);
+        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+
+        var recentException = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.ListCustomLoopRunsAsync());
+        var pageException = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.ListCustomLoopRunPageAsync());
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", recentException.Message, StringComparison.Ordinal);
+        Assert.Contains("Delete `.custom-loop-run-index.json`", pageException.Message, StringComparison.Ordinal);
+        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+    }
+
+    [Fact]
     public async Task Invocation_quota_pressure_prunes_expired_completed_receipts_before_accepting_a_new_operation()
     {
         using var workspace = new TestWorkspace();

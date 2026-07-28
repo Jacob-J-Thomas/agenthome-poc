@@ -277,6 +277,10 @@ public sealed class LoopRunsController : ControllerBase
         {
             return BadRequest(new { error = "invalid_control_request", detail = "The custom-loop lifecycle request is invalid." });
         }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            return UnsupportedPersistenceSchema(exception);
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException)
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "loop_control_unavailable", detail = "The lifecycle request could not be processed safely. Check durable run evidence and the local audit log." });
