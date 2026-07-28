@@ -26,7 +26,7 @@ public sealed class AgentRuntimeFactoryTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        await File.WriteAllTextAsync(paths.CurrentConversationPath, "old transcript" + Environment.NewLine);
+        await new ConversationMemoryStore(paths).AppendMessageAsync(LlmMessage.User("old transcript"));
 
         await using var runtime = await CreateRuntimeAsync(workspace);
 
