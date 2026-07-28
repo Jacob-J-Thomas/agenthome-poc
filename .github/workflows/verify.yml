@@ -29,6 +29,9 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      - name: Install frontend dependencies
+        run: npm ci
+
       - name: Verify solution
         shell: pwsh
         run: ./scripts/verify.ps1 -Configuration Release
