@@ -1,0 +1,57 @@
+name: Browser E2E
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  browser-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify installed browser prerequisite
+        shell: pwsh
+        run: |
+          $browser = @(
+            "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            "C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            "C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($null -eq $browser) { throw "Browser E2E requires an installed Edge or Chrome executable." }
+          Write-Output "Using browser $browser."
+
+      - name: Run installed-browser E2E
+        shell: pwsh
+        run: ./scripts/verify.ps1 -Configuration Release -RunBrowserE2E -SkipCoverage
+
+      - name: Upload browser E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-diagnostics
+          if-no-files-found: warn
+          path: |
+            tests/**/TestResults/**
+            ${{ runner.temp }}/embodysense-browser-e2e-*/**
