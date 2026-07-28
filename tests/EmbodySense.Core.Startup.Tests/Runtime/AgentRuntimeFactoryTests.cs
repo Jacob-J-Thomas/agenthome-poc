@@ -303,6 +303,7 @@ public sealed class AgentRuntimeFactoryTests
 
         Assert.Equal("Cancelled", retry.Status);
         Assert.Equal(CustomLoopControlOperationState.Complete, (await new CustomLoopControlOperationStore(paths).GetAsync(input.OperationId))!.State);
+        Assert.False(runtime.CustomLoopRecoveryRequired);
     }
 
     [Fact]

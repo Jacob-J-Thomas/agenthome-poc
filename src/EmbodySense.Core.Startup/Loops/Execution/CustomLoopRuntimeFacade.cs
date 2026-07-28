@@ -431,6 +431,15 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     public async Task<LoopRunControlResponse> PauseAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
+        if (CustomRecoveryRequired)
+        {
+            var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+            if (!recovery.Available)
+            {
+                return new LoopRunControlResponse(recovery.Status, null, input.OperationId, recovery.Detail);
+            }
+        }
+
         await _executionAvailabilityGate.WaitAsync(cancellationToken);
         try
         {
@@ -449,6 +458,15 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         if (replay is not null)
         {
             return replay;
+        }
+
+        if (CustomRecoveryRequired)
+        {
+            var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+            if (!recovery.Available)
+            {
+                return new LoopRunControlResponse(recovery.Status, null, input.OperationId, recovery.Detail);
+            }
         }
 
         var request = new CustomLoopCancelRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor);
