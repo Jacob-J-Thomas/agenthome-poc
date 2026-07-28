@@ -232,7 +232,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                     }
                 }
             }
-            catch (FormatException)
+            catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
             {
                 // Fall through to locked repair from canonical artifacts.
             }
@@ -919,20 +919,23 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private async Task<CustomLoopRunDiscoveryIndex> LoadDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
         DeleteOrphanedDiscoveryIndexTemporaryArtifacts();
-        if (!File.Exists(_discoveryIndexPendingPath))
+        var hasPendingMutation = File.Exists(_discoveryIndexPendingPath);
+        if (hasPendingMutation)
         {
-            try
+            EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
+        }
+
+        try
+        {
+            var index = await ReadDiscoveryIndexAsync(cancellationToken);
+            if (!hasPendingMutation && index is not null && DiscoveryIndexMatchesArtifacts(index))
             {
-                var index = await ReadDiscoveryIndexAsync(cancellationToken);
-                if (index is not null && DiscoveryIndexMatchesArtifacts(index))
-                {
-                    return index;
-                }
+                return index;
             }
-            catch (FormatException)
-            {
-                // The index is derived evidence. Rebuild it from canonical run artifacts below.
-            }
+        }
+        catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            // The index is derived evidence. Rebuild it from canonical run artifacts below.
         }
 
         return await RebuildDiscoveryIndexAsync(previousRevision: 0, cancellationToken);
@@ -941,18 +944,18 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private async Task<CustomLoopRunDiscoveryIndex?> ReadCleanDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
         DeleteOrphanedDiscoveryIndexTemporaryArtifacts();
-        if (File.Exists(_discoveryIndexPendingPath))
+        var hasPendingMutation = File.Exists(_discoveryIndexPendingPath);
+        if (hasPendingMutation)
         {
             EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
-            return null;
         }
 
         try
         {
             var index = await ReadDiscoveryIndexAsync(cancellationToken);
-            return index is not null && DiscoveryIndexMatchesArtifacts(index) ? index : null;
+            return !hasPendingMutation && index is not null && DiscoveryIndexMatchesArtifacts(index) ? index : null;
         }
-        catch (FormatException)
+        catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
         {
             return null;
         }
@@ -971,6 +974,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         {
             using var document = JsonDocument.Parse(content, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
+            ThrowIfDiscoveryIndexSchemaVersionIsUnsupported(document.RootElement);
             RequireCompleteContract(document.RootElement, typeof(CustomLoopRunDiscoveryIndex), "$");
             var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, JsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
             ValidateDiscoveryIndex(index);
@@ -980,6 +984,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         {
             throw new FormatException("The custom loop run discovery index contains invalid JSON, unknown fields, missing fields, or unsupported enum values.", exception);
         }
+    }
+
+    private static void ThrowIfDiscoveryIndexSchemaVersionIsUnsupported(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("schemaVersion", out var schemaVersion)
+            || schemaVersion.ValueKind != JsonValueKind.Number
+            || !schemaVersion.TryGetInt32(out var value)
+            || value == CustomLoopRunDiscoveryIndex.CurrentSchemaVersion)
+        {
+            return;
+        }
+
+        throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(value);
     }
 
     private async Task<CustomLoopRunDiscoveryIndex> RebuildDiscoveryIndexAsync(long previousRevision, CancellationToken cancellationToken)
@@ -1498,7 +1516,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private static void ValidateDiscoveryIndex(CustomLoopRunDiscoveryIndex index)
     {
-        if (index.SchemaVersion != CustomLoopRunDiscoveryIndex.CurrentSchemaVersion || index.Revision < 1 || index.Entries is null)
+        if (index.Revision < 1 || index.Entries is null)
         {
             throw new FormatException("The custom loop run discovery index uses an unsupported schema or revision.");
         }

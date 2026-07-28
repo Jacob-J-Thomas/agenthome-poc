@@ -45,14 +45,13 @@ public sealed class CustomLoopRecoveryService
         }
 
         var admissionAuditComplete = CustomLoopRunValidator.HasCompleteAdmissionAudit(run);
-        var hasLegacyWorkspaceContext = CustomLoopRunValidator.HasLegacyWorkspaceContextManifest(run);
         var hasOpenAttempt = HasOpenAttemptSinceCheckpoint(run);
-        if (run.Status == CustomLoopRunStatus.Paused && admissionAuditComplete && !hasOpenAttempt && !hasLegacyWorkspaceContext)
+        if (run.Status == CustomLoopRunStatus.Paused && admissionAuditComplete && !hasOpenAttempt)
         {
             return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run is already Paused; restart recovery never starts execution automatically.");
         }
 
-        var target = hasLegacyWorkspaceContext || !admissionAuditComplete
+        var target = !admissionAuditComplete
             ? CustomLoopRunStatus.NeedsReview
             : run.Status switch
         {
@@ -72,7 +71,6 @@ public sealed class CustomLoopRecoveryService
 
         var detail = (run.Status, target) switch
         {
-            (_, CustomLoopRunStatus.NeedsReview) when hasLegacyWorkspaceContext => "Restart recovery quarantined a pre-ROLE workspace context manifest as immutable historical evidence; it cannot be resumed or dispatched.",
             (_, CustomLoopRunStatus.NeedsReview) when !admissionAuditComplete => "Restart recovery found no valid durable admission-audit completion marker; execution is permanently stopped for review.",
             (CustomLoopRunStatus.Admitted, CustomLoopRunStatus.Paused) => "Restart recovery parked the admitted run at Paused without dispatch.",
             (_, CustomLoopRunStatus.NeedsReview) => "Restart recovery found provider-attempt evidence after the last committed checkpoint; execution remains stopped for review.",
@@ -80,9 +78,9 @@ public sealed class CustomLoopRecoveryService
             _ => "Restart recovery parked the interrupted run at its last proved checkpoint without dispatch."
         };
         var now = Now(run);
-        var failureCode = hasLegacyWorkspaceContext ? "recovery_legacy_workspace_context" : !admissionAuditComplete ? "recovery_incomplete_admission_audit" : target == CustomLoopRunStatus.NeedsReview ? "recovery_open_attempt" : null;
+        var failureCode = !admissionAuditComplete ? "recovery_incomplete_admission_audit" : target == CustomLoopRunStatus.NeedsReview ? "recovery_open_attempt" : null;
         var candidate = CreateCandidate(run, target, failureCode, detail, now);
-        var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, admissionAuditComplete, hasLegacyWorkspaceContext);
+        var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, admissionAuditComplete);
 
         try
         {
@@ -147,7 +145,7 @@ public sealed class CustomLoopRecoveryService
         return Result(status, recovered, detail);
     }
 
-    private static Dictionary<string, object?> RecoveryMetadata(CustomLoopRunRecord current, CustomLoopRunRecord candidate, bool hasOpenAttempt, bool admissionAuditComplete, bool hasLegacyWorkspaceContext)
+    private static Dictionary<string, object?> RecoveryMetadata(CustomLoopRunRecord current, CustomLoopRunRecord candidate, bool hasOpenAttempt, bool admissionAuditComplete)
     {
         return new Dictionary<string, object?>
         {
@@ -163,7 +161,6 @@ public sealed class CustomLoopRecoveryService
             ["recoveryEventId"] = candidate.Events[^1].EventId,
             ["openAttemptAfterCheckpoint"] = hasOpenAttempt,
             ["admissionAuditComplete"] = admissionAuditComplete,
-            ["legacyWorkspaceContext"] = hasLegacyWorkspaceContext,
             ["automaticExecution"] = false
         };
     }

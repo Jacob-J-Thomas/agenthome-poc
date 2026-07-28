@@ -36,7 +36,7 @@ let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
 let invocationInFlight = false;
-const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v2";
+const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix = "embodysense.pending-loop-invocations";
 let pendingInvocationStorageKey = null;
 let pendingInvocationRegistryLockName = null;
@@ -1600,7 +1600,7 @@ function restorePendingInvocationRequests() {
   } catch {
     throw new Error("The shared invocation registry is corrupt.");
   }
-  if (payload?.schemaVersion !== 2 || !Array.isArray(payload.requests)) throw new Error("The shared invocation registry schema is unsupported.");
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.requests)) throw new Error("The shared invocation registry schema is unsupported.");
   const requests = new Map();
   for (const entry of payload.requests) {
     if (!isStoredPendingInvocationRequest(entry) || requests.has(entry.requestKey)) throw new Error("The shared invocation registry contains invalid entries.");
@@ -1636,7 +1636,7 @@ function persistPendingInvocationRequests(requests) {
     reservationIds: request.reservationIds,
     dispatchAttempted: request.dispatchAttempted
   }));
-  window.localStorage.setItem(pendingInvocationStorageKey, JSON.stringify({ schemaVersion: 2, requests: storedRequests }));
+  window.localStorage.setItem(pendingInvocationStorageKey, JSON.stringify({ schemaVersion: 1, requests: storedRequests }));
 }
 
 function commitPendingInvocationRequests(next) {

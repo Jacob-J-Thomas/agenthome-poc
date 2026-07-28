@@ -202,7 +202,7 @@ public sealed class CustomLoopRunValidatorTests
     }
 
     [Fact]
-    public void Validate_accepts_the_pre_role_identity_manifest_as_immutable_legacy_evidence()
+    public void Validate_rejects_a_pre_role_identity_manifest_without_a_legacy_fallback()
     {
         var seed = CreateRun();
         var legacyManifest = seed.ContextSnapshot.SourceManifest.ToArray();
@@ -222,9 +222,8 @@ public sealed class CustomLoopRunValidatorTests
 
         var validation = CustomLoopRunValidator.Validate(legacyRun);
 
-        Assert.True(validation.IsValid);
-        Assert.True(CustomLoopRunValidator.HasLegacyWorkspaceContextManifest(legacyRun));
-        AssertCodes(CustomLoopRunValidator.ValidateForDispatch(legacyRun), "legacy_workspace_context_not_executable");
+        AssertCodes(validation, "invalid_workspace_context_classification");
+        AssertCodes(CustomLoopRunValidator.ValidateForDispatch(legacyRun), "invalid_workspace_context_classification");
     }
 
     [Fact]
