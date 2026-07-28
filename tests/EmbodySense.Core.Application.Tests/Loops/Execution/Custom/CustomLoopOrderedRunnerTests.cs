@@ -990,6 +990,8 @@ public sealed class CustomLoopOrderedRunnerTests
         var exception = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web)));
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("external outcome may exist", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("NeedsReview escalation could not be persisted", exception.Message, StringComparison.Ordinal);
         Assert.Equal(CustomLoopRunStatus.Running, store.Current.Status);
         Assert.Single(executor.Requests);
     }

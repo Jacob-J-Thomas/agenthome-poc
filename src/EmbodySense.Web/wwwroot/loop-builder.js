@@ -1427,7 +1427,7 @@ async function startRun() {
       return;
     }
     if (error?.message?.includes("unsupported_loop_persistence_schema")) {
-      showBanner(`Run was not admitted: ${error.message} Retrying the exact request after cleanup will reuse operation ${operationId}.`);
+      showBanner(`Run execution requires persistence cleanup: ${error.message} Retrying the exact request after cleanup will reuse operation ${operationId}.`);
       return;
     }
     await reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId);

@@ -125,7 +125,7 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
-    public async Task Schema_change_after_reservation_releases_the_unmutated_deletion_operation_for_exact_retry()
+    public async Task Schema_change_after_reservation_preserves_the_pending_deletion_operation_for_exact_retry()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -141,12 +141,11 @@ public sealed class CustomLoopTraceRetentionStoreTests
         var exception = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => store.DeleteTerminalTraceAsync(mutation));
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync(mutation.Request.OperationId)).Status);
+        Assert.Equal(CustomLoopTraceDeletionLookupStatus.PendingMutation, (await store.GetTraceDeletionOperationAsync(mutation.Request.OperationId)).Status);
         Assert.False((await store.InspectTraceAsync(terminal.Id))!.IsDeleted);
         Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
 
         File.Delete(indexPath);
-        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
     }
 

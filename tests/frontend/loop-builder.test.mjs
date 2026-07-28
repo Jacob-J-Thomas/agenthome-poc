@@ -1445,6 +1445,8 @@ test("an unsupported persistence schema Hub error preserves cleanup guidance and
   await app.elements.startRunButton.click();
 
   assert.match(app.elements.validationBanner.textContent, /unsupported_loop_persistence_schema.*Delete `.custom-loop-run-index\.json`.*retrying the exact request/i);
+  assert.match(app.elements.validationBanner.textContent, /Run execution requires persistence cleanup/i);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Run was not admitted/i);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
 
   app.context.testHub.invoke = (_target, input) => {

@@ -1462,9 +1462,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 }
             }
         }
-        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
         {
-            throw;
+            throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(exception.SchemaVersion, $"{detail} The NeedsReview escalation could not be persisted because the run discovery index still has an unsupported schema.", exception);
         }
         catch (Exception exception)
         {
