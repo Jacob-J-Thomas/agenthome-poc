@@ -742,6 +742,7 @@ public sealed class CustomLoopRunStoreTests
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
         var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         index["schemaVersion"] = 2;
+        index["unsupportedV2Field"] = "requires-cleanup";
         await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
 
         var exception = await Assert.ThrowsAnyAsync<FormatException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(50)));

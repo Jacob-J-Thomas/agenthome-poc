@@ -974,12 +974,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         {
             using var document = JsonDocument.Parse(content, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
+            ThrowIfDiscoveryIndexSchemaVersionIsUnsupported(document.RootElement);
             RequireCompleteContract(document.RootElement, typeof(CustomLoopRunDiscoveryIndex), "$");
             var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, JsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
-            if (index.SchemaVersion != CustomLoopRunDiscoveryIndex.CurrentSchemaVersion)
-            {
-                throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(index.SchemaVersion);
-            }
             ValidateDiscoveryIndex(index);
             return index;
         }
@@ -987,6 +984,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         {
             throw new FormatException("The custom loop run discovery index contains invalid JSON, unknown fields, missing fields, or unsupported enum values.", exception);
         }
+    }
+
+    private static void ThrowIfDiscoveryIndexSchemaVersionIsUnsupported(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("schemaVersion", out var schemaVersion)
+            || schemaVersion.ValueKind != JsonValueKind.Number
+            || !schemaVersion.TryGetInt32(out var value)
+            || value == CustomLoopRunDiscoveryIndex.CurrentSchemaVersion)
+        {
+            return;
+        }
+
+        throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(value);
     }
 
     private async Task<CustomLoopRunDiscoveryIndex> RebuildDiscoveryIndexAsync(long previousRevision, CancellationToken cancellationToken)
