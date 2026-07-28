@@ -37,7 +37,6 @@ let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
 let invocationInFlight = false;
 const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v1";
-const legacyPendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v2";
 const pendingInvocationRegistryLockNamePrefix = "embodysense.pending-loop-invocations";
 let pendingInvocationStorageKey = null;
 let pendingInvocationRegistryLockName = null;
@@ -1575,7 +1574,6 @@ async function withPendingInvocationRegistryLock(callback) {
 async function configurePendingInvocationRegistry(workspaceRoot) {
   if (typeof workspaceRoot !== "string" || !workspaceRoot) throw new Error("The workspace identity is unavailable.");
   const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
-  window.localStorage.removeItem(`${legacyPendingInvocationStorageKeyPrefix}.${scope}`);
   pendingInvocationStorageKey = `${pendingInvocationStorageKeyPrefix}.${scope}`;
   pendingInvocationRegistryLockName = `${pendingInvocationRegistryLockNamePrefix}.${scope}`;
   synchronizePendingInvocationRequestsFromStorage();

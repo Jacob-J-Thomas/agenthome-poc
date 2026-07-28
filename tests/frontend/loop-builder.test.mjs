@@ -2046,7 +2046,7 @@ test("pending invocation storage is scoped to the authenticated workspace root",
   assert.equal(vm.runInContext("pendingInvocationRequests.size", second.context), 0);
 });
 
-test("startup removes the obsolete version 2 invocation registry instead of restoring it", async () => {
+test("startup ignores an obsolete version 2 invocation registry", async () => {
   const localStorage = new FakeStorage();
   const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
   const obsoleteStorageKey = `embodysense.pending-loop-invocations.v2.${scope}`;
@@ -2056,7 +2056,7 @@ test("startup removes the obsolete version 2 invocation registry instead of rest
 
   const currentStorageKey = vm.runInContext("pendingInvocationStorageKey", app.context);
   assert.equal(currentStorageKey, `embodysense.pending-loop-invocations.v1.${scope}`);
-  assert.equal(localStorage.getItem(obsoleteStorageKey), null);
+  assert.ok(localStorage.getItem(obsoleteStorageKey));
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
 });
 
