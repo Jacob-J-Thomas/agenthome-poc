@@ -232,7 +232,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                     }
                 }
             }
-            catch (FormatException)
+            catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
             {
                 // Fall through to locked repair from canonical artifacts.
             }
@@ -929,7 +929,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                     return index;
                 }
             }
-            catch (FormatException)
+            catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
             {
                 // The index is derived evidence. Rebuild it from canonical run artifacts below.
             }
@@ -952,7 +952,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             var index = await ReadDiscoveryIndexAsync(cancellationToken);
             return index is not null && DiscoveryIndexMatchesArtifacts(index) ? index : null;
         }
-        catch (FormatException)
+        catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
         {
             return null;
         }
@@ -973,6 +973,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
             RequireCompleteContract(document.RootElement, typeof(CustomLoopRunDiscoveryIndex), "$");
             var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, JsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
+            if (index.SchemaVersion != CustomLoopRunDiscoveryIndex.CurrentSchemaVersion)
+            {
+                throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(index.SchemaVersion);
+            }
             ValidateDiscoveryIndex(index);
             return index;
         }
@@ -1498,7 +1502,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private static void ValidateDiscoveryIndex(CustomLoopRunDiscoveryIndex index)
     {
-        if (index.SchemaVersion != CustomLoopRunDiscoveryIndex.CurrentSchemaVersion || index.Revision < 1 || index.Entries is null)
+        if (index.Revision < 1 || index.Entries is null)
         {
             throw new FormatException("The custom loop run discovery index uses an unsupported schema or revision.");
         }

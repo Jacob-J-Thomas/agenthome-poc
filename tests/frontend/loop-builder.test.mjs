@@ -1940,6 +1940,7 @@ test("an unresolved invocation operation survives a tab restart without storing 
   const storageKey = vm.runInContext("pendingInvocationStorageKey", first.context);
   const stored = localStorage.getItem(storageKey);
   assert.ok(stored);
+  assert.equal(JSON.parse(stored).schemaVersion, 1);
   assert.doesNotMatch(stored, /Sensitive unresolved prompt/);
 
   const secondServer = new FakeFetchServer(createCatalog());
@@ -2043,6 +2044,20 @@ test("pending invocation storage is scoped to the authenticated workspace root",
   assert.ok(localStorage.getItem(firstStorageKey));
   assert.equal(localStorage.getItem(secondStorageKey), null);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", second.context), 0);
+});
+
+test("startup removes the obsolete version 2 invocation registry instead of restoring it", async () => {
+  const localStorage = new FakeStorage();
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  const obsoleteStorageKey = `embodysense.pending-loop-invocations.v2.${scope}`;
+  localStorage.setItem(obsoleteStorageKey, JSON.stringify({ schemaVersion: 2, requests: [{ requestKey: "a".repeat(64) }] }));
+
+  const app = await loadLoopBuilder({ localStorage });
+
+  const currentStorageKey = vm.runInContext("pendingInvocationStorageKey", app.context);
+  assert.equal(currentStorageKey, `embodysense.pending-loop-invocations.v1.${scope}`);
+  assert.equal(localStorage.getItem(obsoleteStorageKey), null);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
 });
 
 test("invocation dispatch fails closed when the shared registry cannot be persisted", async () => {
