@@ -187,6 +187,10 @@ public sealed class CustomLoopAdmissionService
             run = await CompleteAdmissionAuditAsync(run, markerIntegrityWindow.Token);
             return Result(CustomLoopAdmissionStatus.Admitted, run, "The custom-loop run was admitted and its audit-integrity marker is durable before ordered execution.");
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             var failed = await FailAdmissionIntegrityAsync(run, exception);

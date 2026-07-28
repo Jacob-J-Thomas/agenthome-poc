@@ -263,6 +263,7 @@ public sealed class AgentRuntimeFactoryTests
         await using var runtime = await CreateRuntimeAsync(workspace);
         var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-unsupported-startup-recovery", "retry after cleanup");
 
+        Assert.True(runtime.CustomLoopRecoveryRequired);
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.InvokeCustomLoopAsync(input));
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
@@ -272,6 +273,7 @@ public sealed class AgentRuntimeFactoryTests
         var retry = await runtime.InvokeCustomLoopAsync(input);
 
         Assert.Equal("NotFound", retry.AdmissionStatus);
+        Assert.False(runtime.CustomLoopRecoveryRequired);
     }
 
     [Fact]

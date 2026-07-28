@@ -35,7 +35,7 @@ let pendingCreateOperationId = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
-// TODO(#77): Persist unresolved Resume identities per workspace and run across reloads and browser tabs.
+// TODO(#77): Persist unresolved lifecycle-control identities per workspace and run across reloads and browser tabs.
 let pendingResumeRequest = null;
 let invocationInFlight = false;
 const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v1";

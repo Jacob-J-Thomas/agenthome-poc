@@ -54,6 +54,8 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     public AgentRuntimeSurface Surface { get; }
 
+    public bool CustomLoopRecoveryRequired => _customLoops.CustomRecoveryRequired;
+
     internal IConversationMemoryStore ConversationMemory { get; }
 
     internal IReadOnlyList<LlmMessage> StartupContext { get; }

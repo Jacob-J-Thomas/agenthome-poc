@@ -946,6 +946,32 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Unsupported_discovery_index_schema_after_provider_dispatch_escalates_to_needs_review()
+    {
+        var schemaFailureInjected = false;
+        var store = new FakeRunStore(Run(Definition()))
+        {
+            BeforeUpdate = (candidate, _) =>
+            {
+                if (!schemaFailureInjected && candidate.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved))
+                {
+                    schemaFailureInjected = true;
+                    throw new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
+                }
+            }
+        };
+        var executor = new QueueExecutor(Result("provider outcome"));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run?.Status);
+        Assert.Equal("post_outcome_persistence_conflict", result.Run?.FailureCode);
+        Assert.Contains("Delete `.custom-loop-run-index.json`", result.Detail, StringComparison.Ordinal);
+        Assert.Single(executor.Requests);
+    }
+
+    [Fact]
     public async Task Caller_cancellation_during_admitted_run_load_parks_the_run_before_returning()
     {
         using var cancellation = new CancellationTokenSource();

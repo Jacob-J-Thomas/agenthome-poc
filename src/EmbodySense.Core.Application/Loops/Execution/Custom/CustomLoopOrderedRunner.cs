@@ -1385,6 +1385,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         {
             throw;
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception) when (outcomeMayExist)
+        {
+            return await EscalatePostOutcomePersistenceUncertaintyAsync(current, $"{exception.Message} An external outcome may exist, but its required trace update could not be committed. Human review is required before resume.");
+        }
         catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
         {
             throw;

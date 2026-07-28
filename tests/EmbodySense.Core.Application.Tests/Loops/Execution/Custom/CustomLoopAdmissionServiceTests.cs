@@ -698,6 +698,22 @@ public sealed class CustomLoopAdmissionServiceTests
     }
 
     [Fact]
+    public async Task Unsupported_discovery_index_schema_during_admission_audit_finalization_is_not_swallowed()
+    {
+        var definition = Definition();
+        var exception = new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
+        var runs = new FakeRunStore { UpdateException = exception };
+        var audit = new RecordingAuditLog();
+
+        var thrown = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => Service(new FakeDefinitionStore(definition), runs, audit).AdmitAsync(Request(definition)));
+
+        Assert.Same(exception, thrown);
+        Assert.Contains("Delete `.custom-loop-run-index.json`", thrown.Message, StringComparison.Ordinal);
+        Assert.Single(audit.Events);
+        Assert.Equal(1, runs.UpdateCallCount);
+    }
+
+    [Fact]
     public async Task Audit_failure_terminalizes_the_persisted_run_before_returning_no_dispatch_result()
     {
         var definition = Definition();

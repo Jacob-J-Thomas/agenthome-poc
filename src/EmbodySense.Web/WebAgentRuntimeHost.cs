@@ -438,7 +438,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 AgentRuntimeSurface.Web,
                 preserveCurrentConversation,
                 cancellationToken);
-            _loopRecoveryCompleted = true;
+            _loopRecoveryCompleted = !_runtime.CustomLoopRecoveryRequired;
             _preserveCurrentConversationAfterRecovery = false;
         }
 
@@ -460,15 +460,21 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
     private async Task EnsureLoopRecoveryUnderGateAsync(CancellationToken cancellationToken)
     {
-        if (_loopRecoveryCompleted)
+        if (_loopRecoveryCompleted && (_runtime is null || !_runtime.CustomLoopRecoveryRequired))
         {
             return;
         }
 
         if (_runtime is not null)
         {
-            _loopRecoveryCompleted = true;
-            return;
+            if (!_runtime.CustomLoopRecoveryRequired)
+            {
+                _loopRecoveryCompleted = true;
+                return;
+            }
+
+            _loopRecoveryCompleted = false;
+            await DisposeRuntimeUnderGateAsync();
         }
 
         var recovery = await _loopRuns.RecoverInterruptedRunsAsync(cancellationToken);
