@@ -3,6 +3,7 @@ using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Net.Http.Headers;
 
 namespace EmbodySense.Web.Controllers;
 
@@ -59,6 +60,43 @@ public sealed class LoopRunsController : ControllerBase
         {
             var run = await _host.GetLoopRunAsync(runId, cancellationToken);
             return run is null ? NotFound() : Ok(run);
+        }
+        catch (ArgumentException)
+        {
+            return BadRequest(new { error = "invalid_run_id", detail = "The run id is not a valid artifact identifier." });
+        }
+        catch (Exception exception) when (IsEvidenceReadFailure(exception))
+        {
+            return EvidenceUnavailable();
+        }
+    }
+
+    [HttpGet("{runId}/monitor")]
+    public async Task<ActionResult<LoopRunSummarySnapshot>> Monitor(string runId, CancellationToken cancellationToken = default)
+    {
+        if (!_host.GetStatus().Initialized)
+        {
+            return WorkspaceNotInitialized();
+        }
+
+        try
+        {
+            var monitor = await _host.GetLoopRunMonitorAsync(runId, cancellationToken);
+            if (monitor is null)
+            {
+                return NotFound();
+            }
+
+            var etag = LoopRunMonitorEtag.Create(monitor.Summary, monitor.ArtifactHash);
+            var currentEtag = EntityTagHeaderValue.Parse(etag);
+            Response.GetTypedHeaders().ETag = currentEtag;
+            var candidates = Request.GetTypedHeaders().IfNoneMatch;
+            if (candidates is not null && candidates.Any(candidate => candidate == EntityTagHeaderValue.Any || candidate.Compare(currentEtag, useStrongComparison: false)))
+            {
+                return StatusCode(StatusCodes.Status304NotModified);
+            }
+
+            return Ok(monitor.Summary);
         }
         catch (ArgumentException)
         {

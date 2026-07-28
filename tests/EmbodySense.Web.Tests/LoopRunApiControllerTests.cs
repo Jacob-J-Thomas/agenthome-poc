@@ -12,6 +12,7 @@ using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using EmbodySense.Web.Controllers;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Builder;
@@ -23,6 +24,19 @@ public sealed class LoopRunApiControllerTests
 {
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
     private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-20T12:00:00+00:00");
+
+    [Fact]
+    public void Monitor_etag_changes_for_every_previously_omitted_summary_field()
+    {
+        var summary = new LoopRunSummarySnapshot("run-test", "loop-test", "invoke-test", 1, 2, "Running", Timestamp, Timestamp.AddSeconds(1), null, 1, 2, null, false);
+        string Etag(LoopRunSummarySnapshot value, string artifactHash = "a") => LoopRunMonitorEtag.Create(value, artifactHash);
+
+        Assert.NotEqual(Etag(summary), Etag(summary with { DefinitionVersion = 2 }));
+        Assert.NotEqual(Etag(summary), Etag(summary with { CreatedAtUtc = summary.CreatedAtUtc.AddTicks(1) }));
+        Assert.NotEqual(Etag(summary), Etag(summary, "b"));
+        Assert.Throws<ArgumentNullException>(() => LoopRunMonitorEtag.Create(null!, "a"));
+        Assert.Throws<ArgumentException>(() => LoopRunMonitorEtag.Create(summary, ""));
+    }
 
     [Fact]
     public async Task Run_evidence_api_enforces_auth_initialization_bounds_and_safe_read_failures_without_starting_runtime()
@@ -49,6 +63,36 @@ public sealed class LoopRunApiControllerTests
             var invalidLoopFilter = await SendAsync(client, "/api/loop-runs?loopId=INVALID%20ID", token);
             var missing = await SendAsync(client, "/api/loop-runs/run-missing", token);
             var invalidId = await SendAsync(client, "/api/loop-runs/INVALID%20ID", token);
+            var monitoredRun = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths));
+            var monitor = await SendAsync(client, $"/api/loop-runs/{monitoredRun.Id}/monitor", token);
+            var monitorSummary = await monitor.Content.ReadFromJsonAsync<LoopRunSummarySnapshot>(JsonOptions);
+            var monitorEtag = monitor.Headers.ETag;
+            using var conditionalRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/loop-runs/{monitoredRun.Id}/monitor");
+            conditionalRequest.Headers.Add(WebSessionSecurity.HeaderName, token);
+            conditionalRequest.Headers.IfNoneMatch.Add(monitorEtag!);
+            var unchangedMonitor = await client.SendAsync(conditionalRequest);
+            using var weakListRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/loop-runs/{monitoredRun.Id}/monitor");
+            weakListRequest.Headers.Add(WebSessionSecurity.HeaderName, token);
+            weakListRequest.Headers.TryAddWithoutValidation("If-None-Match", $"\"older\", W/{monitorEtag}");
+            var weakListMonitor = await client.SendAsync(weakListRequest);
+            using var wildcardRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/loop-runs/{monitoredRun.Id}/monitor");
+            wildcardRequest.Headers.Add(WebSessionSecurity.HeaderName, token);
+            wildcardRequest.Headers.TryAddWithoutValidation("If-None-Match", "*");
+            var wildcardMonitor = await client.SendAsync(wildcardRequest);
+            var canonicalRun = (await new CustomLoopRunStore(paths).GetAsync(monitoredRun.Id))!;
+            var changedRun = canonicalRun with { Events = [.. canonicalRun.Events[..^1], canonicalRun.Events[^1] with { Detail = "Externally replaced canonical event evidence." }] };
+            var artifactPath = Path.Combine(paths.CustomLoopRunsPath, changedRun.LoopId, changedRun.Id + ".json");
+            await File.WriteAllBytesAsync(artifactPath, CustomLoopRunArtifactSerializer.Serialize(changedRun));
+            HttpResponseMessage? changedMonitor = null;
+            for (var attempt = 0; attempt < 20 && changedMonitor?.StatusCode != HttpStatusCode.OK; attempt++)
+            {
+                changedMonitor?.Dispose();
+                using var changedRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/loop-runs/{monitoredRun.Id}/monitor");
+                changedRequest.Headers.Add(WebSessionSecurity.HeaderName, token);
+                changedRequest.Headers.IfNoneMatch.Add(monitorEtag!);
+                changedMonitor = await client.SendAsync(changedRequest);
+                if (changedMonitor.StatusCode != HttpStatusCode.OK) await Task.Delay(25);
+            }
             Directory.CreateDirectory(Path.Combine(paths.CustomLoopRunsPath, "loop-corrupt"));
             await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, "loop-corrupt", "run-corrupt.json"), "secret-provider-corruption");
             var corrupt = await SendAsync(client, "/api/loop-runs/run-corrupt", token);
@@ -66,6 +110,18 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(HttpStatusCode.BadRequest, invalidLoopFilter.StatusCode);
             Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, invalidId.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, monitor.StatusCode);
+            Assert.Equal(monitoredRun.Id, monitorSummary?.Id);
+            Assert.Equal(monitoredRun.LifecycleVersion, monitorSummary?.LifecycleVersion);
+            Assert.NotNull(monitorEtag);
+            Assert.Equal(HttpStatusCode.NotModified, unchangedMonitor.StatusCode);
+            Assert.Empty(await unchangedMonitor.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.NotModified, weakListMonitor.StatusCode);
+            Assert.Empty(await weakListMonitor.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.NotModified, wildcardMonitor.StatusCode);
+            Assert.Empty(await wildcardMonitor.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.OK, changedMonitor?.StatusCode);
+            Assert.NotEqual(monitorEtag, changedMonitor?.Headers.ETag);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, corrupt.StatusCode);
             Assert.Contains("run_evidence_unavailable", corruptBody, StringComparison.Ordinal);
             Assert.DoesNotContain("secret-provider-corruption", corruptBody, StringComparison.Ordinal);

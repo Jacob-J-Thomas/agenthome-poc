@@ -73,16 +73,25 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0 && _executionGate is not null)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
-            await _executionGate.DisposeAsync();
+            return;
         }
+
+        _runStore.Dispose();
+        if (_executionGate is not null) await _executionGate.DisposeAsync();
     }
 
     public async Task<LoopRunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken = default)
     {
         var run = await _runStore.GetAsync(runId, cancellationToken);
         return run is null ? null : CustomLoopRuntimeFacade.Map(run);
+    }
+
+    public async Task<LoopRunMonitorSnapshot?> GetMonitorAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        var monitor = await _runStore.GetMonitorAsync(runId, cancellationToken);
+        return monitor is null ? null : new LoopRunMonitorSnapshot(CustomLoopRuntimeFacade.Map(monitor.Summary), monitor.ArtifactHash);
     }
 
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> ListRecentAsync(int maximumCount = CustomLoopLimits.MaxRecentRunsPageSize, CancellationToken cancellationToken = default)
