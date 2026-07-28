@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Application.Loops.Execution.Custom;
+namespace EmbodySense.Core.Application.Loops;
 
 public sealed class UnsupportedCustomLoopRunDiscoveryIndexSchemaException : FormatException
 {
