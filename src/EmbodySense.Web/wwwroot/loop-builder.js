@@ -47,6 +47,7 @@ let pendingTraceDeletion = null;
 // TODO(#77): Persist unresolved lifecycle-control identities per workspace and run across reloads and browser tabs.
 let pendingResumeRequest = null;
 let invocationInFlight = false;
+let activeInvocationAttempt = null;
 const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix = "embodysense.pending-loop-invocations";
 let pendingInvocationStorageKey = null;
@@ -86,6 +87,7 @@ const elements = {
   invocationPrompt: document.getElementById("invocationPrompt"),
   invocationPromptField: document.getElementById("invocationPromptField"),
   invokeButton: document.getElementById("invokeButton"),
+  invokeError: document.getElementById("invokeError"),
   invokeLimits: document.getElementById("invokeLimits"),
   invokeModal: document.getElementById("invokeModal"),
   invokeSummary: document.getElementById("invokeSummary"),
@@ -226,8 +228,8 @@ function bindStaticEvents() {
   elements.builderTab.addEventListener("click", () => switchView("builder"));
   elements.runsTab.addEventListener("click", () => switchView("runs"));
   elements.invokeButton.addEventListener("click", openInvokeModal);
-  elements.closeInvokeButton.addEventListener("click", closeInvokeModal);
-  elements.cancelInvokeButton.addEventListener("click", closeInvokeModal);
+  elements.closeInvokeButton.addEventListener("click", cancelInvokeModal);
+  elements.cancelInvokeButton.addEventListener("click", cancelInvokeModal);
   elements.startRunButton.addEventListener("click", startRun);
   elements.saveButton.addEventListener("click", saveLoop);
   elements.deleteButton.addEventListener("click", deleteLoop);
@@ -269,7 +271,7 @@ function bindStaticEvents() {
   });
   window.addEventListener("keydown", event => {
     if (!elements.invokeModal.className.split(/\s+/).includes("open")) return;
-    if (event.key === "Escape") closeInvokeModal();
+    if (event.key === "Escape") cancelInvokeModal();
     else if (event.key === "Tab") trapInvokeModalFocus(event);
   });
   window.addEventListener("storage", event => {
@@ -1565,7 +1567,8 @@ function openInvokeModal() {
   elements.invokeSummary.textContent = `${draft.displayName} v${draft.definitionVersion} will run the saved definition with ${draft.inferenceSteps.length} ordered inference step${draft.inferenceSteps.length === 1 ? "" : "s"} using ${catalog.runtimeModel?.provider ?? "the configured provider"} · ${catalog.runtimeModel?.model || "provider default model"}. Trigger source: ${promptSourceLabel(trigger.promptSource)}. Invoking conversation: ${trigger.includeInvokingConversation ? "admitted as a bounded snapshot" : "excluded from model context"}.`;
   const destinations = [...draft.inferenceSteps.map(step => resolvedPolicy(step, "inference")), resolvedPolicy(draft.exitPolicy, "exit")].filter(policy => policy.contextOut.publishToInvokingConversation).length;
   elements.invokeLimits.textContent = `Hard bounds: ${catalog.limits.maxModelAttemptsPerRun} model attempts per run, ${catalog.limits.maxGovernedToolRequestsPerAttempt} governed tool requests per attempt, and ${catalog.limits.maxGovernedToolRequestsPerRun} per run, within ${formatDuration(catalog.limits.maxRunExecutionMilliseconds)} of accumulated execution time. Each canonical model output is capped at ${catalog.limits.maxCanonicalModelOutputCharacters.toLocaleString()} characters. Conversation snapshots retain at most ${catalog.limits.maxInvokingConversationCharacters.toLocaleString()} characters across ${catalog.limits.maxInvokingConversationEntries} selected messages; older omissions are aggregated. Tool targets are capped at ${catalog.limits.maxGovernedToolTargetCharacters.toLocaleString()} characters, arguments at ${catalog.limits.maxGovernedToolArgumentCharacters.toLocaleString()}, and the exact formatted result returned to the model at ${catalog.limits.maxCanonicalToolResultCharacters.toLocaleString()} characters. Run evidence is capped at ${catalog.limits.maxTraceEventsPerRun} events, including ${catalog.limits.maxLifecycleControlEventsPerRun} lifecycle/control events, and ${formatBytes(catalog.limits.maxRunTraceUtf8Bytes)}. Assigned tools: ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "none"}. ${destinations} node output destination${destinations === 1 ? "" : "s"} may publish to the bound invoking conversation.`;
-  elements.startRunButton.disabled = false;
+  clearInvokeError();
+  setInvokePreparationBusy(false);
   elements.appShell.inert = true;
   elements.invokeModal.classList.toggle("open", true);
   elements.invokeModal.setAttribute("aria-hidden", "false");
@@ -1578,6 +1581,37 @@ function closeInvokeModal() {
   elements.appShell.inert = false;
   invokeReturnFocus?.focus?.();
   invokeReturnFocus = null;
+}
+
+function cancelInvokeModal() {
+  const attempt = activeInvocationAttempt;
+  if (attempt && !attempt.dispatched) {
+    attempt.cancelled = true;
+    activeInvocationAttempt = null;
+    invocationInFlight = false;
+    setInvokePreparationBusy(false);
+  }
+  closeInvokeModal();
+}
+
+function setInvokePreparationBusy(busy) {
+  elements.closeInvokeButton.disabled = false;
+  elements.cancelInvokeButton.disabled = false;
+  elements.invocationPrompt.disabled = busy;
+  elements.startRunButton.disabled = busy;
+  elements.startRunButton.textContent = busy ? "Preparing" : "Start run";
+  elements.invokeModal.setAttribute("aria-busy", String(busy));
+}
+
+function clearInvokeError() {
+  elements.invokeError.textContent = "";
+  elements.invokeError.hidden = true;
+}
+
+function showInvokeError(message) {
+  elements.invokeError.textContent = message;
+  elements.invokeError.hidden = false;
+  elements.invokeError.focus?.();
 }
 
 function trapInvokeModalFocus(event) {
@@ -1602,9 +1636,10 @@ function trapInvokeModalFocus(event) {
 
 async function startRun() {
   if (!draft || dirty || isSystemLoop() || invocationInFlight) return;
+  clearInvokeError();
   const invocationPrompt = draft.triggerPolicy.promptSource === "invocation" ? elements.invocationPrompt.value.normalize("NFC") : null;
   if (draft.triggerPolicy.promptSource === "invocation" && !invocationPrompt.trim()) {
-    showBanner("This loop requires an initial user prompt.");
+    showInvokeError("This loop requires an initial user prompt.");
     return;
   }
 
@@ -1616,9 +1651,10 @@ async function startRun() {
     runtimeProvider: catalog.runtimeModel?.provider,
     runtimeModel: catalog.runtimeModel?.model ?? null
   };
+  const attempt = { cancelled: false, dispatched: false };
+  activeInvocationAttempt = attempt;
   invocationInFlight = true;
-  elements.startRunButton.disabled = true;
-  elements.startRunButton.textContent = "Running";
+  setInvokePreparationBusy(true);
   let requestKey = null;
   let operationId = null;
   let reservationId = null;
@@ -1629,20 +1665,28 @@ async function startRun() {
     try {
       requestKey = await invocationRequestKey(invocationRequest);
     } catch (error) {
-      showBanner(`Run could not be prepared safely: ${error.message}`);
+      if (attempt.cancelled) return;
+      showInvokeError(`Run could not be prepared safely: ${error.message}`);
       return;
     }
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) return;
 
     const connection = await getHub();
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) return;
     let reservedInvocationRequest;
     try {
       reservedInvocationRequest = await reservePendingInvocationRequest(requestKey, invocationRequest);
     } catch (error) {
-      showBanner(`Run was not sent because unresolved invocation identity could not be coordinated safely across browser tabs: ${error.message}`);
+      if (attempt.cancelled) return;
+      showInvokeError(`Run was not sent because unresolved invocation identity could not be coordinated safely across browser tabs: ${error.message}`);
+      return;
+    }
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) {
+      if (reservedInvocationRequest) await releasePendingInvocationReservation(requestKey, reservedInvocationRequest.operationId, reservedInvocationRequest.reservationId);
       return;
     }
     if (!reservedInvocationRequest) {
-      showBanner(`Run was not started because ${maximumPendingInvocationRequests} invocation outcomes are still unresolved. Reconcile or definitively reject an existing operation before starting another.`);
+      showInvokeError(`Run was not started because ${maximumPendingInvocationRequests} invocation outcomes are still unresolved. Reconcile or definitively reject an existing operation before starting another.`);
       return;
     }
     operationId = reservedInvocationRequest.operationId;
@@ -1653,10 +1697,17 @@ async function startRun() {
       await markPendingInvocationDispatched(requestKey, operationId, reservationId);
     } catch (error) {
       await releasePendingInvocationReservation(requestKey, operationId, reservationId);
-      showBanner(`Run was not sent because its dispatch state could not be persisted safely: ${error.message}`);
+      if (attempt.cancelled) return;
+      showInvokeError(`Run was not sent because its dispatch state could not be persisted safely: ${error.message}`);
+      return;
+    }
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) {
+      await rollbackPendingInvocationDispatch(requestKey, operationId, reservationId, reservationIdsBeforeDispatch, wasPreviouslyDispatched);
       return;
     }
     dispatchAttempted = true;
+    attempt.dispatched = true;
+    closeInvokeModal();
     const invocation = connection.invoke("InvokeLoop", {
       loopId: invocationRequest.loopId,
       expectedDefinitionVersion: invocationRequest.expectedDefinitionVersion,
@@ -1664,7 +1715,6 @@ async function startRun() {
       operationId,
       invocationPrompt: invocationRequest.invocationPrompt
     });
-    closeInvokeModal();
     currentView = "runs";
     selectedRunId = null;
     selectedRun = null;
@@ -1705,9 +1755,10 @@ async function startRun() {
     renderAll();
     showToast(response?.detail ?? "Run finished. Durable evidence is available in Runs.");
   } catch (error) {
+    if (attempt.cancelled) return;
     if (!dispatchAttempted) {
       if (requestKey && operationId && reservationId) await releasePendingInvocationReservation(requestKey, operationId, reservationId);
-      showBanner(`Run could not be sent because the live connection was not established: ${error.message}`);
+      showInvokeError(`Run could not be sent because the live connection was not established: ${error.message}`);
       return;
     }
     if (error?.name === "SignalRPreDispatchError") {
@@ -1721,9 +1772,11 @@ async function startRun() {
     }
     await reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId);
   } finally {
-    invocationInFlight = false;
-    elements.startRunButton.disabled = false;
-    elements.startRunButton.textContent = "Start run";
+    if (activeInvocationAttempt === attempt) {
+      activeInvocationAttempt = null;
+      invocationInFlight = false;
+      setInvokePreparationBusy(false);
+    }
   }
 }
 
@@ -2320,11 +2373,28 @@ async function deleteSelectedTrace() {
 
 async function getHub() {
   if (hub?.connected) return hub;
-  hub = new JsonSignalRConnection(createHubUrl());
-  hub.on("ApprovalsChanged", renderLoopApprovals);
-  hub.onclose = () => { renderLoopApprovals([]); hub = null; };
-  await hub.start();
-  return hub;
+  const connection = new JsonSignalRConnection(createHubUrl());
+  hub = connection;
+  connection.on("ApprovalsChanged", approvals => {
+    if (hub === connection) renderLoopApprovals(approvals);
+  });
+  connection.onclose = () => {
+    if (hub !== connection) return;
+    renderLoopApprovals([]);
+    hub = null;
+  };
+  try {
+    await connection.start();
+  } catch (error) {
+    connection.stop();
+    if (hub === connection) hub = null;
+    throw error;
+  }
+  if (hub !== connection) {
+    connection.stop();
+    throw new SignalRPreDispatchError("SignalR connection setup was superseded by a newer invocation.");
+  }
+  return connection;
 }
 
 function renderLoopApprovals(approvals) {
@@ -2675,6 +2745,16 @@ class JsonSignalRConnection {
     if (this.keepAliveTimer == null) return;
     window.clearInterval(this.keepAliveTimer);
     this.keepAliveTimer = null;
+  }
+
+  stop() {
+    this.closedByClient = true;
+    try {
+      this.socket?.close();
+    } catch {
+      // A failed or still-connecting socket can reject close; local state must still be released.
+    }
+    this.handleClose();
   }
 
   async receive(data) {

@@ -120,8 +120,8 @@ function createSessionHeaders() {
 }
 
 async function refreshStatus() {
-  status = await fetchJson("/api/status");
-  applyStatus(status);
+  const nextStatus = await fetchJson("/api/status");
+  applyStatus(nextStatus);
 }
 
 async function refreshConfiguration() {

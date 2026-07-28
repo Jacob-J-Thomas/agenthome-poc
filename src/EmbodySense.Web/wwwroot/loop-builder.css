@@ -150,6 +150,7 @@
 .modal-footer { display: flex; justify-content: flex-end; gap: 7px; padding: 12px 18px; border-top: 1px solid var(--line); background: #fafcfb; }
 .run-warning { padding: 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--canvas); font-size: 8px; line-height: 1.5; }
 .run-warning.warning { border-color: #ead4b5; color: #6f4e21; background: var(--amber-soft); }
+.run-warning.error { border-color: #e8b7b7; color: #7a2626; background: #fff0f0; font-weight: 700; }
 .toast { position: fixed; z-index: 130; right: 18px; bottom: 18px; max-width: 390px; padding: 10px 13px; border: 1px solid #9dc0b3; border-radius: 9px; color: #174c3a; background: #f2faf6; box-shadow: var(--shadow); font-size: 9px; }
 .approval-panel { position: fixed; z-index: 120; right: 18px; bottom: 62px; width: min(410px, calc(100vw - 36px)); max-height: min(520px, calc(100vh - 90px)); overflow: auto; padding: 14px; border: 1px solid #d6b87f; border-radius: 12px; background: #fffbf2; box-shadow: 0 18px 52px rgba(54, 39, 14, .22); }
 .approval-panel-header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }

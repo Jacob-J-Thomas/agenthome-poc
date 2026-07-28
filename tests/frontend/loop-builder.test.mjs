@@ -1672,10 +1672,29 @@ test("a connection setup failure is reported before dispatch without creating an
   app.elements.invocationPrompt.value = "Never dispatched.";
   await app.elements.startRunButton.click();
 
-  assert.match(app.elements.validationBanner.textContent, /could not be sent.*live connection was not established.*handshake failed/i);
-  assert.doesNotMatch(app.elements.validationBanner.textContent, /outcome.*unknown/i);
+  assert.match(app.elements.invokeError.textContent, /could not be sent.*live connection was not established.*handshake failed/i);
+  assert.equal(app.elements.invokeError.hidden, false);
+  assert.equal(app.elements.appShell.inert, true);
+  assert.equal(app.elements.invokeModal.attributes.get("aria-hidden"), "false");
+  assert.doesNotMatch(app.elements.invokeError.textContent, /outcome.*unknown/i);
   assert.equal(server.calls.filter(call => call.url.startsWith("/api/loop-runs/invocations/")).length, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("secure invocation preparation failures remain visible and retryable inside the modal", async () => {
+  const app = await loadLoopBuilder({ crypto: { subtle: null, randomUUID: () => "00000000-0000-4000-8000-000000000001" } });
+  await selectCustomLoop(app);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Prepare this securely.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.invokeError.textContent, /could not be prepared safely.*secure request identity hashing is unavailable/i);
+  assert.equal(app.elements.invokeError.hidden, false);
+  assert.equal(app.elements.appShell.inert, true);
+  assert.equal(app.elements.startRunButton.disabled, false);
+  assert.equal(app.elements.closeInvokeButton.disabled, false);
+  assert.equal(app.elements.cancelInvokeButton.disabled, false);
 });
 
 test("a cached hub disconnect before invocation send is not reconciled as an ambiguous operation", async () => {
@@ -1894,6 +1913,9 @@ test("invocation is locked before asynchronous request hashing completes", async
 
   const first = app.context.startRun();
   assert.equal(app.elements.startRunButton.disabled, true);
+  assert.equal(app.elements.closeInvokeButton.disabled, false);
+  assert.equal(app.elements.cancelInvokeButton.disabled, false);
+  assert.equal(app.elements.invocationPrompt.disabled, true);
   const second = app.context.startRun();
   await second;
   assert.equal(attempts.length, 0);
@@ -1902,6 +1924,121 @@ test("invocation is locked before asynchronous request hashing completes", async
 
   assert.equal(attempts.length, 1);
   assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+  assert.doesNotMatch(app.elements.invokeModal.className, /open/);
+  assert.equal(app.elements.appShell.inert, false);
+});
+
+test("cancelling stalled preparation prevents its later dispatch without blocking a new attempt", async () => {
+  let releaseFirstDigest;
+  let digestCalls = 0;
+  const delayedFirstCrypto = {
+    subtle: {
+      digest(algorithm, data) {
+        digestCalls++;
+        if (digestCalls > 1) return webcrypto.subtle.digest(algorithm, data);
+        return new Promise(resolve => {
+          releaseFirstDigest = async () => resolve(await webcrypto.subtle.digest(algorithm, data));
+        });
+      }
+    },
+    randomUUID: () => `00000000-0000-4000-8000-${String(digestCalls).padStart(12, "0")}`
+  };
+  const app = await loadLoopBuilder({ crypto: delayedFirstCrypto });
+  await selectCustomLoop(app);
+  const attempts = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      attempts.push(input);
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive response." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Cancel the stalled request.";
+
+  const cancelledAttempt = app.context.startRun();
+  await app.elements.cancelInvokeButton.click();
+  assert.doesNotMatch(app.elements.invokeModal.className, /open/);
+  assert.equal(app.elements.appShell.inert, false);
+  assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Dispatch only the replacement.";
+  await app.elements.startRunButton.click();
+  assert.equal(attempts.length, 1);
+
+  releaseFirstDigest();
+  await cancelledAttempt;
+  assert.equal(attempts.length, 1);
+  assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+});
+
+test("cancelling stalled connection setup cannot clobber or dispatch through its replacement hub", async () => {
+  const app = await loadLoopBuilder();
+  await selectCustomLoop(app);
+  vm.runInContext(`
+    testConnections = [];
+    testInvocations = [];
+    releaseFirstConnection = null;
+    invocationRequestKey = async () => "a".repeat(64);
+    createHubUrl = () => "ws://127.0.0.1/agent-hub";
+    JsonSignalRConnection = class {
+      constructor() {
+        this.index = testConnections.length;
+        this.connected = false;
+        this.handlers = new Map();
+        this.onclose = null;
+        this.stopped = false;
+        testConnections.push(this);
+      }
+      on(target, handler) {
+        this.handlers.set(target, handler);
+      }
+      async start() {
+        if (this.index === 0) await new Promise(resolve => { releaseFirstConnection = resolve; });
+        this.connected = true;
+      }
+      async invoke(_target, input) {
+        testInvocations.push(input);
+        return { admissionStatus: "Invalid", run: null, detail: "Definitive response." };
+      }
+      stop() {
+        this.stopped = true;
+        this.connected = false;
+        this.onclose?.();
+      }
+    };
+  `, app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Cancel while the first connection starts.";
+
+  assert.equal(vm.runInContext("dirty || isSystemLoop() || invocationInFlight", app.context), false);
+  const cancelledAttempt = app.context.startRun();
+  for (let attempt = 0; attempt < 20 && !vm.runInContext("releaseFirstConnection", app.context); attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(vm.runInContext("testConnections.length", app.context), 1);
+  assert.equal(typeof vm.runInContext("releaseFirstConnection", app.context), "function");
+  await app.elements.cancelInvokeButton.click();
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Dispatch through the replacement connection.";
+  await app.elements.startRunButton.click();
+  assert.equal(vm.runInContext("testInvocations.length", app.context), 1);
+  assert.equal(vm.runInContext("hub === testConnections[1]", app.context), true);
+  vm.runInContext("testConnections[1].handlers.get('ApprovalsChanged')([{ requestId: 'replacement-approval' }])", app.context);
+  assert.equal(app.elements.approvalCount.textContent, "1 pending");
+
+  vm.runInContext(`
+    releaseFirstConnection();
+    testConnections[0].handlers.get("ApprovalsChanged")([]);
+  `, app.context);
+  await cancelledAttempt;
+
+  assert.equal(vm.runInContext("testConnections[0].stopped", app.context), true);
+  assert.equal(vm.runInContext("hub === testConnections[1]", app.context), true);
+  assert.equal(vm.runInContext("testInvocations.length", app.context), 1);
+  assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+  assert.equal(app.elements.approvalCount.textContent, "1 pending");
 });
 
 test("a runtime model change allocates a new operation without discarding the older pending identity", async () => {
@@ -2081,7 +2218,7 @@ test("the unresolved invocation limit refuses new work without evicting an older
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
   assert.equal(vm.runInContext("pendingInvocationRequests.values().next().value.operationId", app.context), oldestOperation);
-  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+  assert.match(app.elements.invokeError.textContent, /100 invocation outcomes are still unresolved/i);
 });
 
 test("the unresolved invocation limit reconciles completed receipts before refusing new work", async () => {
@@ -2159,7 +2296,7 @@ test("the unresolved invocation limit retains admitted receipts until exact run 
 
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
-  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+  assert.match(app.elements.invokeError.textContent, /100 invocation outcomes are still unresolved/i);
 });
 
 test("the unresolved invocation limit retains audit-unavailable receipts until exact run evidence is verified", async () => {
@@ -2198,7 +2335,7 @@ test("the unresolved invocation limit retains audit-unavailable receipts until e
 
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
-  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+  assert.match(app.elements.invokeError.textContent, /100 invocation outcomes are still unresolved/i);
 });
 
 test("the unresolved invocation limit releases a completed audit-unavailable rejection without a run", async () => {
@@ -2448,7 +2585,7 @@ test("invocation dispatch fails closed when the shared registry cannot be persis
 
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
-  assert.match(app.elements.validationBanner.textContent, /could not be coordinated safely across browser tabs.*storage quota exceeded/i);
+  assert.match(app.elements.invokeError.textContent, /could not be coordinated safely across browser tabs.*storage quota exceeded/i);
 });
 
 test("a pre-dispatch tab failure releases only its own shared reservation", async () => {

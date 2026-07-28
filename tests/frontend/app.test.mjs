@@ -50,6 +50,15 @@ test("workspace initialization wakes an activated loop builder", async () => {
   assert.equal(app.elements.connectionDot.className.includes("ready"), true);
 });
 
+test("the initial initialized status wakes a loop builder that observed the prior state", async () => {
+  let refreshes = 0;
+  const loopBuilder = { activate() { }, refreshWorkspace() { refreshes++; } };
+
+  await loadApp({ loopBuilder });
+
+  assert.equal(refreshes, 1);
+});
+
 test("leaving Loops suspends its surface activity", async () => {
   let activations = 0;
   let deactivations = 0;
