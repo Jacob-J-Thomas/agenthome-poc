@@ -11,4 +11,5 @@ public static class CustomLoopAdmissionStatusNames
     public const string LimitExceeded = nameof(Execution.Custom.CustomLoopAdmissionStatus.LimitExceeded);
     public const string NotFound = nameof(Execution.Custom.CustomLoopAdmissionStatus.NotFound);
     public const string AuditUnavailable = nameof(Execution.Custom.CustomLoopAdmissionStatus.AuditUnavailable);
+    public const string ReceiptUnavailable = nameof(Execution.Custom.CustomLoopAdmissionStatus.ReceiptUnavailable);
 }

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import fs from "node:fs";
+import { performance } from "node:perf_hooks";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -176,6 +178,22 @@ test("SignalR transport sends keepalives for long-running invocations and stops 
   assert.deepEqual(JSON.parse(sockets[0].sent.at(-1).slice(0, -1)), { type: 6 });
   sockets[0].closeFromServer();
   assert.equal(keepAlive.cancelled, true);
+});
+
+test("SignalR transport identifies a disconnect before invocation dispatch and removes its pending completion", async () => {
+  const app = await loadLoopBuilder();
+  class FakeWebSocket {
+    static OPEN = 1;
+  }
+  app.context.WebSocket = FakeWebSocket;
+  const Connection = vm.runInContext("JsonSignalRConnection", app.context);
+  const connection = new Connection("ws://127.0.0.1/hubs/session");
+  connection.connected = true;
+  connection.socket = { readyState: FakeWebSocket.OPEN, send: () => { throw new Error("The socket closed before send."); } };
+
+  await assert.rejects(connection.invoke("InvokeLoop", {}), error => error.name === "SignalRPreDispatchError" && /closed before send/i.test(error.message));
+
+  assert.equal(connection.invocations.size, 0);
 });
 
 test("create and save send versioned server-owned definition shapes", async () => {
@@ -958,7 +976,12 @@ test("an admission audit failure selects the durable parked run and surfaces its
   await selectCustomLoop(app);
   app.context.testHub = {
     connected: true,
-    invoke: () => Promise.resolve({ admissionStatus: "AuditUnavailable", run: parked, detail: "Run admission was parked because its invocation audit needs review." })
+    invoke: (_target, input) => {
+      const admittedParked = { ...parked, admissionOperationId: input.operationId };
+      server.runs[0] = { ...server.runs[0], admissionOperationId: input.operationId };
+      server.runDetails.set(admittedParked.id, admittedParked);
+      return Promise.resolve({ admissionStatus: "AuditUnavailable", run: admittedParked, detail: "Run admission was parked because its invocation audit needs review." });
+    }
   };
   vm.runInContext("hub = testHub", app.context);
 
@@ -1030,6 +1053,7 @@ test("a lost invocation connection reconciles the admitted run and continues mon
   const server = new FakeFetchServer(createCatalog());
   let invocationOperationId = null;
   let invocationRunReads = 0;
+  let invocationReceiptReads = 0;
   server.on("GET", "/api/loop-runs?maximumCount=50", () => {
     if (!invocationOperationId) return { status: 200, body: clone(server.runs) };
     invocationRunReads++;
@@ -1048,6 +1072,15 @@ test("a lost invocation connection reconciles the admitted run and continues mon
       admitted.completedAtUtc = null;
       server.runs = [{ id: admitted.id, loopId: admitted.loopId, admissionOperationId: admitted.admissionOperationId, definitionVersion: 2, status: admitted.status, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
       server.runDetails.set(admitted.id, admitted);
+      server.on("GET", `/api/loop-runs/invocations/${invocationOperationId}`, () => {
+        invocationReceiptReads++;
+        return {
+          status: 200,
+          body: invocationReceiptReads === 1
+            ? { operationId: invocationOperationId, loopId: admitted.loopId, state: "Pending", outcome: "Unknown", admissionStatus: "", runId: null, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, detail: "" }
+            : { operationId: invocationOperationId, loopId: admitted.loopId, state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: admitted.id, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, detail: "The run was admitted." }
+        };
+      });
       return Promise.reject(new Error("WebSocket closed before invocation completion."));
     }
   };
@@ -1058,9 +1091,1189 @@ test("a lost invocation connection reconciles the admitted run and continues mon
   await app.elements.startRunButton.click();
 
   assert.equal(invocationRunReads, 2);
+  assert.equal(invocationReceiptReads, 2);
   assert.match(app.elements.runTitle.textContent, /run-reconciled/);
-  assert.match(app.elements.validationBanner.textContent, /live connection was lost after admission/i);
+  assert.match(app.elements.validationBanner.textContent, /durable invocation receipt identified the exact admitted run/i);
   assert.ok(app.window.delayedHandlers.some(timer => timer.delay === 1000 && !timer.cancelled));
+});
+
+test("an in-progress invocation response polls its receipt until the exact admitted run is available", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let invocationReceiptReads = 0;
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      const admitted = createRunSnapshot();
+      admitted.id = "run-after-in-progress";
+      admitted.admissionOperationId = input.operationId;
+      admitted.status = "Running";
+      admitted.completedAtUtc = null;
+      server.runs = [{ id: admitted.id, loopId: admitted.loopId, admissionOperationId: admitted.admissionOperationId, definitionVersion: 2, status: admitted.status, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+      server.runDetails.set(admitted.id, admitted);
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => {
+        invocationReceiptReads++;
+        return {
+          status: 200,
+          body: invocationReceiptReads === 1
+            ? { operationId: input.operationId, loopId: input.loopId, state: "Pending", outcome: "Unknown", admissionStatus: "", runId: null, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, detail: "" }
+            : { operationId: input.operationId, loopId: input.loopId, state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: admitted.id, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, detail: "The run was admitted." }
+        };
+      });
+      return Promise.resolve({ admissionStatus: "OperationInProgress", run: null, detail: "The same invocation is still executing." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Wait for the durable result.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationReceiptReads, 2);
+  assert.match(app.elements.runTitle.textContent, /run-after-in-progress/);
+  assert.match(app.elements.validationBanner.textContent, /durable invocation receipt identified the exact admitted run/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("receipt polling preserves a newer run selection while verifying the admitted operation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const admitted = createRunSnapshot();
+  admitted.id = "run-reconciled-after-poll";
+  const selected = createRunSnapshot();
+  selected.id = "run-selected-during-poll";
+  selected.admissionOperationId = "operation-selected-during-poll";
+  server.runs = [admitted, selected].map(run => ({
+    id: run.id,
+    loopId: run.loopId,
+    admissionOperationId: run.admissionOperationId,
+    definitionVersion: 2,
+    lifecycleVersion: run.lifecycleVersion,
+    status: run.status,
+    createdAtUtc: run.createdAtUtc,
+    updatedAtUtc: run.updatedAtUtc,
+    completedAtUtc: run.completedAtUtc,
+    iteration: 1,
+    nextStepIndex: 1,
+    failureCode: null,
+    isDeleted: false
+  }));
+  server.runDetails.set(admitted.id, admitted);
+  server.runDetails.set(selected.id, selected);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  let receiptReads = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      admitted.admissionOperationId = input.operationId;
+      server.runs[0].admissionOperationId = input.operationId;
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => {
+        receiptReads++;
+        return receiptReads === 1
+          ? { status: 404, body: { detail: "Receipt is still pending." } }
+          : { status: 200, body: { operationId: input.operationId, loopId: input.loopId, state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: admitted.id, detail: "The run was admitted." } };
+      });
+      return Promise.resolve({ admissionStatus: "OperationInProgress", run: null, detail: "The operation is still pending." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Preserve my selection during receipt polling.";
+  const invocation = app.context.startRun();
+  for (let attempt = 0; attempt < 20 && receiptReads < 1; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(receiptReads, 1);
+  await app.context.selectRun(selected.id);
+  await invocation;
+
+  assert.equal(vm.runInContext("selectedRunId", app.context), selected.id);
+  assert.equal(vm.runInContext("selectedRun.id", app.context), selected.id);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+  assert.match(app.elements.validationBanner.textContent, /durable invocation receipt identified the exact admitted run/i);
+});
+
+test("receipt mismatch preserves a newer run selection made while polling", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const selected = createRunSnapshot();
+  selected.id = "run-selected-before-receipt-mismatch";
+  selected.admissionOperationId = "operation-selected-before-receipt-mismatch";
+  server.runs = [{
+    id: selected.id,
+    loopId: selected.loopId,
+    admissionOperationId: selected.admissionOperationId,
+    definitionVersion: 2,
+    lifecycleVersion: selected.lifecycleVersion,
+    status: selected.status,
+    createdAtUtc: selected.createdAtUtc,
+    updatedAtUtc: selected.updatedAtUtc,
+    completedAtUtc: selected.completedAtUtc,
+    iteration: 1,
+    nextStepIndex: 1,
+    failureCode: null,
+    isDeleted: false
+  }];
+  server.runDetails.set(selected.id, selected);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  let receiptReads = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => {
+        receiptReads++;
+        return receiptReads === 1
+          ? { status: 404, body: { detail: "Receipt is still pending." } }
+          : { status: 200, body: { operationId: "operation-owned-by-another-request", loopId: input.loopId, state: "Complete", outcome: "Rejected", admissionStatus: "Conflict", runId: null } };
+      });
+      return Promise.resolve({ admissionStatus: "OperationInProgress", run: null, detail: "The operation is still pending." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Preserve my selection after a mismatched receipt.";
+  const invocation = app.context.startRun();
+  for (let attempt = 0; attempt < 20 && receiptReads < 1; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(receiptReads, 1);
+  await app.context.selectRun(selected.id);
+  await invocation;
+
+  assert.equal(vm.runInContext("selectedRunId", app.context), selected.id);
+  assert.equal(vm.runInContext("selectedRun.id", app.context), selected.id);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+  assert.match(app.elements.validationBanner.textContent, /durable invocation evidence did not match/i);
+});
+
+test("a lost invocation connection reports a durable rejection without selecting unrelated history", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const unrelated = createRunSnapshot();
+  unrelated.id = "run-unrelated";
+  server.runs = [{ id: unrelated.id, loopId: unrelated.loopId, admissionOperationId: unrelated.admissionOperationId, definitionVersion: 2, status: unrelated.status, createdAtUtc: unrelated.createdAtUtc, updatedAtUtc: unrelated.updatedAtUtc, completedAtUtc: unrelated.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(unrelated.id, unrelated);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      server.invocationReceipts.set(input.operationId, { operationId: input.operationId, loopId: input.loopId, state: "Complete", outcome: "Rejected", admissionStatus: "Invalid", runId: null, createdAtUtc: "2026-07-20T12:00:00Z", updatedAtUtc: "2026-07-20T12:00:01Z", detail: "The saved definition hash no longer matches." });
+      return Promise.reject(new Error("WebSocket closed before rejection arrived."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Reject this stale request.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.validationBanner.textContent, /saved definition hash no longer matches/i);
+  assert.equal(app.elements.runTitle.textContent, "No run selected");
+});
+
+test("a lost invocation connection preserves a parked run referenced by an audit-unavailable receipt", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      const parked = createRunSnapshot();
+      parked.id = "run-parked-after-disconnect";
+      parked.admissionOperationId = input.operationId;
+      parked.status = "NeedsReview";
+      parked.completedAtUtc = null;
+      parked.failureCode = "InvocationReceiptAuditUnavailable";
+      parked.failureDetail = "Admission was parked because the invocation receipt could not be completed.";
+      server.runs = [{ id: parked.id, loopId: parked.loopId, admissionOperationId: parked.admissionOperationId, definitionVersion: 2, status: parked.status, createdAtUtc: parked.createdAtUtc, updatedAtUtc: parked.updatedAtUtc, completedAtUtc: null, iteration: 0, nextStepIndex: 0, failureCode: parked.failureCode, isDeleted: false }];
+      server.runDetails.set(parked.id, parked);
+      server.invocationReceipts.set(input.operationId, { operationId: input.operationId, loopId: input.loopId, state: "Complete", outcome: "Rejected", admissionStatus: "AuditUnavailable", runId: parked.id, createdAtUtc: parked.createdAtUtc, updatedAtUtc: parked.updatedAtUtc, detail: "Run admission was parked because its invocation audit needs review." });
+      return Promise.reject(new Error("WebSocket closed before the audit warning arrived."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Preserve this parked run.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.runTitle.textContent, /run-parked-after-disconnect/);
+  assert.match(app.elements.runSubtitle.textContent, /Needs Review/);
+  assert.match(app.elements.validationBanner.textContent, /admission was parked.*audit needs review/i);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Run was not admitted/);
+});
+
+test("an admitted receipt that names unrelated run evidence remains unknown and preserves the operation for retry", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  let operationId = null;
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationId = input.operationId;
+      const unrelated = createRunSnapshot();
+      unrelated.id = "run-wrong-operation";
+      unrelated.admissionOperationId = "invoke-someone-else";
+      server.runs = [{ id: unrelated.id, loopId: unrelated.loopId, admissionOperationId: unrelated.admissionOperationId, definitionVersion: 2, status: unrelated.status, createdAtUtc: unrelated.createdAtUtc, updatedAtUtc: unrelated.updatedAtUtc, completedAtUtc: unrelated.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+      server.runDetails.set(unrelated.id, unrelated);
+      server.invocationReceipts.set(input.operationId, { operationId: input.operationId, loopId: input.loopId, state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: unrelated.id, createdAtUtc: unrelated.createdAtUtc, updatedAtUtc: unrelated.updatedAtUtc, detail: "The run was admitted." });
+      return Promise.reject(new Error("WebSocket closed before invocation completion."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Do not trust an unrelated run.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(app.elements.runTitle.textContent, "No run selected");
+  assert.match(app.elements.validationBanner.textContent, new RegExp(`matching run evidence.*${operationId}.*could not be verified`, "i"));
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+});
+
+test("a connection setup failure is reported before dispatch without creating an ambiguous operation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  vm.runInContext("getHub = async () => { throw new Error('The SignalR handshake failed.'); }", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Never dispatched.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.validationBanner.textContent, /could not be sent.*live connection was not established.*handshake failed/i);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /outcome.*unknown/i);
+  assert.equal(server.calls.filter(call => call.url.startsWith("/api/loop-runs/invocations/")).length, 0);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("a cached hub disconnect before invocation send is not reconciled as an ambiguous operation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const preDispatchError = vm.runInContext("new SignalRPreDispatchError('SignalR connection is not available.')", app.context);
+  app.context.testHub = {
+    connected: true,
+    invoke: () => Promise.reject(preDispatchError)
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Disconnect before send.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.validationBanner.textContent, /could not be sent.*live connection was not established.*connection is not available/i);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /outcome.*unknown/i);
+  assert.equal(server.calls.filter(call => call.url.startsWith("/api/loop-runs/invocations/")).length, 0);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("unavailable invocation evidence keeps the outcome unknown and reuses the exact operation on retry", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Retry this exact prompt.";
+  await app.elements.startRunButton.click();
+  assert.match(app.elements.validationBanner.textContent, /outcome is unknown/i);
+  assert.match(app.elements.validationBanner.textContent, new RegExp(operationIds[0]));
+
+  app.context.testHub.invoke = (_target, input) => {
+    operationIds.push(input.operationId);
+    return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive retry response." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  assert.equal(app.elements.invocationPrompt.value, "Retry this exact prompt.");
+  await app.elements.startRunButton.click();
+
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /Definitive retry response/);
+});
+
+test("a receipt-unavailable retry response remains unknown and preserves the operation identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Preserve this uncertain receipt.";
+  await app.elements.startRunButton.click();
+
+  app.context.testHub.invoke = (_target, input) => {
+    operationIds.push(input.operationId);
+    return Promise.resolve({ admissionStatus: "ReceiptUnavailable", run: null, detail: "The invocation receipt could not be read safely." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  await app.elements.startRunButton.click();
+
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /outcome is unknown/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+});
+
+test("a previously dispatched retry preserves its operation identity when workspace hosting is unavailable", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Preserve this host-unavailable retry.";
+  await app.elements.startRunButton.click();
+
+  app.context.testHub.invoke = (_target, input) => {
+    operationIds.push(input.operationId);
+    return Promise.resolve({ admissionStatus: "WorkspaceHostUnavailable", run: null, detail: "The workspace host is temporarily unavailable." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  await app.elements.startRunButton.click();
+
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /outcome is unknown/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+});
+
+test("canonically equivalent invocation prompts reuse one unresolved operation identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const attempts = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      attempts.push(input);
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Review café evidence.";
+  await app.elements.startRunButton.click();
+
+  app.context.testHub.invoke = (_target, input) => {
+    attempts.push(input);
+    return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive retry response." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  app.elements.invocationPrompt.value = "Review cafe\u0301 evidence.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[1].operationId, attempts[0].operationId);
+  assert.equal(attempts[1].invocationPrompt, "Review café evidence.");
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("invocation is locked before asynchronous request hashing completes", async () => {
+  let releaseDigest;
+  const delayedCrypto = {
+    subtle: {
+      digest(algorithm, data) {
+        return new Promise(resolve => {
+          releaseDigest = async () => resolve(await webcrypto.subtle.digest(algorithm, data));
+        });
+      }
+    },
+    randomUUID: () => "00000000-0000-4000-8000-000000000001"
+  };
+  const app = await loadLoopBuilder({ crypto: delayedCrypto });
+  await selectCustomLoop(app);
+  const attempts = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      attempts.push(input);
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive response." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Hash this request once.";
+
+  const first = app.context.startRun();
+  assert.equal(app.elements.startRunButton.disabled, true);
+  const second = app.context.startRun();
+  await second;
+  assert.equal(attempts.length, 0);
+  releaseDigest();
+  await first;
+
+  assert.equal(attempts.length, 1);
+  assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+});
+
+test("a runtime model change allocates a new operation without discarding the older pending identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const operationIds = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationIds.push(input.operationId);
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Run under the configured model.";
+  await app.elements.startRunButton.click();
+
+  vm.runInContext("catalog.runtimeModel.model = 'gpt-5-updated'", app.context);
+  app.context.testHub.invoke = (_target, input) => {
+    operationIds.push(input.operationId);
+    return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "The new runtime request was definitively rejected." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  await app.elements.startRunButton.click();
+
+  assert.equal(operationIds.length, 2);
+  assert.notEqual(operationIds[1], operationIds[0]);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+  assert.equal(vm.runInContext("pendingInvocationRequests.values().next().value.operationId", app.context), operationIds[0]);
+  assert.match(app.elements.validationBanner.textContent, /new runtime request was definitively rejected/i);
+});
+
+test("a request conflict reconciles an older admitted receipt before releasing its operation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  let operationId = null;
+  let receiptAvailable = false;
+  server.on("GET", "/api/loop-runs/invocations/00000000-0000-4000-8000-000000000001", () => {
+    if (!receiptAvailable) return { status: 503, body: { detail: "Receipt storage is temporarily unavailable." } };
+    return { status: 200, body: server.invocationReceipts.get(operationId) };
+  });
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationId = input.operationId;
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Reconcile the older model receipt.";
+  await app.elements.startRunButton.click();
+
+  app.context.testHub.invoke = (_target, input) => {
+    assert.equal(input.operationId, operationId);
+    const admitted = createRunSnapshot();
+    admitted.id = "run-admitted-before-model-change";
+    admitted.admissionOperationId = operationId;
+    server.runs = [{ id: admitted.id, loopId: admitted.loopId, admissionOperationId: admitted.admissionOperationId, definitionVersion: 2, lifecycleVersion: admitted.lifecycleVersion, status: admitted.status, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, completedAtUtc: admitted.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+    server.runDetails.set(admitted.id, admitted);
+    server.invocationReceipts.set(operationId, { operationId, loopId: admitted.loopId, state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: admitted.id, createdAtUtc: admitted.createdAtUtc, updatedAtUtc: admitted.updatedAtUtc, detail: "The earlier runtime admitted this run." });
+    receiptAvailable = true;
+    return Promise.resolve({ admissionStatus: "Conflict", run: null, detail: "The operation belongs to different canonical runtime identity." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.runTitle.textContent, /run-admitted-before-model-change/);
+  assert.match(app.elements.validationBanner.textContent, /durable invocation receipt identified the exact admitted run/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("an old admitted replay is selected through its exact run endpoint beyond the newest page", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  let operationId = null;
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      operationId = input.operationId;
+      server.on("GET", `/api/loop-runs/invocations/${operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Replay an older admitted run.";
+  await app.elements.startRunButton.click();
+
+  const oldRun = createRunSnapshot();
+  oldRun.id = "run-older-than-first-page";
+  oldRun.admissionOperationId = operationId;
+  oldRun.createdAtUtc = "2026-06-01T00:00:00Z";
+  oldRun.updatedAtUtc = "2026-06-01T00:00:02Z";
+  oldRun.completedAtUtc = "2026-06-01T00:00:02Z";
+  server.runDetails.set(oldRun.id, oldRun);
+  server.traceDetails.set(oldRun.id, createTraceSnapshot(oldRun));
+  server.runs = Array.from({ length: 50 }, (_, index) => {
+    const run = createRunSnapshot();
+    run.id = `run-newer-${String(index).padStart(2, "0")}`;
+    run.admissionOperationId = `operation-newer-${String(index).padStart(2, "0")}`;
+    return { id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, lifecycleVersion: run.lifecycleVersion, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: run.completedAtUtc, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false };
+  });
+  app.context.testHub.invoke = (_target, input) => {
+    assert.equal(input.operationId, operationId);
+    return Promise.resolve({ admissionStatus: "Admitted", run: oldRun, detail: "The original durable invocation was replayed." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.runTitle.textContent, /run-older-than-first-page/);
+  assert.equal(server.runs.some(run => run.id === oldRun.id), false);
+  assert.ok(server.calls.some(call => call.url === `/api/loop-runs/${oldRun.id}`));
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("a verified exact admission is released when broader run evidence refresh is unavailable", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const admitted = createRunSnapshot();
+  admitted.id = "run-exact-with-partial-evidence";
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      admitted.admissionOperationId = input.operationId;
+      server.runDetails.set(admitted.id, admitted);
+      server.on("GET", "/api/loop-runs/quota", () => ({ status: 503, body: { detail: "Quota evidence is temporarily unavailable." } }));
+      return Promise.resolve({ admissionStatus: "Admitted", run: admitted, detail: "The run was admitted." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Admit despite unrelated refresh failure.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.runTitle.textContent, /run-exact-with-partial-evidence/);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("the unresolved invocation limit refuses new work without evicting an older operation", async () => {
+  const app = await loadLoopBuilder();
+  await selectCustomLoop(app);
+  for (let index = 0; index < 100; index++) {
+    const requestKey = index.toString(16).padStart(64, "0");
+    app.context.requestKey = requestKey;
+    app.context.pendingRequest = {
+      loopId: "loop-research",
+      expectedDefinitionVersion: 2,
+      expectedDefinitionHash: "sha256:test",
+      invocationPrompt: `Prompt ${index}`,
+      operationId: `operation-${String(index).padStart(3, "0")}`
+    };
+    vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", app.context);
+  }
+  const oldestOperation = vm.runInContext("pendingInvocationRequests.values().next().value.operationId", app.context);
+  let invocationAttempts = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      invocationAttempts++;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Should not dispatch." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "A 101st unresolved request.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationAttempts, 0);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
+  assert.equal(vm.runInContext("pendingInvocationRequests.values().next().value.operationId", app.context), oldestOperation);
+  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+});
+
+test("the unresolved invocation limit reconciles completed receipts before refusing new work", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  for (let index = 0; index < 100; index++) {
+    const requestKey = index.toString(16).padStart(64, "0");
+    const operationId = `operation-${String(index).padStart(3, "0")}`;
+    app.context.requestKey = requestKey;
+    app.context.pendingRequest = {
+      loopId: "loop-research",
+      expectedDefinitionVersion: 2,
+      expectedDefinitionHash: "sha256:test",
+      invocationPrompt: `Prompt ${index}`,
+      operationId
+    };
+    vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", app.context);
+    if (index === 0) {
+      server.invocationReceipts.set(operationId, { operationId, loopId: "loop-research", state: "Complete", outcome: "Rejected", admissionStatus: "Invalid", runId: null, detail: "The request was definitively rejected." });
+    }
+  }
+  let invocationAttempts = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      invocationAttempts++;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "The new request was definitively rejected." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "A new request after reconciliation.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationAttempts, 1);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 99);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+});
+
+test("the unresolved invocation limit retains admitted receipts until exact run evidence is verified", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  for (let index = 0; index < 100; index++) {
+    const requestKey = index.toString(16).padStart(64, "0");
+    const operationId = `operation-${String(index).padStart(3, "0")}`;
+    app.context.requestKey = requestKey;
+    app.context.pendingRequest = {
+      loopId: "loop-research",
+      expectedDefinitionVersion: 2,
+      expectedDefinitionHash: "sha256:test",
+      invocationPrompt: `Prompt ${index}`,
+      operationId
+    };
+    vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", app.context);
+    if (index === 0) {
+      server.invocationReceipts.set(operationId, { operationId, loopId: "loop-research", state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: "run-missing-exact-evidence", detail: "The request was admitted." });
+    }
+  }
+  let invocationAttempts = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      invocationAttempts++;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Should not dispatch." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Do not evict an unverified admission.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationAttempts, 0);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
+  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+});
+
+test("the unresolved invocation limit retains audit-unavailable receipts until exact run evidence is verified", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  for (let index = 0; index < 100; index++) {
+    const requestKey = index.toString(16).padStart(64, "0");
+    const operationId = `operation-${String(index).padStart(3, "0")}`;
+    app.context.requestKey = requestKey;
+    app.context.pendingRequest = {
+      loopId: "loop-research",
+      expectedDefinitionVersion: 2,
+      expectedDefinitionHash: "sha256:test",
+      invocationPrompt: `Prompt ${index}`,
+      operationId
+    };
+    vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", app.context);
+    if (index === 0) {
+      server.invocationReceipts.set(operationId, { operationId, loopId: "loop-research", state: "Complete", outcome: "Rejected", admissionStatus: "AuditUnavailable", runId: "run-missing-audit-evidence", detail: "Admission was parked for review." });
+    }
+  }
+  let invocationAttempts = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      invocationAttempts++;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Should not dispatch." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Do not evict unverified audit evidence.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationAttempts, 0);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
+  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+});
+
+test("the unresolved invocation limit releases a completed audit-unavailable rejection without a run", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  for (let index = 0; index < 100; index++) {
+    const requestKey = index.toString(16).padStart(64, "0");
+    const operationId = `operation-${String(index).padStart(3, "0")}`;
+    app.context.requestKey = requestKey;
+    app.context.pendingRequest = {
+      loopId: "loop-research",
+      expectedDefinitionVersion: 2,
+      expectedDefinitionHash: "sha256:test",
+      invocationPrompt: `Prompt ${index}`,
+      operationId
+    };
+    vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", app.context);
+    if (index === 0) {
+      server.invocationReceipts.set(operationId, { operationId, loopId: "loop-research", state: "Complete", outcome: "Rejected", admissionStatus: "AuditUnavailable", runId: null, detail: "The rejected outcome could not be audited." });
+    }
+  }
+  let invocationAttempts = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      invocationAttempts++;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "The new request was definitively rejected." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Start after the completed no-run rejection.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationAttempts, 1);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 99);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+});
+
+test("the unresolved invocation limit accepts an exact retained tombstone before admitting new work", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  for (let index = 0; index < 100; index++) {
+    const requestKey = index.toString(16).padStart(64, "0");
+    const operationId = `operation-${String(index).padStart(3, "0")}`;
+    app.context.requestKey = requestKey;
+    app.context.pendingRequest = {
+      loopId: "loop-research",
+      expectedDefinitionVersion: 2,
+      expectedDefinitionHash: "sha256:test",
+      invocationPrompt: `Prompt ${index}`,
+      operationId
+    };
+    vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", app.context);
+    if (index === 0) {
+      const run = createRunSnapshot();
+      run.id = "run-retained-capacity-evidence";
+      run.admissionOperationId = operationId;
+      server.traceDetails.set(run.id, createTombstoneTrace(run));
+      server.invocationReceipts.set(operationId, { operationId, loopId: run.loopId, state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: run.id, detail: "The request was admitted." });
+    }
+  }
+  let invocationAttempts = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      invocationAttempts++;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "The new request was definitively rejected." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Start after exact tombstone reconciliation.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationAttempts, 1);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 99);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+});
+
+test("an unresolved invocation operation survives a tab restart without storing prompt text", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const firstServer = new FakeFetchServer(createCatalog());
+  const first = await loadLoopBuilder({ server: firstServer, localStorage, locks });
+  await selectCustomLoop(first);
+  let originalOperationId = null;
+  first.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      originalOperationId = input.operationId;
+      firstServer.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", first.context);
+
+  await first.elements.invokeButton.click();
+  first.elements.invocationPrompt.value = "Sensitive unresolved prompt.";
+  await first.elements.startRunButton.click();
+
+  const storageKey = vm.runInContext("pendingInvocationStorageKey", first.context);
+  const stored = localStorage.getItem(storageKey);
+  assert.ok(stored);
+  assert.doesNotMatch(stored, /Sensitive unresolved prompt/);
+
+  const secondServer = new FakeFetchServer(createCatalog());
+  const second = await loadLoopBuilder({ server: secondServer, localStorage, locks });
+  await selectCustomLoop(second);
+  let retriedOperationId = null;
+  second.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      retriedOperationId = input.operationId;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive retry response after reload." });
+    }
+  };
+  vm.runInContext("hub = testHub", second.context);
+
+  await second.elements.invokeButton.click();
+  second.elements.invocationPrompt.value = "Sensitive unresolved prompt.";
+  await second.elements.startRunButton.click();
+
+  assert.equal(retriedOperationId, originalOperationId);
+  assert.match(second.elements.validationBanner.textContent, /Definitive retry response after reload/);
+  assert.equal(localStorage.getItem(storageKey), null);
+});
+
+test("dispatch state survives a tab restart before the invocation response settles", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const firstServer = new FakeFetchServer(createCatalog());
+  const first = await loadLoopBuilder({ server: firstServer, localStorage, locks });
+  await selectCustomLoop(first);
+  let originalOperationId = null;
+  let rejectFirstInvocation;
+  first.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      originalOperationId = input.operationId;
+      firstServer.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return new Promise((_resolve, reject) => { rejectFirstInvocation = reject; });
+    }
+  };
+  vm.runInContext("hub = testHub", first.context);
+
+  await first.elements.invokeButton.click();
+  first.elements.invocationPrompt.value = "Recover the dispatched request after restart.";
+  const firstAttempt = first.context.startRun();
+  for (let attempt = 0; attempt < 20 && !originalOperationId; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(originalOperationId);
+  const storageKey = vm.runInContext("pendingInvocationStorageKey", first.context);
+  const storedBeforeResponse = JSON.parse(localStorage.getItem(storageKey));
+  assert.equal(storedBeforeResponse.requests[0].dispatchAttempted, true);
+
+  const secondServer = new FakeFetchServer(createCatalog());
+  const second = await loadLoopBuilder({ server: secondServer, localStorage, locks });
+  await selectCustomLoop(second);
+  let retriedOperationId = null;
+  second.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      retriedOperationId = input.operationId;
+      secondServer.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.resolve({ admissionStatus: "WorkspaceHostUnavailable", run: null, detail: "The workspace host is temporarily unavailable." });
+    }
+  };
+  vm.runInContext("hub = testHub", second.context);
+
+  await second.elements.invokeButton.click();
+  second.elements.invocationPrompt.value = "Recover the dispatched request after restart.";
+  await second.elements.startRunButton.click();
+
+  assert.equal(retriedOperationId, originalOperationId);
+  assert.match(second.elements.validationBanner.textContent, /outcome is unknown/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", second.context), 1);
+  rejectFirstInvocation(new Error("The original tab closed after dispatch."));
+  await firstAttempt;
+});
+
+test("pending invocation storage is scoped to the authenticated workspace root", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const firstServer = new FakeFetchServer(createCatalog());
+  firstServer.on("GET", "/api/status", () => ({ status: 200, body: { workspaceRoot: "C:/workspace-one", initialized: true } }));
+  const first = await loadLoopBuilder({ server: firstServer, localStorage, locks });
+  first.context.requestKey = "a".repeat(64);
+  first.context.pendingRequest = {
+    loopId: "loop-research",
+    expectedDefinitionVersion: 2,
+    expectedDefinitionHash: "sha256:test",
+    invocationPrompt: "Do not persist this prompt.",
+    operationId: "operation-workspace-one"
+  };
+  vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", first.context);
+  const firstStorageKey = vm.runInContext("pendingInvocationStorageKey", first.context);
+
+  const secondServer = new FakeFetchServer(createCatalog());
+  secondServer.on("GET", "/api/status", () => ({ status: 200, body: { workspaceRoot: "C:/workspace-two", initialized: true } }));
+  secondServer.invocationReceipts.set("operation-workspace-one", { operationId: "operation-workspace-one", loopId: "loop-research", state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: "run-from-copied-workspace" });
+  const second = await loadLoopBuilder({ server: secondServer, localStorage, locks });
+  const secondStorageKey = vm.runInContext("pendingInvocationStorageKey", second.context);
+
+  assert.notEqual(secondStorageKey, firstStorageKey);
+  assert.ok(localStorage.getItem(firstStorageKey));
+  assert.equal(localStorage.getItem(secondStorageKey), null);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", second.context), 0);
+});
+
+test("invocation dispatch fails closed when the shared registry cannot be persisted", async () => {
+  const localStorage = new FakeStorage();
+  localStorage.setItem = () => { throw new Error("Storage quota exceeded."); };
+  const app = await loadLoopBuilder({ localStorage });
+  await selectCustomLoop(app);
+  let invocationAttempts = 0;
+  app.context.testHub = {
+    connected: true,
+    invoke: () => {
+      invocationAttempts++;
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Should not dispatch." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Do not dispatch without shared persistence.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(invocationAttempts, 0);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+  assert.match(app.elements.validationBanner.textContent, /could not be coordinated safely across browser tabs.*storage quota exceeded/i);
+});
+
+test("a pre-dispatch tab failure releases only its own shared reservation", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const first = await loadLoopBuilder({ localStorage, locks });
+  const second = await loadLoopBuilder({ localStorage, locks });
+  first.context.crypto.randomUUID = () => "00000000-0000-4000-8000-000000000101";
+  second.context.crypto.randomUUID = () => "00000000-0000-4000-8000-000000000202";
+  const requestKey = "b".repeat(64);
+  const request = {
+    loopId: "loop-research",
+    expectedDefinitionVersion: 2,
+    expectedDefinitionHash: "sha256:test",
+    invocationPrompt: "Coordinate this request."
+  };
+
+  const firstReservation = await first.context.reservePendingInvocationRequest(requestKey, request);
+  const secondReservation = await second.context.reservePendingInvocationRequest(requestKey, request);
+  assert.equal(secondReservation.operationId, firstReservation.operationId);
+
+  await second.context.releasePendingInvocationReservation(requestKey, secondReservation.operationId, secondReservation.reservationId);
+  first.context.synchronizePendingInvocationRequestsFromStorage();
+  const retained = vm.runInContext("pendingInvocationRequests.values().next().value", first.context);
+
+  assert.equal(retained.operationId, firstReservation.operationId);
+  assert.deepEqual([...retained.reservationIds], [firstReservation.reservationId]);
+});
+
+test("the 101st same-request reservation is refused without corrupting shared storage", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const first = await loadLoopBuilder({ localStorage, locks });
+  const requestKey = "d".repeat(64);
+  const request = {
+    loopId: "loop-research",
+    expectedDefinitionVersion: 2,
+    expectedDefinitionHash: "sha256:test",
+    invocationPrompt: "Coordinate many browser tabs."
+  };
+
+  for (let index = 0; index < 100; index++) {
+    await first.context.reservePendingInvocationRequest(requestKey, request);
+  }
+
+  await assert.rejects(first.context.reservePendingInvocationRequest(requestKey, request), /100 active browser reservations/i);
+  const storageKey = vm.runInContext("pendingInvocationStorageKey", first.context);
+  const stored = JSON.parse(localStorage.getItem(storageKey));
+  assert.equal(stored.requests.length, 1);
+  assert.equal(stored.requests[0].reservationIds.length, 100);
+
+  const restored = await loadLoopBuilder({ localStorage, locks });
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", restored.context), 1);
+  assert.equal(vm.runInContext("pendingInvocationRequests.values().next().value.reservationIds.length", restored.context), 100);
+});
+
+test("concurrent browser tabs coordinate one operation identity for the same request", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const first = await loadLoopBuilder({ localStorage, locks });
+  const second = await loadLoopBuilder({ localStorage, locks });
+  await selectCustomLoop(first);
+  await selectCustomLoop(second);
+  const operationIds = [];
+  const releases = [];
+  for (const app of [first, second]) {
+    app.context.testHub = {
+      connected: true,
+      invoke: (_target, input) => {
+        operationIds.push(input.operationId);
+        return new Promise(resolve => releases.push(() => resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive response." })));
+      }
+    };
+    vm.runInContext("hub = testHub", app.context);
+    await app.elements.invokeButton.click();
+    app.elements.invocationPrompt.value = "Coordinate this shared request.";
+  }
+
+  const attempts = [first.context.startRun(), second.context.startRun()];
+  for (let attempt = 0; attempt < 20 && operationIds.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[1], operationIds[0]);
+  for (const release of releases) release();
+  await Promise.all(attempts);
+});
+
+test("an admitted invocation receipt reconciles against its exact retained tombstone", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const run = createRunSnapshot();
+  run.id = "run-deleted-before-retry";
+  run.admissionOperationId = "operation-deleted-before-retry";
+  server.traceDetails.set(run.id, createTombstoneTrace(run));
+  const requestKey = "c".repeat(64);
+  app.context.requestKey = requestKey;
+  app.context.pendingRequest = {
+    loopId: run.loopId,
+    expectedDefinitionVersion: 2,
+    expectedDefinitionHash: "sha256:test",
+    invocationPrompt: null,
+    operationId: run.admissionOperationId
+  };
+  vm.runInContext("rememberPendingInvocationRequest(requestKey, pendingRequest)", app.context);
+
+  await app.context.applyInvocationReconciliation({
+    kind: "admitted",
+    receipt: { operationId: run.admissionOperationId, loopId: run.loopId, state: "Complete", outcome: "Admitted", admissionStatus: "Admitted", runId: run.id }
+  }, {
+    loopId: run.loopId,
+    expectedDefinitionVersion: 2,
+    expectedDefinitionHash: "sha256:test",
+    invocationPrompt: null
+  }, requestKey, run.admissionOperationId);
+
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+  assert.equal(vm.runInContext("selectedRunId", app.context), run.id);
+  assert.equal(vm.runInContext("selectedRun", app.context), null);
+  assert.equal(vm.runInContext("selectedTrace.isDeleted", app.context), true);
+  assert.match(app.elements.validationBanner.textContent, /durable invocation receipt identified the exact admitted run/i);
+});
+
+test("different unresolved invocation requests retain independent operation identities", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  const attempts = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      attempts.push({ operationId: input.operationId, prompt: input.invocationPrompt });
+      server.on("GET", `/api/loop-runs/invocations/${input.operationId}`, () => ({ status: 503, body: { detail: "Receipt storage is temporarily unavailable." } }));
+      return Promise.reject(new Error("WebSocket closed."));
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "First unresolved request.";
+  await app.elements.startRunButton.click();
+
+  vm.runInContext("openInvokeModal()", app.context);
+  app.elements.invocationPrompt.value = "Second unresolved request.";
+  await app.elements.startRunButton.click();
+
+  app.context.testHub.invoke = (_target, input) => {
+    attempts.push({ operationId: input.operationId, prompt: input.invocationPrompt });
+    return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "The first request now has a definitive response." });
+  };
+  vm.runInContext("openInvokeModal()", app.context);
+  assert.equal(app.elements.invocationPrompt.value, "Second unresolved request.");
+  app.elements.invocationPrompt.value = "First unresolved request.";
+  await app.elements.startRunButton.click();
+
+  assert.equal(attempts.length, 3);
+  assert.notEqual(attempts[0].operationId, attempts[1].operationId);
+  assert.equal(attempts[2].operationId, attempts[0].operationId);
+  assert.match(app.elements.validationBanner.textContent, /first request now has a definitive response/i);
+  assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 1);
+});
+
+test("missing invocation evidence stops at the bounded reconciliation deadline as unknown", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+
+  const result = await app.context.reconcileInvocationOperation("invoke-never-visible");
+
+  assert.equal(result.kind, "unknown");
+  assert.equal(server.calls.filter(call => call.url === "/api/loop-runs/invocations/invoke-never-visible").length, 20);
+});
+
+test("a stalled invocation receipt read is aborted at the overall reconciliation deadline", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loop-runs/invocations/invoke-stalled", () => new Promise(() => { }));
+  const app = await loadLoopBuilder({ server });
+  const startedAt = Date.now();
+
+  const result = await app.context.reconcileInvocationOperation("invoke-stalled", 25);
+
+  assert.equal(result.kind, "unknown");
+  assert.ok(Date.now() - startedAt < 500);
+  const receiptCalls = server.calls.filter(call => call.url === "/api/loop-runs/invocations/invoke-stalled");
+  assert.equal(receiptCalls.length, 1);
+  assert.equal(receiptCalls[0].options.signal.aborted, true);
+});
+
+test("invocation reconciliation remains bounded when the wall clock moves backward", async () => {
+  let wallClock = 1000;
+  class RegressingDate extends Date {
+    static now() {
+      return wallClock;
+    }
+  }
+  const server = new FakeFetchServer(createCatalog());
+  let receiptReads = 0;
+  server.on("GET", "/api/loop-runs/invocations/invoke-clock-regression", () => {
+    receiptReads++;
+    wallClock = 0;
+    return receiptReads === 1 ? { status: 404, body: { detail: "Not visible yet." } } : new Promise(() => { });
+  });
+  const app = await loadLoopBuilder({ server, Date: RegressingDate });
+  const startedAt = performance.now();
+
+  const result = await app.context.reconcileInvocationOperation("invoke-clock-regression", 25);
+
+  assert.equal(result.kind, "unknown");
+  assert.ok(performance.now() - startedAt < 500);
 });
 
 test("slower run detail responses cannot overwrite a newer run selection", async () => {
@@ -1093,6 +2306,49 @@ test("slower run detail responses cannot overwrite a newer run selection", async
   assert.match(app.elements.runTitle.textContent, /run-b/);
   assert.match(app.elements.inspectorContent.textContent, /run run-b/);
   assert.equal(app.elements.runList.children.find(item => item.className.includes("selected")).textContent.includes("run-b"), true);
+});
+
+test("invocation hydration cannot overwrite a newer run selection", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const invocationRun = createRunSnapshot();
+  invocationRun.id = "run-invocation-hydration";
+  invocationRun.admissionOperationId = "operation-invocation-hydration";
+  const newerRun = createRunSnapshot();
+  newerRun.id = "run-selected-while-hydrating";
+  newerRun.admissionOperationId = "operation-selected-while-hydrating";
+  server.runs = [invocationRun, newerRun].map(run => ({
+    id: run.id,
+    loopId: run.loopId,
+    admissionOperationId: run.admissionOperationId,
+    definitionVersion: 2,
+    status: run.status,
+    createdAtUtc: run.createdAtUtc,
+    updatedAtUtc: run.updatedAtUtc,
+    completedAtUtc: run.completedAtUtc,
+    iteration: 1,
+    nextStepIndex: 1,
+    failureCode: null,
+    isDeleted: false
+  }));
+  server.runDetails.set(invocationRun.id, invocationRun);
+  server.runDetails.set(newerRun.id, newerRun);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  let releaseQuota;
+  const quotaReleased = new Promise(resolve => { releaseQuota = resolve; });
+  server.on("GET", "/api/loop-runs/quota", async () => {
+    await quotaReleased;
+    return { status: 200, body: createTraceQuota(2) };
+  });
+
+  const hydration = app.context.selectExactInvocationRun(invocationRun, invocationRun.loopId, invocationRun.admissionOperationId);
+  await Promise.resolve();
+  await app.context.selectRun(newerRun.id);
+  releaseQuota();
+  await hydration;
+
+  assert.equal(vm.runInContext("selectedRunId", app.context), newerRun.id);
+  assert.equal(vm.runInContext("selectedRun.id", app.context), newerRun.id);
 });
 
 test("opening an existing nonterminal run keeps refreshing independently of its original invoker", async () => {
@@ -1678,12 +2934,17 @@ test("owned run approvals expose resolved governance evidence in the loop builde
 async function loadLoopBuilder(options = {}) {
   const document = new FakeDocument(loopsHtml);
   const server = options.server ?? new FakeFetchServer(options.catalog ?? createCatalog());
+  const sessionStorage = options.sessionStorage ?? new FakeStorage();
+  const localStorage = options.localStorage ?? new FakeStorage();
+  const locks = options.locks ?? new FakeLockManager();
   let operation = 0;
   const window = {
     confirmations: [],
     delayedHandlers: [],
     intervalHandlers: [],
     location: { href: "http://127.0.0.1:4378/loops.html" },
+    localStorage,
+    sessionStorage,
     addEventListener() { },
     confirm(message) { this.confirmations.push(message); return true; },
     setTimeout(handler, delay) {
@@ -1708,20 +2969,63 @@ async function loadLoopBuilder(options = {}) {
     }
   };
   const context = {
+    AbortController,
     console,
-    crypto: { randomUUID: () => `00000000-0000-4000-8000-${String(++operation).padStart(12, "0")}` },
+    crypto: options.crypto ?? { subtle: webcrypto.subtle, randomUUID: () => `00000000-0000-4000-8000-${String(++operation).padStart(12, "0")}` },
+    Date: options.Date ?? Date,
     document,
     fetch: server.fetch.bind(server),
+    navigator: { locks },
     performance,
     setTimeout,
     clearTimeout,
     structuredClone,
+    TextEncoder,
     window
   };
   context.globalThis = context;
   vm.runInNewContext(builderSource, context, { filename: "loop-builder.js" });
   await flushAsyncWork();
   return { context, document, elements: document.elementsObject, server, window };
+}
+
+class FakeStorage {
+  constructor() {
+    this.values = new Map();
+  }
+
+  getItem(key) {
+    return this.values.has(key) ? this.values.get(key) : null;
+  }
+
+  removeItem(key) {
+    this.values.delete(key);
+  }
+
+  setItem(key, value) {
+    this.values.set(key, String(value));
+  }
+}
+
+class FakeLockManager {
+  constructor() {
+    this.tails = new Map();
+  }
+
+  async request(name, _options, callback) {
+    const previous = this.tails.get(name) ?? Promise.resolve();
+    let release;
+    const current = new Promise(resolve => { release = resolve; });
+    const tail = previous.then(() => current);
+    this.tails.set(name, tail);
+    await previous;
+    try {
+      return await callback({ name, mode: "exclusive" });
+    } finally {
+      release();
+      if (this.tails.get(name) === tail) this.tails.delete(name);
+    }
+  }
 }
 
 async function selectCustomLoop(app) {
@@ -1958,6 +3262,36 @@ function createTraceSnapshot(run) {
   };
 }
 
+function createTombstoneTrace(run) {
+  const liveTrace = createTraceSnapshot(run);
+  return {
+    ...liveTrace,
+    kind: "Tombstone",
+    status: run.status,
+    persistedArtifactUtf8Bytes: 1024,
+    isDeleted: true,
+    tombstone: {
+      runId: run.id,
+      loopId: run.loopId,
+      admissionOperationId: run.admissionOperationId,
+      terminalStatus: run.status,
+      definitionVersion: run.admittedDefinition.definitionVersion,
+      definitionHash: run.admittedDefinition.contentHash,
+      originalTraceHash: liveTrace.originalTraceHash,
+      originalTraceUtf8Bytes: liveTrace.originalTraceUtf8Bytes,
+      createdAtUtc: run.createdAtUtc,
+      completedAtUtc: run.completedAtUtc,
+      deletedAtUtc: "2026-07-26T13:00:00Z",
+      deletionActor: "web",
+      deletionSurface: "web",
+      deletionOperationId: "delete-retained-trace",
+      intentAuditCorrelationId: "audit-delete-intent",
+      outcomeAuditCorrelationId: "audit-delete-outcome",
+      outcomeIntegrity: "Complete"
+    }
+  };
+}
+
 function createTraceQuota(liveTraceCount = 0, tombstoneCount = 0, actualStoredUtf8Bytes = liveTraceCount * 16384) {
   return {
     liveTraceCount,
@@ -1989,6 +3323,7 @@ class FakeFetchServer {
     this.runs = [];
     this.runDetails = new Map();
     this.traceDetails = new Map();
+    this.invocationReceipts = new Map();
     this.traceQuota = null;
     this.calls = [];
     this.handlers = new Map();
@@ -2015,6 +3350,11 @@ class FakeFetchServer {
       return responseFrom({ status: 200, body: { items: clone(runs), continuationCursor: null } });
     }
     if (method === "GET" && url === "/api/loop-runs/quota") return responseFrom({ status: 200, body: clone(this.traceQuota ?? createTraceQuota(this.runs.length)) });
+    if (method === "GET" && url.startsWith("/api/loop-runs/invocations/")) {
+      const operationId = decodeURIComponent(url.slice("/api/loop-runs/invocations/".length));
+      const receipt = this.invocationReceipts.get(operationId);
+      return receipt ? responseFrom({ status: 200, body: clone(receipt) }) : responseFrom({ status: 404, body: { detail: "Invocation receipt not found." } });
+    }
     if (method === "GET" && url.endsWith("/monitor") && url.startsWith("/api/loop-runs/")) {
       const runId = decodeURIComponent(url.slice("/api/loop-runs/".length, -"/monitor".length));
       const summary = this.runs.find(run => run.id === runId);

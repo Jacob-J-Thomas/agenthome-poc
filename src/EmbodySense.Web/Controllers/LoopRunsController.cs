@@ -108,6 +108,29 @@ public sealed class LoopRunsController : ControllerBase
         }
     }
 
+    [HttpGet("invocations/{operationId}")]
+    public async Task<ActionResult<LoopInvocationOperationSnapshot>> GetInvocationOperation(string operationId, CancellationToken cancellationToken = default)
+    {
+        if (!_host.GetStatus().Initialized)
+        {
+            return WorkspaceNotInitialized();
+        }
+
+        try
+        {
+            var operation = await _host.GetLoopInvocationOperationAsync(operationId, cancellationToken);
+            return operation is null ? NotFound() : Ok(operation);
+        }
+        catch (ArgumentException)
+        {
+            return BadRequest(new { error = "invalid_invocation_operation_id", detail = "The invocation operation id is not a valid artifact identifier." });
+        }
+        catch (Exception exception) when (IsEvidenceReadFailure(exception))
+        {
+            return EvidenceUnavailable();
+        }
+    }
+
     [HttpGet("quota")]
     public async Task<ActionResult<LoopTraceQuotaSnapshot>> GetTraceQuota(CancellationToken cancellationToken = default)
     {

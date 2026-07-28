@@ -13,5 +13,6 @@ public enum CustomLoopAdmissionStatus
     NonterminalRunExists = 5,
     LimitExceeded = 6,
     NotFound = 7,
-    AuditUnavailable = 8
+    AuditUnavailable = 8,
+    ReceiptUnavailable = 9
 }

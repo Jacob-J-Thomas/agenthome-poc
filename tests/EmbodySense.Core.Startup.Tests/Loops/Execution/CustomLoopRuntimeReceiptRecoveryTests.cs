@@ -16,7 +16,6 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
-using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
@@ -37,7 +36,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
     }
 
     [Fact]
-    public async Task Version_one_pending_receipt_with_an_already_admitted_run_is_bound_and_reconciled_before_a_new_busy_owner()
+    public async Task Pending_receipt_with_an_already_admitted_run_is_bound_and_reconciled_before_a_new_busy_owner()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
@@ -116,14 +115,6 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 conversation,
                 context));
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
-        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
-        var persisted = JsonNode.Parse(await File.ReadAllTextAsync(receiptPath))!.AsObject();
-        persisted["schemaVersion"] = 1;
-        persisted.Remove("bindingState");
-        persisted.Remove("invokingConversationId");
-        persisted.Remove("contextIdentityHash");
-        await File.WriteAllTextAsync(receiptPath, persisted.ToJsonString());
-
         await using var competingGate = new CustomLoopWorkspaceExecutionGate(paths);
         var competing = competingGate.TryAcquire("competing-active-operation", new string('f', CustomLoopLimits.Sha256HexCharacters));
         Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, competing.Status);
@@ -273,6 +264,31 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         Assert.Equal(CustomLoopRunStatus.Paused.ToString(), replay.ExecutionStatus);
         Assert.False(replay.WasDispatched);
         Assert.Equal(CustomLoopInvocationOperationState.Complete, (await prepared.ReceiptStore.GetAsync(operationId))!.State);
+    }
+
+    [Fact]
+    public async Task Unreadable_invocation_receipt_is_reported_as_non_definitive()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var definition = await CreateInvocationLoopAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        const string operationId = "invoke-unreadable-receipt";
+        Directory.CreateDirectory(paths.CustomLoopInvocationOperationsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json"), "{");
+        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            workspace.File("unused-codex.cmd"),
+            "read-only",
+            AgentRuntimeSurface.Cli);
+
+        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, operationId, "retry the unresolved operation"));
+
+        Assert.Equal(CustomLoopAdmissionStatus.ReceiptUnavailable.ToString(), response.AdmissionStatus);
+        Assert.False(response.WasDispatched);
+        Assert.Null(response.Run);
+        Assert.Contains("could not be read safely", response.Detail, StringComparison.Ordinal);
     }
 
     private static async Task<(CustomLoopRunRecord Run, CustomLoopInvocationOperationStore ReceiptStore)> PrepareInterruptedAdmissionAsync(WorkspacePaths paths, LoopDefinitionSnapshot definitionSnapshot, string operationId, string prompt)
