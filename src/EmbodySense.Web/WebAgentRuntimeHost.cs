@@ -474,6 +474,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             }
 
             _loopRecoveryCompleted = false;
+            if (_activeCustomRuntimeOperations > 0)
+            {
+                _discardRuntimeWhenCustomOperationsComplete = true;
+                _runtimeDiscardCompletion ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                throw new InvalidOperationException("custom_loop_recovery_pending: the retained runtime will be discarded when its active custom-loop operation reaches a safe boundary; retry the evidence request afterward.");
+            }
+
             await DisposeRuntimeUnderGateAsync();
         }
 

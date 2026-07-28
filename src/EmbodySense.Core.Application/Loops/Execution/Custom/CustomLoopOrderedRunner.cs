@@ -1462,6 +1462,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 }
             }
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, current, $"{detail} Escalation persistence is uncertain: {SafeExceptionClass(exception)}."));
