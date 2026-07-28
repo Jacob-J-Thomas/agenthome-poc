@@ -61,7 +61,7 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
-    public async Task Legacy_pre_role_identity_trace_remains_listable_and_quota_visible_after_restart()
+    public async Task Pre_role_identity_trace_is_rejected_without_a_legacy_persistence_fallback()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -79,14 +79,13 @@ public sealed class CustomLoopRunStoreTests
             Provenance = CustomLoopContextProvenance.WorkspaceRoleFile
         };
         var legacyContext = CustomLoopContextSnapshotHash.Apply(run.ContextSnapshot with { SourceManifest = legacyManifest });
-        var legacyRun = CustomLoopAdmissionRequestHash.Apply(run with { ContextSnapshot = legacyContext, AdmissionRequestHash = string.Empty });
+        var unsupportedRun = CustomLoopAdmissionRequestHash.Apply(run with { ContextSnapshot = legacyContext, AdmissionRequestHash = string.Empty });
 
-        Assert.Equal(CustomLoopRunStoreStatus.Created, (await new CustomLoopRunStore(paths).CreateAsync(legacyRun)).Status);
+        var store = new CustomLoopRunStore(paths);
 
-        var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
-        AssertRun(legacyRun, await restarted.GetAsync(legacyRun.Id));
-        Assert.Equal(legacyRun.Id, Assert.Single(await restarted.ListRecentAsync(50)).Id);
-        Assert.Equal(1, (await restarted.GetTraceQuotaAsync()).RetainedTraceCount);
+        await Assert.ThrowsAsync<FormatException>(() => store.CreateAsync(unsupportedRun));
+        Assert.Empty(await store.ListRecentAsync(50));
+        Assert.Equal(0, (await store.GetTraceQuotaAsync()).RetainedTraceCount);
     }
 
     [Fact]
@@ -693,9 +692,12 @@ public sealed class CustomLoopRunStoreTests
 
         await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: "not-a-cursor")));
         await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, "loop-beta", filtered.ContinuationCursor)));
-        var impossibleCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, createdAtUtcTicks = DateTimeOffset.MinValue.UtcTicks, runId = "run-impossible-cursor", loopId = (string?)null });
+        var impossibleCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, createdAtUtcTicks = DateTimeOffset.MinValue.UtcTicks, runId = "run-impossible-cursor", loopId = (string?)null });
         var impossibleCursor = Convert.ToBase64String(impossibleCursorJson).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: impossibleCursor)));
+        var obsoleteCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, createdAtUtcTicks = Timestamp.UtcTicks, runId = "run-obsolete-cursor", loopId = (string?)null });
+        var obsoleteCursor = Convert.ToBase64String(obsoleteCursorJson).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: obsoleteCursor)));
     }
 
     [Fact]
@@ -723,7 +725,9 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(unseen.Id, Assert.Single(second.Items).Id);
         Assert.Equal(oldest.Id, Assert.Single(third.Items).Id);
         Assert.Null(third.ContinuationCursor);
-        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        Assert.True(File.Exists(indexPath));
+        Assert.Equal(1, JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!["schemaVersion"]!.GetValue<int>());
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
     }
 

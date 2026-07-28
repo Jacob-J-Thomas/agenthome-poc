@@ -27,7 +27,7 @@ You are working on EmbodySense.
 - Use the .NET 10 SDK selected by the root `global.json`. All production and test projects target `net10.0`, and `Directory.Build.props` pins C# 14; do not lower or broaden those toolchain versions in an unrelated change.
 - Keep changes direct and aligned with the existing C# solution unless the axioms and the user's request justify a broader design.
 - Avoid dependencies unless they buy something concrete.
-- Until a user-approved release migration policy exists, experimental persisted schemas and documents must remain at version 1. Do not add automatic migrations, compatibility readers or writers, legacy aliases, or fallback behavior for superseded POC shapes; require explicit reinitialization or cleanup instead. Existing exceptions are tracked in GitHub issue #71.
+- Until a user-approved release migration policy exists, experimental persisted schemas and documents must remain at version 1. Do not add automatic migrations, compatibility readers or writers, legacy aliases, or fallback behavior for superseded POC shapes; require explicit reinitialization or cleanup instead.
 - Do not describe aspirational agent-loop behavior as implemented unless it exists in source.
 - If documentation claims a capability that the source does not contain, treat that as a documentation/source mismatch and report it before filling in code.
 - If source contains partial or accidental work, do not treat it as project direction without user confirmation.
