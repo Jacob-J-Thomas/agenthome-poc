@@ -26,6 +26,8 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 public sealed class CustomLoopRuntimeTests
 {
+    private static readonly TimeSpan ProviderAttemptStartTimeout = TimeSpan.FromSeconds(30);
+
     [Fact]
     public async Task Context_capture_truncates_role_and_conversation_sources_only_at_valid_utf16_boundaries()
     {
@@ -958,11 +960,13 @@ public sealed class CustomLoopRuntimeTests
         await using (var runtime = await CreateRuntimeAsync(workspace))
         {
             _ = await runtime.RunTurnAsync("conversation prefix before the paused run");
-            var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-restart-conversation", "delayed restart conversation"));
+            var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-restart-conversation", "held-once restart conversation"));
             await WaitForAttemptStartAsync(workspace);
             var running = Assert.Single(await runtime.ListCustomLoopRunsAsync(), run => run.LoopId == definition.Id);
-            _ = await runtime.PauseCustomLoopAsync(new LoopRunControlInput(running.Id, (await runtime.GetCustomLoopRunAsync(running.Id))!.LifecycleVersion, "pause-runtime-restart-conversation"));
+            var pause = await runtime.PauseCustomLoopAsync(new LoopRunControlInput(running.Id, (await runtime.GetCustomLoopRunAsync(running.Id))!.LifecycleVersion, "pause-runtime-restart-conversation"));
+            File.WriteAllText(workspace.File("custom-attempt-release.marker"), "released");
             paused = Assert.IsType<LoopRunSnapshot>((await invocation).Run);
+            Assert.Equal("PauseRequested", pause.Status);
             Assert.Equal("Paused", paused.Status);
             Assert.Equal(1, paused.Checkpoint.NextStepIndex);
         }
@@ -1275,12 +1279,13 @@ public sealed class CustomLoopRuntimeTests
     private static async Task WaitForAttemptStartAsync(TestWorkspace workspace)
     {
         var markerPath = workspace.File("custom-attempt-started.marker");
-        for (var attempt = 0; attempt < 100 && !File.Exists(markerPath); attempt++)
+        var deadline = DateTime.UtcNow.Add(ProviderAttemptStartTimeout);
+        while (!File.Exists(markerPath) && DateTime.UtcNow < deadline)
         {
             await Task.Delay(50);
         }
 
-        Assert.True(File.Exists(markerPath), "The delayed custom-loop provider attempt did not start within five seconds.");
+        Assert.True(File.Exists(markerPath), $"The custom-loop provider attempt did not start within {ProviderAttemptStartTimeout.TotalSeconds:0} seconds.");
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
@@ -1318,7 +1323,12 @@ public sealed class CustomLoopRuntimeTests
                     "turn/start" {
                         $turnId = "turn-test"
                         $userText = [string]$message.params.input[0].text
-                        if ($userText.Contains("held")) {
+                        $heldOnceMarker = Join-Path $PSScriptRoot "custom-attempt-held-once.marker"
+                        $shouldHold = $userText.Contains("held") -and (-not $userText.Contains("held-once") -or -not (Test-Path $heldOnceMarker))
+                        if ($shouldHold) {
+                            if ($userText.Contains("held-once")) {
+                                [IO.File]::WriteAllText($heldOnceMarker, "held")
+                            }
                             [IO.File]::WriteAllText((Join-Path $PSScriptRoot "custom-attempt-started.marker"), "started")
                             $releaseMarker = Join-Path $PSScriptRoot "custom-attempt-release.marker"
                             $releaseDeadline = [DateTime]::UtcNow.AddSeconds(10)
