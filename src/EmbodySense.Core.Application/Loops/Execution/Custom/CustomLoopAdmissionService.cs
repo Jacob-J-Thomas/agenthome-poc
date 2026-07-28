@@ -147,6 +147,10 @@ public sealed class CustomLoopAdmissionService
         {
             stored = await _runStore.CreateAsync(run, cancellationToken);
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             var result = Result(CustomLoopAdmissionStatus.Invalid, null, $"The admitted run could not be persisted: {exception.GetType().Name}.");

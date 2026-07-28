@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
@@ -189,6 +190,13 @@ public sealed class LoopRunInspectionFacadeTests
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
         Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync("delete-trace")).Status);
+
+        File.Delete(indexPath);
+        var retry = await facade.DeleteTraceAsync(terminal.Id, trace.PersistedArtifactHash, "delete-trace");
+
+        Assert.Equal("Deleted", retry.Status);
+        Assert.True(retry.IsOutcomeCommitted);
     }
 
     private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store)

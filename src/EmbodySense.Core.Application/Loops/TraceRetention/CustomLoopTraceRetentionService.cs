@@ -103,6 +103,10 @@ public sealed class CustomLoopTraceRetentionService
         {
             reservation = await _store.ReserveTraceDeletionOperationAsync(mutation, cancellationToken);
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             try

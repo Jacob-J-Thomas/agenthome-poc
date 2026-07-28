@@ -109,6 +109,10 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
         {
             throw new HubException("The custom-loop invocation was cancelled.");
         }
+        catch (LoopRunEvidenceUnsupportedSchemaException exception)
+        {
+            throw new HubException(exception.Message);
+        }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or IOException)
         {
             throw new HubException("The custom-loop invocation could not be processed safely. Check durable run evidence and the local audit log.");

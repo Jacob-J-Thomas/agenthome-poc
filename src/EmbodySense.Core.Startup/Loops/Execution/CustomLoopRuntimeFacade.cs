@@ -328,7 +328,16 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 _modelSnapshot,
                 conversationReference,
                 contextSnapshot);
-            var admission = await _admissionService.AdmitAsync(request, cancellationToken);
+            CustomLoopAdmissionResult admission;
+            try
+            {
+                admission = await _admissionService.AdmitAsync(request, cancellationToken);
+            }
+            catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+            {
+                throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+            }
+
             if (!admission.IsAdmitted)
             {
                 if (admission.Status == CustomLoopAdmissionStatus.NotFound && operation.BindingState == CustomLoopInvocationBindingState.CapturedContext)

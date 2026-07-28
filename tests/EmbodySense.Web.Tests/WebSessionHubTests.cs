@@ -237,6 +237,20 @@ public sealed class WebSessionHubTests
         Assert.DoesNotContain("sensitive runtime detail", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Invoke_surfaces_unsupported_run_evidence_schema_cleanup_guidance()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace.RootPath, approvals);
+        const string guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
+        var hub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(guidance));
+
+        var exception = await Assert.ThrowsAsync<HubException>(() => hub.InvokeLoop(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-unsupported-schema", "prompt")));
+
+        Assert.Equal(guidance, exception.Message);
+    }
+
     private static WebAgentRuntimeHost CreateHost(string rootPath, WebApprovalCoordinator approvals)
     {
         var options = WebRunOptions.FromArguments(["--workdir", rootPath]);
@@ -323,6 +337,19 @@ public sealed class WebSessionHubTests
             return cancelled
                 ? new OperationCanceledException("sensitive runtime detail")
                 : new InvalidOperationException("sensitive runtime detail");
+        }
+    }
+
+    private sealed class UnsupportedSchemaLoopRuntimeInvoker(string guidance) : IWebLoopRuntimeInvoker
+    {
+        public Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromException<LoopRunInvocationResponse>(new LoopRunEvidenceUnsupportedSchemaException(guidance));
+        }
+
+        public Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
         }
     }
 

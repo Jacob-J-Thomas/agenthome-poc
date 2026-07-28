@@ -683,6 +683,21 @@ public sealed class CustomLoopAdmissionServiceTests
     }
 
     [Fact]
+    public async Task Unsupported_discovery_index_schema_is_preserved_for_the_public_runtime_boundary()
+    {
+        var definition = Definition();
+        var exception = new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
+        var runs = new FakeRunStore { CreateException = exception };
+        var audit = new RecordingAuditLog();
+
+        var thrown = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => Service(new FakeDefinitionStore(definition), runs, audit).AdmitAsync(Request(definition)));
+
+        Assert.Same(exception, thrown);
+        Assert.Empty(audit.Events);
+        Assert.Equal(0, runs.UpdateCallCount);
+    }
+
+    [Fact]
     public async Task Audit_failure_terminalizes_the_persisted_run_before_returning_no_dispatch_result()
     {
         var definition = Definition();
