@@ -43,9 +43,26 @@ test("workspace initialization wakes an activated loop builder", async () => {
     status: { workspaceRoot: "C:/workspace", initialized: false, client: "web", cliRole: "CLI remains available." }
   });
 
+  assert.equal(app.elements.connectionDot.className.includes("ready"), false);
   vm.runInContext("applyStatus({ workspaceRoot: 'C:/workspace', initialized: true, client: 'web', cliRole: 'CLI remains available.' })", app.context);
 
   assert.equal(refreshes, 1);
+  assert.equal(app.elements.connectionDot.className.includes("ready"), true);
+});
+
+test("leaving Loops suspends its surface activity", async () => {
+  let activations = 0;
+  let deactivations = 0;
+  const loopBuilder = { activate() { activations++; }, deactivate() { deactivations++; }, refreshWorkspace() { } };
+  const app = await loadApp({ loopBuilder });
+  const loopsTab = app.appTabs.find(tab => tab.dataset.appView === "loops");
+  const overviewTab = app.appTabs.find(tab => tab.dataset.configTab === "overview");
+
+  await loopsTab.click();
+  await overviewTab.click();
+
+  assert.equal(activations, 1);
+  assert.equal(deactivations, 1);
 });
 
 test("history_loaded replaces the transcript using role labels and text content", async () => {

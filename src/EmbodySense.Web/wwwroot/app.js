@@ -23,6 +23,7 @@ const elements = {
   cliRole: document.getElementById("cliRole"),
   clientRole: document.getElementById("clientRole"),
   clientStatus: document.getElementById("clientStatus"),
+  connectionDot: document.getElementById("connectionDot"),
   configContent: document.getElementById("configContent"),
   configTabs: Array.from(document.querySelectorAll("[data-config-tab]")),
   configurationSubtitle: document.getElementById("configurationSubtitle"),
@@ -54,7 +55,11 @@ const configurationViewCopy = {
 };
 
 function selectAppView(view, sourceTab = null) {
+  const previousAppView = activeAppView;
   activeAppView = ["chat", "loops", "configuration"].includes(view) ? view : "chat";
+  if (previousAppView === "loops" && activeAppView !== "loops") {
+    window.embodySenseLoopBuilder?.deactivate();
+  }
   elements.chatView.hidden = activeAppView !== "chat";
   elements.loopsView.hidden = activeAppView !== "loops";
   elements.configurationView.hidden = activeAppView !== "configuration";
@@ -141,6 +146,7 @@ function applyStatus(nextStatus) {
   status = nextStatus;
   elements.workspaceRoot.textContent = status.workspaceRoot;
   elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
+  elements.connectionDot.classList.toggle("ready", status.initialized);
   elements.clientStatus.textContent = hub?.connected ? "Web primary" : "Web reconnecting";
   elements.clientRole.textContent = status.client;
   elements.cliRole.textContent = status.cliRole;

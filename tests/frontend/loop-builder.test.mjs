@@ -99,6 +99,170 @@ test("revisiting Loops preserves an unsaved draft without reloading the catalog"
   assert.equal(server.calls.filter(call => call.url === "/api/loops").length, catalogRequests);
 });
 
+test("a transient first activation failure retries without rebinding events", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let catalogAttempts = 0;
+  server.on("GET", "/api/loops", () => {
+    catalogAttempts++;
+    return catalogAttempts === 1
+      ? { status: 503, body: { detail: "Catalog temporarily unavailable." } }
+      : { status: 200, body: createCatalog() };
+  });
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.match(app.elements.validationBanner.textContent, /Catalog temporarily unavailable/);
+  assert.ok(findByTag(app.elements.validationBanner, "button").some(button => button.textContent === "Retry"));
+
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+
+  assert.equal(catalogAttempts, 2);
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+  assert.equal(app.elements.createLoopButton.listeners.get("click") != null, true);
+});
+
+test("run-evidence activation retry preserves the draft and clears its failure state", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let runAttempts = 0;
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => {
+    runAttempts++;
+    return runAttempts === 1
+      ? { status: 503, body: { detail: "Evidence temporarily unavailable." } }
+      : { status: 200, body: { items: [], continuationCursor: null } };
+  });
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.match(app.elements.validationBanner.textContent, /Run evidence unavailable/);
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved retry notes";
+  await app.elements.loopDescription.input();
+
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+
+  assert.equal(runAttempts, 2);
+  assert.equal(server.calls.filter(call => call.url === "/api/loops").length, 1);
+  assert.equal(app.elements.loopDescription.value, "Unsaved retry notes");
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Run evidence unavailable|Retry/);
+});
+
+test("a status refresh failure becomes retryable and cached-catalog recovery restores the UI", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusAvailable = true;
+  server.on("GET", "/api/status", () => statusAvailable
+    ? { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } }
+    : { status: 503, body: { detail: "Status temporarily unavailable." } });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved status retry notes";
+  await app.elements.loopDescription.input();
+
+  statusAvailable = false;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), false);
+  assert.equal(app.elements.loopDescription.disabled, true);
+  assert.match(app.elements.validationBanner.textContent, /Status temporarily unavailable.*Retry/);
+
+  statusAvailable = true;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.equal(server.calls.filter(call => call.url === "/api/loops").length, 1);
+  assert.equal(app.elements.loopDescription.value, "Unsaved status retry notes");
+  assert.equal(app.elements.loopDescription.disabled, false);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /unavailable|Retry/i);
+});
+
+test("a queued refresh failure leaves the builder retryable", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusReads = 0;
+  let releaseActiveRefresh;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 2) {
+      return new Promise(resolve => {
+        releaseActiveRefresh = () => resolve({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } });
+      });
+    }
+    if (statusReads === 3) return { status: 503, body: { detail: "Queued refresh failed." } };
+    return { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  const activeRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  for (let attempt = 0; attempt < 20 && !releaseActiveRefresh; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  const queuedRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  releaseActiveRefresh();
+  await Promise.all([activeRefresh, queuedRefresh]);
+
+  assert.equal(statusReads, 3);
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), false);
+  assert.match(app.elements.validationBanner.textContent, /Queued refresh failed.*Retry/);
+
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /failed|Retry/i);
+});
+
+test("Retry joins a still-draining refresh chain instead of starting a competing refresh", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusReads = 0;
+  let releaseFailedRefresh;
+  let releaseQueuedRefresh;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 2) {
+      return new Promise(resolve => {
+        releaseFailedRefresh = () => resolve({ status: 503, body: { detail: "First refresh failed." } });
+      });
+    }
+    if (statusReads === 3) {
+      return new Promise(resolve => {
+        releaseQueuedRefresh = () => resolve({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } });
+      });
+    }
+    return { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  const failedRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  for (let attempt = 0; attempt < 20 && !releaseFailedRefresh; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  const queuedRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  releaseFailedRefresh();
+  for (let attempt = 0; attempt < 20 && !releaseQueuedRefresh; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  const retry = findByTag(app.elements.validationBanner, "button").find(button => button.textContent === "Retry");
+  assert.ok(retry);
+
+  const retryRefresh = retry.click();
+  await Promise.resolve();
+  assert.equal(statusReads, 3);
+  releaseQueuedRefresh();
+  await Promise.all([failedRefresh, queuedRefresh, retryRefresh]);
+
+  assert.equal(statusReads, 3);
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /failed|Retry/i);
+});
+
+test("selecting another loop during first evidence hydration does not fail activation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let releaseWorkspaceRuns;
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => new Promise(resolve => {
+    releaseWorkspaceRuns = () => resolve({ status: 200, body: { items: [], continuationCursor: null } });
+  }));
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+  const activation = app.window.embodySenseLoopBuilder.activate();
+  for (let attempt = 0; attempt < 20 && !releaseWorkspaceRuns; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+
+  await selectCustomLoop(app);
+  releaseWorkspaceRuns();
+  await activation;
+
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.equal(app.elements.loopName.value, "Research pass");
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Retry|unavailable/i);
+});
+
 test("server-controlled loop text is rendered as text and cannot create executable markup", async () => {
   const unsafe = '<img src=x onerror="globalThis.compromised=true"><script>globalThis.compromised=true</script>';
   const catalog = createCatalog();
@@ -153,11 +317,25 @@ test("prototype-aligned search, insertion, and zoom controls update the projecte
   app.elements.loopSearch.value = "";
   await app.elements.loopSearch.input();
   await selectCustomLoop(app);
+  app.elements.loopSearch.value = "pass";
+  await app.elements.loopSearch.input();
+  app.elements.loopName.value = "Renamed working loop";
+  await app.elements.loopName.input();
+  assert.doesNotMatch(app.elements.loopList.textContent, /Renamed working loop/);
+  app.elements.loopSearch.value = "renamed working";
+  await app.elements.loopSearch.input();
+  assert.match(app.elements.loopList.textContent, /Renamed working loop/);
+  app.elements.loopSearch.value = "research pass";
+  await app.elements.loopSearch.input();
+  assert.doesNotMatch(app.elements.loopList.textContent, /Renamed working loop/);
+  app.elements.loopSearch.value = "";
+  await app.elements.loopSearch.input();
   const insertionControls = findByClass(app.elements.loopCanvas, "connector-add");
   assert.equal(insertionControls.length, 2);
   await insertionControls[1].click();
 
   assert.match(app.elements.loopCanvas.textContent, /Step 2/);
+  assert.match(app.elements.loopList.textContent, /2 steps/);
   assert.match(app.elements.validationBanner.textContent, /Every inference step needs a name and instruction/);
   await app.elements.zoomInButton.click();
   assert.equal(app.elements.zoomLevel.textContent, "110%");
@@ -2578,6 +2756,105 @@ test("opening an existing nonterminal run keeps refreshing independently of its 
 
   assert.match(app.elements.runSubtitle.textContent, /Completed/);
   assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+});
+
+test("run monitoring stops while Loops is hidden and resumes when it returns", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 1);
+  app.window.embodySenseLoopBuilder.deactivate();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 1);
+});
+
+test("rapidly leaving and returning during an in-flight run poll keeps one monitoring chain", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  let monitorStarted;
+  let releaseMonitor;
+  const monitorPending = new Promise(resolve => { monitorStarted = resolve; });
+  const monitorReleased = new Promise(resolve => { releaseMonitor = resolve; });
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, async () => {
+    monitorStarted();
+    await monitorReleased;
+    return { status: 200, body: server.runs[0] };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  const refresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  refresh.cancelled = true;
+  const inFlightRefresh = refresh.handler();
+  await monitorPending;
+  app.window.embodySenseLoopBuilder.deactivate();
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+
+  releaseMonitor();
+  await inFlightRefresh;
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 1);
+});
+
+test("selecting another active run during an in-flight poll transfers the monitoring chain", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const firstRun = createRunSnapshot();
+  firstRun.status = "Running";
+  firstRun.completedAtUtc = null;
+  const secondRun = createRunSnapshot();
+  secondRun.id = "run-second-active";
+  secondRun.admissionOperationId = "op-second-active";
+  secondRun.status = "Running";
+  secondRun.completedAtUtc = null;
+  secondRun.createdAtUtc = "2026-07-20T11:59:00Z";
+  secondRun.updatedAtUtc = "2026-07-20T11:59:02Z";
+  server.runs = [firstRun, secondRun].map(run => ({ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }));
+  server.runDetails.set(firstRun.id, firstRun);
+  server.runDetails.set(secondRun.id, secondRun);
+  let monitorStarted;
+  let releaseMonitor;
+  const monitorPending = new Promise(resolve => { monitorStarted = resolve; });
+  const monitorReleased = new Promise(resolve => { releaseMonitor = resolve; });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const polledRunId = vm.runInContext("selectedRun.id", app.context);
+  const alternateRun = polledRunId === firstRun.id ? secondRun : firstRun;
+  server.on("GET", `/api/loop-runs/${polledRunId}/monitor`, async () => {
+    monitorStarted();
+    await monitorReleased;
+    return { status: 200, body: server.runs.find(run => run.id === polledRunId) };
+  });
+
+  const firstRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  firstRefresh.cancelled = true;
+  const inFlightRefresh = firstRefresh.handler();
+  await monitorPending;
+  const secondRunButton = app.elements.runList.children.find(item => item.textContent.includes(alternateRun.id));
+  await secondRunButton.click();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+
+  releaseMonitor();
+  await inFlightRefresh;
+  const transferredRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  assert.ok(transferredRefresh);
+  transferredRefresh.cancelled = true;
+  await transferredRefresh.handler();
+  assert.equal(server.calls.some(call => call.url === `/api/loop-runs/${alternateRun.id}/monitor`), true);
 });
 
 test("long active-run approval waits use conditional monitor reads without reloading full evidence", async () => {

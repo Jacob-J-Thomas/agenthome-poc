@@ -195,6 +195,7 @@
 .editor-menu button.danger { color: var(--red); }
 .validation-banner.visible { display: flex; align-items: flex-start; gap: 8px; }
 .validation-banner.success { color: #15523e; background: #e8f5ee; border-color: #b8d9ca; }
+.validation-retry { min-height: 26px; flex: 0 0 auto; margin-left: auto; padding: 4px 9px; }
 .validation-title { display: block; font-weight: 820; }
 .validation-copy { display: block; margin-top: 2px; font-size: 8px; opacity: .85; }
 .validation-copy > strong, .validation-copy > span { display: block; }

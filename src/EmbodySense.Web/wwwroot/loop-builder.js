@@ -7,6 +7,8 @@ let lastSelectedNodeId = "trigger";
 let loopSearchQuery = "";
 let canvasZoom = 1;
 let loopBuilderActivated = false;
+let loopBuilderEventsBound = false;
+let loopBuilderSurfaceActive = false;
 let loopBuilderRefresh = null;
 let loopBuilderRefreshQueued = false;
 let dirty = false;
@@ -35,6 +37,7 @@ let hub = null;
 let invokeReturnFocus = null;
 let historicalLoopId = null;
 let selectedRunRefreshTimer = null;
+let selectedRunRefreshInFlight = false;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
 let pendingCreateOperationId = null;
@@ -74,7 +77,6 @@ const elements = {
   canvasAuthority: document.getElementById("canvasAuthority"),
   canvasStepCount: document.getElementById("canvasStepCount"),
   closeInvokeButton: document.getElementById("closeInvokeButton"),
-  connectionDot: document.getElementById("connectionDot"),
   createLoopButton: document.getElementById("createLoopButton"),
   deleteButton: document.getElementById("deleteButton"),
   description: document.getElementById("loopDescription"),
@@ -122,10 +124,23 @@ const elements = {
 };
 
 function activate() {
-  if (loopBuilderActivated) return loopBuilderRefresh || Promise.resolve();
-  bindStaticEvents();
+  loopBuilderSurfaceActive = true;
+  if (loopBuilderRefresh) return loopBuilderRefresh;
+  if (loopBuilderActivated) {
+    scheduleSelectedRunRefresh();
+    return Promise.resolve();
+  }
+  if (!loopBuilderEventsBound) {
+    bindStaticEvents();
+    loopBuilderEventsBound = true;
+  }
   loopBuilderActivated = true;
   return beginLoopBuilderRefresh(startLoopBuilder);
+}
+
+function deactivate() {
+  loopBuilderSurfaceActive = false;
+  scheduleSelectedRunRefresh();
 }
 
 function beginLoopBuilderRefresh(operation) {
@@ -137,11 +152,19 @@ function beginLoopBuilderRefresh(operation) {
 }
 
 async function drainLoopBuilderRefresh(operation) {
-  await operation();
+  let refreshed = await operation();
+  applyLoopBuilderRefreshOutcome(refreshed);
   while (loopBuilderRefreshQueued) {
     loopBuilderRefreshQueued = false;
-    await refreshWorkspaceCore();
+    refreshed = await refreshWorkspaceCore(Boolean(catalog));
+    applyLoopBuilderRefreshOutcome(refreshed);
   }
+  return refreshed;
+}
+
+function applyLoopBuilderRefreshOutcome(refreshed) {
+  loopBuilderActivated = refreshed !== false;
+  if (!loopBuilderActivated) appendActivationRetry();
 }
 
 async function startLoopBuilder() {
@@ -150,23 +173,24 @@ async function startLoopBuilder() {
       const session = await requestJson("/api/session");
       sessionToken = session.token;
     }
-    await refreshWorkspaceCore();
+    return await refreshWorkspaceCore(Boolean(catalog));
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
+    return false;
   }
 }
 
 function refreshWorkspace() {
-  if (!loopBuilderActivated) return Promise.resolve();
   if (loopBuilderRefresh) {
     loopBuilderRefreshQueued = true;
     return loopBuilderRefresh;
   }
+  if (!loopBuilderActivated) return loopBuilderSurfaceActive ? activate() : Promise.resolve();
   return beginLoopBuilderRefresh(refreshWorkspaceCore);
 }
 
-async function refreshWorkspaceCore() {
+async function refreshWorkspaceCore(reuseCatalog = false) {
   try {
     const status = await requestJson("/api/status");
     try {
@@ -179,18 +203,21 @@ async function refreshWorkspaceCore() {
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
-    elements.connectionDot.classList.toggle("ready", status.initialized);
     if (!status.initialized) {
       showBanner("Initialize the workspace from Chat before creating loops.", "notice");
       setInteractive(false);
-      return;
+      return true;
     }
 
-    await loadCatalog();
-    await loadRuns();
+    if (!reuseCatalog || !catalog) await loadCatalog();
+    const runsLoaded = await loadRuns();
+    if (runsLoaded === false) return false;
+    renderAll();
+    return true;
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
+    return false;
   }
 }
 
@@ -432,7 +459,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
       filteredPageRequest,
       requestJson("/api/loop-runs/quota")
     ]);
-    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId) return false;
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId) return null;
     if (runPaginationLoopId !== loopId) {
       runPaginationLoopId = loopId;
       runContinuationCursor = null;
@@ -461,7 +488,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
       if (evidence.trace?.isDeleted) {
         recentRuns = mergeRunSummaries([tombstoneRunSummary(evidence.trace)], recentRuns.filter(run => run.id !== requestedRunId));
       }
-      if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return false;
+      if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return null;
       selectedRun = evidence.run;
       selectedTrace = evidence.trace;
       bindSelectedRunMonitor(selectedRun?.id ?? null);
@@ -478,6 +505,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     }
     renderList();
     renderTabs();
+    if (elements.validationBanner.textContent.startsWith("Run evidence unavailable:")) renderValidation();
     scheduleSelectedRunRefresh();
     return true;
   } catch (error) {
@@ -1019,10 +1047,14 @@ function renderList() {
   elements.list.replaceChildren();
   if (!catalog) return;
   const listOptions = [];
-  const matchesSearch = definition => !loopSearchQuery || [definition.displayName, definition.description, definition.id].some(value => String(value ?? "").toLocaleLowerCase().includes(loopSearchQuery));
+  const matchesSearch = definition => {
+    const projectedDefinition = draft?.id === definition.id ? draft : definition;
+    return !loopSearchQuery || [projectedDefinition.displayName, projectedDefinition.description, projectedDefinition.id].some(value => String(value ?? "").toLocaleLowerCase().includes(loopSearchQuery));
+  };
   const visibleDefinitions = [...catalog.customDefinitions, catalog.systemDefault].filter(matchesSearch);
   let visibleGroup = null;
   for (const definition of visibleDefinitions) {
+    const projectedDefinition = draft?.id === definition.id ? draft : definition;
     const group = definition.id === "default-conversation" ? "System" : "Custom loops";
     if (group !== visibleGroup) {
       elements.list.append(node("div", "loop-list-group", group));
@@ -1038,10 +1070,10 @@ function renderList() {
     button.dataset.loopOptionKey = `definition:${definition.id}`;
     button.append(node("span", `loop-icon ${definition.id === "default-conversation" ? "system" : "custom"}`, definition.id === "default-conversation" ? "◇" : "↻"));
     const copy = node("span", "loop-list-copy");
-    copy.append(node("span", "loop-list-name", definition.displayName));
+    copy.append(node("span", "loop-list-name", projectedDefinition.displayName));
     const meta = node("span", "loop-list-meta");
-    meta.append(node("span", definition.id === "default-conversation" ? "system-chip" : "version-chip", definition.id === "default-conversation" ? "System loop" : `v${definition.definitionVersion}`));
-    meta.append(node("span", "", definition.inferenceSteps.length === 1 ? "1 step" : `${definition.inferenceSteps.length} steps`));
+    meta.append(node("span", definition.id === "default-conversation" ? "system-chip" : "version-chip", definition.id === "default-conversation" ? "System loop" : `v${projectedDefinition.definitionVersion}`));
+    meta.append(node("span", "", projectedDefinition.inferenceSteps.length === 1 ? "1 step" : `${projectedDefinition.inferenceSteps.length} steps`));
     copy.append(meta);
     button.append(copy);
     button.addEventListener("click", () => selectDefinition(definition));
@@ -1443,6 +1475,7 @@ function validateDraft() {
 function markDirty() {
   if (isSystemLoop()) return;
   dirty = true;
+  renderList();
   renderToolbar();
   renderValidation();
 }
@@ -1451,12 +1484,6 @@ function updateDraftValue(fieldName, value) {
   if (mutationInFlight || !draft || isSystemLoop()) return;
   draft[fieldName] = value;
   markDirty();
-  renderListDraftName();
-}
-
-function renderListDraftName() {
-  const selected = elements.list.querySelector('[aria-selected="true"] .loop-list-name');
-  if (selected) selected.textContent = draft.displayName || "Untitled loop";
 }
 
 async function createLoop() {
@@ -2211,16 +2238,18 @@ function scheduleSelectedRunRefresh() {
     window.clearTimeout(selectedRunRefreshTimer);
     selectedRunRefreshTimer = null;
   }
-  if (activeRunOperationMonitors > 0 || currentView !== "runs" || !selectedRun || !isNonterminalRun(selectedRun)) return;
+  if (!loopBuilderSurfaceActive || selectedRunRefreshInFlight || activeRunOperationMonitors > 0 || currentView !== "runs" || !selectedRun || !isNonterminalRun(selectedRun)) return;
   const runId = selectedRun.id;
   selectedRunRefreshTimer = window.setTimeout(async () => {
     selectedRunRefreshTimer = null;
-    if (currentView !== "runs" || selectedRun?.id !== runId) return;
+    if (!loopBuilderSurfaceActive || currentView !== "runs" || selectedRun?.id !== runId) return;
+    selectedRunRefreshInFlight = true;
     try {
       const monitored = await refreshSelectedRunFromMonitor(runId);
       if (!monitored) await fallbackSelectedRunAfterMonitorFailure(runId);
     } finally {
-      if (currentView === "runs" && selectedRun?.id === runId && isNonterminalRun(selectedRun)) scheduleSelectedRunRefresh();
+      selectedRunRefreshInFlight = false;
+      scheduleSelectedRunRefresh();
     }
   }, 1000);
 }
@@ -2460,6 +2489,14 @@ function showBanner(message, style) {
   elements.validationBanner.className = `validation-banner visible${style ? ` ${style}` : ""}`;
 }
 
+function appendActivationRetry() {
+  const retry = actionButton("Retry", async () => {
+    retry.disabled = true;
+    await activate();
+  }, false, "secondary-button validation-retry");
+  elements.validationBanner.append(retry);
+}
+
 function showToast(message) {
   elements.toast.textContent = message;
   elements.toast.hidden = false;
@@ -2686,5 +2723,5 @@ class JsonSignalRConnection {
   }
 }
 
-window.embodySenseLoopBuilder = Object.freeze({ activate, refreshWorkspace });
+window.embodySenseLoopBuilder = Object.freeze({ activate, deactivate, refreshWorkspace });
 if (!elements.loopsView.hidden) void activate();
