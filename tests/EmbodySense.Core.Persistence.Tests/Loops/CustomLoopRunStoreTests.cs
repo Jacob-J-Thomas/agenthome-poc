@@ -751,6 +751,27 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Pending_discovery_index_refuses_an_unsupported_schema_without_rewriting_it()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteDirectAsync(paths, At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1));
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["schemaVersion"] = 2;
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending"), "pending\n");
+
+        await Assert.ThrowsAnyAsync<FormatException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(50)));
+        await Assert.ThrowsAnyAsync<FormatException>(() => store.CreateAsync(At(CreateRun("loop-beta", "run-beta", "invoke-beta"), 2)));
+
+        Assert.Equal(2, JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!["schemaVersion"]!.GetValue<int>());
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, "loop-beta", "run-beta.json")));
+    }
+
+    [Fact]
     public async Task Run_page_index_rebuilds_after_a_pending_mutation_marker()
     {
         using var workspace = new TestWorkspace();

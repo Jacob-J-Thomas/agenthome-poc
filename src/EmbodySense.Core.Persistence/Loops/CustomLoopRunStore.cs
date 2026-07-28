@@ -919,20 +919,23 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private async Task<CustomLoopRunDiscoveryIndex> LoadDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
         DeleteOrphanedDiscoveryIndexTemporaryArtifacts();
-        if (!File.Exists(_discoveryIndexPendingPath))
+        var hasPendingMutation = File.Exists(_discoveryIndexPendingPath);
+        if (hasPendingMutation)
         {
-            try
+            EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
+        }
+
+        try
+        {
+            var index = await ReadDiscoveryIndexAsync(cancellationToken);
+            if (!hasPendingMutation && index is not null && DiscoveryIndexMatchesArtifacts(index))
             {
-                var index = await ReadDiscoveryIndexAsync(cancellationToken);
-                if (index is not null && DiscoveryIndexMatchesArtifacts(index))
-                {
-                    return index;
-                }
+                return index;
             }
-            catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
-            {
-                // The index is derived evidence. Rebuild it from canonical run artifacts below.
-            }
+        }
+        catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            // The index is derived evidence. Rebuild it from canonical run artifacts below.
         }
 
         return await RebuildDiscoveryIndexAsync(previousRevision: 0, cancellationToken);
@@ -941,16 +944,16 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private async Task<CustomLoopRunDiscoveryIndex?> ReadCleanDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
         DeleteOrphanedDiscoveryIndexTemporaryArtifacts();
-        if (File.Exists(_discoveryIndexPendingPath))
+        var hasPendingMutation = File.Exists(_discoveryIndexPendingPath);
+        if (hasPendingMutation)
         {
             EnsureSafeArtifactPath(_discoveryIndexPendingPath, mustExist: true);
-            return null;
         }
 
         try
         {
             var index = await ReadDiscoveryIndexAsync(cancellationToken);
-            return index is not null && DiscoveryIndexMatchesArtifacts(index) ? index : null;
+            return !hasPendingMutation && index is not null && DiscoveryIndexMatchesArtifacts(index) ? index : null;
         }
         catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
         {
