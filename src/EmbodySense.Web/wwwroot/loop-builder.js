@@ -44,10 +44,16 @@ let pendingCreateOperationId = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
-// TODO(#77): Persist unresolved lifecycle-control identities per workspace and run across reloads and browser tabs.
-let pendingResumeRequest = null;
 let invocationInFlight = false;
 let activeInvocationAttempt = null;
+const pendingLifecycleStorageKeyPrefix =
+  "embodysense.pending-loop-lifecycle.v1";
+const pendingLifecycleRegistryLockNamePrefix =
+  "embodysense.pending-loop-lifecycle";
+let pendingLifecycleStorageKey = null;
+let pendingLifecycleRegistryLockName = null;
+const maximumPendingLifecycleRequests = 100;
+const pendingLifecycleRequests = new Map();
 const pendingInvocationStorageKeyPrefix =
   "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix =
@@ -202,10 +208,14 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
     const status = await requestJson("/api/status");
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
+      await configurePendingLifecycleRegistry(status.workspaceRoot);
     } catch {
       pendingInvocationStorageKey = null;
       pendingInvocationRegistryLockName = null;
       pendingInvocationRequests.clear();
+      pendingLifecycleStorageKey = null;
+      pendingLifecycleRegistryLockName = null;
+      pendingLifecycleRequests.clear();
     }
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
@@ -307,6 +317,16 @@ function bindStaticEvents() {
         synchronizePendingInvocationRequestsFromStorage();
       } catch {
         // Retain the last verified in-memory view and fail closed on the next reservation attempt.
+      }
+    }
+    if (
+      pendingLifecycleStorageKey &&
+      event.key === pendingLifecycleStorageKey
+    ) {
+      try {
+        synchronizePendingLifecycleRequestsFromStorage();
+      } catch {
+        // Retain the last verified in-memory view and fail closed on the next lifecycle request.
       }
     }
   });
@@ -3227,6 +3247,161 @@ async function withPendingInvocationRegistryLock(callback) {
   );
 }
 
+function lifecycleRequestKey(kind, runId, expectedLifecycleVersion) {
+  return JSON.stringify([kind, runId, expectedLifecycleVersion]);
+}
+
+function isDefinitiveLifecycleResponse(response) {
+  return !["OperationInProgress", "WorkspaceHostUnavailable"].includes(
+    response?.status,
+  );
+}
+
+async function getOrCreatePendingLifecycleRequest(
+  kind,
+  runId,
+  expectedLifecycleVersion,
+) {
+  return withPendingLifecycleRegistryLock(async () => {
+    synchronizePendingLifecycleRequestsFromStorage();
+    const requestKey = lifecycleRequestKey(
+      kind,
+      runId,
+      expectedLifecycleVersion,
+    );
+    const existing = pendingLifecycleRequests.get(requestKey);
+    if (existing) return existing;
+    if (pendingLifecycleRequests.size >= maximumPendingLifecycleRequests)
+      throw new Error(
+        `The workspace already has ${maximumPendingLifecycleRequests} unresolved lifecycle requests.`,
+      );
+    const pending = {
+      kind,
+      runId,
+      expectedLifecycleVersion,
+      operationId: newOperationId(),
+    };
+    const next = new Map(pendingLifecycleRequests);
+    next.set(requestKey, pending);
+    commitPendingLifecycleRequests(next);
+    return pending;
+  });
+}
+
+async function forgetPendingLifecycleRequest(request) {
+  return withPendingLifecycleRegistryLock(async () => {
+    synchronizePendingLifecycleRequestsFromStorage();
+    const requestKey = lifecycleRequestKey(
+      request.kind,
+      request.runId,
+      request.expectedLifecycleVersion,
+    );
+    const stored = pendingLifecycleRequests.get(requestKey);
+    if (!stored || stored.operationId !== request.operationId) return;
+    const next = new Map(pendingLifecycleRequests);
+    next.delete(requestKey);
+    commitPendingLifecycleRequests(next);
+  });
+}
+
+async function withPendingLifecycleRegistryLock(callback) {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request)
+    throw new Error(
+      "This browser does not provide the required cross-tab lock service.",
+    );
+  if (!pendingLifecycleRegistryLockName)
+    throw new Error("The workspace-scoped lifecycle registry is unavailable.");
+  return locks.request(
+    pendingLifecycleRegistryLockName,
+    { mode: "exclusive" },
+    callback,
+  );
+}
+
+async function configurePendingLifecycleRegistry(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  pendingLifecycleStorageKey = `${pendingLifecycleStorageKeyPrefix}.${scope}`;
+  pendingLifecycleRegistryLockName = `${pendingLifecycleRegistryLockNamePrefix}.${scope}`;
+  synchronizePendingLifecycleRequestsFromStorage();
+}
+
+function synchronizePendingLifecycleRequestsFromStorage() {
+  const stored = restorePendingLifecycleRequests();
+  pendingLifecycleRequests.clear();
+  for (const [requestKey, request] of stored)
+    pendingLifecycleRequests.set(requestKey, request);
+}
+
+function restorePendingLifecycleRequests() {
+  if (!pendingLifecycleStorageKey || !window.localStorage)
+    throw new Error("Shared lifecycle storage is unavailable.");
+  const stored = window.localStorage.getItem(pendingLifecycleStorageKey);
+  if (!stored) return new Map();
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    throw new Error("The shared lifecycle registry is corrupt.");
+  }
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.requests))
+    throw new Error("The shared lifecycle registry schema is unsupported.");
+  const requests = new Map();
+  for (const request of payload.requests) {
+    if (!isStoredPendingLifecycleRequest(request))
+      throw new Error(
+        "The shared lifecycle registry contains invalid entries.",
+      );
+    const requestKey = lifecycleRequestKey(
+      request.kind,
+      request.runId,
+      request.expectedLifecycleVersion,
+    );
+    if (requests.has(requestKey))
+      throw new Error(
+        "The shared lifecycle registry contains duplicate entries.",
+      );
+    requests.set(requestKey, request);
+  }
+  return requests;
+}
+
+function isStoredPendingLifecycleRequest(request) {
+  return (
+    request &&
+    ["pause", "cancel", "resume"].includes(request.kind) &&
+    typeof request.runId === "string" &&
+    request.runId.length > 0 &&
+    request.runId.length <= 200 &&
+    Number.isInteger(request.expectedLifecycleVersion) &&
+    request.expectedLifecycleVersion > 0 &&
+    typeof request.operationId === "string" &&
+    /^[a-z0-9-]{8,128}$/.test(request.operationId)
+  );
+}
+
+function persistPendingLifecycleRequests(requests) {
+  if (!pendingLifecycleStorageKey || !window.localStorage)
+    throw new Error("Shared lifecycle storage is unavailable.");
+  if (!requests.size) {
+    window.localStorage.removeItem(pendingLifecycleStorageKey);
+    return;
+  }
+  window.localStorage.setItem(
+    pendingLifecycleStorageKey,
+    JSON.stringify({ schemaVersion: 1, requests: [...requests.values()] }),
+  );
+}
+
+function commitPendingLifecycleRequests(next) {
+  persistPendingLifecycleRequests(next);
+  pendingLifecycleRequests.clear();
+  for (const [requestKey, request] of next)
+    pendingLifecycleRequests.set(requestKey, request);
+}
+
 async function configurePendingInvocationRegistry(workspaceRoot) {
   if (typeof workspaceRoot !== "string" || !workspaceRoot)
     throw new Error("The workspace identity is unavailable.");
@@ -3742,17 +3917,26 @@ function invocationReconciliationDeadlineError() {
 
 async function controlRun(action) {
   if (!selectedRun) return;
+  const runId = selectedRun.id;
+  const expectedLifecycleVersion = selectedRun.lifecycleVersion;
   try {
+    const pending = await getOrCreatePendingLifecycleRequest(
+      action,
+      runId,
+      expectedLifecycleVersion,
+    );
     const response = await requestJson(
-      `/api/loop-runs/${encodeURIComponent(selectedRun.id)}/${action}`,
+      `/api/loop-runs/${encodeURIComponent(runId)}/${action}`,
       {
         method: "POST",
         body: JSON.stringify({
-          expectedLifecycleVersion: selectedRun.lifecycleVersion,
-          operationId: newOperationId(),
+          expectedLifecycleVersion,
+          operationId: pending.operationId,
         }),
       },
     );
+    if (isDefinitiveLifecycleResponse(response))
+      await forgetPendingLifecycleRequest(pending);
     selectedRun = response.run ?? response;
     await loadRuns({ silent: true });
     showToast(response.detail ?? `${capitalize(action)} request recorded.`);
@@ -3765,22 +3949,17 @@ async function resumeRun() {
   if (!selectedRun || selectedRun.status !== "Paused") return;
   const runId = selectedRun.id;
   const expectedLifecycleVersion = selectedRun.lifecycleVersion;
-  if (
-    pendingResumeRequest?.runId !== runId ||
-    pendingResumeRequest.expectedLifecycleVersion !== expectedLifecycleVersion
-  ) {
-    pendingResumeRequest = {
+  try {
+    const pending = await getOrCreatePendingLifecycleRequest(
+      "resume",
       runId,
       expectedLifecycleVersion,
-      operationId: newOperationId(),
-    };
-  }
-  try {
+    );
     const connection = await getHub();
     const invocation = connection.invoke("ResumeLoop", {
       runId,
       expectedLifecycleVersion,
-      operationId: pendingResumeRequest.operationId,
+      operationId: pending.operationId,
     });
     const response = await waitForRunOperation(invocation, {
       preferredRunId: runId,
@@ -3790,7 +3969,7 @@ async function resumeRun() {
         response?.status,
       )
     )
-      pendingResumeRequest = null;
+      await forgetPendingLifecycleRequest(pending);
     if (
       ![
         "Resumed",
