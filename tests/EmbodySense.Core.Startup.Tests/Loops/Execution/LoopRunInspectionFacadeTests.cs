@@ -56,6 +56,24 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Contains("Restart recovery parked the admitted run", await File.ReadAllTextAsync(paths.EventsLogPath), StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Recovery_preserves_unsupported_discovery_index_cleanup_guidance()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        _ = await CreateInterruptedRunAsync(store);
+        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+
+        var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => facade.RecoverInterruptedRunsAsync());
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, true)]
@@ -152,6 +170,25 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Equal("HashMismatch", result.Status);
         Assert.False(result.IsCommitted);
         Assert.False((await facade.GetTraceAsync(terminal.Id))!.IsDeleted);
+    }
+
+    [Fact]
+    public async Task Trace_deletion_preserves_unsupported_discovery_index_cleanup_guidance()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
+        var trace = (await facade.GetTraceAsync(terminal.Id))!;
+        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+
+        var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => facade.DeleteTraceAsync(terminal.Id, trace.PersistedArtifactHash, "delete-trace"));
+
+        Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
     }
 
     private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store)

@@ -188,8 +188,15 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
             throw new InvalidOperationException("This read-only facade was not constructed with an authenticated trace-management identity.");
         }
 
-        var result = await _retention.DeleteAsync(new CustomLoopTraceDeletionRequest(runId, expectedTraceHash, operationId, _actor, _surface), cancellationToken);
-        return new LoopTraceDeletionResponse(result.Status.ToString(), result.IsCommitted, result.IsOutcomeCommitted, result.Detail, result.Tombstone is null ? null : Map(result.Tombstone));
+        try
+        {
+            var result = await _retention.DeleteAsync(new CustomLoopTraceDeletionRequest(runId, expectedTraceHash, operationId, _actor, _surface), cancellationToken);
+            return new LoopTraceDeletionResponse(result.Status.ToString(), result.IsCommitted, result.IsOutcomeCommitted, result.Detail, result.Tombstone is null ? null : Map(result.Tombstone));
+        }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
+        {
+            throw new LoopRunEvidenceUnsupportedSchemaException(exception);
+        }
     }
 
     private static LoopTraceInspectionSnapshot Map(CustomLoopTraceInspection trace)

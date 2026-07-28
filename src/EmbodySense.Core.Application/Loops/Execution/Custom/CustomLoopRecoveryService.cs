@@ -108,6 +108,10 @@ public sealed class CustomLoopRecoveryService
         {
             throw;
         }
+        catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             return Result(CustomLoopRecoveryStatus.Failed, run, $"The recovery transition failed: {SafeExceptionClass(exception)}.");
