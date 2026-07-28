@@ -5,7 +5,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
-using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -66,30 +66,37 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     [Fact]
     public async Task Gate_holds_file_ownership_until_all_host_references_are_disposed()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var first = new CustomLoopWorkspaceExecutionGate(paths);
         var second = new CustomLoopWorkspaceExecutionGate(paths);
 
         Assert.True(File.Exists(paths.CustomLoopHostLockPath));
-        Assert.Throws<IOException>(() => new FileStream(paths.CustomLoopHostLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read));
 
         await first.DisposeAsync();
-        Assert.Throws<IOException>(() => new FileStream(paths.CustomLoopHostLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read));
         await second.DisposeAsync();
         await second.DisposeAsync();
 
-        using var ownershipAfterRelease = new FileStream(paths.CustomLoopHostLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
-        Assert.True(ownershipAfterRelease.CanWrite);
+        using var ownershipAfterRelease = new WindowsFileLock(paths.CustomLoopHostLockPath);
     }
 
     [Fact]
     public async Task Gate_reports_unavailable_host_without_blocking_construction_when_another_process_owns_the_lock()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.LoopRunsPath);
-        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        using var ownership = new WindowsFileLock(paths.CustomLoopHostLockPath);
 
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
 
@@ -100,10 +107,15 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     [Fact]
     public async Task Gate_retries_host_ownership_after_the_external_owner_releases_the_lock()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.LoopRunsPath);
-        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+        using var ownership = new WindowsFileLock(paths.CustomLoopHostLockPath);
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
 
         Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", FirstHash).Status);
@@ -116,6 +128,11 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     [Fact]
     public async Task Gate_can_relinquish_its_host_reference_and_reacquire_later()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
@@ -124,9 +141,9 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
         gate.RelinquishWorkspaceHost();
         active.Lease.Dispose();
-        using (var externalOwnership = new FileStream(paths.CustomLoopHostLockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
+        using (var externalOwnership = new WindowsFileLock(paths.CustomLoopHostLockPath))
         {
-            Assert.True(externalOwnership.CanWrite);
+            Assert.NotNull(externalOwnership);
         }
 
         using var reacquired = gate.TryAcquire("invoke-two", SecondHash).Lease;

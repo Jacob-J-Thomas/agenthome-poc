@@ -3,8 +3,8 @@ using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using EmbodySense.Core.Application.Loops.Execution.Custom;
-using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 

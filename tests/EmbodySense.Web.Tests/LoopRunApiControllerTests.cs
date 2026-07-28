@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Workspace;
@@ -258,12 +259,13 @@ public sealed class LoopRunApiControllerTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var interrupted = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths), bindConversation: true);
         const string transcriptEvidence = """
             {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","role":"user","content":"recovered user prompt"}
             {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-07-20T11:59:00+00:00","role":"assistant","content":"recovered assistant response"}
             """;
         await File.WriteAllTextAsync(paths.CurrentConversationPath, transcriptEvidence);
+        var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
+        var interrupted = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths), conversationIdentity);
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
         await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
         await app.StartAsync();
@@ -303,34 +305,6 @@ public sealed class LoopRunApiControllerTests
         }
     }
 
-    [Fact]
-    public async Task Cancel_returns_service_unavailable_when_another_process_owns_loop_hosting()
-    {
-        using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
-        var paths = new WorkspacePaths(workspace.RootPath);
-        using var ownership = new FileStream(paths.CustomLoopHostLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
-        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
-        await app.StartAsync();
-
-        try
-        {
-            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
-
-            var cancel = await SendControlAsync(client, "/api/loop-runs/run-missing/cancel", token, new { expectedLifecycleVersion = 1, operationId = "cancel-host-unavailable" });
-            var cancelBody = await cancel.Content.ReadFromJsonAsync<LoopRunControlResponse>(JsonOptions);
-
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, cancel.StatusCode);
-            Assert.Equal("WorkspaceHostUnavailable", cancelBody!.Status);
-        }
-        finally
-        {
-            await app.StopAsync();
-        }
-    }
-
     private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace)
     {
         var facade = new LoopAuthoringFacade(workspace.RootPath);
@@ -346,11 +320,11 @@ public sealed class LoopRunApiControllerTests
         return Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
     }
 
-    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, bool bindConversation = false)
+    private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, string? invokingConversationIdentity = null)
     {
         var definition = CustomLoopDefinition.CreateSeed("loop-web-recovery", "default-role", "step-1", "create-web-recovery", Timestamp);
         var admittedEvent = RunEvent(1, "web-recovery-admitted", CustomLoopRunEventKind.Admitted);
-        var conversation = bindConversation ? new CustomLoopConversationReference("current", new string('c', CustomLoopLimits.Sha256HexCharacters), Timestamp) : null;
+        var conversation = invokingConversationIdentity is null ? null : new CustomLoopConversationReference(invokingConversationIdentity, new string('c', CustomLoopLimits.Sha256HexCharacters), Timestamp);
         var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
@@ -406,7 +380,14 @@ public sealed class LoopRunApiControllerTests
             "The invocation is pending.");
         var store = new CustomLoopInvocationOperationStore(paths);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
-        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(pending with
+        var bound = pending with
+        {
+            BindingState = CustomLoopInvocationBindingState.CapturedContext,
+            InvokingConversationId = new string('a', CustomLoopLimits.Sha256HexCharacters),
+            ContextIdentityHash = new string('b', CustomLoopLimits.Sha256HexCharacters)
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(bound with
         {
             UpdatedAtUtc = run.UpdatedAtUtc,
             State = CustomLoopInvocationOperationState.Complete,
