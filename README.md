@@ -117,7 +117,7 @@ Newly initialized workspaces seed a fuller `.agent/` home: contextual `ROLE.md` 
 
 - .NET 10 SDK 10.0.302 or a newer 10.0.3xx patch. The root `global.json` selects this feature band with `latestPatch` roll-forward and disallows prerelease SDKs.
 - C# 14 is pinned in `Directory.Build.props`.
-- Node.js 24 for the dependency-free frontend test runner.
+- Node.js 24 for the frontend lint, format, and test toolchain.
 - PowerShell 7 or Windows PowerShell 5.1 for `scripts/verify.ps1`.
 
 Run `dotnet --version` from the repository root to confirm SDK selection. GitHub Actions reads the same `global.json` and runs the normal Release verification workflow on Windows.
@@ -148,7 +148,7 @@ From the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, runs the frontend Node tests, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. The installed-browser smoke is opt-in because local Edge/Chrome GPU startup is host-specific:
+The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. The installed-browser smoke is opt-in because local Edge/Chrome GPU startup is host-specific:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -RunBrowserE2E

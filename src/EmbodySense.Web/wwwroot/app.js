@@ -41,22 +41,33 @@ const elements = {
   transcript: document.getElementById("transcript"),
   verboseToggle: document.getElementById("verboseToggle"),
   workspaceRoot: document.getElementById("workspaceRoot"),
-  workspaceStatus: document.getElementById("workspaceStatus")
+  workspaceStatus: document.getElementById("workspaceStatus"),
 };
 
 const recordSeparator = "\u001e";
 
 const configurationViewCopy = {
   overview: ["Overview", "Runtime posture, paths, and implemented concepts."],
-  permissions: ["Permissions", "The current workspace permission policy and governed reach."],
-  agent: ["Agent", "Role, identity, personality, context, memory, and model documents."],
+  permissions: [
+    "Permissions",
+    "The current workspace permission policy and governed reach.",
+  ],
+  agent: [
+    "Agent",
+    "Role, identity, personality, context, memory, and model documents.",
+  ],
   audit: ["Audit", "Recent attributable actions and governance outcomes."],
-  history: ["History", "Current and archived logical conversation transcripts."]
+  history: [
+    "History",
+    "Current and archived logical conversation transcripts.",
+  ],
 };
 
 function selectAppView(view, sourceTab = null) {
   const previousAppView = activeAppView;
-  activeAppView = ["chat", "loops", "configuration"].includes(view) ? view : "chat";
+  activeAppView = ["chat", "loops", "configuration"].includes(view)
+    ? view
+    : "chat";
   if (previousAppView === "loops" && activeAppView !== "loops") {
     window.embodySenseLoopBuilder?.deactivate();
   }
@@ -81,18 +92,25 @@ function selectAppView(view, sourceTab = null) {
   }
 
   if (activeAppView === "configuration") {
-    const [title, subtitle] = configurationViewCopy[activeConfigTab] ?? configurationViewCopy.overview;
+    const [title, subtitle] =
+      configurationViewCopy[activeConfigTab] ?? configurationViewCopy.overview;
     elements.configurationTitle.textContent = title;
     elements.configurationSubtitle.textContent = subtitle;
     elements.surfaceTitle.textContent = title;
-    if (selectedTab?.id) elements.configurationView.setAttribute("aria-labelledby", selectedTab.id);
+    if (selectedTab?.id)
+      elements.configurationView.setAttribute(
+        "aria-labelledby",
+        selectedTab.id,
+      );
     renderConfiguration();
   } else {
-    elements.surfaceTitle.textContent = activeAppView === "loops" ? "Loops" : "Chat";
+    elements.surfaceTitle.textContent =
+      activeAppView === "loops" ? "Loops" : "Chat";
   }
 
   if (sourceTab && window.history?.replaceState) {
-    const route = activeAppView === "configuration" ? activeConfigTab : activeAppView;
+    const route =
+      activeAppView === "configuration" ? activeConfigTab : activeAppView;
     window.history.replaceState(null, "", `/?view=${route}`);
   }
 }
@@ -132,7 +150,9 @@ async function refreshConfiguration() {
   elements.refreshConfigButton.disabled = true;
   renderConfigLoading();
   try {
-    configuration = await fetchJson("/api/configuration", { headers: createSessionHeaders() });
+    configuration = await fetchJson("/api/configuration", {
+      headers: createSessionHeaders(),
+    });
     renderConfiguration();
   } catch (error) {
     renderConfigError(error.message);
@@ -145,9 +165,13 @@ function applyStatus(nextStatus) {
   const wasInitialized = Boolean(status?.initialized);
   status = nextStatus;
   elements.workspaceRoot.textContent = status.workspaceRoot;
-  elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
+  elements.workspaceStatus.textContent = status.initialized
+    ? "Initialized"
+    : "Needs initialization";
   elements.connectionDot.classList.toggle("ready", status.initialized);
-  elements.clientStatus.textContent = hub?.connected ? "Web primary" : "Web reconnecting";
+  elements.clientStatus.textContent = hub?.connected
+    ? "Web primary"
+    : "Web reconnecting";
   elements.clientRole.textContent = status.client;
   elements.cliRole.textContent = status.cliRole;
   elements.initButton.disabled = status.initialized || !hub?.connected;
@@ -176,12 +200,16 @@ async function connectHub() {
 }
 
 function queueConversationPublicationSynchronization(notification) {
-  const retry = conversationSynchronizationRetries.get(notification?.operationId);
+  const retry = conversationSynchronizationRetries.get(
+    notification?.operationId,
+  );
   if (retry?.timeoutId != null) {
     return conversationSynchronization;
   }
 
-  conversationSynchronization = conversationSynchronization.then(() => synchronizeConversationPublication(notification));
+  conversationSynchronization = conversationSynchronization.then(() =>
+    synchronizeConversationPublication(notification),
+  );
   return conversationSynchronization;
 }
 
@@ -200,7 +228,10 @@ async function synchronizeConversationPublication(notification) {
       replaceTranscript(currentTranscript);
     } else {
       forgetSynchronizedConversationOperation(operationId);
-      scheduleConversationSynchronizationRetry(notification, "the retained runtime is temporarily unavailable");
+      scheduleConversationSynchronizationRetry(
+        notification,
+        "the retained runtime is temporarily unavailable",
+      );
     }
   } catch (error) {
     forgetSynchronizedConversationOperation(operationId);
@@ -211,14 +242,23 @@ async function synchronizeConversationPublication(notification) {
 function rememberSynchronizedConversationOperation(operationId) {
   synchronizedConversationOperations.add(operationId);
   synchronizedConversationOperationOrder.push(operationId);
-  if (synchronizedConversationOperationOrder.length > maxSynchronizedConversationOperations) {
-    synchronizedConversationOperations.delete(synchronizedConversationOperationOrder.shift());
+  if (
+    synchronizedConversationOperationOrder.length >
+    maxSynchronizedConversationOperations
+  ) {
+    synchronizedConversationOperations.delete(
+      synchronizedConversationOperationOrder.shift(),
+    );
   }
 }
 
 function forgetSynchronizedConversationOperation(operationId) {
   synchronizedConversationOperations.delete(operationId);
-  for (let index = synchronizedConversationOperationOrder.length - 1; index >= 0; index -= 1) {
+  for (
+    let index = synchronizedConversationOperationOrder.length - 1;
+    index >= 0;
+    index -= 1
+  ) {
     if (synchronizedConversationOperationOrder[index] === operationId) {
       synchronizedConversationOperationOrder.splice(index, 1);
     }
@@ -227,17 +267,25 @@ function forgetSynchronizedConversationOperation(operationId) {
 
 function scheduleConversationSynchronizationRetry(notification, detail) {
   const operationId = notification.operationId;
-  const retry = conversationSynchronizationRetries.get(operationId) ?? { attempts: 0, timeoutId: null };
+  const retry = conversationSynchronizationRetries.get(operationId) ?? {
+    attempts: 0,
+    timeoutId: null,
+  };
   retry.attempts += 1;
   if (retry.attempts > maxConversationSynchronizationRetries) {
     conversationSynchronizationRetries.delete(operationId);
-    appendMessage("error", `Conversation synchronization unavailable: ${detail}`);
+    appendMessage(
+      "error",
+      `Conversation synchronization unavailable: ${detail}`,
+    );
     return;
   }
 
   const delay = Math.min(
-    initialConversationSynchronizationRetryMilliseconds * (2 ** (retry.attempts - 1)),
-    maxConversationSynchronizationRetryMilliseconds);
+    initialConversationSynchronizationRetryMilliseconds *
+      2 ** (retry.attempts - 1),
+    maxConversationSynchronizationRetryMilliseconds,
+  );
   retry.timeoutId = window.setTimeout(() => {
     retry.timeoutId = null;
     queueConversationPublicationSynchronization(notification);
@@ -286,7 +334,9 @@ function renderConfigLoading() {
 }
 
 function renderConfigError(message) {
-  elements.configContent.replaceChildren(createState(`Configuration unavailable: ${message}`, "error"));
+  elements.configContent.replaceChildren(
+    createState(`Configuration unavailable: ${message}`, "error"),
+  );
 }
 
 function renderConfiguration() {
@@ -296,7 +346,9 @@ function renderConfiguration() {
   }
 
   for (const tab of elements.configTabs) {
-    const selected = activeAppView === "configuration" && tab.dataset.configTab === activeConfigTab;
+    const selected =
+      activeAppView === "configuration" &&
+      tab.dataset.configTab === activeConfigTab;
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", selected ? "true" : "false");
   }
@@ -306,21 +358,33 @@ function renderConfiguration() {
     permissions: renderPermissionsTab,
     agent: renderAgentTab,
     audit: renderAuditTab,
-    history: renderHistoryTab
+    history: renderHistoryTab,
   };
-  elements.configContent.replaceChildren(renderers[activeConfigTab]?.() ?? renderOverviewTab());
+  elements.configContent.replaceChildren(
+    renderers[activeConfigTab]?.() ?? renderOverviewTab(),
+  );
 }
 
 function renderOverviewTab() {
   const fragment = document.createDocumentFragment();
-  fragment.append(renderMetricGrid([
-    ["Workspace", configuration.status.initialized ? "Initialized" : "Needs initialization"],
-    ["Surface", configuration.runtime.surface],
-    ["Model", configuration.runtime.model],
-    ["Sandbox", configuration.runtime.codexSandbox],
-    ["Audit events", String(configuration.audit.events.length)],
-    ["Transcripts", String(configuration.conversationHistory.transcripts.length)]
-  ]));
+  fragment.append(
+    renderMetricGrid([
+      [
+        "Workspace",
+        configuration.status.initialized
+          ? "Initialized"
+          : "Needs initialization",
+      ],
+      ["Surface", configuration.runtime.surface],
+      ["Model", configuration.runtime.model],
+      ["Sandbox", configuration.runtime.codexSandbox],
+      ["Audit events", String(configuration.audit.events.length)],
+      [
+        "Transcripts",
+        String(configuration.conversationHistory.transcripts.length),
+      ],
+    ]),
+  );
   fragment.append(renderPathGroup(configuration.paths));
   fragment.append(renderConcepts(configuration.concepts));
   return fragment;
@@ -328,23 +392,37 @@ function renderOverviewTab() {
 
 function renderPermissionsTab() {
   const fragment = document.createDocumentFragment();
-  fragment.append(renderMetricGrid([
-    ["File", configuration.permissions.exists ? "Present" : "Missing"],
-    ["Parsed", configuration.permissions.parsed ? "Yes" : "No"],
-    ["Version", configuration.permissions.version ?? "Missing"],
-    ["Scope", configuration.permissions.scope || "Missing"],
-    ["Default", configuration.permissions.defaultAccess]
-  ]));
+  fragment.append(
+    renderMetricGrid([
+      ["File", configuration.permissions.exists ? "Present" : "Missing"],
+      ["Parsed", configuration.permissions.parsed ? "Yes" : "No"],
+      ["Version", configuration.permissions.version ?? "Missing"],
+      ["Scope", configuration.permissions.scope || "Missing"],
+      ["Default", configuration.permissions.defaultAccess],
+    ]),
+  );
   fragment.append(renderProblems(configuration.permissions.readProblems));
-  fragment.append(renderRuleSection("Approved", configuration.permissions.approved));
-  fragment.append(renderRuleSection("Denied", configuration.permissions.denied));
-  fragment.append(renderDetails("permissions.json", configuration.permissions.rawJson || "Missing"));
+  fragment.append(
+    renderRuleSection("Approved", configuration.permissions.approved),
+  );
+  fragment.append(
+    renderRuleSection("Denied", configuration.permissions.denied),
+  );
+  fragment.append(
+    renderDetails(
+      "permissions.json",
+      configuration.permissions.rawJson || "Missing",
+    ),
+  );
   return fragment;
 }
 
 function renderAgentTab() {
   const fragment = document.createDocumentFragment();
-  const documents = groupBy(configuration.documents, document => document.category);
+  const documents = groupBy(
+    configuration.documents,
+    (document) => document.category,
+  );
   for (const [category, items] of documents) {
     fragment.append(renderSectionHeading(category));
     for (const documentItem of items) {
@@ -357,11 +435,13 @@ function renderAgentTab() {
 
 function renderAuditTab() {
   const fragment = document.createDocumentFragment();
-  fragment.append(renderMetricGrid([
-    ["Path", configuration.audit.path],
-    ["File", configuration.audit.exists ? "Present" : "Missing"],
-    ["Events", String(configuration.audit.events.length)]
-  ]));
+  fragment.append(
+    renderMetricGrid([
+      ["Path", configuration.audit.path],
+      ["File", configuration.audit.exists ? "Present" : "Missing"],
+      ["Events", String(configuration.audit.events.length)],
+    ]),
+  );
   fragment.append(renderProblems(configuration.audit.readProblems));
   if (configuration.audit.events.length === 0) {
     fragment.append(createState("No audit events"));
@@ -377,13 +457,20 @@ function renderAuditTab() {
 
 function renderHistoryTab() {
   const fragment = document.createDocumentFragment();
-  fragment.append(renderMetricGrid([
-    ["Directory", configuration.conversationHistory.directoryPath],
-    ["Current", configuration.conversationHistory.currentPath],
-    ["Archive", configuration.conversationHistory.archivePath],
-    ["Transcripts", String(configuration.conversationHistory.transcripts.length)]
-  ]));
-  fragment.append(renderProblems(configuration.conversationHistory.readProblems));
+  fragment.append(
+    renderMetricGrid([
+      ["Directory", configuration.conversationHistory.directoryPath],
+      ["Current", configuration.conversationHistory.currentPath],
+      ["Archive", configuration.conversationHistory.archivePath],
+      [
+        "Transcripts",
+        String(configuration.conversationHistory.transcripts.length),
+      ],
+    ]),
+  );
+  fragment.append(
+    renderProblems(configuration.conversationHistory.readProblems),
+  );
   for (const transcript of configuration.conversationHistory.transcripts) {
     fragment.append(renderTranscript(transcript));
   }
@@ -414,7 +501,9 @@ function renderPathGroup(paths) {
   for (const path of paths) {
     const item = document.createElement("article");
     item.className = "config-row";
-    item.append(renderRowHeader(path.name, path.exists ? "Present" : "Missing"));
+    item.append(
+      renderRowHeader(path.name, path.exists ? "Present" : "Missing"),
+    );
     item.append(textLine(path.category, "muted"));
     item.append(textLine(path.path, "path"));
     item.append(textLine(path.description, "muted"));
@@ -452,7 +541,12 @@ function renderRuleSection(title, rules) {
   for (const rule of rules) {
     const item = document.createElement("article");
     item.className = "config-row permission-rule";
-    item.append(renderRowHeader(rule.path, rule.requiresApproval ? "Approval" : rule.effect));
+    item.append(
+      renderRowHeader(
+        rule.path,
+        rule.requiresApproval ? "Approval" : rule.effect,
+      ),
+    );
     item.append(renderChipList(rule.operations));
     item.append(textLine(rule.detail, "muted"));
     section.append(item);
@@ -464,18 +558,28 @@ function renderRuleSection(title, rules) {
 function renderDocument(documentItem) {
   const details = document.createElement("details");
   details.className = "config-document";
-  if (documentItem.exists && ["Role guide", "Context", "Memory", "Models"].includes(documentItem.name)) {
+  if (
+    documentItem.exists &&
+    ["Role guide", "Context", "Memory", "Models"].includes(documentItem.name)
+  ) {
     details.open = true;
   }
 
   const summary = document.createElement("summary");
-  summary.append(renderRowHeader(documentItem.name, documentItem.exists ? "Present" : "Missing"));
+  summary.append(
+    renderRowHeader(
+      documentItem.name,
+      documentItem.exists ? "Present" : "Missing",
+    ),
+  );
   details.append(summary);
-  details.append(renderMetricGrid([
-    ["Path", documentItem.path],
-    ["Size", `${documentItem.sizeBytes} bytes`],
-    ["Modified", formatDate(documentItem.lastModifiedUtc)]
-  ]));
+  details.append(
+    renderMetricGrid([
+      ["Path", documentItem.path],
+      ["Size", `${documentItem.sizeBytes} bytes`],
+      ["Modified", formatDate(documentItem.lastModifiedUtc)],
+    ]),
+  );
   details.append(renderCodeBlock(documentItem.content || "Missing"));
   return details;
 }
@@ -483,13 +587,17 @@ function renderDocument(documentItem) {
 function renderAuditEvent(event) {
   const item = document.createElement("article");
   item.className = "config-row audit-event";
-  item.append(renderRowHeader(`${event.sequence}. ${event.action}`, event.outcome));
-  item.append(renderMetricGrid([
-    ["Time", formatDate(event.timestampUtc)],
-    ["Actor", event.actor],
-    ["Target", event.target],
-    ["Detail", event.detail]
-  ]));
+  item.append(
+    renderRowHeader(`${event.sequence}. ${event.action}`, event.outcome),
+  );
+  item.append(
+    renderMetricGrid([
+      ["Time", formatDate(event.timestampUtc)],
+      ["Actor", event.actor],
+      ["Target", event.target],
+      ["Detail", event.detail],
+    ]),
+  );
   const metadata = Object.entries(event.metadata ?? {});
   if (metadata.length > 0) {
     item.append(renderKeyValueList("Metadata", metadata));
@@ -504,14 +612,21 @@ function renderTranscript(transcript) {
   details.open = transcript.isCurrent;
 
   const summary = document.createElement("summary");
-  summary.append(renderRowHeader(transcript.conversationId, transcript.exists ? `${transcript.messageCount} messages` : "Missing"));
+  summary.append(
+    renderRowHeader(
+      transcript.conversationId,
+      transcript.exists ? `${transcript.messageCount} messages` : "Missing",
+    ),
+  );
   details.append(summary);
-  details.append(renderMetricGrid([
-    ["Path", transcript.path],
-    ["First", formatDate(transcript.firstTimestampUtc)],
-    ["Last", formatDate(transcript.lastTimestampUtc)],
-    ["First prompt", transcript.firstPrompt || "None"]
-  ]));
+  details.append(
+    renderMetricGrid([
+      ["Path", transcript.path],
+      ["First", formatDate(transcript.firstTimestampUtc)],
+      ["Last", formatDate(transcript.lastTimestampUtc)],
+      ["First prompt", transcript.firstPrompt || "None"],
+    ]),
+  );
   if (transcript.messages.length === 0) {
     details.append(createState("No messages"));
     return details;
@@ -520,7 +635,12 @@ function renderTranscript(transcript) {
   for (const message of transcript.messages) {
     const item = document.createElement("article");
     item.className = "history-message";
-    item.append(renderRowHeader(`${message.sequence}. ${message.role}`, formatDate(message.timestampUtc)));
+    item.append(
+      renderRowHeader(
+        `${message.sequence}. ${message.role}`,
+        formatDate(message.timestampUtc),
+      ),
+    );
     item.append(textLine(message.content, "content"));
     details.append(item);
   }
@@ -664,7 +784,7 @@ function renderApproval(approval) {
     `Target: ${approval.targetPath}`,
     `Resolved: ${approval.resolvedPath}`,
     `Matched: ${approval.matchedPath}`,
-    approval.reason
+    approval.reason,
   ]) {
     const line = document.createElement("p");
     line.textContent = text;
@@ -678,15 +798,25 @@ function renderApproval(approval) {
   reject.className = "reject";
   reject.type = "button";
   reject.textContent = "Reject";
-  reject.setAttribute("aria-label", `Reject ${approval.command} ${approval.operation} for ${approval.targetPath}`);
-  reject.addEventListener("click", () => decideApproval(approval.requestId, false));
+  reject.setAttribute(
+    "aria-label",
+    `Reject ${approval.command} ${approval.operation} for ${approval.targetPath}`,
+  );
+  reject.addEventListener("click", () =>
+    decideApproval(approval.requestId, false),
+  );
 
   const approve = document.createElement("button");
   approve.className = "approve";
   approve.type = "button";
   approve.textContent = "Approve";
-  approve.setAttribute("aria-label", `Approve ${approval.command} ${approval.operation} for ${approval.targetPath}`);
-  approve.addEventListener("click", () => decideApproval(approval.requestId, true));
+  approve.setAttribute(
+    "aria-label",
+    `Approve ${approval.command} ${approval.operation} for ${approval.targetPath}`,
+  );
+  approve.addEventListener("click", () =>
+    decideApproval(approval.requestId, true),
+  );
 
   actions.append(reject, approve);
   item.append(actions);
@@ -746,7 +876,9 @@ function getMessageContent(message) {
 
 function replaceTranscript(messages) {
   activeAgentMessage = null;
-  const renderedMessages = (messages ?? []).map(message => createMessage(messageKind(message.role), message.content ?? ""));
+  const renderedMessages = (messages ?? []).map((message) =>
+    createMessage(messageKind(message.role), message.content ?? ""),
+  );
   elements.transcript.replaceChildren(...renderedMessages);
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
 }
@@ -815,11 +947,13 @@ for (const tab of elements.appTabs) {
     if (tab.dataset.configTab) activeConfigTab = tab.dataset.configTab;
     selectAppView(tab.dataset.appView ?? "chat", tab);
   });
-  tab.addEventListener("keydown", event => moveAppTabFocus(event, tab));
+  tab.addEventListener("keydown", (event) => moveAppTabFocus(event, tab));
 }
 
 elements.chatApprovalAlert.addEventListener("click", () => {
-  const chatTab = elements.appTabs.find(tab => tab.dataset.appView === "chat");
+  const chatTab = elements.appTabs.find(
+    (tab) => tab.dataset.appView === "chat",
+  );
   selectAppView("chat", chatTab);
   elements.chatApprovalsTitle.focus();
 });
@@ -828,11 +962,15 @@ function moveAppTabFocus(event, currentTab) {
   if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
   event.preventDefault();
   const currentIndex = elements.appTabs.indexOf(currentTab);
-  const nextIndex = event.key === "Home"
-    ? 0
-    : event.key === "End"
-      ? elements.appTabs.length - 1
-      : (currentIndex + (event.key === "ArrowUp" ? -1 : 1) + elements.appTabs.length) % elements.appTabs.length;
+  const nextIndex =
+    event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? elements.appTabs.length - 1
+        : (currentIndex +
+            (event.key === "ArrowUp" ? -1 : 1) +
+            elements.appTabs.length) %
+          elements.appTabs.length;
   const nextTab = elements.appTabs[nextIndex];
   nextTab.focus();
   nextTab.click();
@@ -846,7 +984,7 @@ elements.cancelButton.addEventListener("click", async () => {
   }
 });
 
-elements.messageForm.addEventListener("submit", async event => {
+elements.messageForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = elements.messageInput.value.trim();
   if (!message || !status?.initialized || !hub?.connected) {
@@ -911,20 +1049,24 @@ class JsonSignalRConnection {
     this.closedByClient = false;
     this.isClosed = false;
     this.socket = new WebSocket(this.url);
-    this.socket.onmessage = event => this.receive(event.data);
+    this.socket.onmessage = (event) => this.receive(event.data);
     this.socket.onclose = () => this.handleClose();
 
     await new Promise((resolve, reject) => {
       this.socket.onopen = () => {
         resolve();
       };
-      this.socket.onerror = () => reject(new Error("SignalR connection failed."));
+      this.socket.onerror = () =>
+        reject(new Error("SignalR connection failed."));
     });
 
     this.handshake = new Promise((resolve, reject) => {
       this.handshakeResolve = resolve;
       this.handshakeReject = reject;
-      window.setTimeout(() => this.handshakeReject?.(new Error("SignalR handshake timed out.")), 5000);
+      window.setTimeout(
+        () => this.handshakeReject?.(new Error("SignalR handshake timed out.")),
+        5000,
+      );
     });
     this.socket.onerror = () => this.handleClose();
     this.sendRaw({ protocol: "json", version: 1 });
@@ -933,7 +1075,11 @@ class JsonSignalRConnection {
   }
 
   async invoke(target, ...args) {
-    if (!this.connected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+    if (
+      !this.connected ||
+      !this.socket ||
+      this.socket.readyState !== WebSocket.OPEN
+    ) {
       throw new Error("SignalR connection is not available.");
     }
 
@@ -1022,6 +1168,14 @@ elements.cancelButton.disabled = true;
 elements.refreshConfigButton.disabled = true;
 renderConfigLoading();
 const requestedView = new URL(window.location.href).searchParams.get("view");
-activeConfigTab = configurationViewCopy[requestedView] ? requestedView : "overview";
-selectAppView(requestedView === "loops" ? "loops" : configurationViewCopy[requestedView] ? "configuration" : "chat");
-boot().catch(error => appendMessage("error", error.message));
+activeConfigTab = configurationViewCopy[requestedView]
+  ? requestedView
+  : "overview";
+selectAppView(
+  requestedView === "loops"
+    ? "loops"
+    : configurationViewCopy[requestedView]
+      ? "configuration"
+      : "chat",
+);
+boot().catch((error) => appendMessage("error", error.message));
