@@ -1,3 +1,4 @@
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
@@ -10,31 +11,53 @@ internal static class CSharpParameterNamingPolicy
     public static IReadOnlyList<string> FindViolations(string source, string sourcePath)
     {
         var root = CSharpSyntaxTree.ParseText(source, ParseOptions, sourcePath).GetRoot();
-        // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/99 Extend this gate to the remaining non-record parameter-bearing syntax roles.
-        var parameters = root.DescendantNodes()
-            .OfType<MethodDeclarationSyntax>()
-            .SelectMany(method => method.ParameterList.Parameters.Select(parameter => (Parameter: parameter, ExpectedStyle: "camelCase", Context: "method")))
-            .Concat(root.DescendantNodes()
-                .OfType<ClassDeclarationSyntax>()
-                .Where(declaration => declaration.ParameterList is not null)
-                .SelectMany(declaration => declaration.ParameterList!.Parameters.Select(parameter => (Parameter: parameter, ExpectedStyle: "camelCase", Context: "class primary constructor"))))
-            .Concat(root.DescendantNodes()
-                .OfType<StructDeclarationSyntax>()
-                .Where(declaration => declaration.ParameterList is not null)
-                .SelectMany(declaration => declaration.ParameterList!.Parameters.Select(parameter => (Parameter: parameter, ExpectedStyle: "camelCase", Context: "struct primary constructor"))))
-            .Concat(root.DescendantNodes()
-                .OfType<RecordDeclarationSyntax>()
-                .Where(declaration => declaration.ParameterList is not null)
-                .SelectMany(declaration => declaration.ParameterList!.Parameters.Select(parameter => (Parameter: parameter, ExpectedStyle: "PascalCase", Context: "positional record"))));
+        // Destructors, accessors, and function-pointer signatures expose no authored ParameterSyntax identifier, so no naming rule applies to them.
+        var parameters = GetParameterRules(root);
 
         return parameters
-            .Where(item => !HasExpectedStyle(item.Parameter.Identifier.ValueText, item.ExpectedStyle))
+            .Where(item => !HasExpectedStyle(item.Parameter.Identifier.ValueText, item.ExpectedStyle, item.AllowsUnderscorePlaceholder))
             .Select(item => DescribeViolation(item.Parameter, sourcePath, item.ExpectedStyle, item.Context))
             .ToArray();
     }
 
-    private static bool HasExpectedStyle(string identifier, string expectedStyle)
+    private static IEnumerable<(ParameterSyntax Parameter, string ExpectedStyle, string Context, bool AllowsUnderscorePlaceholder)> GetParameterRules(SyntaxNode root)
     {
+        foreach (var node in root.DescendantNodes())
+        {
+            (IEnumerable<ParameterSyntax> Parameters, string ExpectedStyle, string Context, bool AllowsUnderscorePlaceholder) rule = node switch
+            {
+                MethodDeclarationSyntax method => (method.ParameterList.Parameters, "camelCase", "method", false),
+                ConstructorDeclarationSyntax constructor => (constructor.ParameterList.Parameters, "camelCase", "constructor", false),
+                OperatorDeclarationSyntax @operator => (@operator.ParameterList.Parameters, "camelCase", "operator", false),
+                ConversionOperatorDeclarationSyntax conversion => (conversion.ParameterList.Parameters, "camelCase", "conversion operator", false),
+                LocalFunctionStatementSyntax localFunction => (localFunction.ParameterList.Parameters, "camelCase", "local function", false),
+                DelegateDeclarationSyntax @delegate => (@delegate.ParameterList.Parameters, "camelCase", "delegate", false),
+                IndexerDeclarationSyntax indexer => (indexer.ParameterList.Parameters, "camelCase", "indexer", false),
+                // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/102 Remove the lone-underscore placeholder exemption after the repository-wide rename.
+                ParenthesizedLambdaExpressionSyntax lambda => (lambda.ParameterList.Parameters, "camelCase", "parenthesized lambda", true),
+                SimpleLambdaExpressionSyntax lambda => ([lambda.Parameter], "camelCase", "simple lambda", true),
+                AnonymousMethodExpressionSyntax anonymousMethod when anonymousMethod.ParameterList is not null => (anonymousMethod.ParameterList.Parameters, "camelCase", "anonymous method", true),
+                ExtensionBlockDeclarationSyntax extension when extension.ParameterList is not null => (extension.ParameterList.Parameters, "camelCase", "extension receiver", false),
+                ClassDeclarationSyntax @class when @class.ParameterList is not null => (@class.ParameterList.Parameters, "camelCase", "class primary constructor", false),
+                StructDeclarationSyntax @struct when @struct.ParameterList is not null => (@struct.ParameterList.Parameters, "camelCase", "struct primary constructor", false),
+                RecordDeclarationSyntax record when record.ParameterList is not null => (record.ParameterList.Parameters, "PascalCase", "positional record", false),
+                _ => ([], "", "", false)
+            };
+
+            foreach (var parameter in rule.Parameters)
+            {
+                yield return (parameter, rule.ExpectedStyle, rule.Context, rule.AllowsUnderscorePlaceholder);
+            }
+        }
+    }
+
+    private static bool HasExpectedStyle(string identifier, string expectedStyle, bool allowsUnderscorePlaceholder)
+    {
+        if (allowsUnderscorePlaceholder && identifier == "_")
+        {
+            return true;
+        }
+
         if (identifier.Length == 0 || !identifier.All(char.IsLetterOrDigit))
         {
             return false;
