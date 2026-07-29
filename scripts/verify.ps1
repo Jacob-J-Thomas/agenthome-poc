@@ -62,6 +62,7 @@ try {
 
     $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
     $npm = if ($runningOnWindows) { "npm.cmd" } else { "npm" }
+    Invoke-CheckedNative $npm @("ci")
     Invoke-CheckedNative $npm @("test")
 
     if ($RunBrowserE2E) {
