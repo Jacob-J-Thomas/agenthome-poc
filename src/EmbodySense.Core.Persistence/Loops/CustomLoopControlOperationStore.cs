@@ -30,7 +30,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         ArgumentNullException.ThrowIfNull(paths);
         _root = Path.GetFullPath(paths.CustomLoopControlOperationsPath);
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
-        _processGate = ProcessGates.GetOrAdd(_root, _ => new SemaphoreSlim(1, 1));
+        _processGate = ProcessGates.GetOrAdd(_root, operationRoot => new SemaphoreSlim(1, 1));
     }
 
     public async Task<CustomLoopControlOperationStoreResult> BeginAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken = default)

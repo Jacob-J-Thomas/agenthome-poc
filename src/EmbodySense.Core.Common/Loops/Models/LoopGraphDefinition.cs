@@ -133,8 +133,8 @@ public sealed record LoopGraphDefinition(
         }
 
         var edgeIds = new HashSet<string>(StringComparer.Ordinal);
-        var incomingEdges = nodeIds.ToDictionary(nodeId => nodeId, _ => new List<LoopGraphEdgeDefinition>(), StringComparer.Ordinal);
-        var outgoingEdges = nodeIds.ToDictionary(nodeId => nodeId, _ => new List<LoopGraphEdgeDefinition>(), StringComparer.Ordinal);
+        var incomingEdges = nodeIds.ToDictionary(nodeId => nodeId, nodeId => new List<LoopGraphEdgeDefinition>(), StringComparer.Ordinal);
+        var outgoingEdges = nodeIds.ToDictionary(nodeId => nodeId, nodeId => new List<LoopGraphEdgeDefinition>(), StringComparer.Ordinal);
         foreach (var edge in Edges)
         {
             var failure = ValidateEdge(edge, nodeIds);

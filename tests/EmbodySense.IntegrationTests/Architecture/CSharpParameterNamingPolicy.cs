@@ -33,10 +33,9 @@ internal static class CSharpParameterNamingPolicy
                 LocalFunctionStatementSyntax localFunction => (localFunction.ParameterList.Parameters, "camelCase", "local function", false),
                 DelegateDeclarationSyntax @delegate => (@delegate.ParameterList.Parameters, "camelCase", "delegate", false),
                 IndexerDeclarationSyntax indexer => (indexer.ParameterList.Parameters, "camelCase", "indexer", false),
-                // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/102 Remove the lone-underscore placeholder exemption after the repository-wide rename.
-                ParenthesizedLambdaExpressionSyntax lambda => (lambda.ParameterList.Parameters, "camelCase", "parenthesized lambda", true),
-                SimpleLambdaExpressionSyntax lambda => ([lambda.Parameter], "camelCase", "simple lambda", true),
-                AnonymousMethodExpressionSyntax anonymousMethod when anonymousMethod.ParameterList is not null => (anonymousMethod.ParameterList.Parameters, "camelCase", "anonymous method", true),
+                ParenthesizedLambdaExpressionSyntax lambda => (lambda.ParameterList.Parameters, "camelCase", "parenthesized lambda", HasRepeatedDiscardParameters(lambda.ParameterList.Parameters)),
+                SimpleLambdaExpressionSyntax lambda => ([lambda.Parameter], "camelCase", "simple lambda", false),
+                AnonymousMethodExpressionSyntax anonymousMethod when anonymousMethod.ParameterList is not null => (anonymousMethod.ParameterList.Parameters, "camelCase", "anonymous method", HasRepeatedDiscardParameters(anonymousMethod.ParameterList.Parameters)),
                 ExtensionBlockDeclarationSyntax extension when extension.ParameterList is not null => (extension.ParameterList.Parameters, "camelCase", "extension receiver", false),
                 ClassDeclarationSyntax @class when @class.ParameterList is not null => (@class.ParameterList.Parameters, "camelCase", "class primary constructor", false),
                 StructDeclarationSyntax @struct when @struct.ParameterList is not null => (@struct.ParameterList.Parameters, "camelCase", "struct primary constructor", false),
@@ -49,6 +48,11 @@ internal static class CSharpParameterNamingPolicy
                 yield return (parameter, rule.ExpectedStyle, rule.Context, rule.AllowsUnderscorePlaceholder);
             }
         }
+    }
+
+    private static bool HasRepeatedDiscardParameters(IEnumerable<ParameterSyntax> parameters)
+    {
+        return parameters.Count(parameter => parameter.Identifier.ValueText == "_") > 1;
     }
 
     private static bool HasExpectedStyle(string identifier, string expectedStyle, bool allowsUnderscorePlaceholder)

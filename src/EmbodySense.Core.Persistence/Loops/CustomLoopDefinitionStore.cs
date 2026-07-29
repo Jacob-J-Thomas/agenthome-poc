@@ -34,7 +34,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
         _paths = paths;
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
-        _mutationGate = MutationGates.GetOrAdd(Path.GetFullPath(paths.CustomLoopDefinitionsPath), _ => new SemaphoreSlim(1, 1));
+        _mutationGate = MutationGates.GetOrAdd(Path.GetFullPath(paths.CustomLoopDefinitionsPath), definitionsPath => new SemaphoreSlim(1, 1));
     }
 
     public async Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CancellationToken cancellationToken = default)

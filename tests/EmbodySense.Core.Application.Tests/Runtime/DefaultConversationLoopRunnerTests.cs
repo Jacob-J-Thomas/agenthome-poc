@@ -32,12 +32,12 @@ public sealed class DefaultConversationLoopRunnerTests
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest(
             "hello",
-            (chunk, _) =>
+            (chunk, streamCancellationToken) =>
             {
                 chunks.Add(chunk);
                 return Task.CompletedTask;
             },
-            (diagnostic, _) =>
+            (diagnostic, diagnosticCancellationToken) =>
             {
                 diagnostics.Add(diagnostic);
                 return Task.CompletedTask;
@@ -118,7 +118,7 @@ public sealed class DefaultConversationLoopRunnerTests
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest(
             "hello",
-            diagnosticHandler: (diagnostic, _) =>
+            diagnosticHandler: (diagnostic, diagnosticCancellationToken) =>
             {
                 diagnostics.Add(diagnostic);
                 return Task.CompletedTask;
@@ -199,7 +199,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var client = new RecordingInferenceClient("unused");
         var memory = new RecordingConversationMemoryStore
         {
-            BeforeLoadCurrent = _ =>
+            BeforeLoadCurrent = cancellationToken =>
             {
                 cancellation.Cancel();
                 throw new OperationCanceledException(cancellation.Token);
@@ -589,7 +589,7 @@ public sealed class DefaultConversationLoopRunnerTests
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest(
             "hello",
-            responseChunkHandler: (_, token) =>
+            responseChunkHandler: (chunk, token) =>
             {
                 cancellation.Cancel();
                 return Task.FromCanceled(token);

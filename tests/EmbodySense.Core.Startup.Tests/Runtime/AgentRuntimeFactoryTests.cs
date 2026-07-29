@@ -81,7 +81,7 @@ public sealed class AgentRuntimeFactoryTests
         var chunks = new List<string>();
 
         Assert.Equal(AgentRuntimeSurface.Web, runtime.Surface);
-        var response = await runtime.RunTurnAsync("hello", (chunk, _) =>
+        var response = await runtime.RunTurnAsync("hello", (chunk, streamCancellationToken) =>
         {
             chunks.Add(chunk);
             return Task.CompletedTask;
@@ -524,7 +524,7 @@ public sealed class AgentRuntimeFactoryTests
         var contexts = new List<string>();
 
         var verboseResult = runtime.SetVerbose(true);
-        var response = await runtime.RunTurnAsync("hello", verboseContextHandler: (context, _) =>
+        var response = await runtime.RunTurnAsync("hello", verboseContextHandler: (context, contextCancellationToken) =>
         {
             contexts.Add(context);
             return Task.CompletedTask;

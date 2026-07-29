@@ -73,7 +73,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         _mutationLockPath = Path.Combine(_runsRoot, MutationLockFileName);
         _discoveryIndexPath = Path.Combine(_runsRoot, DiscoveryIndexFileName);
         _discoveryIndexPendingPath = Path.Combine(_runsRoot, DiscoveryIndexPendingFileName);
-        _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
+        _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, runsRoot => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _monitorWatcherFactory = monitorWatcherFactory;
         _monitorArtifactChangeVersions = new Dictionary<string, long>(PathComparer);

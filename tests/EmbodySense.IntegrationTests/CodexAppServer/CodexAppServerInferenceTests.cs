@@ -37,7 +37,7 @@ public sealed class CodexAppServerInferenceTests
         var client = CreateClient(transport, providerRequestStarted: () => providerRequestStarted = true);
         var chunks = new List<string>();
 
-        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("say hello"), (chunk, _) =>
+        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("say hello"), (chunk, streamCancellationToken) =>
         {
             chunks.Add(chunk);
             return Task.CompletedTask;

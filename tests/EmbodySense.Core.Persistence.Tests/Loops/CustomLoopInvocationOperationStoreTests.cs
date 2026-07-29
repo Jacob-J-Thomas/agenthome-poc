@@ -390,7 +390,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(paths);
         var pending = Pending("invoke-concurrent", "prompt");
 
-        var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => store.BeginAsync(pending)));
+        var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(attemptIndex => store.BeginAsync(pending)));
         var missingCompletion = await store.CompleteAsync(CompletedAdmitted(ContextBound(Pending("invoke-missing", "prompt"))));
 
         Assert.Single(outcomes, item => item.Status == CustomLoopInvocationOperationStoreStatus.Created);

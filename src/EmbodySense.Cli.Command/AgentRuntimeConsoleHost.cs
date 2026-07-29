@@ -68,7 +68,7 @@ public sealed class AgentRuntimeConsoleHost
 
         var result = await _runtime.RunTurnAsync(
             input,
-            (chunk, _) =>
+            (chunk, streamCancellationToken) =>
             {
                 if (!string.IsNullOrEmpty(chunk))
                 {
@@ -85,7 +85,7 @@ public sealed class AgentRuntimeConsoleHost
 
                 return Task.CompletedTask;
             },
-            (context, _) =>
+            (context, contextCancellationToken) =>
             {
                 _console.WriteLine(context);
                 _console.WriteLine();

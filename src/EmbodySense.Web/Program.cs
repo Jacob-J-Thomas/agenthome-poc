@@ -60,7 +60,7 @@ public static class Program
             options.MaximumReceiveMessageSize = LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes;
             options.MaximumParallelInvocationsPerClient = 2;
         });
-        services.AddAuthentication(WebSessionAuthenticationDefaults.Scheme).AddScheme<AuthenticationSchemeOptions, WebSessionAuthenticationHandler>(WebSessionAuthenticationDefaults.Scheme, _ => { });
+        services.AddAuthentication(WebSessionAuthenticationDefaults.Scheme).AddScheme<AuthenticationSchemeOptions, WebSessionAuthenticationHandler>(WebSessionAuthenticationDefaults.Scheme, authenticationOptions => { });
         services.AddAuthorization(options =>
         {
             options.AddPolicy(WebAuthPolicies.LocalSession, policy =>
@@ -80,7 +80,7 @@ public static class Program
             WorkspaceInitializer.ForWeb(),
             provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>()));
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
-        services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
+        services.AddSingleton(serviceProvider => new LoopAuthoringFacade(options.WorkingDirectory));
     }
 
     public static void ConfigurePipeline(WebApplication app)

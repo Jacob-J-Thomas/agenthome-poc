@@ -171,8 +171,8 @@ public sealed class BrowserFlowTests
                     "about:blank"
                 }
             }) ?? throw new InvalidOperationException("Headless browser process did not start.");
-            process.OutputDataReceived += (_, args) => output.Append(args.Data);
-            process.ErrorDataReceived += (_, args) => error.Append(args.Data);
+            process.OutputDataReceived += (sender, args) => output.Append(args.Data);
+            process.ErrorDataReceived += (sender, args) => error.Append(args.Data);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 

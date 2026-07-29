@@ -726,7 +726,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var definition = Definition(exitPolicy: Policy(Output(false, false)));
         var store = new FakeRunStore(Run(definition));
         var executor = new QueueExecutor(Result("observed"));
-        executor.AfterExecute = _ =>
+        executor.AfterExecute = executionRequest =>
         {
             cancellation.Cancel();
             return Task.CompletedTask;
@@ -908,7 +908,7 @@ public sealed class CustomLoopOrderedRunnerTests
         CustomLoopOrderedRunner? runner = null;
         var store = new FakeRunStore(Run(Definition()))
         {
-            BeforeUpdate = (candidate, _) =>
+            BeforeUpdate = (candidate, updateCancellationToken) =>
             {
                 if (candidate.Status == CustomLoopRunStatus.Running)
                 {
@@ -928,7 +928,7 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         var store = new FakeRunStore(Run(Definition()))
         {
-            BeforeUpdate = (candidate, _) =>
+            BeforeUpdate = (candidate, updateCancellationToken) =>
             {
                 if (candidate.Status == CustomLoopRunStatus.Running)
                 {
@@ -951,7 +951,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var schemaFailureInjected = false;
         var store = new FakeRunStore(Run(Definition()))
         {
-            BeforeUpdate = (candidate, _) =>
+            BeforeUpdate = (candidate, updateCancellationToken) =>
             {
                 if (!schemaFailureInjected && candidate.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved))
                 {
@@ -976,7 +976,7 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         var store = new FakeRunStore(Run(Definition()))
         {
-            BeforeUpdate = (candidate, _) =>
+            BeforeUpdate = (candidate, updateCancellationToken) =>
             {
                 if (candidate.Events.Any(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved)
                     || candidate.Status == CustomLoopRunStatus.NeedsReview)
@@ -1288,7 +1288,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var time = new MutableTimeProvider(Now);
         var audit = new RecordingAuditLog
         {
-            BeforeAppend = (auditEvent, _) =>
+            BeforeAppend = (auditEvent, auditCancellationToken) =>
             {
                 if (auditEvent.Action == AuditSchema.Actions.LoopNodeAttempt && auditEvent.Outcome == AuditSchema.Outcomes.Started)
                 {
@@ -1600,7 +1600,7 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
         {
-            BeforeUpdate = (candidate, _) =>
+            BeforeUpdate = (candidate, updateCancellationToken) =>
             {
                 if (candidate.Events[^1].Kind == CustomLoopRunEventKind.NodeAttemptCompleted)
                 {
@@ -1623,7 +1623,7 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         var store = new FakeRunStore(Run(Definition(exitPolicy: Policy(Output(false, false)))))
         {
-            BeforeUpdate = (candidate, _) =>
+            BeforeUpdate = (candidate, updateCancellationToken) =>
             {
                 if (candidate.Events[^1].Kind == CustomLoopRunEventKind.NodeAttemptCompleted)
                 {
@@ -1800,7 +1800,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var runner = Runner(store, executor, audit: audit);
         var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
         CustomLoopControlResult? pause = null;
-        executor.BeforeExecute = async _ => pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-open-attempt", AuditSchema.Actors.Web));
+        executor.BeforeExecute = async executionRequest => pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-open-attempt", AuditSchema.Actors.Web));
 
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
@@ -1829,7 +1829,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var runner = Runner(store, executor, audit: audit);
         var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
         CustomLoopControlResult? cancel = null;
-        executor.BeforeExecute = async _ => cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-open-attempt", AuditSchema.Actors.Web));
+        executor.BeforeExecute = async executionRequest => cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-open-attempt", AuditSchema.Actors.Web));
 
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
@@ -1856,7 +1856,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var operations = new FakeControlOperationStore();
         var lifecycle = new CustomLoopLifecycleService(store, operations, runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
         var pauseRequest = new CustomLoopPauseRequest(store.Current.Id, 4, "pause-for-resume", AuditSchema.Actors.Web);
-        executor.BeforeExecute = async _ =>
+        executor.BeforeExecute = async executionRequest =>
         {
             if (executor.Requests.Count == 1)
             {
@@ -1938,7 +1938,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var outcomes = new List<object>();
         for (var iteration = 0; iteration <= CustomLoopLimits.MaxAdditionalIterations; iteration++)
         {
-            outcomes.AddRange(Enumerable.Range(0, CustomLoopLimits.MaxInferenceSteps).Select(_ => (object)Result(worstCaseOutput)));
+            outcomes.AddRange(Enumerable.Range(0, CustomLoopLimits.MaxInferenceSteps).Select(stepIndex => (object)Result(worstCaseOutput)));
             if (iteration < CustomLoopLimits.MaxAdditionalIterations)
             {
                 outcomes.Add(Result("Repeat"));

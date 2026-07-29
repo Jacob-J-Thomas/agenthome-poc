@@ -69,7 +69,7 @@ public sealed class WebAgentRuntimeHostTests
         await using var host = CreateHost(workspace.RootPath);
         var events = new List<WebStreamEvent>();
 
-        await host.SendMessageAsync("/help", (streamEvent, _) =>
+        await host.SendMessageAsync("/help", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
@@ -91,7 +91,7 @@ public sealed class WebAgentRuntimeHostTests
         await WriteCurrentTranscriptAsync(workspace, "web archived prompt", "web archived answer");
         var events = new List<WebStreamEvent>();
 
-        await host.SendMessageAsync("/history", (streamEvent, _) =>
+        await host.SendMessageAsync("/history", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
@@ -103,7 +103,7 @@ public sealed class WebAgentRuntimeHostTests
         Assert.Contains("Send conversation number to load", historyEvent.Text);
 
         events.Clear();
-        await host.SendMessageAsync("1", (streamEvent, _) =>
+        await host.SendMessageAsync("1", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
@@ -144,12 +144,12 @@ public sealed class WebAgentRuntimeHostTests
         await host.InitializeWorkspaceAsync();
         var events = new List<WebStreamEvent>();
 
-        await host.SetVerboseModeAsync(true, (streamEvent, _) =>
+        await host.SetVerboseModeAsync(true, (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
         });
-        await host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        await host.SendMessageAsync("hello from web", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
@@ -236,7 +236,7 @@ public sealed class WebAgentRuntimeHostTests
         var responseObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var send = host.SendMessageAsync("/help", async (_, cancellationToken) =>
+        var send = host.SendMessageAsync("/help", async (streamEvent, cancellationToken) =>
         {
             responseObserved.TrySetResult();
             await releaseResponse.Task.WaitAsync(cancellationToken);
@@ -261,7 +261,7 @@ public sealed class WebAgentRuntimeHostTests
         await host.InitializeWorkspaceAsync();
         var events = new List<WebStreamEvent>();
 
-        await host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        await host.SendMessageAsync("hello from web", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
@@ -284,7 +284,7 @@ public sealed class WebAgentRuntimeHostTests
         await File.WriteAllTextAsync(definitionPath, definitionJson.Replace("\"state\": \"enabled\"", "\"state\": \"disabled\"", StringComparison.Ordinal));
         var events = new List<WebStreamEvent>();
 
-        await host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        await host.SendMessageAsync("hello from web", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
@@ -304,7 +304,7 @@ public sealed class WebAgentRuntimeHostTests
         await host.InitializeWorkspaceAsync();
         var events = new List<WebStreamEvent>();
 
-        var sendTask = host.SendMessageAsync("hello from web", (streamEvent, _) =>
+        var sendTask = host.SendMessageAsync("hello from web", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;
@@ -324,7 +324,7 @@ public sealed class WebAgentRuntimeHostTests
         Assert.Equal("Message cancelled.", streamEvent.Text);
 
         events.Clear();
-        await host.SendMessageAsync("after cancel", (streamEvent, _) =>
+        await host.SendMessageAsync("after cancel", (streamEvent, streamCancellationToken) =>
         {
             events.Add(streamEvent);
             return Task.CompletedTask;

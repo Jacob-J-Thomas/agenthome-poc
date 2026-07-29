@@ -29,7 +29,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         ArgumentNullException.ThrowIfNull(paths);
 
         _paths = paths;
-        _currentConversationGate = CurrentConversationGates.GetOrAdd(Path.GetFullPath(paths.CurrentConversationPath), _ => new SemaphoreSlim(1, 1));
+        _currentConversationGate = CurrentConversationGates.GetOrAdd(Path.GetFullPath(paths.CurrentConversationPath), conversationPath => new SemaphoreSlim(1, 1));
     }
 
     public async Task<IReadOnlyList<LlmMessage>> LoadCurrentConversationAsync(CancellationToken cancellationToken = default)

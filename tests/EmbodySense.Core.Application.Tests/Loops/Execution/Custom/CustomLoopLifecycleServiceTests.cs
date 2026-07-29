@@ -695,7 +695,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var store = new MultiRunStore([run]);
         var executor = new NoopResumeExecutor(
             exception: new OperationCanceledException("The active attempt was cancelled."),
-            beforeResult: _ =>
+            beforeResult: executionResult =>
             {
                 var running = store[run.Id];
                 var cancelledAt = Now.AddSeconds(4);

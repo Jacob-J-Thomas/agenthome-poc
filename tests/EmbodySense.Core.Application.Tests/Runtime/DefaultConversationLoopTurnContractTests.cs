@@ -24,12 +24,12 @@ public sealed class DefaultConversationLoopTurnContractTests
         var diagnostics = new List<RuntimeDiagnosticMessage>();
         var request = new DefaultConversationLoopTurnRequest(
             "hello",
-            (chunk, _) =>
+            (chunk, streamCancellationToken) =>
             {
                 chunks.Add(chunk);
                 return Task.CompletedTask;
             },
-            (message, _) =>
+            (message, diagnosticCancellationToken) =>
             {
                 diagnostics.Add(message);
                 return Task.CompletedTask;

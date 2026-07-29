@@ -664,7 +664,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
     private static CustomLoopRunRecord RemoveEvents(CustomLoopRunRecord run, params int[] eventIndexes)
     {
         var removed = eventIndexes.ToHashSet();
-        var events = run.Events.Where((_, index) => !removed.Contains(index)).ToArray();
+        var events = run.Events.Where((runEvent, index) => !removed.Contains(index)).ToArray();
         return run with { Events = Renumber(events), LifecycleVersion = events.Length };
     }
 

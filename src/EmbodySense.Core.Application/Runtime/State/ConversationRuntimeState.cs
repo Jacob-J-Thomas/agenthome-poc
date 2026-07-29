@@ -27,7 +27,7 @@ public sealed class ConversationRuntimeState
         _messages = initialMessages?.Select(message => CreateContextMessage(message, RuntimeContextSource.StartupContext)).ToList() ?? [];
         _exclusiveAccess = string.IsNullOrWhiteSpace(exclusiveAccessScope)
             ? new SemaphoreSlim(1, 1)
-            : WorkspaceExclusiveAccess.GetOrAdd(exclusiveAccessScope.Trim(), _ => new SemaphoreSlim(1, 1));
+            : WorkspaceExclusiveAccess.GetOrAdd(exclusiveAccessScope.Trim(), workspaceScope => new SemaphoreSlim(1, 1));
     }
 
     public IReadOnlyList<LlmMessage> Messages

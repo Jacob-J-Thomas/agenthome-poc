@@ -226,8 +226,8 @@ public sealed class WebClientFlowTests
         process = process ?? throw new InvalidOperationException("Web process did not start.");
         var output = new BoundedProcessOutput();
         var error = new BoundedProcessOutput();
-        process.OutputDataReceived += (_, args) => output.Append(args.Data);
-        process.ErrorDataReceived += (_, args) => error.Append(args.Data);
+        process.OutputDataReceived += (sender, args) => output.Append(args.Data);
+        process.ErrorDataReceived += (sender, args) => error.Append(args.Data);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         return new WebProcess(process, output, error);

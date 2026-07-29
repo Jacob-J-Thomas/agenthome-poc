@@ -171,7 +171,7 @@ internal sealed class CustomLoopRuntimeContext
         var omittedCount = logicalMessages.Count - selected.Count;
         if (omittedCount > 0)
         {
-            var omittedCharacters = logicalMessages.Select(FormatConversationMessage).Where((_, index) => !selected.ContainsKey(index)).Sum(content => (long)content.Length);
+            var omittedCharacters = logicalMessages.Select(FormatConversationMessage).Where((logicalMessage, index) => !selected.ContainsKey(index)).Sum(content => (long)content.Length);
             var boundedOriginalCharacters = (int)Math.Min(int.MaxValue, omittedCharacters);
             var omissionReason = admitted
                 ? $"{omittedCount} older logical conversation message(s) were omitted by the {CustomLoopLimits.MaxInvokingConversationEntries}-entry and {CustomLoopLimits.MaxInvokingConversationCharacters}-character snapshot limits."

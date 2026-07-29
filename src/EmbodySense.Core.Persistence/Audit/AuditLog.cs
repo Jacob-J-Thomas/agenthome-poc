@@ -43,7 +43,7 @@ public sealed class AuditLog : IAuditLog
         ArgumentNullException.ThrowIfNull(auditEvent);
 
         Directory.CreateDirectory(_paths.AuditPath);
-        var fileLock = FileLocks.GetOrAdd(_paths.EventsLogPath, _ => new SemaphoreSlim(1, 1));
+        var fileLock = FileLocks.GetOrAdd(_paths.EventsLogPath, eventsLogPath => new SemaphoreSlim(1, 1));
 
         await fileLock.WaitAsync(cancellationToken);
         try

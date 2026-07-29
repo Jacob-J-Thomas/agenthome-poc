@@ -37,7 +37,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         _root = Path.GetFullPath(paths.CustomLoopInvocationOperationsPath);
         _retentionRoot = Path.GetFullPath(paths.CustomLoopInvocationReceiptRetentionPath);
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
-        _processGate = ProcessGates.GetOrAdd(_root, _ => new SemaphoreSlim(1, 1));
+        _processGate = ProcessGates.GetOrAdd(_root, operationRoot => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 

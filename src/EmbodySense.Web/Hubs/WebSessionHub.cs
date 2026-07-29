@@ -70,7 +70,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
 
         try
         {
-            await _host.SendMessageAsync(message, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionId, Context.ConnectionAborted);
+            await _host.SendMessageAsync(message, (item, streamCancellationToken) => Clients.Caller.StreamEvent(item), Context.ConnectionId, Context.ConnectionAborted);
         }
         catch (OperationCanceledException)
         {
@@ -86,7 +86,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     {
         try
         {
-            await _host.SetVerboseModeAsync(enabled, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionAborted);
+            await _host.SetVerboseModeAsync(enabled, (item, streamCancellationToken) => Clients.Caller.StreamEvent(item), Context.ConnectionAborted);
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
         {

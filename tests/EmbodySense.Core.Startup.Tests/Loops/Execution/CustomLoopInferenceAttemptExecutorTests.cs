@@ -125,7 +125,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         await File.WriteAllTextAsync(file, "reload me");
         var approvalPrompt = new RecordingApprovalPrompt(approved: false);
         var outcomes = new List<ToolExecutionOutcome>();
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             outcomes.Add((await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken)).Outcome);
@@ -151,7 +151,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "do not read after revocation");
         var authorityProvider = new RevokingAuthorityProvider();
         ToolResult? observed = null;
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             observed = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
@@ -178,7 +178,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: () => authorityProvider.Revoke("role-2"));
         var evidenceSink = new RecordingEvidenceSink();
         ToolResult? observed = null;
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             observed = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
@@ -229,7 +229,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
         var outcomes = new List<ToolExecutionOutcome>();
         ToolResult? denied = null;
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             for (var index = 0; index < 5; index++)
@@ -269,7 +269,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var paths = await InitializeWorkspaceAsync(workspace);
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
         var outcomes = new List<ToolExecutionOutcome>();
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             Assert.Equal(callsAlreadyUsed < CustomLoopLimits.MaxGovernedToolRequestsPerRun, broker.AvailableCommands.Count > 0);
@@ -300,7 +300,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var paths = await InitializeWorkspaceAsync(workspace);
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
         var evidenceSink = new RecordingEvidenceSink();
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             for (var index = 0; index < 6; index++)
@@ -339,7 +339,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "bounded");
         using var providerCancellation = new CancellationTokenSource();
         var evidenceSink = new CancelOnIntegrityEvidenceSink(providerCancellation);
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             for (var ordinal = 1; ordinal <= CustomLoopLimits.MaxGovernedToolRequestsPerAttempt; ordinal++)
@@ -383,7 +383,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var store = new CustomLoopRunStore(paths);
         var admitted = await CreateAdmittedRunAsync(store);
         var evidenceSink = new CustomLoopRunToolEvidenceSink(store);
-        var executor = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var executor = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             for (var ordinal = 1; ordinal <= CustomLoopLimits.MaxGovernedToolRequestsPerAttempt; ordinal++)
@@ -442,7 +442,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var store = new CustomLoopRunStore(paths);
         var admitted = await CreateAdmittedRunAsync(store);
         var evidenceSink = new CustomLoopRunToolEvidenceSink(store);
-        var inner = CreateExecutor(workspace, async (broker, _, cancellationToken) =>
+        var inner = CreateExecutor(workspace, async (broker, inferenceRequest, cancellationToken) =>
         {
             Assert.NotNull(broker);
             var denied = await broker.ExecuteAsync(new ToolRequest(
@@ -641,7 +641,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         var executor = CreateInjectedExecutor(
             options,
             new RecordingApprovalPrompt(),
-            (_, broker) => new AsyncFakeInferenceClient(broker, (_, _, _) => Task.FromResult(new LlmInferenceResponse("azure", LlmInferenceSurface.AzureAiFoundry))));
+            (clientOptions, broker) => new AsyncFakeInferenceClient(broker, (_, _, _) => Task.FromResult(new LlmInferenceResponse("azure", LlmInferenceSurface.AzureAiFoundry))));
         var request = CreateRequest() with { ModelSnapshot = new CustomLoopModelSnapshot("azure-ai-foundry", "pinned") };
 
         var result = await executor.ExecuteAsync(request);

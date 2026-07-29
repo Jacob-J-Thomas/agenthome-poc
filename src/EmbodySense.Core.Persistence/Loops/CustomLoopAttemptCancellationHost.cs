@@ -180,7 +180,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         _shutdown.Cancel();
         DeleteOwnerDescriptor();
         _ = _server.ContinueWith(
-            _ =>
+            completedServer =>
             {
                 _shutdown.Dispose();
                 CryptographicOperations.ZeroMemory(_secret);
