@@ -44,10 +44,16 @@ let pendingCreateOperationId = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
-// TODO(#77): Persist unresolved lifecycle-control identities per workspace and run across reloads and browser tabs.
-let pendingResumeRequest = null;
 let invocationInFlight = false;
 let activeInvocationAttempt = null;
+const pendingLifecycleStorageKeyPrefix =
+  "embodysense.pending-loop-lifecycle.v1";
+const pendingLifecycleRegistryLockNamePrefix =
+  "embodysense.pending-loop-lifecycle";
+let pendingLifecycleStorageKey = null;
+let pendingLifecycleRegistryLockName = null;
+const maximumPendingLifecycleRequests = 100;
+const pendingLifecycleRequests = new Map();
 const pendingInvocationStorageKeyPrefix =
   "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix =
@@ -207,6 +213,13 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
       pendingInvocationRegistryLockName = null;
       pendingInvocationRequests.clear();
     }
+    try {
+      await configurePendingLifecycleRegistry(status.workspaceRoot);
+    } catch {
+      pendingLifecycleStorageKey = null;
+      pendingLifecycleRegistryLockName = null;
+      pendingLifecycleRequests.clear();
+    }
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized
@@ -307,6 +320,16 @@ function bindStaticEvents() {
         synchronizePendingInvocationRequestsFromStorage();
       } catch {
         // Retain the last verified in-memory view and fail closed on the next reservation attempt.
+      }
+    }
+    if (
+      pendingLifecycleStorageKey &&
+      event.key === pendingLifecycleStorageKey
+    ) {
+      try {
+        synchronizePendingLifecycleRequestsFromStorage();
+      } catch {
+        // Retain the last verified in-memory view and fail closed on the next lifecycle request.
       }
     }
   });
@@ -3227,6 +3250,183 @@ async function withPendingInvocationRegistryLock(callback) {
   );
 }
 
+function lifecycleRequestKey(kind, runId, expectedLifecycleVersion) {
+  return JSON.stringify([kind, runId, expectedLifecycleVersion]);
+}
+
+function isDefinitiveLifecycleResponse(response) {
+  if (!response?.status) return false;
+  if (
+    ["OperationInProgress", "WorkspaceHostUnavailable"].includes(
+      response.status,
+    )
+  )
+    return false;
+  if (!["Failed", "NeedsReview"].includes(response.status)) return true;
+  const detail = String(response.detail ?? "").toLowerCase();
+  // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/97 Replace receipt-detail matching with structured durable receipt state.
+  return ![
+    "receipt remains pending",
+    "receipt could not be",
+    "receipt failed",
+  ].some((marker) => detail.includes(marker));
+}
+
+async function getOrCreatePendingLifecycleRequest(
+  kind,
+  runId,
+  expectedLifecycleVersion,
+) {
+  return withPendingLifecycleRegistryLock(async () => {
+    synchronizePendingLifecycleRequestsFromStorage();
+    const requestKey = lifecycleRequestKey(
+      kind,
+      runId,
+      expectedLifecycleVersion,
+    );
+    const existing = pendingLifecycleRequests.get(requestKey);
+    if (existing) return existing;
+    if (pendingLifecycleRequests.size >= maximumPendingLifecycleRequests)
+      throw new Error(
+        `The workspace already has ${maximumPendingLifecycleRequests} unresolved lifecycle requests.`,
+      );
+    const pending = {
+      kind,
+      runId,
+      expectedLifecycleVersion,
+      operationId: newOperationId(),
+    };
+    const next = new Map(pendingLifecycleRequests);
+    next.set(requestKey, pending);
+    commitPendingLifecycleRequests(next);
+    return pending;
+  });
+}
+
+async function forgetPendingLifecycleRequest(request) {
+  return withPendingLifecycleRegistryLock(async () => {
+    synchronizePendingLifecycleRequestsFromStorage();
+    const requestKey = lifecycleRequestKey(
+      request.kind,
+      request.runId,
+      request.expectedLifecycleVersion,
+    );
+    const stored = pendingLifecycleRequests.get(requestKey);
+    if (!stored || stored.operationId !== request.operationId) return;
+    const next = new Map(pendingLifecycleRequests);
+    next.delete(requestKey);
+    commitPendingLifecycleRequests(next);
+  });
+}
+
+async function tryForgetPendingLifecycleRequest(request) {
+  try {
+    await forgetPendingLifecycleRequest(request);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function withPendingLifecycleRegistryLock(callback) {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request)
+    throw new Error(
+      "This browser does not provide the required cross-tab lock service.",
+    );
+  if (!pendingLifecycleRegistryLockName)
+    throw new Error("The workspace-scoped lifecycle registry is unavailable.");
+  return locks.request(
+    pendingLifecycleRegistryLockName,
+    { mode: "exclusive" },
+    callback,
+  );
+}
+
+async function configurePendingLifecycleRegistry(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  pendingLifecycleStorageKey = `${pendingLifecycleStorageKeyPrefix}.${scope}`;
+  pendingLifecycleRegistryLockName = `${pendingLifecycleRegistryLockNamePrefix}.${scope}`;
+  synchronizePendingLifecycleRequestsFromStorage();
+  // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/97 Reconcile restored identities against structured durable receipt state before pruning them.
+}
+
+function synchronizePendingLifecycleRequestsFromStorage() {
+  const stored = restorePendingLifecycleRequests();
+  pendingLifecycleRequests.clear();
+  for (const [requestKey, request] of stored)
+    pendingLifecycleRequests.set(requestKey, request);
+}
+
+function restorePendingLifecycleRequests() {
+  if (!pendingLifecycleStorageKey || !window.localStorage)
+    throw new Error("Shared lifecycle storage is unavailable.");
+  const stored = window.localStorage.getItem(pendingLifecycleStorageKey);
+  if (!stored) return new Map();
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    throw new Error("The shared lifecycle registry is corrupt.");
+  }
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.requests))
+    throw new Error("The shared lifecycle registry schema is unsupported.");
+  const requests = new Map();
+  for (const request of payload.requests) {
+    if (!isStoredPendingLifecycleRequest(request))
+      throw new Error(
+        "The shared lifecycle registry contains invalid entries.",
+      );
+    const requestKey = lifecycleRequestKey(
+      request.kind,
+      request.runId,
+      request.expectedLifecycleVersion,
+    );
+    if (requests.has(requestKey))
+      throw new Error(
+        "The shared lifecycle registry contains duplicate entries.",
+      );
+    requests.set(requestKey, request);
+  }
+  return requests;
+}
+
+function isStoredPendingLifecycleRequest(request) {
+  return (
+    request &&
+    ["pause", "cancel", "resume"].includes(request.kind) &&
+    typeof request.runId === "string" &&
+    request.runId.length > 0 &&
+    request.runId.length <= 200 &&
+    Number.isInteger(request.expectedLifecycleVersion) &&
+    request.expectedLifecycleVersion > 0 &&
+    typeof request.operationId === "string" &&
+    /^[a-z0-9-]{8,128}$/.test(request.operationId)
+  );
+}
+
+function persistPendingLifecycleRequests(requests) {
+  if (!pendingLifecycleStorageKey || !window.localStorage)
+    throw new Error("Shared lifecycle storage is unavailable.");
+  if (!requests.size) {
+    window.localStorage.removeItem(pendingLifecycleStorageKey);
+    return;
+  }
+  window.localStorage.setItem(
+    pendingLifecycleStorageKey,
+    JSON.stringify({ schemaVersion: 1, requests: [...requests.values()] }),
+  );
+}
+
+function commitPendingLifecycleRequests(next) {
+  persistPendingLifecycleRequests(next);
+  pendingLifecycleRequests.clear();
+  for (const [requestKey, request] of next)
+    pendingLifecycleRequests.set(requestKey, request);
+}
+
 async function configurePendingInvocationRegistry(workspaceRoot) {
   if (typeof workspaceRoot !== "string" || !workspaceRoot)
     throw new Error("The workspace identity is unavailable.");
@@ -3742,22 +3942,47 @@ function invocationReconciliationDeadlineError() {
 
 async function controlRun(action) {
   if (!selectedRun) return;
+  const runId = selectedRun.id;
+  const expectedLifecycleVersion = selectedRun.lifecycleVersion;
+  let pending = null;
   try {
+    pending = await getOrCreatePendingLifecycleRequest(
+      action,
+      runId,
+      expectedLifecycleVersion,
+    );
     const response = await requestJson(
-      `/api/loop-runs/${encodeURIComponent(selectedRun.id)}/${action}`,
+      `/api/loop-runs/${encodeURIComponent(runId)}/${action}`,
       {
         method: "POST",
         body: JSON.stringify({
-          expectedLifecycleVersion: selectedRun.lifecycleVersion,
-          operationId: newOperationId(),
+          expectedLifecycleVersion,
+          operationId: pending.operationId,
         }),
       },
     );
     selectedRun = response.run ?? response;
     await loadRuns({ silent: true });
+    const cleanupSucceeded =
+      !isDefinitiveLifecycleResponse(response) ||
+      (await tryForgetPendingLifecycleRequest(pending));
     showToast(response.detail ?? `${capitalize(action)} request recorded.`);
+    if (!cleanupSucceeded)
+      showBanner(
+        `${capitalize(action)} completed, but the browser could not retire its operation identity. Retrying the same operation is safe.`,
+        "notice",
+      );
   } catch (error) {
-    showBanner(`${capitalize(action)} failed: ${error.message}`);
+    const cleanupSucceeded =
+      !pending ||
+      !isDefinitiveLifecycleResponse(error.payload) ||
+      (await tryForgetPendingLifecycleRequest(pending));
+    const cleanupDetail = cleanupSucceeded
+      ? ""
+      : " The browser could not retire the definitive operation identity.";
+    showBanner(
+      `${capitalize(action)} failed: ${error.message}${cleanupDetail}`,
+    );
   }
 }
 
@@ -3765,52 +3990,54 @@ async function resumeRun() {
   if (!selectedRun || selectedRun.status !== "Paused") return;
   const runId = selectedRun.id;
   const expectedLifecycleVersion = selectedRun.lifecycleVersion;
-  if (
-    pendingResumeRequest?.runId !== runId ||
-    pendingResumeRequest.expectedLifecycleVersion !== expectedLifecycleVersion
-  ) {
-    pendingResumeRequest = {
+  try {
+    const pending = await getOrCreatePendingLifecycleRequest(
+      "resume",
       runId,
       expectedLifecycleVersion,
-      operationId: newOperationId(),
-    };
-  }
-  try {
+    );
     const connection = await getHub();
     const invocation = connection.invoke("ResumeLoop", {
       runId,
       expectedLifecycleVersion,
-      operationId: pendingResumeRequest.operationId,
+      operationId: pending.operationId,
     });
     const response = await waitForRunOperation(invocation, {
       preferredRunId: runId,
     });
-    if (
-      !["OperationInProgress", "WorkspaceHostUnavailable"].includes(
-        response?.status,
-      )
-    )
-      pendingResumeRequest = null;
-    if (
-      ![
-        "Resumed",
-        "Completed",
-        "Cancelled",
-        "Paused",
-        "NeedsReview",
-        "AuditWarning",
-      ].includes(response?.status)
-    ) {
+    const accepted = [
+      "Resumed",
+      "Completed",
+      "Cancelled",
+      "Paused",
+      "NeedsReview",
+      "AuditWarning",
+    ].includes(response?.status);
+    selectedRun = response?.run ?? selectedRun;
+    if (!accepted) {
       await loadRuns({ silent: true, preferredRunId: runId });
       renderAll();
+      const cleanupSucceeded =
+        !isDefinitiveLifecycleResponse(response) ||
+        (await tryForgetPendingLifecycleRequest(pending));
+      const cleanupDetail = cleanupSucceeded
+        ? ""
+        : " The browser could not retire the definitive operation identity.";
       showBanner(
-        `Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}`,
+        `Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}${cleanupDetail}`,
       );
       return;
     }
-    selectedRun = response?.run ?? selectedRun;
     await loadRuns({ silent: true });
+    const cleanupSucceeded =
+      !isDefinitiveLifecycleResponse(response) ||
+      (await tryForgetPendingLifecycleRequest(pending));
     showToast(response?.detail ?? "Resume completed.");
+    if (!cleanupSucceeded)
+      showBanner(
+        "Resume completed, but the browser could not retire its operation identity. Retrying the same operation is safe.",
+        "notice",
+      );
   } catch (error) {
     showBanner(`Resume failed: ${error.message}`);
   }
