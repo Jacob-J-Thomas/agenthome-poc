@@ -2527,7 +2527,7 @@ test("a committed Resume audit warning refreshes the durable run instead of repo
   assert.match(app.elements.runSubtitle.textContent, /Running/);
 });
 
-test("an unsupported persistence schema Resume error reuses the operation identity after cleanup", async () => {
+test("Resume preserves unreadable operations but retires identities proved absent", async () => {
   const server = new FakeFetchServer(createCatalog());
   const paused = createRunSnapshot();
   paused.status = "Paused";
@@ -2567,11 +2567,13 @@ test("an unsupported persistence schema Resume error reuses the operation identi
         return Promise.resolve({
           status: "WorkspaceHostUnavailable",
           run: paused,
+          operationId: input.operationId,
           detail: "Hosting is temporarily unavailable.",
         });
       return Promise.resolve({
         status: "InvalidState",
         run: paused,
+        operationId: input.operationId,
         detail: "Definitive retry response.",
       });
     },
@@ -2606,7 +2608,7 @@ test("an unsupported persistence schema Resume error reuses the operation identi
 
   assert.equal(operationIds.length, 3);
   assert.equal(operationIds[1], operationIds[0]);
-  assert.equal(operationIds[2], operationIds[0]);
+  assert.notEqual(operationIds[2], operationIds[0]);
   assert.match(
     app.elements.validationBanner.textContent,
     /Definitive retry response/,
@@ -2790,6 +2792,15 @@ test("receipt-pending lifecycle failures retain their operation identity", async
   const operationIds = [];
   server.on("POST", `/api/loop-runs/${run.id}/cancel`, ({ body }) => {
     operationIds.push(body.operationId);
+    server.controlReceipts.set(body.operationId, {
+      operationId: body.operationId,
+      kind: "Cancel",
+      runId: run.id,
+      expectedLifecycleVersion: run.lifecycleVersion,
+      state: "Pending",
+      outcome: "Unknown",
+      completionDurablyProved: false,
+    });
     return {
       status: 503,
       body: {
@@ -2817,30 +2828,81 @@ test("receipt-pending lifecycle failures retain their operation identity", async
 });
 
 test("receipt I/O failures retain their lifecycle operation identity", async () => {
-  const app = await loadLoopBuilder();
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  const operationIds = [];
+  server.on("POST", `/api/loop-runs/${run.id}/pause`, ({ body }) => {
+    operationIds.push(body.operationId);
+    return {
+      status: 503,
+      body: {
+        status: "Failed",
+        run,
+        operationId: body.operationId,
+        detail: "A receipt I/O failure occurred.",
+      },
+    };
+  });
+  server.on(
+    "GET",
+    "/api/loop-runs/controls/00000000-0000-4000-8000-000000000001",
+    () => ({
+      status: 503,
+      body: { detail: "Receipt storage is temporarily unavailable." },
+    }),
+  );
+  const app = await loadLoopBuilder({ server });
+  app.context.testRun = run;
+  vm.runInContext("selectedRun = testRun", app.context);
 
+  await app.context.controlRun("pause");
+  await app.context.controlRun("pause");
+
+  assert.deepEqual(operationIds, [
+    "00000000-0000-4000-8000-000000000001",
+    "00000000-0000-4000-8000-000000000001",
+  ]);
   assert.equal(
-    app.context.isDefinitiveLifecycleResponse({
-      status: "Failed",
-      detail:
-        "The control-operation receipt could not be started safely: IOException.",
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    1,
+  );
+});
+
+test("stalled lifecycle receipt reads stop at one bounded deadline and retain their identities", async () => {
+  const localStorage = new FakeStorage();
+  const app = await loadLoopBuilder({ localStorage });
+  const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      requests: [
+        {
+          kind: "pause",
+          runId: "run-stalled",
+          expectedLifecycleVersion: 4,
+          operationId: "operation-stalled",
+        },
+      ],
     }),
-    false,
+  );
+  app.server.on(
+    "GET",
+    "/api/loop-runs/controls/operation-stalled",
+    () => new Promise(() => {}),
+  );
+
+  const startedAt = performance.now();
+  await app.context.reconcilePendingLifecycleRequests(startedAt + 25);
+
+  assert.ok(performance.now() - startedAt < 1000);
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    1,
   );
   assert.equal(
-    app.context.isDefinitiveLifecycleResponse({
-      status: "Failed",
-      detail:
-        "The control-operation receipt could not be read safely: FormatException.",
-    }),
-    false,
-  );
-  assert.equal(
-    app.context.isDefinitiveLifecycleResponse({
-      status: "Failed",
-      detail: "The provider returned a definitive terminal failure.",
-    }),
-    true,
+    JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
+    "operation-stalled",
   );
 });
 
@@ -2868,6 +2930,15 @@ test("startup preserves receipt-pending identities after lifecycle advancement",
     id: "run-advanced",
     lifecycleVersion: 5,
   });
+  server.controlReceipts.set("operation-before-response-loss", {
+    operationId: "operation-before-response-loss",
+    kind: "Resume",
+    runId: "run-advanced",
+    expectedLifecycleVersion: 4,
+    state: "Pending",
+    outcome: "Unknown",
+    completionDurablyProved: false,
+  });
 
   const app = await loadLoopBuilder({ server, localStorage });
 
@@ -2878,6 +2949,100 @@ test("startup preserves receipt-pending identities after lifecycle advancement",
   assert.equal(
     JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
     "operation-before-response-loss",
+  );
+});
+
+test("startup retires only matching durably completed lifecycle receipts", async () => {
+  const localStorage = new FakeStorage();
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  const storageKey = `embodysense.pending-loop-lifecycle.v1.${scope}`;
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      requests: [
+        {
+          kind: "pause",
+          runId: "run-complete",
+          expectedLifecycleVersion: 2,
+          operationId: "operation-complete",
+        },
+        {
+          kind: "cancel",
+          runId: "run-pending",
+          expectedLifecycleVersion: 3,
+          operationId: "operation-pending",
+        },
+      ],
+    }),
+  );
+  const server = new FakeFetchServer(createCatalog());
+  server.controlReceipts.set("operation-complete", {
+    operationId: "operation-complete",
+    kind: "Pause",
+    runId: "run-complete",
+    expectedLifecycleVersion: 2,
+    state: "Complete",
+    outcome: "Paused",
+    completionDurablyProved: true,
+  });
+  server.controlReceipts.set("operation-pending", {
+    operationId: "operation-pending",
+    kind: "Cancel",
+    runId: "run-pending",
+    expectedLifecycleVersion: 3,
+    state: "Pending",
+    outcome: "Unknown",
+    completionDurablyProved: false,
+  });
+
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    1,
+  );
+  assert.equal(
+    JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
+    "operation-pending",
+  );
+});
+
+test("structured completion retires partial-success responses without reading receipt detail", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  let operationId = null;
+  server.on("POST", `/api/loop-runs/${run.id}/cancel`, ({ body }) => {
+    operationId = body.operationId;
+    server.controlReceipts.set(operationId, {
+      operationId,
+      kind: "Cancel",
+      runId: run.id,
+      expectedLifecycleVersion: run.lifecycleVersion,
+      state: "Complete",
+      outcome: "NeedsReview",
+      completionDurablyProved: true,
+    });
+    return {
+      status: 503,
+      body: {
+        status: "NeedsReview",
+        run,
+        operationId,
+        detail: "This misleading detail says the receipt remains pending.",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  app.context.testRun = run;
+  vm.runInContext("selectedRun = testRun", app.context);
+
+  await app.context.controlRun("cancel");
+
+  assert.ok(operationId);
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    0,
   );
 });
 
@@ -2914,6 +3079,49 @@ test("the lifecycle registry remains bounded when safe reconciliation is unavail
   assert.equal(
     JSON.parse(localStorage.getItem(storageKey)).requests.length,
     100,
+  );
+});
+
+test("completed lifecycle receipts are reconciled before enforcing the registry bound", async () => {
+  const localStorage = new FakeStorage();
+  const app = await loadLoopBuilder({ localStorage });
+  const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
+  const requests = Array.from({ length: 100 }, (_, index) => ({
+    kind: "pause",
+    runId: "run-advancing",
+    expectedLifecycleVersion: index + 1,
+    operationId: `operation-${String(index + 1).padStart(3, "0")}`,
+  }));
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify({ schemaVersion: 1, requests }),
+  );
+  app.server.controlReceipts.set("operation-001", {
+    operationId: "operation-001",
+    kind: "Pause",
+    runId: "run-advancing",
+    expectedLifecycleVersion: 1,
+    state: "Complete",
+    outcome: "Paused",
+    completionDurablyProved: true,
+  });
+
+  const reserved = await app.context.getOrCreatePendingLifecycleRequest(
+    "cancel",
+    "run-advancing",
+    101,
+  );
+
+  assert.equal(reserved.kind, "cancel");
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    100,
+  );
+  assert.equal(
+    JSON.parse(localStorage.getItem(storageKey)).requests.some(
+      (request) => request.operationId === "operation-001",
+    ),
+    false,
   );
 });
 
@@ -2975,7 +3183,7 @@ test("authoritative lifecycle responses survive browser cleanup failures", async
   assert.equal(app.elements.toast.textContent, "Pause recorded.");
   assert.match(
     app.elements.validationBanner.textContent,
-    /completed, but the browser could not retire its operation identity/i,
+    /returned, but its durable receipt is still pending or unreadable/i,
   );
   assert.equal(
     vm.runInContext("selectedRun.lifecycleVersion", app.context),
@@ -7353,6 +7561,7 @@ class FakeFetchServer {
     this.runDetails = new Map();
     this.traceDetails = new Map();
     this.invocationReceipts = new Map();
+    this.controlReceipts = new Map();
     this.traceQuota = null;
     this.calls = [];
     this.handlers = new Map();
@@ -7409,6 +7618,18 @@ class FakeFetchServer {
         : responseFrom({
             status: 404,
             body: { detail: "Invocation receipt not found." },
+          });
+    }
+    if (method === "GET" && url.startsWith("/api/loop-runs/controls/")) {
+      const operationId = decodeURIComponent(
+        url.slice("/api/loop-runs/controls/".length),
+      );
+      const receipt = this.controlReceipts.get(operationId);
+      return receipt
+        ? responseFrom({ status: 200, body: clone(receipt) })
+        : responseFrom({
+            status: 404,
+            body: { detail: "Control receipt not found." },
           });
     }
     if (

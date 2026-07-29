@@ -50,8 +50,10 @@ public sealed class LoopRunApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var unauthorized = await client.GetAsync("/api/loop-runs");
+            var unauthorizedControlReceipt = await client.GetAsync("/api/loop-runs/controls/control-web");
             var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
             var beforeInitialization = await SendAsync(client, "/api/loop-runs", token);
+            var controlBeforeInitialization = await SendAsync(client, "/api/loop-runs/controls/control-web", token);
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
             var paths = new WorkspacePaths(workspace.RootPath);
             const string transcriptEvidence = "existing conversation evidence must survive a run read";
@@ -68,6 +70,25 @@ public sealed class LoopRunApiControllerTests
             await CreateCompletedInvocationReceiptAsync(paths, monitoredRun);
             var invocationReceipt = await SendAsync(client, $"/api/loop-runs/invocations/{monitoredRun.AdmissionOperationId}", token);
             var invocationSnapshot = await invocationReceipt.Content.ReadFromJsonAsync<LoopInvocationOperationSnapshot>(JsonOptions);
+            var control = await BeginControlReceiptAsync(paths);
+            using var controlLease = control.Lease;
+            var pendingControlReceipt = await SendAsync(client, $"/api/loop-runs/controls/{control.Operation.OperationId}", token);
+            var pendingControlSnapshot = await pendingControlReceipt.Content.ReadFromJsonAsync<LoopControlOperationSnapshot>(JsonOptions);
+            Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await control.Store.CompleteAsync(control.Operation with
+            {
+                UpdatedAtUtc = control.Operation.UpdatedAtUtc.AddSeconds(1),
+                State = CustomLoopControlOperationState.Complete,
+                Outcome = CustomLoopControlStatus.Paused,
+                ResultLifecycleVersion = 3,
+                ResultRunStatus = CustomLoopRunStatus.Paused,
+                OutcomeAuditRecorded = true,
+                Detail = "The run paused."
+            })).Status);
+            var completedControlReceipt = await SendAsync(client, $"/api/loop-runs/controls/{control.Operation.OperationId}", token);
+            var completedControlJson = await completedControlReceipt.Content.ReadAsStringAsync();
+            var completedControlSnapshot = JsonSerializer.Deserialize<LoopControlOperationSnapshot>(completedControlJson, JsonOptions);
+            var missingControlReceipt = await SendAsync(client, "/api/loop-runs/controls/control-missing", token);
+            var invalidControlReceipt = await SendAsync(client, "/api/loop-runs/controls/INVALID%20ID", token);
             var monitor = await SendAsync(client, $"/api/loop-runs/{monitoredRun.Id}/monitor", token);
             var monitorSummary = await monitor.Content.ReadFromJsonAsync<LoopRunSummarySnapshot>(JsonOptions);
             var monitorEtag = monitor.Headers.ETag;
@@ -103,7 +124,9 @@ public sealed class LoopRunApiControllerTests
             var corruptBody = await corrupt.Content.ReadAsStringAsync();
 
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedControlReceipt.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, controlBeforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.OK, list.StatusCode);
             Assert.Empty(summaries!.Items);
             Assert.Null(summaries.ContinuationCursor);
@@ -118,6 +141,25 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal("Complete", invocationSnapshot?.State);
             Assert.Equal("Admitted", invocationSnapshot?.Outcome);
             Assert.Equal(monitoredRun.Id, invocationSnapshot?.RunId);
+            Assert.Equal(HttpStatusCode.OK, pendingControlReceipt.StatusCode);
+            Assert.Equal("Pending", pendingControlSnapshot?.State);
+            Assert.Equal("Unknown", pendingControlSnapshot?.Outcome);
+            Assert.False(pendingControlSnapshot?.CompletionDurablyProved);
+            Assert.Equal(HttpStatusCode.OK, completedControlReceipt.StatusCode);
+            Assert.Equal("control-web", completedControlSnapshot?.OperationId);
+            Assert.Equal("Pause", completedControlSnapshot?.Kind);
+            Assert.Equal("run-web-recovery", completedControlSnapshot?.RunId);
+            Assert.Equal(2, completedControlSnapshot?.ExpectedLifecycleVersion);
+            Assert.Equal("Complete", completedControlSnapshot?.State);
+            Assert.Equal("Paused", completedControlSnapshot?.Outcome);
+            Assert.Equal(3, completedControlSnapshot?.ResultLifecycleVersion);
+            Assert.Equal("Paused", completedControlSnapshot?.ResultRunStatus);
+            Assert.True(completedControlSnapshot?.OutcomeAuditRecorded);
+            Assert.True(completedControlSnapshot?.CompletionDurablyProved);
+            Assert.DoesNotContain("\"detail\"", completedControlJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("\"actor\"", completedControlJson, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(HttpStatusCode.NotFound, missingControlReceipt.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidControlReceipt.StatusCode);
             Assert.Equal(HttpStatusCode.OK, monitor.StatusCode);
             Assert.Equal(monitoredRun.Id, monitorSummary?.Id);
             Assert.Equal(monitoredRun.LifecycleVersion, monitorSummary?.LifecycleVersion);
@@ -478,6 +520,30 @@ public sealed class LoopRunApiControllerTests
             RunId = run.Id,
             Detail = "The run was admitted."
         })).Status);
+    }
+
+    private static async Task<(CustomLoopControlOperationStore Store, CustomLoopControlOperation Operation, ICustomLoopControlOperationLease Lease)> BeginControlReceiptAsync(WorkspacePaths paths)
+    {
+        var pending = new CustomLoopControlOperation(
+            CustomLoopControlOperation.CurrentSchemaVersion,
+            "control-web",
+            CustomLoopControlRequestHash.Compute(CustomLoopControlKind.Pause, "run-web-recovery", 2, "control-web", "web"),
+            CustomLoopControlKind.Pause,
+            "run-web-recovery",
+            2,
+            "web",
+            Timestamp,
+            Timestamp,
+            CustomLoopControlOperationState.Pending,
+            CustomLoopControlStatus.Unknown,
+            null,
+            null,
+            false,
+            "The control operation is pending.");
+        var store = new CustomLoopControlOperationStore(paths);
+        var begun = await store.BeginAsync(pending);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, begun.Status);
+        return (store, Assert.IsType<CustomLoopControlOperation>(begun.Operation), Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(begun.Lease));
     }
 
     private static async Task<HttpResponseMessage> SendAsync(HttpClient client, string path, string token, HttpMethod? method = null)
