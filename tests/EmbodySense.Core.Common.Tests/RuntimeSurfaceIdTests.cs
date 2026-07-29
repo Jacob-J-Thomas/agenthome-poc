@@ -1,4 +1,4 @@
-using EmbodySense.Core.Common.Runtime.Models;
+using EmbodySense.Core.Common.Runtime;
 
 namespace EmbodySense.Core.Common.Tests;
 

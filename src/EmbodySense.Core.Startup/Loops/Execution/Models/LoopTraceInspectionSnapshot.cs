@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Loops.Execution;
+namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 
 public sealed record LoopTraceInspectionSnapshot(
     string Kind,

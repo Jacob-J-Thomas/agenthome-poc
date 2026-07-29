@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Workspace;

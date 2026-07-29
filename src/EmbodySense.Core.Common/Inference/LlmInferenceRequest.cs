@@ -1,0 +1,35 @@
+using EmbodySense.Core.Common.Inference.Models;
+namespace EmbodySense.Core.Common.Inference;
+
+public sealed record LlmInferenceRequest
+{
+    public LlmInferenceRequest(
+        IReadOnlyList<LlmMessage> messages,
+        LlmInferenceOptions? options = null,
+        LlmInferenceInstructionContext? instructionContext = null)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        if (messages.Count == 0)
+        {
+            throw new ArgumentException(
+                "At least one message is required for LLM inferencing.",
+                nameof(messages));
+        }
+
+        Messages = messages.ToArray();
+        Options = options ?? LlmInferenceOptions.Default;
+        InstructionContext = instructionContext;
+    }
+
+    public IReadOnlyList<LlmMessage> Messages { get; }
+
+    public LlmInferenceOptions Options { get; }
+
+    public LlmInferenceInstructionContext? InstructionContext { get; }
+
+    public static LlmInferenceRequest FromUserText(string text, LlmInferenceOptions? options = null)
+    {
+        return new LlmInferenceRequest([LlmMessage.User(text)], options);
+    }
+}

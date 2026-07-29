@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Governance.Permissions;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 
 namespace EmbodySense.Core.Common.Governance.Tools.Models;

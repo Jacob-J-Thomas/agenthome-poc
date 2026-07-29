@@ -1,7 +1,8 @@
+using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Inference;
 using System.Diagnostics;
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Memory.Models;

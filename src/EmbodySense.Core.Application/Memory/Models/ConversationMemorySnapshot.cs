@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Application.Memory.Models;

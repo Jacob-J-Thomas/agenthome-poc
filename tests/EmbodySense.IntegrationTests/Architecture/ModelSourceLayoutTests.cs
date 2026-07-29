@@ -36,27 +36,26 @@ public sealed class ModelSourceLayoutTests
     ];
 
     [Fact]
-    public void Foundation_model_files_use_path_matching_models_namespaces()
+    public void Production_model_files_use_path_matching_models_namespaces()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = MigratedProjectRoots(sourceRoot)
+        var violations = ProductionProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => IsModelFile(sourceRoot, file))
             .Where(file => !HasExpectedNamespace(sourceRoot, file))
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Startup, CLI, and Web as their model slices are migrated.
-        Assert.Empty(violations);
+        Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
     [Fact]
-    public void Foundation_model_declarations_are_not_left_outside_models_directories()
+    public void Production_model_declarations_are_not_left_outside_models_directories()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = MigratedProjectRoots(sourceRoot)
+        var violations = ProductionProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => !IsModelFile(sourceRoot, file))
             .SelectMany(file => FindTopLevelModelCandidateNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares model candidate {name} outside Models."))
@@ -86,13 +85,12 @@ public sealed class ModelSourceLayoutTests
     }
 
     [Fact]
-    public void CoreApplication_model_files_do_not_own_behavior()
+    public void Production_model_files_do_not_own_behavior()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var projectRoot = Path.Combine(sourceRoot, "EmbodySense.Core.Application");
         var violations = Directory
-            .EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
+            .EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
             .Where(file => IsModelFile(sourceRoot, file))
             .SelectMany(file => FindTopLevelBehaviorBearingTypeNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares behavior-bearing type {name} in Models."))
             .ToArray();
@@ -112,7 +110,7 @@ public sealed class ModelSourceLayoutTests
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
-        Assert.Empty(violations);
+        Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
     [Fact]
@@ -195,15 +193,12 @@ public sealed class ModelSourceLayoutTests
             || member is BaseTypeDeclarationSyntax nestedType && OwnsBehavior(nestedType));
     }
 
-    private static IReadOnlyList<string> MigratedProjectRoots(string sourceRoot)
+    private static IReadOnlyList<string> ProductionProjectRoots(string sourceRoot)
     {
-        return
-        [
-            Path.Combine(sourceRoot, "EmbodySense.Core.Common"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Application"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Clients"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Persistence")
-        ];
+        return Directory
+            .EnumerateDirectories(sourceRoot, "EmbodySense.*", SearchOption.TopDirectoryOnly)
+            .Where(directory => File.Exists(Path.Combine(directory, $"{Path.GetFileName(directory)}.csproj")))
+            .ToArray();
     }
 
     private static bool HasExpectedNamespace(string sourceRoot, string file)

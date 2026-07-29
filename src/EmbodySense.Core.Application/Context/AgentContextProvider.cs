@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Common.Context;
 using EmbodySense.Core.Common.Context.Models;

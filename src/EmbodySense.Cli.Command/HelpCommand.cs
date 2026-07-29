@@ -1,4 +1,4 @@
-using EmbodySense.Cli.Command.Models;
+using EmbodySense.Cli.Command;
 
 namespace EmbodySense.Cli.Command;
 

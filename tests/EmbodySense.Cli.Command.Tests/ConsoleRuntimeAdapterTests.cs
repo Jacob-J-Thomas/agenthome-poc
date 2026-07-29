@@ -1,6 +1,6 @@
+using EmbodySense.Core.Startup.Governance;
 using System.Globalization;
 using System.Text;
-using EmbodySense.Core.Startup.Governance;
 
 namespace EmbodySense.Cli.Command.Tests;
 

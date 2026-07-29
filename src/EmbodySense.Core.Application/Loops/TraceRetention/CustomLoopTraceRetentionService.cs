@@ -1,10 +1,10 @@
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 
 namespace EmbodySense.Core.Application.Loops.TraceRetention;

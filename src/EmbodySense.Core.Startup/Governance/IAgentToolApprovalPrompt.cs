@@ -1,3 +1,4 @@
+using EmbodySense.Core.Startup.Governance;
 namespace EmbodySense.Core.Startup.Governance;
 
 public interface IAgentToolApprovalPrompt

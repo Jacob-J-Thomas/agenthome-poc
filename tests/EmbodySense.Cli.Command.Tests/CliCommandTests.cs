@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
 using EmbodySense.Cli.Command;
-using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 

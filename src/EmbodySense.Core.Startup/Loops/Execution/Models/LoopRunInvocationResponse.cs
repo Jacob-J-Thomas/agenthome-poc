@@ -1,6 +1,7 @@
+using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Loops;
 
-namespace EmbodySense.Core.Startup.Loops.Execution;
+namespace EmbodySense.Core.Startup.Loops.Execution.Models;
 
 public sealed record LoopRunInvocationResponse(
     string AdmissionStatus,
