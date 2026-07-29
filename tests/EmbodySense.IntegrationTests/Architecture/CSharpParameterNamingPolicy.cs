@@ -112,7 +112,7 @@ internal static class CSharpParameterNamingPolicy
                 return false;
             }
 
-            if (ancestor is AnonymousFunctionExpressionSyntax nestedAnonymousFunction && AnonymousFunctionParameters(nestedAnonymousFunction).Any(parameter => parameter.Identifier.ValueText == "_")
+            if (ancestor is AnonymousFunctionExpressionSyntax nestedAnonymousFunction && AnonymousFunctionParameters(nestedAnonymousFunction).Count(parameter => parameter.Identifier.ValueText == "_") == 1
                 || ancestor is LocalFunctionStatementSyntax localFunction && localFunction.ParameterList.Parameters.Any(parameter => parameter.Identifier.ValueText == "_"))
             {
                 return true;
