@@ -63,6 +63,8 @@ public sealed class CSharpParameterNamingTests
                     Func<string, string> ignoredSimple = _ => string.Empty;
                     Func<string, string> parenthesized = (inputValue) => inputValue;
                     Func<string, string> ignoredParenthesized = (_) => string.Empty;
+                    Func<string, string> ignoredWithUnrelatedMember = _ => holder._;
+                    Action<string> ignoredWithUnrelatedNamedArgument = _ => Consume(_: string.Empty);
                     Func<string, string, string> discarded = (_, _) => string.Empty;
                     Action<string> anonymous = delegate(string inputValue) { };
                     Action<string> anonymousPlaceholder = delegate(string _) { };

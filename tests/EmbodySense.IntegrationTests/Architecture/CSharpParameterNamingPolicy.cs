@@ -7,15 +7,18 @@ namespace EmbodySense.IntegrationTests.Architecture;
 internal static class CSharpParameterNamingPolicy
 {
     private static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.CSharp14);
+    private static readonly CSharpCompilation BindingCompilation = CSharpCompilation.Create(nameof(CSharpParameterNamingPolicy), references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
 
     public static IReadOnlyList<string> FindViolations(string source, string sourcePath)
     {
-        var root = CSharpSyntaxTree.ParseText(source, ParseOptions, sourcePath).GetRoot();
+        var syntaxTree = CSharpSyntaxTree.ParseText(source, ParseOptions, sourcePath);
+        var root = syntaxTree.GetRoot();
+        var semanticModel = BindingCompilation.AddSyntaxTrees(syntaxTree).GetSemanticModel(syntaxTree, ignoreAccessibility: true);
         // Destructors, accessors, and function-pointer signatures expose no authored ParameterSyntax identifier, so no naming rule applies to them.
         var parameters = GetParameterRules(root);
 
         return parameters
-            .Where(item => !HasExpectedStyle(item.Parameter, item.ExpectedStyle, item.AllowsUnusedUnderscore))
+            .Where(item => !HasExpectedStyle(item.Parameter, item.ExpectedStyle, item.AllowsUnusedUnderscore, semanticModel))
             .Select(item => DescribeViolation(item.Parameter, sourcePath, item.ExpectedStyle, item.Context))
             .ToArray();
     }
@@ -51,10 +54,10 @@ internal static class CSharpParameterNamingPolicy
         }
     }
 
-    private static bool HasExpectedStyle(ParameterSyntax parameter, string expectedStyle, bool allowsUnusedUnderscore)
+    private static bool HasExpectedStyle(ParameterSyntax parameter, string expectedStyle, bool allowsUnusedUnderscore, SemanticModel semanticModel)
     {
         var identifier = parameter.Identifier.ValueText;
-        if (allowsUnusedUnderscore && identifier == "_" && IsUnusedAnonymousFunctionParameter(parameter))
+        if (allowsUnusedUnderscore && identifier == "_" && IsUnusedAnonymousFunctionParameter(parameter, semanticModel))
         {
             return true;
         }
@@ -67,7 +70,7 @@ internal static class CSharpParameterNamingPolicy
         return expectedStyle == "camelCase" ? char.IsLower(identifier[0]) : char.IsUpper(identifier[0]);
     }
 
-    private static bool IsUnusedAnonymousFunctionParameter(ParameterSyntax parameter)
+    private static bool IsUnusedAnonymousFunctionParameter(ParameterSyntax parameter, SemanticModel semanticModel)
     {
         var anonymousFunction = parameter.Ancestors().OfType<AnonymousFunctionExpressionSyntax>().First();
         if (AnonymousFunctionParameters(anonymousFunction).Count(candidate => candidate.Identifier.ValueText == "_") >= 2)
@@ -75,11 +78,17 @@ internal static class CSharpParameterNamingPolicy
             return true;
         }
 
+        var parameterSymbol = semanticModel.GetDeclaredSymbol(parameter);
+        if (parameterSymbol is null)
+        {
+            return false;
+        }
+
         return !AnonymousFunctionBody(anonymousFunction)
             .DescendantNodesAndSelf()
             .OfType<IdentifierNameSyntax>()
             .Where(identifier => identifier.Identifier.ValueText == "_")
-            .Any(identifier => !IsShadowedByNestedFunction(identifier, anonymousFunction));
+            .Any(identifier => SymbolEqualityComparer.Default.Equals(semanticModel.GetSymbolInfo(identifier).Symbol, parameterSymbol));
     }
 
     private static IEnumerable<ParameterSyntax> AnonymousFunctionParameters(AnonymousFunctionExpressionSyntax anonymousFunction)
@@ -101,25 +110,6 @@ internal static class CSharpParameterNamingPolicy
             AnonymousMethodExpressionSyntax anonymousMethod => anonymousMethod.Block,
             _ => throw new InvalidOperationException($"Unsupported anonymous-function syntax {anonymousFunction.Kind()}.")
         };
-    }
-
-    private static bool IsShadowedByNestedFunction(IdentifierNameSyntax identifier, AnonymousFunctionExpressionSyntax owner)
-    {
-        foreach (var ancestor in identifier.Ancestors())
-        {
-            if (ReferenceEquals(ancestor, owner))
-            {
-                return false;
-            }
-
-            if (ancestor is AnonymousFunctionExpressionSyntax nestedAnonymousFunction && AnonymousFunctionParameters(nestedAnonymousFunction).Count(parameter => parameter.Identifier.ValueText == "_") == 1
-                || ancestor is LocalFunctionStatementSyntax localFunction && localFunction.ParameterList.Parameters.Any(parameter => parameter.Identifier.ValueText == "_"))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static string DescribeViolation(ParameterSyntax parameter, string sourcePath, string expectedStyle, string context)
