@@ -100,6 +100,49 @@ public sealed class ModelSourceLayoutTests
         Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
+    [Fact]
+    public void Model_files_do_not_own_comparer_behavior()
+    {
+        var root = FindRepositoryRoot();
+        var sourceRoot = Path.Combine(root, "src");
+        var violations = Directory
+            .EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(file => IsModelFile(sourceRoot, file))
+            .Where(file => DeclaresComparerType(File.ReadAllText(file)))
+            .Select(file => Path.GetRelativePath(root, file))
+            .ToArray();
+
+        Assert.Empty(violations);
+    }
+
+    [Fact]
+    public void Behavior_classification_catches_field_events_and_nested_behavior()
+    {
+        const string source = """
+            namespace Example;
+
+            internal sealed record EventfulState
+            {
+                public event EventHandler? Changed;
+            }
+
+            internal sealed record NestedValidatorState
+            {
+                private sealed class Validator
+                {
+                    public bool IsValid() => true;
+                }
+            }
+
+            internal sealed record NestedDataState
+            {
+                private sealed record Metadata(string Value);
+            }
+            """;
+
+        Assert.Equal(["EventfulState", "NestedValidatorState"], FindTopLevelBehaviorBearingTypeNames(source));
+    }
+
     private static bool IsModelFile(string sourceRoot, string file)
     {
         var relativePath = Path.GetRelativePath(sourceRoot, file);
@@ -146,8 +189,10 @@ public sealed class ModelSourceLayoutTests
             or OperatorDeclarationSyntax
             or ConversionOperatorDeclarationSyntax
             or IndexerDeclarationSyntax
+            or EventFieldDeclarationSyntax
             || member is PropertyDeclarationSyntax property && (property.ExpressionBody is not null || property.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true)
-            || member is EventDeclarationSyntax eventDeclaration && eventDeclaration.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true);
+            || member is EventDeclarationSyntax eventDeclaration && eventDeclaration.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true
+            || member is BaseTypeDeclarationSyntax nestedType && OwnsBehavior(nestedType));
     }
 
     private static IReadOnlyList<string> MigratedProjectRoots(string sourceRoot)
@@ -176,6 +221,13 @@ public sealed class ModelSourceLayoutTests
     }
 
     private static readonly Regex NamespaceDeclarationPattern = new(@"^\s*namespace\s+(?<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[;{]", RegexOptions.CultureInvariant | RegexOptions.Multiline);
+    private static readonly Regex TypeDeclarationWithBaseListPattern = new(@"^\s*(?:(?:public|internal|private|protected|file|abstract|sealed|static|partial|readonly|ref|unsafe|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct)\s+[A-Za-z_]\w*(?:\s*<[^>{;]+>)?(?:\s*\([^;{]*\))?\s*:\s*(?<bases>[^{]+)\{", RegexOptions.CultureInvariant | RegexOptions.Multiline);
+    private static readonly Regex ComparerBaseTypePattern = new(@"\b(?:IComparer|IEqualityComparer|Comparer)\s*<", RegexOptions.CultureInvariant);
+
+    private static bool DeclaresComparerType(string source)
+    {
+        return TypeDeclarationWithBaseListPattern.Matches(source).Any(match => ComparerBaseTypePattern.IsMatch(match.Groups["bases"].Value));
+    }
 
     private static string FindRepositoryRoot()
     {
