@@ -2,8 +2,8 @@
   "private": true,
   "scripts": {
     "verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify.ps1",
-    "lint": "eslint src/EmbodySense.Web/wwwroot/**/*.js tests/frontend/**/*.mjs",
-    "format:check": "prettier --check src/EmbodySense.Web/wwwroot/**/*.{js,css,html} tests/frontend/**/*.mjs",
+    "lint": "eslint \"src/EmbodySense.Web/wwwroot/**/*.js\" \"tests/frontend/**/*.mjs\"",
+    "format:check": "prettier --check \"src/EmbodySense.Web/wwwroot/**/*.{js,css,html}\" \"tests/frontend/**/*.mjs\"",
     "test": "npm run lint && npm run format:check && npm run test:frontend",
     "test:frontend": "node --test tests/frontend/*.test.mjs"
   },

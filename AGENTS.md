@@ -18,7 +18,8 @@ You are working on EmbodySense.
 - Prefer single-line method calls and argument lists.
 - Do not split method arguments across multiple lines unless there are more than 3 arguments, or keeping one line would make the code genuinely hard to read.
 - When a call must be split, use the smallest readable split and avoid cascading vertical formatting through nearby code.
-- Use `PascalCase` for public types, members, and positional-record properties; `camelCase` for parameters and locals; and `_camelCase` for private fields. Run `npm run lint` and `npm run format:check` for frontend changes.
+- For C#, use `PascalCase` for public types, members, and positional-record properties; `camelCase` for parameters and locals; and `_camelCase` for private fields.
+- Run `npm run lint` and `npm run format:check` for frontend changes.
 - Keep each class, record, struct, interface, and enum in its own file, with the file named after the type. Extract every behavior-bearing private helper type, including helpers that coordinate, synchronize, mutate, validate, dispose, or own lifecycle state, into its own matching file.
 - Place model and DTO types under an appropriate `Models/` folder, and give each non-private model or DTO its own named file.
 - A small model or DTO that is truly private to one containing class may remain in that class's file when it has no independent meaning, no behavior beyond property storage, and only a limited number of such private types have accumulated. Extract it once it grows, multiplies, or becomes useful outside that class. Generated and partial types are the only source-layout exceptions, and each must be explicit and narrow.
