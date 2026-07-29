@@ -40,14 +40,14 @@ public sealed class ModelSourceLayoutTests
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = FoundationProjectRoots(sourceRoot)
+        var violations = MigratedProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => IsModelFile(sourceRoot, file))
             .Where(file => !HasExpectedNamespace(sourceRoot, file))
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Application, Core.Startup, CLI, and Web as their model slices are migrated.
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Startup, CLI, and Web as their model slices are migrated.
         Assert.Empty(violations);
     }
 
@@ -56,7 +56,7 @@ public sealed class ModelSourceLayoutTests
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = FoundationProjectRoots(sourceRoot)
+        var violations = MigratedProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => !IsModelFile(sourceRoot, file))
             .SelectMany(file => FindTopLevelModelCandidateNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares model candidate {name} outside Models."))
@@ -115,11 +115,12 @@ public sealed class ModelSourceLayoutTests
             .ToArray();
     }
 
-    private static IReadOnlyList<string> FoundationProjectRoots(string sourceRoot)
+    private static IReadOnlyList<string> MigratedProjectRoots(string sourceRoot)
     {
         return
         [
             Path.Combine(sourceRoot, "EmbodySense.Core.Common"),
+            Path.Combine(sourceRoot, "EmbodySense.Core.Application"),
             Path.Combine(sourceRoot, "EmbodySense.Core.Clients"),
             Path.Combine(sourceRoot, "EmbodySense.Core.Persistence")
         ];

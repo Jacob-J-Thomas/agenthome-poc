@@ -1,3 +1,5 @@
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Security.Cryptography;

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;

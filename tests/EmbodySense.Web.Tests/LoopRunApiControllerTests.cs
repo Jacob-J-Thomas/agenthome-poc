@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Models;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
