@@ -9,7 +9,7 @@ public sealed class ModelSourceLayoutTests
         var violations = Directory
             .EnumerateFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories)
             .Where(IsModelFile)
-            .Where(file => !File.ReadAllText(file).Contains("namespace ", StringComparison.Ordinal) || !File.ReadAllText(file).Contains(".Models;", StringComparison.Ordinal))
+            .Where(file => !HasModelsNamespace(File.ReadAllText(file)))
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
@@ -33,6 +33,11 @@ public sealed class ModelSourceLayoutTests
     private static bool IsModelFile(string file)
     {
         return file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(segment => string.Equals(segment, "Models", StringComparison.Ordinal));
+    }
+
+    private static bool HasModelsNamespace(string source)
+    {
+        return source.Contains(".Models;", StringComparison.Ordinal) || source.Contains(".Models.", StringComparison.Ordinal);
     }
 
     private static string FindRepositoryRoot()
