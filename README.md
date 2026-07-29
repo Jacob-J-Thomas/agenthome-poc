@@ -148,7 +148,7 @@ From the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. The installed-browser smoke is opt-in because local Edge/Chrome GPU startup is host-specific:
+The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. Pull requests also run the installed-browser smoke on a Windows runner; it remains opt-in locally because local Edge/Chrome GPU startup is host-specific:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -RunBrowserE2E
