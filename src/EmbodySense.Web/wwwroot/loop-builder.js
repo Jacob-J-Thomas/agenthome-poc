@@ -52,7 +52,9 @@ const pendingLifecycleRegistryLockNamePrefix =
   "embodysense.pending-loop-lifecycle";
 let pendingLifecycleStorageKey = null;
 let pendingLifecycleRegistryLockName = null;
+let reconciledPendingLifecycleStorageKey = null;
 const maximumPendingLifecycleRequests = 100;
+const maximumConcurrentLifecycleReceiptReads = 8;
 const pendingLifecycleRequests = new Map();
 const pendingInvocationStorageKeyPrefix =
   "embodysense.pending-loop-invocations.v1";
@@ -214,10 +216,14 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
       pendingInvocationRequests.clear();
     }
     try {
-      await configurePendingLifecycleRegistry(status.workspaceRoot);
+      await configurePendingLifecycleRegistry(
+        status.workspaceRoot,
+        status.initialized,
+      );
     } catch {
       pendingLifecycleStorageKey = null;
       pendingLifecycleRegistryLockName = null;
+      reconciledPendingLifecycleStorageKey = null;
       pendingLifecycleRequests.clear();
     }
     elements.workspaceRoot.textContent = status.workspaceRoot;
@@ -3254,22 +3260,51 @@ function lifecycleRequestKey(kind, runId, expectedLifecycleVersion) {
   return JSON.stringify([kind, runId, expectedLifecycleVersion]);
 }
 
-function isDefinitiveLifecycleResponse(response) {
-  if (!response?.status) return false;
-  if (
-    ["OperationInProgress", "WorkspaceHostUnavailable"].includes(
-      response.status,
-    )
-  )
+async function reconcilePendingLifecycleRequest(
+  request,
+  receiptAbsenceIsDefinitive = false,
+) {
+  let receipt;
+  try {
+    receipt = await requestJson(
+      `/api/loop-runs/controls/${encodeURIComponent(request.operationId)}`,
+    );
+  } catch (error) {
+    if (error.status === 404 && receiptAbsenceIsDefinitive)
+      return await tryForgetPendingLifecycleRequest(request);
     return false;
-  if (!["Failed", "NeedsReview"].includes(response.status)) return true;
-  const detail = String(response.detail ?? "").toLowerCase();
-  // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/97 Replace receipt-detail matching with structured durable receipt state.
-  return ![
-    "receipt remains pending",
-    "receipt could not be",
-    "receipt failed",
-  ].some((marker) => detail.includes(marker));
+  }
+
+  if (receipt?.operationId !== request.operationId) return false;
+  const receiptMatchesRequest =
+    String(receipt.kind ?? "").toLowerCase() === request.kind &&
+    receipt.runId === request.runId &&
+    receipt.expectedLifecycleVersion === request.expectedLifecycleVersion;
+  if (!receiptMatchesRequest)
+    return await tryForgetPendingLifecycleRequest(request);
+  if (receipt.state !== "Complete" || receipt.completionDurablyProved !== true)
+    return false;
+  return await tryForgetPendingLifecycleRequest(request);
+}
+
+async function reconcilePendingLifecycleRequests() {
+  const requests = await withPendingLifecycleRegistryLock(async () => {
+    synchronizePendingLifecycleRequestsFromStorage();
+    return [...pendingLifecycleRequests.values()];
+  });
+  let nextIndex = 0;
+  const workerCount = Math.min(
+    maximumConcurrentLifecycleReceiptReads,
+    requests.length,
+  );
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < requests.length) {
+        const request = requests[nextIndex++];
+        await reconcilePendingLifecycleRequest(request);
+      }
+    }),
+  );
 }
 
 async function getOrCreatePendingLifecycleRequest(
@@ -3277,6 +3312,7 @@ async function getOrCreatePendingLifecycleRequest(
   runId,
   expectedLifecycleVersion,
 ) {
+  await reconcilePendingLifecycleRequests();
   return withPendingLifecycleRegistryLock(async () => {
     synchronizePendingLifecycleRequestsFromStorage();
     const requestKey = lifecycleRequestKey(
@@ -3343,14 +3379,20 @@ async function withPendingLifecycleRegistryLock(callback) {
   );
 }
 
-async function configurePendingLifecycleRegistry(workspaceRoot) {
+async function configurePendingLifecycleRegistry(workspaceRoot, initialized) {
   if (typeof workspaceRoot !== "string" || !workspaceRoot)
     throw new Error("The workspace identity is unavailable.");
   const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
   pendingLifecycleStorageKey = `${pendingLifecycleStorageKeyPrefix}.${scope}`;
   pendingLifecycleRegistryLockName = `${pendingLifecycleRegistryLockNamePrefix}.${scope}`;
   synchronizePendingLifecycleRequestsFromStorage();
-  // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/97 Reconcile restored identities against structured durable receipt state before pruning them.
+  if (
+    initialized &&
+    reconciledPendingLifecycleStorageKey !== pendingLifecycleStorageKey
+  ) {
+    await reconcilePendingLifecycleRequests();
+    reconciledPendingLifecycleStorageKey = pendingLifecycleStorageKey;
+  }
 }
 
 function synchronizePendingLifecycleRequestsFromStorage() {
@@ -3963,23 +4005,26 @@ async function controlRun(action) {
     );
     selectedRun = response.run ?? response;
     await loadRuns({ silent: true });
-    const cleanupSucceeded =
-      !isDefinitiveLifecycleResponse(response) ||
-      (await tryForgetPendingLifecycleRequest(pending));
+    const cleanupSucceeded = await reconcilePendingLifecycleRequest(
+      pending,
+      response?.operationId === pending.operationId,
+    );
     showToast(response.detail ?? `${capitalize(action)} request recorded.`);
     if (!cleanupSucceeded)
       showBanner(
-        `${capitalize(action)} completed, but the browser could not retire its operation identity. Retrying the same operation is safe.`,
+        `${capitalize(action)} returned, but its durable receipt is still pending or unreadable. Retrying the same operation is safe.`,
         "notice",
       );
   } catch (error) {
     const cleanupSucceeded =
       !pending ||
-      !isDefinitiveLifecycleResponse(error.payload) ||
-      (await tryForgetPendingLifecycleRequest(pending));
+      (await reconcilePendingLifecycleRequest(
+        pending,
+        error.payload?.operationId === pending.operationId,
+      ));
     const cleanupDetail = cleanupSucceeded
       ? ""
-      : " The browser could not retire the definitive operation identity.";
+      : " The operation identity remains pending for safe replay.";
     showBanner(
       `${capitalize(action)} failed: ${error.message}${cleanupDetail}`,
     );
@@ -3990,8 +4035,9 @@ async function resumeRun() {
   if (!selectedRun || selectedRun.status !== "Paused") return;
   const runId = selectedRun.id;
   const expectedLifecycleVersion = selectedRun.lifecycleVersion;
+  let pending = null;
   try {
-    const pending = await getOrCreatePendingLifecycleRequest(
+    pending = await getOrCreatePendingLifecycleRequest(
       "resume",
       runId,
       expectedLifecycleVersion,
@@ -4017,29 +4063,36 @@ async function resumeRun() {
     if (!accepted) {
       await loadRuns({ silent: true, preferredRunId: runId });
       renderAll();
-      const cleanupSucceeded =
-        !isDefinitiveLifecycleResponse(response) ||
-        (await tryForgetPendingLifecycleRequest(pending));
+      const cleanupSucceeded = await reconcilePendingLifecycleRequest(
+        pending,
+        response?.operationId === pending.operationId,
+      );
       const cleanupDetail = cleanupSucceeded
         ? ""
-        : " The browser could not retire the definitive operation identity.";
+        : " The operation identity remains pending for safe replay.";
       showBanner(
         `Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}${cleanupDetail}`,
       );
       return;
     }
     await loadRuns({ silent: true });
-    const cleanupSucceeded =
-      !isDefinitiveLifecycleResponse(response) ||
-      (await tryForgetPendingLifecycleRequest(pending));
+    const cleanupSucceeded = await reconcilePendingLifecycleRequest(
+      pending,
+      response?.operationId === pending.operationId,
+    );
     showToast(response?.detail ?? "Resume completed.");
     if (!cleanupSucceeded)
       showBanner(
-        "Resume completed, but the browser could not retire its operation identity. Retrying the same operation is safe.",
+        "Resume returned, but its durable receipt is still pending or unreadable. Retrying the same operation is safe.",
         "notice",
       );
   } catch (error) {
-    showBanner(`Resume failed: ${error.message}`);
+    const cleanupSucceeded =
+      !pending || (await reconcilePendingLifecycleRequest(pending));
+    const cleanupDetail = cleanupSucceeded
+      ? ""
+      : " The operation identity remains pending for safe replay.";
+    showBanner(`Resume failed: ${error.message}${cleanupDetail}`);
   }
 }
 
