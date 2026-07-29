@@ -27,6 +27,7 @@ public sealed class BrowserFlowTests
         try
         {
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Needs initialization')");
+            await browser.WaitForExpressionAsync("!document.getElementById('initButton').disabled");
             await browser.EvaluateAsync("document.getElementById('initButton').click()");
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await WriteCurrentTranscriptAsync(workspace, "browser restored prompt", "browser restored answer");
