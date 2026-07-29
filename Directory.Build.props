@@ -4,8 +4,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsTestProjectLocation>$([System.String]::Copy('$(MSBuildProjectDirectory)').Replace('\', '/').Contains('/tests/'))</IsTestProjectLocation>
+    <GenerateDocumentationFile Condition="'$(IsTestProjectLocation)' != 'True'">true</GenerateDocumentationFile>
     <!-- The source baseline is documented in issue #83 before CS1591 becomes an error. -->
-    <NoWarn>$(NoWarn);1591</NoWarn>
+    <NoWarn Condition="'$(IsTestProjectLocation)' != 'True'">$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 </Project>
