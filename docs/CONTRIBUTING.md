@@ -1,5 +1,9 @@
 # Contributing
 
+## Code style
+
+Use `_` for intentionally unused lambda and anonymous-method parameters, including when the anonymous function has only one parameter. C# keeps a lone `_` addressable rather than treating it as a compiler discard, but the repository uses it as an explicit unused-value convention. If the value is read, give it a descriptive `camelCase` name instead.
+
 ## Documentation
 
 Production projects emit XML documentation files. Add accurate XML documentation to public and protected contracts and to any internal contract whose behavior crosses a layer, persistence boundary, tool authority boundary, or concurrency boundary. Cover meaningful parameters, return values, cancellation, exceptions, ordering, lifecycle constraints, and authority or integrity invariants.

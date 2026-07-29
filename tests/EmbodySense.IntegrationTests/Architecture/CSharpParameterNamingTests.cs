@@ -51,7 +51,7 @@ public sealed class CSharpParameterNamingTests
     }
 
     [Fact]
-    public void Local_functions_and_anonymous_functions_accept_camel_case_and_temporary_underscore_placeholders()
+    public void Local_functions_and_anonymous_functions_accept_camel_case_and_unused_underscores()
     {
         const string source = """
             internal sealed class Worker
@@ -60,7 +60,9 @@ public sealed class CSharpParameterNamingTests
                 {
                     void Execute(string localValue) { }
                     Func<string, string> simple = inputValue => inputValue;
+                    Func<string, string> ignoredSimple = _ => string.Empty;
                     Func<string, string> parenthesized = (inputValue) => inputValue;
+                    Func<string, string> ignoredParenthesized = (_) => string.Empty;
                     Func<string, string, string> discarded = (_, _) => string.Empty;
                     Action<string> anonymous = delegate(string inputValue) { };
                     Action<string> anonymousPlaceholder = delegate(string _) { };
