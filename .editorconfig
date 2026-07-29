@@ -12,7 +12,7 @@ dotnet_naming_symbols.private_fields.applicable_accessibilities = private
 dotnet_naming_style.underscore_camel_case.required_prefix = _
 dotnet_naming_style.underscore_camel_case.capitalization = camel_case
 
-# TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/96): Enforce camelCase parameters without flagging PascalCase positional-record properties.
+# Parameter casing is enforced by the syntax-aware CSharpParameterNamingTests gate because EditorConfig groups positional-record properties with ordinary parameters.
 
 dotnet_naming_rule.public_types_use_pascal_case.severity = warning
 dotnet_naming_rule.public_types_use_pascal_case.symbols = public_types
