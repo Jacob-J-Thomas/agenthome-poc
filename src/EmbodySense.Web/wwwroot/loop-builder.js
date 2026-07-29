@@ -55,6 +55,7 @@ let pendingLifecycleRegistryLockName = null;
 let reconciledPendingLifecycleStorageKey = null;
 const maximumPendingLifecycleRequests = 100;
 const maximumConcurrentLifecycleReceiptReads = 8;
+const pendingLifecycleReconciliationDeadlineMilliseconds = 2000;
 const pendingLifecycleRequests = new Map();
 const pendingInvocationStorageKeyPrefix =
   "embodysense.pending-loop-invocations.v1";
@@ -3263,11 +3264,14 @@ function lifecycleRequestKey(kind, runId, expectedLifecycleVersion) {
 async function reconcilePendingLifecycleRequest(
   request,
   receiptAbsenceIsDefinitive = false,
+  deadline = performance.now() +
+    pendingLifecycleReconciliationDeadlineMilliseconds,
 ) {
   let receipt;
   try {
-    receipt = await requestJson(
+    receipt = await requestLifecycleReceiptBeforeDeadline(
       `/api/loop-runs/controls/${encodeURIComponent(request.operationId)}`,
+      deadline,
     );
   } catch (error) {
     if (error.status === 404 && receiptAbsenceIsDefinitive)
@@ -3287,7 +3291,10 @@ async function reconcilePendingLifecycleRequest(
   return await tryForgetPendingLifecycleRequest(request);
 }
 
-async function reconcilePendingLifecycleRequests() {
+async function reconcilePendingLifecycleRequests(
+  deadline = performance.now() +
+    pendingLifecycleReconciliationDeadlineMilliseconds,
+) {
   const requests = await withPendingLifecycleRegistryLock(async () => {
     synchronizePendingLifecycleRequestsFromStorage();
     return [...pendingLifecycleRequests.values()];
@@ -3301,10 +3308,34 @@ async function reconcilePendingLifecycleRequests() {
     Array.from({ length: workerCount }, async () => {
       while (nextIndex < requests.length) {
         const request = requests[nextIndex++];
-        await reconcilePendingLifecycleRequest(request);
+        await reconcilePendingLifecycleRequest(request, false, deadline);
       }
     }),
   );
+}
+
+async function requestLifecycleReceiptBeforeDeadline(url, deadline) {
+  const remainingMilliseconds = deadline - performance.now();
+  if (remainingMilliseconds <= 0)
+    throw new Error("The lifecycle receipt reconciliation deadline elapsed.");
+  const abortController = new AbortController();
+  let timeoutHandle = null;
+  try {
+    const timeout = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        abortController.abort();
+        reject(
+          new Error("The lifecycle receipt reconciliation deadline elapsed."),
+        );
+      }, remainingMilliseconds);
+    });
+    return await Promise.race([
+      requestJson(url, { signal: abortController.signal }),
+      timeout,
+    ]);
+  } finally {
+    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+  }
 }
 
 async function getOrCreatePendingLifecycleRequest(

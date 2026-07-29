@@ -2868,6 +2868,44 @@ test("receipt I/O failures retain their lifecycle operation identity", async () 
   );
 });
 
+test("stalled lifecycle receipt reads stop at one bounded deadline and retain their identities", async () => {
+  const localStorage = new FakeStorage();
+  const app = await loadLoopBuilder({ localStorage });
+  const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      requests: [
+        {
+          kind: "pause",
+          runId: "run-stalled",
+          expectedLifecycleVersion: 4,
+          operationId: "operation-stalled",
+        },
+      ],
+    }),
+  );
+  app.server.on(
+    "GET",
+    "/api/loop-runs/controls/operation-stalled",
+    () => new Promise(() => {}),
+  );
+
+  const startedAt = performance.now();
+  await app.context.reconcilePendingLifecycleRequests(startedAt + 25);
+
+  assert.ok(performance.now() - startedAt < 1000);
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    1,
+  );
+  assert.equal(
+    JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
+    "operation-stalled",
+  );
+});
+
 test("startup preserves receipt-pending identities after lifecycle advancement", async () => {
   const localStorage = new FakeStorage();
   const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
