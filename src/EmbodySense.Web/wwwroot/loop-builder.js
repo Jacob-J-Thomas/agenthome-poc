@@ -3264,10 +3264,11 @@ function isDefinitiveLifecycleResponse(response) {
     return false;
   if (!["Failed", "NeedsReview"].includes(response.status)) return true;
   const detail = String(response.detail ?? "").toLowerCase();
+  // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/97 Replace receipt-detail matching with structured durable receipt state.
   return ![
-    "control receipt remains pending",
-    "idempotency receipt could not be completed",
-    "idempotency receipt failed",
+    "receipt remains pending",
+    "receipt could not be",
+    "receipt failed",
   ].some((marker) => detail.includes(marker));
 }
 
@@ -3278,7 +3279,6 @@ async function getOrCreatePendingLifecycleRequest(
 ) {
   return withPendingLifecycleRegistryLock(async () => {
     synchronizePendingLifecycleRequestsFromStorage();
-    retireSupersededPendingLifecycleRequests(runId, expectedLifecycleVersion);
     const requestKey = lifecycleRequestKey(
       kind,
       runId,
@@ -3301,21 +3301,6 @@ async function getOrCreatePendingLifecycleRequest(
     commitPendingLifecycleRequests(next);
     return pending;
   });
-}
-
-function retireSupersededPendingLifecycleRequests(
-  runId,
-  expectedLifecycleVersion,
-) {
-  const next = new Map(pendingLifecycleRequests);
-  for (const [requestKey, request] of next)
-    if (
-      request.runId === runId &&
-      request.expectedLifecycleVersion < expectedLifecycleVersion
-    )
-      next.delete(requestKey);
-  if (next.size !== pendingLifecycleRequests.size)
-    commitPendingLifecycleRequests(next);
 }
 
 async function forgetPendingLifecycleRequest(request) {
@@ -3365,43 +3350,7 @@ async function configurePendingLifecycleRegistry(workspaceRoot) {
   pendingLifecycleStorageKey = `${pendingLifecycleStorageKeyPrefix}.${scope}`;
   pendingLifecycleRegistryLockName = `${pendingLifecycleRegistryLockNamePrefix}.${scope}`;
   synchronizePendingLifecycleRequestsFromStorage();
-  await reconcileStoredPendingLifecycleRequests();
-}
-
-async function reconcileStoredPendingLifecycleRequests() {
-  const runRequests = new Map();
-  for (const [requestKey, request] of pendingLifecycleRequests) {
-    const requests = runRequests.get(request.runId) ?? [];
-    requests.push([requestKey, request]);
-    runRequests.set(request.runId, requests);
-  }
-  const superseded = await Promise.all(
-    [...runRequests.entries()].map(async ([runId, requests]) => {
-      try {
-        const run = await requestJson(
-          `/api/loop-runs/${encodeURIComponent(runId)}`,
-        );
-        return requests.filter(
-          ([, request]) =>
-            Number.isInteger(run?.lifecycleVersion) &&
-            run.lifecycleVersion > request.expectedLifecycleVersion,
-        );
-      } catch (error) {
-        return error.status === 404 ? requests : [];
-      }
-    }),
-  );
-  const completed = superseded.flat();
-  if (!completed.length) return;
-  await withPendingLifecycleRegistryLock(async () => {
-    synchronizePendingLifecycleRequestsFromStorage();
-    const next = new Map(pendingLifecycleRequests);
-    for (const [requestKey, request] of completed) {
-      const stored = next.get(requestKey);
-      if (stored?.operationId === request.operationId) next.delete(requestKey);
-    }
-    commitPendingLifecycleRequests(next);
-  });
+  // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/97 Reconcile restored identities against structured durable receipt state before pruning them.
 }
 
 function synchronizePendingLifecycleRequestsFromStorage() {

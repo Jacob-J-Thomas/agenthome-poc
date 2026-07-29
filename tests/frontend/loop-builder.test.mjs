@@ -2816,7 +2816,35 @@ test("receipt-pending lifecycle failures retain their operation identity", async
   );
 });
 
-test("startup retires lifecycle identities superseded by durable run evidence", async () => {
+test("receipt I/O failures retain their lifecycle operation identity", async () => {
+  const app = await loadLoopBuilder();
+
+  assert.equal(
+    app.context.isDefinitiveLifecycleResponse({
+      status: "Failed",
+      detail:
+        "The control-operation receipt could not be started safely: IOException.",
+    }),
+    false,
+  );
+  assert.equal(
+    app.context.isDefinitiveLifecycleResponse({
+      status: "Failed",
+      detail:
+        "The control-operation receipt could not be read safely: FormatException.",
+    }),
+    false,
+  );
+  assert.equal(
+    app.context.isDefinitiveLifecycleResponse({
+      status: "Failed",
+      detail: "The provider returned a definitive terminal failure.",
+    }),
+    true,
+  );
+});
+
+test("startup preserves receipt-pending identities after lifecycle advancement", async () => {
   const localStorage = new FakeStorage();
   const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
   const storageKey = `embodysense.pending-loop-lifecycle.v1.${scope}`;
@@ -2845,12 +2873,15 @@ test("startup retires lifecycle identities superseded by durable run evidence", 
 
   assert.equal(
     vm.runInContext("pendingLifecycleRequests.size", app.context),
-    0,
+    1,
   );
-  assert.equal(localStorage.getItem(storageKey), null);
+  assert.equal(
+    JSON.parse(localStorage.getItem(storageKey)).requests[0].operationId,
+    "operation-before-response-loss",
+  );
 });
 
-test("superseded lifecycle identities are retired before enforcing the cap", async () => {
+test("the lifecycle registry remains bounded when safe reconciliation is unavailable", async () => {
   const localStorage = new FakeStorage();
   const app = await loadLoopBuilder({ localStorage });
   const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
@@ -2867,16 +2898,22 @@ test("superseded lifecycle identities are retired before enforcing the cap", asy
     }),
   );
 
-  const current = await app.context.getOrCreatePendingLifecycleRequest(
-    "cancel",
-    "run-advancing",
-    101,
+  await assert.rejects(
+    app.context.getOrCreatePendingLifecycleRequest(
+      "cancel",
+      "run-advancing",
+      101,
+    ),
+    /100 unresolved lifecycle requests/i,
   );
 
-  assert.equal(current.expectedLifecycleVersion, 101);
   assert.equal(
     vm.runInContext("pendingLifecycleRequests.size", app.context),
-    1,
+    100,
+  );
+  assert.equal(
+    JSON.parse(localStorage.getItem(storageKey)).requests.length,
+    100,
   );
 });
 
