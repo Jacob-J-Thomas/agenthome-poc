@@ -1,4 +1,6 @@
-namespace EmbodySense.Core.Clients.LocalWorkspace.Models;
+using EmbodySense.Core.Clients.LocalWorkspace.Models;
+
+namespace EmbodySense.Core.Clients.LocalWorkspace;
 
 internal sealed class ListEntryComparer : IComparer<ListEntry>
 {
