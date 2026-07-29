@@ -2613,6 +2613,339 @@ test("an unsupported persistence schema Resume error reuses the operation identi
   );
 });
 
+test("lifecycle identities survive reload for pause cancel resume and multiple runs", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const first = await loadLoopBuilder({ localStorage, locks });
+  const pause = await first.context.getOrCreatePendingLifecycleRequest(
+    "pause",
+    "run-one",
+    3,
+  );
+  const cancel = await first.context.getOrCreatePendingLifecycleRequest(
+    "cancel",
+    "run-one",
+    3,
+  );
+  const resume = await first.context.getOrCreatePendingLifecycleRequest(
+    "resume",
+    "run-two",
+    7,
+  );
+  const storageKey = vm.runInContext(
+    "pendingLifecycleStorageKey",
+    first.context,
+  );
+  const stored = localStorage.getItem(storageKey);
+
+  assert.ok(stored);
+  assert.equal(JSON.parse(stored).schemaVersion, 1);
+  assert.deepEqual(
+    JSON.parse(stored).requests.map((request) => request.kind),
+    ["pause", "cancel", "resume"],
+  );
+  assert.doesNotMatch(stored, /prompt|context/i);
+
+  const secondServer = new FakeFetchServer(createCatalog());
+  secondServer.runDetails.set("run-one", {
+    ...createRunSnapshot(),
+    id: "run-one",
+    lifecycleVersion: 3,
+  });
+  secondServer.runDetails.set("run-two", {
+    ...createRunSnapshot(),
+    id: "run-two",
+    lifecycleVersion: 7,
+  });
+  const second = await loadLoopBuilder({
+    server: secondServer,
+    localStorage,
+    locks,
+  });
+  const restoredPause = await second.context.getOrCreatePendingLifecycleRequest(
+    "pause",
+    "run-one",
+    3,
+  );
+  const restoredCancel =
+    await second.context.getOrCreatePendingLifecycleRequest(
+      "cancel",
+      "run-one",
+      3,
+    );
+  const restoredResume =
+    await second.context.getOrCreatePendingLifecycleRequest(
+      "resume",
+      "run-two",
+      7,
+    );
+
+  assert.equal(restoredPause.operationId, pause.operationId);
+  assert.equal(restoredCancel.operationId, cancel.operationId);
+  assert.equal(restoredResume.operationId, resume.operationId);
+});
+
+test("concurrent tabs coordinate one lifecycle operation identity", async () => {
+  const localStorage = new FakeStorage();
+  const locks = new FakeLockManager();
+  const first = await loadLoopBuilder({ localStorage, locks });
+  const second = await loadLoopBuilder({ localStorage, locks });
+
+  const [firstRequest, secondRequest] = await Promise.all([
+    first.context.getOrCreatePendingLifecycleRequest("pause", "run-shared", 4),
+    second.context.getOrCreatePendingLifecycleRequest("pause", "run-shared", 4),
+  ]);
+
+  assert.equal(secondRequest.operationId, firstRequest.operationId);
+  const storageKey = vm.runInContext(
+    "pendingLifecycleStorageKey",
+    first.context,
+  );
+  assert.equal(JSON.parse(localStorage.getItem(storageKey)).requests.length, 1);
+});
+
+test("registry setup failures remain isolated by operation family", async () => {
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  const corruptLifecycleStorage = new FakeStorage();
+  corruptLifecycleStorage.setItem(
+    `embodysense.pending-loop-lifecycle.v1.${scope}`,
+    "{ malformed",
+  );
+  const invocationAvailable = await loadLoopBuilder({
+    localStorage: corruptLifecycleStorage,
+  });
+
+  assert.ok(
+    vm.runInContext(
+      "pendingInvocationRegistryLockName",
+      invocationAvailable.context,
+    ),
+  );
+  assert.equal(
+    vm.runInContext(
+      "pendingLifecycleRegistryLockName",
+      invocationAvailable.context,
+    ),
+    null,
+  );
+
+  const corruptInvocationStorage = new FakeStorage();
+  corruptInvocationStorage.setItem(
+    `embodysense.pending-loop-invocations.v1.${scope}`,
+    "{ malformed",
+  );
+  const lifecycleAvailable = await loadLoopBuilder({
+    localStorage: corruptInvocationStorage,
+  });
+
+  assert.equal(
+    vm.runInContext(
+      "pendingInvocationRegistryLockName",
+      lifecycleAvailable.context,
+    ),
+    null,
+  );
+  assert.ok(
+    vm.runInContext(
+      "pendingLifecycleRegistryLockName",
+      lifecycleAvailable.context,
+    ),
+  );
+});
+
+test("definitive HTTP lifecycle errors retire their operation identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  const operationIds = [];
+  server.on("POST", `/api/loop-runs/${run.id}/pause`, ({ body }) => {
+    operationIds.push(body.operationId);
+    return {
+      status: 409,
+      body: {
+        status: "Conflict",
+        run,
+        operationId: body.operationId,
+        detail: "The lifecycle version is stale.",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  app.context.testRun = run;
+  vm.runInContext("selectedRun = testRun", app.context);
+
+  await app.context.controlRun("pause");
+  await app.context.controlRun("pause");
+
+  assert.equal(operationIds.length, 2);
+  assert.notEqual(operationIds[1], operationIds[0]);
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    0,
+  );
+});
+
+test("receipt-pending lifecycle failures retain their operation identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  const operationIds = [];
+  server.on("POST", `/api/loop-runs/${run.id}/cancel`, ({ body }) => {
+    operationIds.push(body.operationId);
+    return {
+      status: 503,
+      body: {
+        status: "Failed",
+        run,
+        operationId: body.operationId,
+        detail:
+          "The cancellation signal failed; the control receipt remains pending so the same operation can retry.",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  app.context.testRun = run;
+  vm.runInContext("selectedRun = testRun", app.context);
+
+  await app.context.controlRun("cancel");
+  await app.context.controlRun("cancel");
+
+  assert.equal(operationIds.length, 2);
+  assert.equal(operationIds[1], operationIds[0]);
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    1,
+  );
+});
+
+test("startup retires lifecycle identities superseded by durable run evidence", async () => {
+  const localStorage = new FakeStorage();
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  const storageKey = `embodysense.pending-loop-lifecycle.v1.${scope}`;
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      requests: [
+        {
+          kind: "resume",
+          runId: "run-advanced",
+          expectedLifecycleVersion: 4,
+          operationId: "operation-before-response-loss",
+        },
+      ],
+    }),
+  );
+  const server = new FakeFetchServer(createCatalog());
+  server.runDetails.set("run-advanced", {
+    ...createRunSnapshot(),
+    id: "run-advanced",
+    lifecycleVersion: 5,
+  });
+
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    0,
+  );
+  assert.equal(localStorage.getItem(storageKey), null);
+});
+
+test("superseded lifecycle identities are retired before enforcing the cap", async () => {
+  const localStorage = new FakeStorage();
+  const app = await loadLoopBuilder({ localStorage });
+  const storageKey = vm.runInContext("pendingLifecycleStorageKey", app.context);
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      requests: Array.from({ length: 100 }, (_, index) => ({
+        kind: "pause",
+        runId: "run-advancing",
+        expectedLifecycleVersion: index + 1,
+        operationId: `operation-${String(index + 1).padStart(3, "0")}`,
+      })),
+    }),
+  );
+
+  const current = await app.context.getOrCreatePendingLifecycleRequest(
+    "cancel",
+    "run-advancing",
+    101,
+  );
+
+  assert.equal(current.expectedLifecycleVersion, 101);
+  assert.equal(
+    vm.runInContext("pendingLifecycleRequests.size", app.context),
+    1,
+  );
+});
+
+test("authoritative lifecycle responses survive browser cleanup failures", async () => {
+  const localStorage = new FakeStorage();
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  const paused = {
+    ...run,
+    status: "PauseRequested",
+    lifecycleVersion: run.lifecycleVersion + 1,
+  };
+  server.runs = [
+    {
+      id: run.id,
+      loopId: run.loopId,
+      admissionOperationId: run.admissionOperationId,
+      definitionVersion: run.admittedDefinition.definitionVersion,
+      lifecycleVersion: run.lifecycleVersion,
+      status: run.status,
+      createdAtUtc: run.createdAtUtc,
+      updatedAtUtc: run.updatedAtUtc,
+      completedAtUtc: null,
+      iteration: run.iteration,
+      nextStepIndex: run.nextStepIndex,
+      failureCode: null,
+      isDeleted: false,
+    },
+  ];
+  server.runDetails.set(run.id, run);
+  server.on("POST", `/api/loop-runs/${run.id}/pause`, ({ body }) => {
+    server.runs[0] = {
+      ...server.runs[0],
+      lifecycleVersion: paused.lifecycleVersion,
+      status: paused.status,
+    };
+    server.runDetails.set(run.id, paused);
+    localStorage.removeItem = () => {
+      throw new Error("Storage cleanup failed.");
+    };
+    return {
+      status: 200,
+      body: {
+        status: "PauseRequested",
+        run: paused,
+        operationId: body.operationId,
+        detail: "Pause recorded.",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server, localStorage });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  app.context.testRun = run;
+  vm.runInContext("selectedRun = testRun", app.context);
+
+  await app.context.controlRun("pause");
+
+  assert.equal(app.elements.toast.textContent, "Pause recorded.");
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /completed, but the browser could not retire its operation identity/i,
+  );
+  assert.equal(
+    vm.runInContext("selectedRun.lifecycleVersion", app.context),
+    paused.lifecycleVersion,
+  );
+});
+
 test("a lost invocation connection reconciles the admitted run and continues monitoring", async () => {
   const server = new FakeFetchServer(createCatalog());
   let invocationOperationId = null;

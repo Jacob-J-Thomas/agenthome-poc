@@ -208,11 +208,14 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
     const status = await requestJson("/api/status");
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
-      await configurePendingLifecycleRegistry(status.workspaceRoot);
     } catch {
       pendingInvocationStorageKey = null;
       pendingInvocationRegistryLockName = null;
       pendingInvocationRequests.clear();
+    }
+    try {
+      await configurePendingLifecycleRegistry(status.workspaceRoot);
+    } catch {
       pendingLifecycleStorageKey = null;
       pendingLifecycleRegistryLockName = null;
       pendingLifecycleRequests.clear();
@@ -3252,9 +3255,20 @@ function lifecycleRequestKey(kind, runId, expectedLifecycleVersion) {
 }
 
 function isDefinitiveLifecycleResponse(response) {
-  return !["OperationInProgress", "WorkspaceHostUnavailable"].includes(
-    response?.status,
-  );
+  if (!response?.status) return false;
+  if (
+    ["OperationInProgress", "WorkspaceHostUnavailable"].includes(
+      response.status,
+    )
+  )
+    return false;
+  if (!["Failed", "NeedsReview"].includes(response.status)) return true;
+  const detail = String(response.detail ?? "").toLowerCase();
+  return ![
+    "control receipt remains pending",
+    "idempotency receipt could not be completed",
+    "idempotency receipt failed",
+  ].some((marker) => detail.includes(marker));
 }
 
 async function getOrCreatePendingLifecycleRequest(
@@ -3264,6 +3278,7 @@ async function getOrCreatePendingLifecycleRequest(
 ) {
   return withPendingLifecycleRegistryLock(async () => {
     synchronizePendingLifecycleRequestsFromStorage();
+    retireSupersededPendingLifecycleRequests(runId, expectedLifecycleVersion);
     const requestKey = lifecycleRequestKey(
       kind,
       runId,
@@ -3288,6 +3303,21 @@ async function getOrCreatePendingLifecycleRequest(
   });
 }
 
+function retireSupersededPendingLifecycleRequests(
+  runId,
+  expectedLifecycleVersion,
+) {
+  const next = new Map(pendingLifecycleRequests);
+  for (const [requestKey, request] of next)
+    if (
+      request.runId === runId &&
+      request.expectedLifecycleVersion < expectedLifecycleVersion
+    )
+      next.delete(requestKey);
+  if (next.size !== pendingLifecycleRequests.size)
+    commitPendingLifecycleRequests(next);
+}
+
 async function forgetPendingLifecycleRequest(request) {
   return withPendingLifecycleRegistryLock(async () => {
     synchronizePendingLifecycleRequestsFromStorage();
@@ -3302,6 +3332,15 @@ async function forgetPendingLifecycleRequest(request) {
     next.delete(requestKey);
     commitPendingLifecycleRequests(next);
   });
+}
+
+async function tryForgetPendingLifecycleRequest(request) {
+  try {
+    await forgetPendingLifecycleRequest(request);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function withPendingLifecycleRegistryLock(callback) {
@@ -3326,6 +3365,43 @@ async function configurePendingLifecycleRegistry(workspaceRoot) {
   pendingLifecycleStorageKey = `${pendingLifecycleStorageKeyPrefix}.${scope}`;
   pendingLifecycleRegistryLockName = `${pendingLifecycleRegistryLockNamePrefix}.${scope}`;
   synchronizePendingLifecycleRequestsFromStorage();
+  await reconcileStoredPendingLifecycleRequests();
+}
+
+async function reconcileStoredPendingLifecycleRequests() {
+  const runRequests = new Map();
+  for (const [requestKey, request] of pendingLifecycleRequests) {
+    const requests = runRequests.get(request.runId) ?? [];
+    requests.push([requestKey, request]);
+    runRequests.set(request.runId, requests);
+  }
+  const superseded = await Promise.all(
+    [...runRequests.entries()].map(async ([runId, requests]) => {
+      try {
+        const run = await requestJson(
+          `/api/loop-runs/${encodeURIComponent(runId)}`,
+        );
+        return requests.filter(
+          ([, request]) =>
+            Number.isInteger(run?.lifecycleVersion) &&
+            run.lifecycleVersion > request.expectedLifecycleVersion,
+        );
+      } catch (error) {
+        return error.status === 404 ? requests : [];
+      }
+    }),
+  );
+  const completed = superseded.flat();
+  if (!completed.length) return;
+  await withPendingLifecycleRegistryLock(async () => {
+    synchronizePendingLifecycleRequestsFromStorage();
+    const next = new Map(pendingLifecycleRequests);
+    for (const [requestKey, request] of completed) {
+      const stored = next.get(requestKey);
+      if (stored?.operationId === request.operationId) next.delete(requestKey);
+    }
+    commitPendingLifecycleRequests(next);
+  });
 }
 
 function synchronizePendingLifecycleRequestsFromStorage() {
@@ -3919,8 +3995,9 @@ async function controlRun(action) {
   if (!selectedRun) return;
   const runId = selectedRun.id;
   const expectedLifecycleVersion = selectedRun.lifecycleVersion;
+  let pending = null;
   try {
-    const pending = await getOrCreatePendingLifecycleRequest(
+    pending = await getOrCreatePendingLifecycleRequest(
       action,
       runId,
       expectedLifecycleVersion,
@@ -3935,13 +4012,28 @@ async function controlRun(action) {
         }),
       },
     );
-    if (isDefinitiveLifecycleResponse(response))
-      await forgetPendingLifecycleRequest(pending);
     selectedRun = response.run ?? response;
     await loadRuns({ silent: true });
+    const cleanupSucceeded =
+      !isDefinitiveLifecycleResponse(response) ||
+      (await tryForgetPendingLifecycleRequest(pending));
     showToast(response.detail ?? `${capitalize(action)} request recorded.`);
+    if (!cleanupSucceeded)
+      showBanner(
+        `${capitalize(action)} completed, but the browser could not retire its operation identity. Retrying the same operation is safe.`,
+        "notice",
+      );
   } catch (error) {
-    showBanner(`${capitalize(action)} failed: ${error.message}`);
+    const cleanupSucceeded =
+      !pending ||
+      !isDefinitiveLifecycleResponse(error.payload) ||
+      (await tryForgetPendingLifecycleRequest(pending));
+    const cleanupDetail = cleanupSucceeded
+      ? ""
+      : " The browser could not retire the definitive operation identity.";
+    showBanner(
+      `${capitalize(action)} failed: ${error.message}${cleanupDetail}`,
+    );
   }
 }
 
@@ -3964,32 +4056,39 @@ async function resumeRun() {
     const response = await waitForRunOperation(invocation, {
       preferredRunId: runId,
     });
-    if (
-      !["OperationInProgress", "WorkspaceHostUnavailable"].includes(
-        response?.status,
-      )
-    )
-      await forgetPendingLifecycleRequest(pending);
-    if (
-      ![
-        "Resumed",
-        "Completed",
-        "Cancelled",
-        "Paused",
-        "NeedsReview",
-        "AuditWarning",
-      ].includes(response?.status)
-    ) {
+    const accepted = [
+      "Resumed",
+      "Completed",
+      "Cancelled",
+      "Paused",
+      "NeedsReview",
+      "AuditWarning",
+    ].includes(response?.status);
+    selectedRun = response?.run ?? selectedRun;
+    if (!accepted) {
       await loadRuns({ silent: true, preferredRunId: runId });
       renderAll();
+      const cleanupSucceeded =
+        !isDefinitiveLifecycleResponse(response) ||
+        (await tryForgetPendingLifecycleRequest(pending));
+      const cleanupDetail = cleanupSucceeded
+        ? ""
+        : " The browser could not retire the definitive operation identity.";
       showBanner(
-        `Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}`,
+        `Resume failed: ${response?.detail ?? "The runtime rejected the Resume operation."}${cleanupDetail}`,
       );
       return;
     }
-    selectedRun = response?.run ?? selectedRun;
     await loadRuns({ silent: true });
+    const cleanupSucceeded =
+      !isDefinitiveLifecycleResponse(response) ||
+      (await tryForgetPendingLifecycleRequest(pending));
     showToast(response?.detail ?? "Resume completed.");
+    if (!cleanupSucceeded)
+      showBanner(
+        "Resume completed, but the browser could not retire its operation identity. Retrying the same operation is safe.",
+        "notice",
+      );
   } catch (error) {
     showBanner(`Resume failed: ${error.message}`);
   }
