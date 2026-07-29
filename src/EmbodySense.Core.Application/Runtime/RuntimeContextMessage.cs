@@ -1,6 +1,7 @@
+using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Common.Inference.Models;
 
-namespace EmbodySense.Core.Application.Runtime.Models;
+namespace EmbodySense.Core.Application.Runtime;
 
 public sealed record RuntimeContextMessage
 {

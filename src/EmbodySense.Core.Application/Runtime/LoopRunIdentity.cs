@@ -1,4 +1,5 @@
-namespace EmbodySense.Core.Application.Runtime.Models;
+using EmbodySense.Core.Application.Runtime.Models;
+namespace EmbodySense.Core.Application.Runtime;
 
 public sealed record LoopRunIdentity
 {

@@ -1,7 +1,9 @@
+using EmbodySense.Core.Application.Loops.Execution.Models;
+using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Runtime.Models;
 
-namespace EmbodySense.Core.Application.Loops.Execution.Models;
+namespace EmbodySense.Core.Application.Loops.Execution;
 
 public sealed record DefaultConversationLoopTurnRequest
 {

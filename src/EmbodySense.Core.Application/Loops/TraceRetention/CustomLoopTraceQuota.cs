@@ -1,6 +1,7 @@
+using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 
-namespace EmbodySense.Core.Application.Loops.TraceRetention.Models;
+namespace EmbodySense.Core.Application.Loops.TraceRetention;
 
 public sealed record CustomLoopTraceQuota(
     int RetainedTraceCount,

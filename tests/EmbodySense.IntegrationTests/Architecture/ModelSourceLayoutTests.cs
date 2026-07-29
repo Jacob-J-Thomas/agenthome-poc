@@ -75,6 +75,10 @@ public sealed class ModelSourceLayoutTests
             internal enum FeatureKind { Unknown }
             internal sealed class FeatureRequest { }
             internal sealed class FeatureDTO { }
+            internal sealed record FeatureResult(string Value)
+            {
+                public string Format() => Value;
+            }
             internal sealed class FeatureService { }
             """;
 
@@ -82,18 +86,18 @@ public sealed class ModelSourceLayoutTests
     }
 
     [Fact]
-    public void Model_files_do_not_own_comparer_behavior()
+    public void CoreApplication_model_files_do_not_own_behavior()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
+        var projectRoot = Path.Combine(sourceRoot, "EmbodySense.Core.Application");
         var violations = Directory
-            .EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
+            .EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
             .Where(file => IsModelFile(sourceRoot, file))
-            .Where(file => DeclaresComparerType(File.ReadAllText(file)))
-            .Select(file => Path.GetRelativePath(root, file))
+            .SelectMany(file => FindTopLevelBehaviorBearingTypeNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares behavior-bearing type {name} in Models."))
             .ToArray();
 
-        Assert.Empty(violations);
+        Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
     private static bool IsModelFile(string sourceRoot, string file)
@@ -110,9 +114,40 @@ public sealed class ModelSourceLayoutTests
             .DescendantNodes()
             .OfType<BaseTypeDeclarationSyntax>()
             .Where(declaration => declaration.Parent is BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)
+            .Where(declaration => !OwnsBehavior(declaration))
             .Where(declaration => declaration is RecordDeclarationSyntax or EnumDeclarationSyntax || ModelTypeSuffixes.Any(suffix => declaration.Identifier.ValueText.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
             .Select(declaration => declaration.Identifier.ValueText)
             .ToArray();
+    }
+
+    private static IReadOnlyList<string> FindTopLevelBehaviorBearingTypeNames(string source)
+    {
+        return CSharpSyntaxTree
+            .ParseText(source)
+            .GetRoot()
+            .DescendantNodes()
+            .OfType<BaseTypeDeclarationSyntax>()
+            .Where(declaration => declaration.Parent is BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)
+            .Where(OwnsBehavior)
+            .Select(declaration => declaration.Identifier.ValueText)
+            .ToArray();
+    }
+
+    private static bool OwnsBehavior(BaseTypeDeclarationSyntax declaration)
+    {
+        if (declaration is not TypeDeclarationSyntax typeDeclaration)
+        {
+            return false;
+        }
+
+        return typeDeclaration.Members.Any(member => member is MethodDeclarationSyntax
+            or ConstructorDeclarationSyntax
+            or DestructorDeclarationSyntax
+            or OperatorDeclarationSyntax
+            or ConversionOperatorDeclarationSyntax
+            or IndexerDeclarationSyntax
+            || member is PropertyDeclarationSyntax property && (property.ExpressionBody is not null || property.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true)
+            || member is EventDeclarationSyntax eventDeclaration && eventDeclaration.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true);
     }
 
     private static IReadOnlyList<string> MigratedProjectRoots(string sourceRoot)
@@ -140,14 +175,7 @@ public sealed class ModelSourceLayoutTests
         return string.Equals(declaredNamespace, expectedNamespace, StringComparison.Ordinal);
     }
 
-    private static bool DeclaresComparerType(string source)
-    {
-        return TypeDeclarationWithBaseListPattern.Matches(source).Any(match => ComparerBaseTypePattern.IsMatch(match.Groups["bases"].Value));
-    }
-
     private static readonly Regex NamespaceDeclarationPattern = new(@"^\s*namespace\s+(?<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[;{]", RegexOptions.CultureInvariant | RegexOptions.Multiline);
-    private static readonly Regex TypeDeclarationWithBaseListPattern = new(@"^\s*(?:(?:public|internal|private|protected|file|abstract|sealed|static|partial|readonly|ref|unsafe|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct)\s+[A-Za-z_]\w*(?:\s*<[^>{;]+>)?(?:\s*\([^;{]*\))?\s*:\s*(?<bases>[^{]+)\{", RegexOptions.CultureInvariant | RegexOptions.Multiline);
-    private static readonly Regex ComparerBaseTypePattern = new(@"\b(?:IComparer|IEqualityComparer|Comparer)\s*<", RegexOptions.CultureInvariant);
 
     private static string FindRepositoryRoot()
     {

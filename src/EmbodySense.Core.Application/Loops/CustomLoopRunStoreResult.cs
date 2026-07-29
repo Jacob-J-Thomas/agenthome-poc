@@ -1,6 +1,7 @@
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
-namespace EmbodySense.Core.Application.Loops.Models;
+namespace EmbodySense.Core.Application.Loops;
 
 public sealed record CustomLoopRunStoreResult(
     CustomLoopRunStoreStatus Status,

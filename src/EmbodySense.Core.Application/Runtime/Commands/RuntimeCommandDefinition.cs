@@ -1,4 +1,5 @@
-namespace EmbodySense.Core.Application.Runtime.Commands.Models;
+using EmbodySense.Core.Application.Runtime.Commands.Models;
+namespace EmbodySense.Core.Application.Runtime.Commands;
 
 public sealed record RuntimeCommandDefinition
 {
