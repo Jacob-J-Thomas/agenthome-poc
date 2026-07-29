@@ -10,6 +10,7 @@ internal static class CSharpParameterNamingPolicy
     public static IReadOnlyList<string> FindViolations(string source, string sourcePath)
     {
         var root = CSharpSyntaxTree.ParseText(source, ParseOptions, sourcePath).GetRoot();
+        // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/99 Extend this gate to the remaining non-record parameter-bearing syntax roles.
         var parameters = root.DescendantNodes()
             .OfType<MethodDeclarationSyntax>()
             .SelectMany(method => method.ParameterList.Parameters.Select(parameter => (Parameter: parameter, ExpectedStyle: "camelCase", Context: "method")))
@@ -34,7 +35,12 @@ internal static class CSharpParameterNamingPolicy
 
     private static bool HasExpectedStyle(string identifier, string expectedStyle)
     {
-        return identifier.Length > 0 && (expectedStyle == "camelCase" ? char.IsLower(identifier[0]) : char.IsUpper(identifier[0]));
+        if (identifier.Length == 0 || !identifier.All(char.IsLetterOrDigit))
+        {
+            return false;
+        }
+
+        return expectedStyle == "camelCase" ? char.IsLower(identifier[0]) : char.IsUpper(identifier[0]);
     }
 
     private static string DescribeViolation(ParameterSyntax parameter, string sourcePath, string expectedStyle, string context)

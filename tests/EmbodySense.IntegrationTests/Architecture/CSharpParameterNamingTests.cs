@@ -40,21 +40,23 @@ public sealed class CSharpParameterNamingTests
         const string source = """
             internal sealed class Worker(string WorkerName)
             {
-                public void Run(string InputValue) { }
+                public void Run(string InputValue, string input_Value) { }
             }
 
             internal readonly struct Coordinate(int XValue);
 
-            internal sealed record Result(string displayName);
+            internal sealed record Result(string displayName, string Display_Name);
             """;
 
         var violations = CSharpParameterNamingPolicy.FindViolations(source, "rejected.cs");
 
-        Assert.Equal(4, violations.Count);
+        Assert.Equal(6, violations.Count);
         Assert.Contains(violations, violation => violation.Contains("class primary constructor parameter `WorkerName` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("method parameter `InputValue` must use camelCase", StringComparison.Ordinal));
+        Assert.Contains(violations, violation => violation.Contains("method parameter `input_Value` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("struct primary constructor parameter `XValue` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("positional record parameter `displayName` must use PascalCase", StringComparison.Ordinal));
+        Assert.Contains(violations, violation => violation.Contains("positional record parameter `Display_Name` must use PascalCase", StringComparison.Ordinal));
     }
 
     private static bool IsAuthoredSourceFile(string root, string file)
