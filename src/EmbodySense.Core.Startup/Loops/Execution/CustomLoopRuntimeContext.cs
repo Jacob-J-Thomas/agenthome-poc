@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Context;
+using EmbodySense.Core.Common.Context.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;

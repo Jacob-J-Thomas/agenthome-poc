@@ -4,20 +4,25 @@ namespace EmbodySense.IntegrationTests.Architecture;
 
 public sealed class ModelSourceLayoutTests
 {
-    private const string LocalWorkspaceModelsNamespace = "EmbodySense.Core.Clients.LocalWorkspace.Models";
-
     [Fact]
-    public void LocalWorkspace_model_files_use_a_models_namespace()
+    public void Foundation_model_files_use_path_matching_models_namespaces()
     {
         var root = FindRepositoryRoot();
-        var modelRoot = Path.Combine(root, "src", "EmbodySense.Core.Clients", "LocalWorkspace", "Models");
-        var violations = Directory
-            .EnumerateFiles(modelRoot, "*.cs", SearchOption.AllDirectories)
-            .Where(file => !HasExpectedNamespace(File.ReadAllText(file), LocalWorkspaceModelsNamespace))
+        var sourceRoot = Path.Combine(root, "src");
+        var projectRoots = new[]
+        {
+            Path.Combine(sourceRoot, "EmbodySense.Core.Common"),
+            Path.Combine(sourceRoot, "EmbodySense.Core.Clients"),
+            Path.Combine(sourceRoot, "EmbodySense.Core.Persistence")
+        };
+        var violations = projectRoots
+            .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
+            .Where(file => IsModelFile(sourceRoot, file))
+            .Where(file => !HasExpectedNamespace(sourceRoot, file))
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Expand this guard assembly by assembly as each model namespace slice is migrated.
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Application, Core.Startup, CLI, and Web as their model slices are migrated.
         Assert.Empty(violations);
     }
 
@@ -42,16 +47,18 @@ public sealed class ModelSourceLayoutTests
         return relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(segment => string.Equals(segment, "Models", StringComparison.Ordinal));
     }
 
-    private static bool HasExpectedNamespace(string source, string expectedNamespace)
+    private static bool HasExpectedNamespace(string sourceRoot, string file)
     {
-        var match = NamespaceDeclarationPattern.Match(source);
+        var match = NamespaceDeclarationPattern.Match(File.ReadAllText(file));
         if (!match.Success)
         {
             return false;
         }
 
+        var relativeDirectory = Path.GetDirectoryName(Path.GetRelativePath(sourceRoot, file)) ?? string.Empty;
+        var expectedNamespace = relativeDirectory.Replace(Path.DirectorySeparatorChar, '.').Replace(Path.AltDirectorySeparatorChar, '.');
         var declaredNamespace = match.Groups["name"].Value;
-        return string.Equals(declaredNamespace, expectedNamespace, StringComparison.Ordinal) || declaredNamespace.StartsWith($"{expectedNamespace}.", StringComparison.Ordinal);
+        return string.Equals(declaredNamespace, expectedNamespace, StringComparison.Ordinal);
     }
 
     private static bool DeclaresComparerType(string source)

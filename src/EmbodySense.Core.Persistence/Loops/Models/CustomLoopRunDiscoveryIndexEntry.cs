@@ -1,6 +1,6 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
-namespace EmbodySense.Core.Persistence.Loops;
+namespace EmbodySense.Core.Persistence.Loops.Models;
 
 internal sealed record CustomLoopRunDiscoveryIndexEntry(
     CustomLoopRunSummary Summary,

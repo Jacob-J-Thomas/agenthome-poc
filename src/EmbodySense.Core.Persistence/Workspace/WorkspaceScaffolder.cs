@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Workspace.Models;
 using EmbodySense.Core.Persistence.Audit;
 
 namespace EmbodySense.Core.Persistence.Workspace;

@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Context;
+using EmbodySense.Core.Common.Context.Models;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;

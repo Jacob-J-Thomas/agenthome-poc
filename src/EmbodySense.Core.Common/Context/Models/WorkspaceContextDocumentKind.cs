@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Common.Context;
+namespace EmbodySense.Core.Common.Context.Models;
 
 public enum WorkspaceContextDocumentKind
 {

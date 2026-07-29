@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Common.Inference.Models;
 

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.LocalWorkspace;
+using EmbodySense.Core.Common.LocalWorkspace.Models;
 
 namespace EmbodySense.Core.Application.LocalWorkspace;
 
