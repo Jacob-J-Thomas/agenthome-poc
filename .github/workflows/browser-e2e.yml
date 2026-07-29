@@ -54,4 +54,3 @@ jobs:
           if-no-files-found: warn
           path: |
             tests/**/TestResults/**
-            ${{ runner.temp }}/embodysense-browser-e2e-*/**
