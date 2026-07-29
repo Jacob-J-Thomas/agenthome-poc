@@ -1,21 +1,45 @@
 using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace EmbodySense.IntegrationTests.Architecture;
 
 public sealed class ModelSourceLayoutTests
 {
+    private static readonly string[] ModelTypeSuffixes =
+    [
+        "Config",
+        "Configuration",
+        "Decision",
+        "Definition",
+        "Descriptor",
+        "Entry",
+        "Event",
+        "Evidence",
+        "Identity",
+        "Manifest",
+        "Message",
+        "Operation",
+        "Options",
+        "Outcome",
+        "Page",
+        "Quota",
+        "Receipt",
+        "Record",
+        "Reference",
+        "Request",
+        "Response",
+        "Result",
+        "Snapshot",
+        "Status"
+    ];
+
     [Fact]
     public void Foundation_model_files_use_path_matching_models_namespaces()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var projectRoots = new[]
-        {
-            Path.Combine(sourceRoot, "EmbodySense.Core.Common"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Clients"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Persistence")
-        };
-        var violations = projectRoots
+        var violations = FoundationProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => IsModelFile(sourceRoot, file))
             .Where(file => !HasExpectedNamespace(sourceRoot, file))
@@ -24,6 +48,35 @@ public sealed class ModelSourceLayoutTests
 
         // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Application, Core.Startup, CLI, and Web as their model slices are migrated.
         Assert.Empty(violations);
+    }
+
+    [Fact]
+    public void Foundation_model_declarations_are_not_left_outside_models_directories()
+    {
+        var root = FindRepositoryRoot();
+        var sourceRoot = Path.Combine(root, "src");
+        var violations = FoundationProjectRoots(sourceRoot)
+            .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
+            .Where(file => !IsModelFile(sourceRoot, file))
+            .SelectMany(file => FindTopLevelModelCandidateNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares model candidate {name} outside Models."))
+            .ToArray();
+
+        Assert.Empty(violations);
+    }
+
+    [Fact]
+    public void Model_candidate_classification_catches_records_enums_and_dto_suffixes()
+    {
+        const string source = """
+            namespace Example;
+
+            internal sealed record FeatureState(string Value);
+            internal enum FeatureKind { Unknown }
+            internal sealed class FeatureRequest { }
+            internal sealed class FeatureService { }
+            """;
+
+        Assert.Equal(["FeatureState", "FeatureKind", "FeatureRequest"], FindTopLevelModelCandidateNames(source));
     }
 
     [Fact]
@@ -45,6 +98,29 @@ public sealed class ModelSourceLayoutTests
     {
         var relativePath = Path.GetRelativePath(sourceRoot, file);
         return relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(segment => string.Equals(segment, "Models", StringComparison.Ordinal));
+    }
+
+    private static IReadOnlyList<string> FindTopLevelModelCandidateNames(string source)
+    {
+        return CSharpSyntaxTree
+            .ParseText(source)
+            .GetRoot()
+            .DescendantNodes()
+            .OfType<BaseTypeDeclarationSyntax>()
+            .Where(declaration => declaration.Parent is BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)
+            .Where(declaration => declaration is RecordDeclarationSyntax or EnumDeclarationSyntax || ModelTypeSuffixes.Any(suffix => declaration.Identifier.ValueText.EndsWith(suffix, StringComparison.Ordinal)))
+            .Select(declaration => declaration.Identifier.ValueText)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> FoundationProjectRoots(string sourceRoot)
+    {
+        return
+        [
+            Path.Combine(sourceRoot, "EmbodySense.Core.Common"),
+            Path.Combine(sourceRoot, "EmbodySense.Core.Clients"),
+            Path.Combine(sourceRoot, "EmbodySense.Core.Persistence")
+        ];
     }
 
     private static bool HasExpectedNamespace(string sourceRoot, string file)
