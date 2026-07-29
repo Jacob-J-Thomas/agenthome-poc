@@ -15,7 +15,7 @@ internal static class CSharpParameterNamingPolicy
         var parameters = GetParameterRules(root);
 
         return parameters
-            .Where(item => !HasExpectedStyle(item.Parameter.Identifier.ValueText, item.ExpectedStyle, item.AllowsUnusedUnderscore))
+            .Where(item => !HasExpectedStyle(item.Parameter, item.ExpectedStyle, item.AllowsUnusedUnderscore))
             .Select(item => DescribeViolation(item.Parameter, sourcePath, item.ExpectedStyle, item.Context))
             .ToArray();
     }
@@ -51,9 +51,10 @@ internal static class CSharpParameterNamingPolicy
         }
     }
 
-    private static bool HasExpectedStyle(string identifier, string expectedStyle, bool allowsUnusedUnderscore)
+    private static bool HasExpectedStyle(ParameterSyntax parameter, string expectedStyle, bool allowsUnusedUnderscore)
     {
-        if (allowsUnusedUnderscore && identifier == "_")
+        var identifier = parameter.Identifier.ValueText;
+        if (allowsUnusedUnderscore && identifier == "_" && IsUnusedAnonymousFunctionParameter(parameter))
         {
             return true;
         }
@@ -64,6 +65,61 @@ internal static class CSharpParameterNamingPolicy
         }
 
         return expectedStyle == "camelCase" ? char.IsLower(identifier[0]) : char.IsUpper(identifier[0]);
+    }
+
+    private static bool IsUnusedAnonymousFunctionParameter(ParameterSyntax parameter)
+    {
+        var anonymousFunction = parameter.Ancestors().OfType<AnonymousFunctionExpressionSyntax>().First();
+        if (AnonymousFunctionParameters(anonymousFunction).Count(candidate => candidate.Identifier.ValueText == "_") >= 2)
+        {
+            return true;
+        }
+
+        return !AnonymousFunctionBody(anonymousFunction)
+            .DescendantNodesAndSelf()
+            .OfType<IdentifierNameSyntax>()
+            .Where(identifier => identifier.Identifier.ValueText == "_")
+            .Any(identifier => !IsShadowedByNestedFunction(identifier, anonymousFunction));
+    }
+
+    private static IEnumerable<ParameterSyntax> AnonymousFunctionParameters(AnonymousFunctionExpressionSyntax anonymousFunction)
+    {
+        return anonymousFunction switch
+        {
+            SimpleLambdaExpressionSyntax simpleLambda => [simpleLambda.Parameter],
+            ParenthesizedLambdaExpressionSyntax parenthesizedLambda => parenthesizedLambda.ParameterList.Parameters,
+            AnonymousMethodExpressionSyntax anonymousMethod when anonymousMethod.ParameterList is not null => anonymousMethod.ParameterList.Parameters,
+            _ => []
+        };
+    }
+
+    private static CSharpSyntaxNode AnonymousFunctionBody(AnonymousFunctionExpressionSyntax anonymousFunction)
+    {
+        return anonymousFunction switch
+        {
+            LambdaExpressionSyntax lambda => lambda.Body,
+            AnonymousMethodExpressionSyntax anonymousMethod => anonymousMethod.Block,
+            _ => throw new InvalidOperationException($"Unsupported anonymous-function syntax {anonymousFunction.Kind()}.")
+        };
+    }
+
+    private static bool IsShadowedByNestedFunction(IdentifierNameSyntax identifier, AnonymousFunctionExpressionSyntax owner)
+    {
+        foreach (var ancestor in identifier.Ancestors())
+        {
+            if (ReferenceEquals(ancestor, owner))
+            {
+                return false;
+            }
+
+            if (ancestor is AnonymousFunctionExpressionSyntax nestedAnonymousFunction && AnonymousFunctionParameters(nestedAnonymousFunction).Any(parameter => parameter.Identifier.ValueText == "_")
+                || ancestor is LocalFunctionStatementSyntax localFunction && localFunction.ParameterList.Parameters.Any(parameter => parameter.Identifier.ValueText == "_"))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static string DescribeViolation(ParameterSyntax parameter, string sourcePath, string expectedStyle, string context)

@@ -133,18 +133,20 @@ public sealed class CSharpParameterNamingTests
                     Func<string, string> parenthesized = (InputValue) => InputValue;
                     Func<string, string> invalidDiscard = (__) => string.Empty;
                     Action<string> anonymous = delegate(string InputValue) { };
+                    Func<int, int> usedUnderscore = _ => _ + 1;
                 }
             }
             """;
 
         var violations = CSharpParameterNamingPolicy.FindViolations(source, "anonymous-rejected.cs");
 
-        Assert.Equal(5, violations.Count);
+        Assert.Equal(6, violations.Count);
         Assert.Contains(violations, violation => violation.Contains("local function parameter `LocalValue` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("simple lambda parameter `InputValue` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("parenthesized lambda parameter `InputValue` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("parenthesized lambda parameter `__` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("anonymous method parameter `InputValue` must use camelCase", StringComparison.Ordinal));
+        Assert.Contains(violations, violation => violation.Contains("simple lambda parameter `_` must use camelCase", StringComparison.Ordinal));
     }
 
     [Fact]
