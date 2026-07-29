@@ -44,7 +44,7 @@ jobs:
 
       - name: Run installed-browser E2E
         shell: pwsh
-        run: ./scripts/verify.ps1 -Configuration Release -RunBrowserE2E -SkipCoverage
+        run: ./scripts/verify.ps1 -Configuration Release -RunBrowserE2E -BrowserE2EOnly
 
       - name: Upload browser E2E diagnostics
         if: failure()
