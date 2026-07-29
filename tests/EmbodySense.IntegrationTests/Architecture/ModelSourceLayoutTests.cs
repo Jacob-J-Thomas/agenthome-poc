@@ -13,6 +13,7 @@ public sealed class ModelSourceLayoutTests
         "Decision",
         "Definition",
         "Descriptor",
+        "Dto",
         "Entry",
         "Event",
         "Evidence",
@@ -73,10 +74,11 @@ public sealed class ModelSourceLayoutTests
             internal sealed record FeatureState(string Value);
             internal enum FeatureKind { Unknown }
             internal sealed class FeatureRequest { }
+            internal sealed class FeatureDTO { }
             internal sealed class FeatureService { }
             """;
 
-        Assert.Equal(["FeatureState", "FeatureKind", "FeatureRequest"], FindTopLevelModelCandidateNames(source));
+        Assert.Equal(["FeatureState", "FeatureKind", "FeatureRequest", "FeatureDTO"], FindTopLevelModelCandidateNames(source));
     }
 
     [Fact]
@@ -108,7 +110,7 @@ public sealed class ModelSourceLayoutTests
             .DescendantNodes()
             .OfType<BaseTypeDeclarationSyntax>()
             .Where(declaration => declaration.Parent is BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)
-            .Where(declaration => declaration is RecordDeclarationSyntax or EnumDeclarationSyntax || ModelTypeSuffixes.Any(suffix => declaration.Identifier.ValueText.EndsWith(suffix, StringComparison.Ordinal)))
+            .Where(declaration => declaration is RecordDeclarationSyntax or EnumDeclarationSyntax || ModelTypeSuffixes.Any(suffix => declaration.Identifier.ValueText.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
             .Select(declaration => declaration.Identifier.ValueText)
             .ToArray();
     }
