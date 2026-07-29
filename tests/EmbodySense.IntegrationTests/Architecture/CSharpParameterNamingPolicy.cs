@@ -15,16 +15,16 @@ internal static class CSharpParameterNamingPolicy
         var parameters = GetParameterRules(root);
 
         return parameters
-            .Where(item => !HasExpectedStyle(item.Parameter.Identifier.ValueText, item.ExpectedStyle, item.AllowsDiscard))
+            .Where(item => !HasExpectedStyle(item.Parameter.Identifier.ValueText, item.ExpectedStyle, item.AllowsUnderscorePlaceholder))
             .Select(item => DescribeViolation(item.Parameter, sourcePath, item.ExpectedStyle, item.Context))
             .ToArray();
     }
 
-    private static IEnumerable<(ParameterSyntax Parameter, string ExpectedStyle, string Context, bool AllowsDiscard)> GetParameterRules(SyntaxNode root)
+    private static IEnumerable<(ParameterSyntax Parameter, string ExpectedStyle, string Context, bool AllowsUnderscorePlaceholder)> GetParameterRules(SyntaxNode root)
     {
         foreach (var node in root.DescendantNodes())
         {
-            (IEnumerable<ParameterSyntax> Parameters, string ExpectedStyle, string Context, bool AllowsDiscard) rule = node switch
+            (IEnumerable<ParameterSyntax> Parameters, string ExpectedStyle, string Context, bool AllowsUnderscorePlaceholder) rule = node switch
             {
                 MethodDeclarationSyntax method => (method.ParameterList.Parameters, "camelCase", "method", false),
                 ConstructorDeclarationSyntax constructor => (constructor.ParameterList.Parameters, "camelCase", "constructor", false),
@@ -33,6 +33,7 @@ internal static class CSharpParameterNamingPolicy
                 LocalFunctionStatementSyntax localFunction => (localFunction.ParameterList.Parameters, "camelCase", "local function", false),
                 DelegateDeclarationSyntax @delegate => (@delegate.ParameterList.Parameters, "camelCase", "delegate", false),
                 IndexerDeclarationSyntax indexer => (indexer.ParameterList.Parameters, "camelCase", "indexer", false),
+                // TODO: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/102 Remove the lone-underscore placeholder exemption after the repository-wide rename.
                 ParenthesizedLambdaExpressionSyntax lambda => (lambda.ParameterList.Parameters, "camelCase", "parenthesized lambda", true),
                 SimpleLambdaExpressionSyntax lambda => ([lambda.Parameter], "camelCase", "simple lambda", true),
                 AnonymousMethodExpressionSyntax anonymousMethod when anonymousMethod.ParameterList is not null => (anonymousMethod.ParameterList.Parameters, "camelCase", "anonymous method", true),
@@ -45,14 +46,14 @@ internal static class CSharpParameterNamingPolicy
 
             foreach (var parameter in rule.Parameters)
             {
-                yield return (parameter, rule.ExpectedStyle, rule.Context, rule.AllowsDiscard);
+                yield return (parameter, rule.ExpectedStyle, rule.Context, rule.AllowsUnderscorePlaceholder);
             }
         }
     }
 
-    private static bool HasExpectedStyle(string identifier, string expectedStyle, bool allowsDiscard)
+    private static bool HasExpectedStyle(string identifier, string expectedStyle, bool allowsUnderscorePlaceholder)
     {
-        if (allowsDiscard && identifier == "_")
+        if (allowsUnderscorePlaceholder && identifier == "_")
         {
             return true;
         }

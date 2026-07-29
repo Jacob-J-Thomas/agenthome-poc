@@ -12,7 +12,7 @@ public sealed class CSharpParameterNamingTests
             .SelectMany(file => CSharpParameterNamingPolicy.FindViolations(File.ReadAllText(file), Path.GetRelativePath(root, file)))
             .ToArray();
 
-        Assert.Empty(violations);
+        Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class CSharpParameterNamingTests
     }
 
     [Fact]
-    public void Local_functions_and_anonymous_functions_accept_camel_case_and_exact_discard_parameters()
+    public void Local_functions_and_anonymous_functions_accept_camel_case_and_temporary_underscore_placeholders()
     {
         const string source = """
             internal sealed class Worker
@@ -63,7 +63,7 @@ public sealed class CSharpParameterNamingTests
                     Func<string, string> parenthesized = (inputValue) => inputValue;
                     Func<string, string, string> discarded = (_, _) => string.Empty;
                     Action<string> anonymous = delegate(string inputValue) { };
-                    Action<string> anonymousDiscard = delegate(string _) { };
+                    Action<string> anonymousPlaceholder = delegate(string _) { };
                 }
             }
             """;
@@ -119,7 +119,7 @@ public sealed class CSharpParameterNamingTests
     }
 
     [Fact]
-    public void Local_and_anonymous_function_violations_are_reported_and_only_exact_discards_are_exempt()
+    public void Local_and_anonymous_function_violations_are_reported()
     {
         const string source = """
             internal sealed class Worker
