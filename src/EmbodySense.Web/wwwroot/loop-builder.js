@@ -3,6 +3,14 @@ let catalog = null;
 let currentDefinition = null;
 let draft = null;
 let selectedNodeId = "trigger";
+let lastSelectedNodeId = "trigger";
+let loopSearchQuery = "";
+let canvasZoom = 1;
+let loopBuilderActivated = false;
+let loopBuilderEventsBound = false;
+let loopBuilderSurfaceActive = false;
+let loopBuilderRefresh = null;
+let loopBuilderRefreshQueued = false;
 let dirty = false;
 let currentView = "builder";
 let recentRuns = [];
@@ -29,6 +37,7 @@ let hub = null;
 let invokeReturnFocus = null;
 let historicalLoopId = null;
 let selectedRunRefreshTimer = null;
+let selectedRunRefreshInFlight = false;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
 let pendingCreateOperationId = null;
@@ -38,6 +47,7 @@ let pendingTraceDeletion = null;
 // TODO(#77): Persist unresolved lifecycle-control identities per workspace and run across reloads and browser tabs.
 let pendingResumeRequest = null;
 let invocationInFlight = false;
+let activeInvocationAttempt = null;
 const pendingInvocationStorageKeyPrefix = "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix = "embodysense.pending-loop-invocations";
 let pendingInvocationStorageKey = null;
@@ -56,31 +66,40 @@ const pendingInvocationRegistryReconciliationDeadlineMilliseconds = 2000;
 
 const elements = {
   addStepButton: document.getElementById("addStepButton"),
-  approvalCount: document.getElementById("approvalCount"),
-  approvalPanel: document.getElementById("approvalPanel"),
-  approvals: document.getElementById("approvals"),
+  appShell: document.getElementById("appShell"),
+  approvalCount: document.getElementById("loopApprovalCount"),
+  approvalPanel: document.getElementById("loopApprovalPanel"),
+  approvals: document.getElementById("loopApprovals"),
   builderTab: document.getElementById("builderTab"),
+  builderLayout: document.getElementById("builderLayout"),
   builderView: document.getElementById("builderView"),
   cancelInvokeButton: document.getElementById("cancelInvokeButton"),
   canvas: document.getElementById("loopCanvas"),
+  canvasAuthority: document.getElementById("canvasAuthority"),
+  canvasStepCount: document.getElementById("canvasStepCount"),
   closeInvokeButton: document.getElementById("closeInvokeButton"),
-  connectionDot: document.getElementById("connectionDot"),
   createLoopButton: document.getElementById("createLoopButton"),
   deleteButton: document.getElementById("deleteButton"),
   description: document.getElementById("loopDescription"),
   inspectorContent: document.getElementById("inspectorContent"),
+  inspectorTabs: document.getElementById("inspectorTabs"),
   inspectorTitle: document.getElementById("inspectorTitle"),
   invocationPrompt: document.getElementById("invocationPrompt"),
   invocationPromptField: document.getElementById("invocationPromptField"),
   invokeButton: document.getElementById("invokeButton"),
+  invokeError: document.getElementById("invokeError"),
   invokeLimits: document.getElementById("invokeLimits"),
   invokeModal: document.getElementById("invokeModal"),
   invokeSummary: document.getElementById("invokeSummary"),
   list: document.getElementById("loopList"),
+  loopHeaderMeta: document.getElementById("loopHeaderMeta"),
+  loopsView: document.getElementById("loopsView"),
+  loopSearch: document.getElementById("loopSearch"),
   loopSettingsButton: document.getElementById("loopSettingsButton"),
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
   roleId: document.getElementById("roleId"),
+  rolePath: document.getElementById("rolePath"),
   loadMoreRunsButton: document.getElementById("loadMoreRunsButton"),
   runActions: document.getElementById("runActions"),
   runCount: document.getElementById("runCount"),
@@ -93,19 +112,88 @@ const elements = {
   runTitle: document.getElementById("runTitle"),
   saveButton: document.getElementById("saveButton"),
   saveState: document.getElementById("saveState"),
+  selectedNodeButton: document.getElementById("selectedNodeButton"),
   startRunButton: document.getElementById("startRunButton"),
   toast: document.getElementById("toast"),
   traceQuota: document.getElementById("traceQuota"),
   validationBanner: document.getElementById("validationBanner"),
   workspaceRoot: document.getElementById("workspaceRoot"),
-  workspaceStatus: document.getElementById("workspaceStatus")
+  workspaceStatus: document.getElementById("workspaceStatus"),
+  zoomFitButton: document.getElementById("zoomFitButton"),
+  zoomInButton: document.getElementById("zoomInButton"),
+  zoomLevel: document.getElementById("zoomLevel"),
+  zoomOutButton: document.getElementById("zoomOutButton")
 };
 
-async function boot() {
-  bindStaticEvents();
+function activate() {
+  loopBuilderSurfaceActive = true;
+  if (loopBuilderRefresh) return loopBuilderRefresh;
+  if (loopBuilderActivated) {
+    scheduleSelectedRunRefresh();
+    return Promise.resolve();
+  }
+  if (!loopBuilderEventsBound) {
+    bindStaticEvents();
+    loopBuilderEventsBound = true;
+  }
+  loopBuilderActivated = true;
+  return beginLoopBuilderRefresh(startLoopBuilder);
+}
+
+function deactivate() {
+  loopBuilderSurfaceActive = false;
+  scheduleSelectedRunRefresh();
+}
+
+function beginLoopBuilderRefresh(operation) {
+  const refresh = drainLoopBuilderRefresh(operation).finally(() => {
+    if (loopBuilderRefresh === refresh) loopBuilderRefresh = null;
+  });
+  loopBuilderRefresh = refresh;
+  return refresh;
+}
+
+async function drainLoopBuilderRefresh(operation) {
+  let refreshed = await operation();
+  applyLoopBuilderRefreshOutcome(refreshed);
+  while (loopBuilderRefreshQueued) {
+    loopBuilderRefreshQueued = false;
+    refreshed = await refreshWorkspaceCore(Boolean(catalog));
+    applyLoopBuilderRefreshOutcome(refreshed);
+  }
+  return refreshed;
+}
+
+function applyLoopBuilderRefreshOutcome(refreshed) {
+  loopBuilderActivated = refreshed !== false;
+  if (!loopBuilderActivated) appendActivationRetry();
+}
+
+async function startLoopBuilder() {
   try {
-    const session = await requestJson("/api/session");
-    sessionToken = session.token;
+    if (!sessionToken) {
+      const session = await requestJson("/api/session");
+      sessionToken = session.token;
+    }
+    return await refreshWorkspaceCore(Boolean(catalog));
+  } catch (error) {
+    showBanner(`Loop builder unavailable: ${error.message}`);
+    setInteractive(false);
+    return false;
+  }
+}
+
+function refreshWorkspace() {
+  if (loopBuilderRefresh) {
+    loopBuilderRefreshQueued = true;
+    return loopBuilderRefresh;
+  }
+  if (!loopBuilderActivated) return loopBuilderSurfaceActive ? activate() : Promise.resolve();
+  return beginLoopBuilderRefresh(refreshWorkspaceCore);
+}
+
+async function refreshWorkspaceCore(reuseCatalog = false) {
+  try {
     const status = await requestJson("/api/status");
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
@@ -115,19 +203,23 @@ async function boot() {
       pendingInvocationRequests.clear();
     }
     elements.workspaceRoot.textContent = status.workspaceRoot;
+    elements.rolePath.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
-    elements.connectionDot.classList.toggle("ready", status.initialized);
     if (!status.initialized) {
       showBanner("Initialize the workspace from Chat before creating loops.", "notice");
       setInteractive(false);
-      return;
+      return true;
     }
 
-    await loadCatalog();
-    await loadRuns();
+    if (!reuseCatalog || !catalog) await loadCatalog();
+    const runsLoaded = await loadRuns();
+    if (runsLoaded === false) return false;
+    renderAll();
+    return true;
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
+    return false;
   }
 }
 
@@ -136,19 +228,38 @@ function bindStaticEvents() {
   elements.builderTab.addEventListener("click", () => switchView("builder"));
   elements.runsTab.addEventListener("click", () => switchView("runs"));
   elements.invokeButton.addEventListener("click", openInvokeModal);
-  elements.closeInvokeButton.addEventListener("click", closeInvokeModal);
-  elements.cancelInvokeButton.addEventListener("click", closeInvokeModal);
+  elements.closeInvokeButton.addEventListener("click", cancelInvokeModal);
+  elements.cancelInvokeButton.addEventListener("click", cancelInvokeModal);
   elements.startRunButton.addEventListener("click", startRun);
   elements.saveButton.addEventListener("click", saveLoop);
   elements.deleteButton.addEventListener("click", deleteLoop);
   elements.reloadButton.addEventListener("click", reloadCurrent);
   elements.addStepButton.addEventListener("click", addInferenceStep);
+  elements.selectedNodeButton.addEventListener("click", () => {
+    if (!draft) return;
+    selectedNodeId = lastSelectedNodeId;
+    renderCanvas();
+    renderInspector();
+    renderToolbar();
+  });
   elements.loopSettingsButton.addEventListener("click", () => {
     if (!draft) return;
     selectedNodeId = "loop-settings";
     renderCanvas();
     renderInspector();
+    renderToolbar();
   });
+  bindTabKeyboard(elements.builderTab, [elements.builderTab, elements.runsTab]);
+  bindTabKeyboard(elements.runsTab, [elements.builderTab, elements.runsTab]);
+  bindTabKeyboard(elements.selectedNodeButton, [elements.selectedNodeButton, elements.loopSettingsButton]);
+  bindTabKeyboard(elements.loopSettingsButton, [elements.selectedNodeButton, elements.loopSettingsButton]);
+  elements.loopSearch.addEventListener("input", event => {
+    loopSearchQuery = event.target.value.trim().toLocaleLowerCase();
+    renderList();
+  });
+  elements.zoomOutButton.addEventListener("click", () => setCanvasZoom(canvasZoom - 0.1));
+  elements.zoomInButton.addEventListener("click", () => setCanvasZoom(canvasZoom + 0.1));
+  elements.zoomFitButton.addEventListener("click", fitCanvas);
   elements.loadMoreRunsButton.addEventListener("click", loadMoreRuns);
   elements.name.addEventListener("input", event => updateDraftValue("displayName", event.target.value));
   elements.description.addEventListener("input", event => updateDraftValue("description", event.target.value));
@@ -159,7 +270,9 @@ function bindStaticEvents() {
     }
   });
   window.addEventListener("keydown", event => {
-    if (event.key === "Escape" && elements.invokeModal.className.split(/\s+/).includes("open")) closeInvokeModal();
+    if (!elements.invokeModal.className.split(/\s+/).includes("open")) return;
+    if (event.key === "Escape") cancelInvokeModal();
+    else if (event.key === "Tab") trapInvokeModalFocus(event);
   });
   window.addEventListener("storage", event => {
     if (pendingInvocationStorageKey && event.key === pendingInvocationStorageKey) {
@@ -170,6 +283,43 @@ function bindStaticEvents() {
       }
     }
   });
+}
+
+function bindTabKeyboard(tab, tabs) {
+  tab.addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const enabledTabs = tabs.filter(item => !item.disabled && !item.hidden);
+    if (enabledTabs.length === 0) return;
+    event.preventDefault();
+    const currentIndex = enabledTabs.indexOf(tab);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? enabledTabs.length - 1
+        : (currentIndex + (event.key === "ArrowLeft" ? -1 : 1) + enabledTabs.length) % enabledTabs.length;
+    const nextTab = enabledTabs[nextIndex];
+    nextTab.focus();
+    nextTab.click();
+  });
+}
+
+function moveLoopOptionFocus(event, currentOption) {
+  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  const options = Array.from(elements.list.querySelectorAll('[role="option"]')).filter(option => !option.disabled);
+  if (options.length === 0) return;
+  event.preventDefault();
+  const currentIndex = options.indexOf(currentOption);
+  const nextIndex = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? options.length - 1
+      : (currentIndex + (event.key === "ArrowUp" ? -1 : 1) + options.length) % options.length;
+  const nextOption = options[nextIndex];
+  const nextOptionKey = nextOption.dataset.loopOptionKey;
+  nextOption.focus();
+  nextOption.click();
+  const replacement = Array.from(elements.list.querySelectorAll('[role="option"]')).find(option => option.dataset.loopOptionKey === nextOptionKey);
+  replacement?.focus();
 }
 
 async function requestJson(url, options = {}) {
@@ -235,6 +385,7 @@ function applyDefinition(definition) {
   currentDefinition = definition;
   draft = definition ? clone(definition) : null;
   selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
   dirty = false;
   elements.name.value = draft?.displayName ?? "";
   elements.description.value = draft?.description ?? "";
@@ -264,8 +415,14 @@ function renderTabs() {
   elements.runsTab.classList.toggle("active", !builderActive);
   elements.builderTab.setAttribute("aria-selected", String(builderActive));
   elements.runsTab.setAttribute("aria-selected", String(!builderActive));
+  elements.builderTab.tabIndex = builderActive ? 0 : -1;
+  elements.runsTab.tabIndex = builderActive ? -1 : 0;
   elements.builderView.hidden = !builderActive;
   elements.runsView.hidden = builderActive;
+  elements.inspectorTabs.hidden = !builderActive;
+  elements.builderLayout.classList.toggle("runs-active", !builderActive);
+  elements.inspectorContent.setAttribute("role", builderActive ? "tabpanel" : "region");
+  elements.inspectorContent.setAttribute("aria-labelledby", builderActive ? (selectedNodeId === "loop-settings" ? "loopSettingsButton" : "selectedNodeButton") : "inspectorTitle");
   elements.runCount.textContent = String(runsForCurrentLoop().length);
 }
 
@@ -304,7 +461,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
       filteredPageRequest,
       requestJson("/api/loop-runs/quota")
     ]);
-    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId) return false;
+    if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId) return null;
     if (runPaginationLoopId !== loopId) {
       runPaginationLoopId = loopId;
       runContinuationCursor = null;
@@ -333,7 +490,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
       if (evidence.trace?.isDeleted) {
         recentRuns = mergeRunSummaries([tombstoneRunSummary(evidence.trace)], recentRuns.filter(run => run.id !== requestedRunId));
       }
-      if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return false;
+      if (requestGeneration !== runEvidenceRequestGeneration || selectedLoopId() !== loopId || selectedRunId !== requestedRunId) return null;
       selectedRun = evidence.run;
       selectedTrace = evidence.trace;
       bindSelectedRunMonitor(selectedRun?.id ?? null);
@@ -350,6 +507,7 @@ async function loadRuns({ silent = false, preferredRunId = null, preferredAdmiss
     }
     renderList();
     renderTabs();
+    if (elements.validationBanner.textContent.startsWith("Run evidence unavailable:")) renderValidation();
     scheduleSelectedRunRefresh();
     return true;
   } catch (error) {
@@ -890,40 +1048,72 @@ function evidenceSection(label) {
 function renderList() {
   elements.list.replaceChildren();
   if (!catalog) return;
-  for (const definition of allDefinitions()) {
+  const listOptions = [];
+  const matchesSearch = definition => {
+    const projectedDefinition = draft?.id === definition.id ? draft : definition;
+    return !loopSearchQuery || [projectedDefinition.displayName, projectedDefinition.description, projectedDefinition.id].some(value => String(value ?? "").toLocaleLowerCase().includes(loopSearchQuery));
+  };
+  const visibleDefinitions = [...catalog.customDefinitions, catalog.systemDefault].filter(matchesSearch);
+  let visibleGroup = null;
+  for (const definition of visibleDefinitions) {
+    const projectedDefinition = draft?.id === definition.id ? draft : definition;
+    const group = definition.id === "default-conversation" ? "System" : "Custom loops";
+    if (group !== visibleGroup) {
+      elements.list.append(node("div", "loop-list-group", group));
+      visibleGroup = group;
+    }
     const button = node("button", "loop-list-item");
     button.type = "button";
     button.disabled = mutationInFlight;
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", definition.id === currentDefinition?.id ? "true" : "false");
     button.classList.toggle("selected", definition.id === currentDefinition?.id);
-    button.append(node("span", "loop-list-name", definition.displayName));
+    button.tabIndex = definition.id === currentDefinition?.id ? 0 : -1;
+    button.dataset.loopOptionKey = `definition:${definition.id}`;
+    button.append(node("span", `loop-icon ${definition.id === "default-conversation" ? "system" : "custom"}`, definition.id === "default-conversation" ? "◇" : "↻"));
+    const copy = node("span", "loop-list-copy");
+    copy.append(node("span", "loop-list-name", projectedDefinition.displayName));
     const meta = node("span", "loop-list-meta");
-    meta.append(node("span", definition.id === "default-conversation" ? "system-chip" : "version-chip", definition.id === "default-conversation" ? "System" : `v${definition.definitionVersion}`));
-    meta.append(node("span", "", definition.inferenceSteps.length === 1 ? "1 step" : `${definition.inferenceSteps.length} steps`));
-    button.append(meta);
+    meta.append(node("span", definition.id === "default-conversation" ? "system-chip" : "version-chip", definition.id === "default-conversation" ? "System loop" : `v${projectedDefinition.definitionVersion}`));
+    meta.append(node("span", "", projectedDefinition.inferenceSteps.length === 1 ? "1 step" : `${projectedDefinition.inferenceSteps.length} steps`));
+    copy.append(meta);
+    button.append(copy);
     button.addEventListener("click", () => selectDefinition(definition));
+    button.addEventListener("keydown", event => moveLoopOptionFocus(event, button));
     elements.list.append(button);
+    listOptions.push(button);
   }
   const knownLoopIds = new Set(allDefinitions().map(definition => definition.id));
   const archivedGroups = new Map();
   for (const run of recentRuns) {
     if (!knownLoopIds.has(run.loopId)) archivedGroups.set(run.loopId, (archivedGroups.get(run.loopId) ?? 0) + 1);
   }
-  for (const [loopId, runCount] of archivedGroups) {
+  const visibleArchivedGroups = [...archivedGroups].filter(([loopId]) => !loopSearchQuery || loopId.toLocaleLowerCase().includes(loopSearchQuery));
+  if (visibleArchivedGroups.length > 0) elements.list.append(node("div", "loop-list-group", "Archived evidence"));
+  for (const [loopId, runCount] of visibleArchivedGroups) {
     const button = node("button", "loop-list-item");
     button.type = "button";
     button.disabled = mutationInFlight;
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", loopId === historicalLoopId ? "true" : "false");
     button.classList.toggle("selected", loopId === historicalLoopId);
-    button.append(node("span", "loop-list-name", `Deleted loop · ${loopId}`));
+    button.tabIndex = loopId === historicalLoopId ? 0 : -1;
+    button.dataset.loopOptionKey = `archived:${loopId}`;
+    button.append(node("span", "loop-icon archived", "A"));
+    const copy = node("span", "loop-list-copy");
+    copy.append(node("span", "loop-list-name", `Deleted loop · ${loopId}`));
     const meta = node("span", "loop-list-meta");
     meta.append(node("span", "system-chip", "Archived evidence"), node("span", "", `${runCount} run${runCount === 1 ? "" : "s"}`));
-    button.append(meta);
+    copy.append(meta);
+    button.append(copy);
     button.addEventListener("click", () => selectHistoricalLoop(loopId));
+    button.addEventListener("keydown", event => moveLoopOptionFocus(event, button));
     elements.list.append(button);
+    listOptions.push(button);
   }
+  if (!listOptions.some(option => option.tabIndex === 0) && listOptions.length > 0) listOptions[0].tabIndex = 0;
+  if (elements.list.children.length === 0) elements.list.append(node("p", "empty-state", "No loops match this search."));
+  if (mutationInFlight) for (const item of elements.list.children) item.disabled = true;
 }
 
 async function selectDefinition(definition) {
@@ -943,6 +1133,8 @@ async function selectHistoricalLoop(loopId) {
   historicalLoopId = loopId;
   currentDefinition = null;
   draft = null;
+  selectedNodeId = "loop-settings";
+  lastSelectedNodeId = "trigger";
   dirty = false;
   currentView = "runs";
   selectedRunId = recentRuns.find(run => run.loopId === loopId)?.id ?? null;
@@ -958,54 +1150,94 @@ function renderCanvas() {
   elements.canvas.replaceChildren();
   if (!draft) {
     elements.canvas.append(node("p", "empty-state", "Create a loop to begin."));
+    applyCanvasZoom();
     return;
   }
 
-  elements.canvas.append(createNodeCard("trigger", "Trigger", "Manual trigger", triggerSummary(), "T", "system"));
-  appendConnector();
+  elements.canvas.append(createNodeCard("trigger", "Manual trigger", "Manual trigger", triggerDescription(), "system", "admission", "Start"));
+  appendConnector(0);
   draft.inferenceSteps.forEach((step, index) => {
-    elements.canvas.append(createNodeCard(step.id ?? `local-${index}`, "Inference", step.name || `Step ${index + 1}`, step.instruction || "Instruction required", String(index + 1), "inference", step.contextPolicy?.mode));
-    appendConnector();
+    elements.canvas.append(createNodeCard(step.id ?? `local-${index}`, "Inference", step.name || `Step ${index + 1}`, step.instruction || "Instruction required", "inference", step.contextPolicy?.mode, `Step ${index + 1}`));
+    appendConnector(index + 1);
   });
   const exitPolicy = draft.exitPolicy;
-  elements.canvas.append(createNodeCard("exit", "Exit", "Exit", exitPolicy.maxAdditionalIterations > 0 ? `Model-gated · up to ${exitPolicy.maxAdditionalIterations} additional` : "Complete after one iteration", "E", "exit", exitPolicy.contextPolicy?.mode));
+  const exitSummary = exitPolicy.maxAdditionalIterations > 0
+    ? `Make a tool-less continuation decision with a ceiling of ${exitPolicy.maxAdditionalIterations} additional iteration${exitPolicy.maxAdditionalIterations === 1 ? "" : "s"}.`
+    : "Return the final retained output and complete without a continuation model call.";
+  elements.canvas.append(createNodeCard("exit", "Exit", "Exit", exitSummary, "exit", exitPolicy.contextPolicy?.mode, "Finish"));
   if (exitPolicy.maxAdditionalIterations > 0) {
     const rail = node("div", "repeat-rail");
     rail.append(node("span", "", `Repeat may return to Step 1 · ceiling ${exitPolicy.maxAdditionalIterations}`));
     elements.canvas.append(rail);
   }
+  applyCanvasZoom();
 }
 
-function createNodeCard(id, kind, name, summary, icon, className, policyMode) {
+function createNodeCard(id, kind, name, summary, className, policyMode, position) {
   const button = node("button", `node-card ${className}`);
   button.type = "button";
   button.classList.toggle("selected", selectedNodeId === id);
   button.setAttribute("aria-pressed", selectedNodeId === id ? "true" : "false");
-  button.append(node("span", "node-icon", icon));
-  const copy = node("span", "node-copy");
-  copy.append(node("span", "node-kind", kind), node("span", "node-name", name), node("span", "node-summary", summary));
-  button.append(copy);
-  button.append(node("span", "node-policy", policyMode === "custom" ? "custom context" : kind === "Trigger" ? "admission" : "inherits context"));
+  const header = node("span", "node-card-head");
+  const kindCopy = node("span", "node-kind-wrap");
+  kindCopy.append(node("span", "node-kind-dot"), node("span", "node-kind", kind));
+  header.append(kindCopy, node("span", "node-position", position));
+  button.append(header, node("span", "node-name", name), node("span", "node-summary", summary));
+  const chips = node("span", "node-card-chips");
+  if (id === "trigger") {
+    const trigger = draft.triggerPolicy;
+    const promptLabel = trigger.promptSource === "preset" ? "Preset prompt" : trigger.promptSource === "none" ? "No prompt" : "Invoking user prompt";
+    chips.append(node("span", "node-chip", `${promptLabel} · conversation ${trigger.includeInvokingConversation ? "included" : "excluded"}`));
+  } else if (id === "exit") {
+    chips.append(node("span", "node-chip", "evidence always retained"));
+    chips.append(node("span", "node-chip", draft.exitPolicy.maxAdditionalIterations > 0 ? `Model-gated · up to ${draft.exitPolicy.maxAdditionalIterations} additional` : "Deterministic complete"));
+  } else {
+    const assignments = draft.toolAssignments.length;
+    chips.append(node("span", "node-chip", `↳ ${draft.roleId}`));
+    chips.append(node("span", "node-chip", `${assignments} governed ${assignments === 1 ? "capability" : "capabilities"}`));
+    chips.append(node("span", "node-chip", policyMode === "custom" ? "context customized" : "context inherited"));
+  }
+  button.append(chips);
   button.addEventListener("click", () => {
+    lastSelectedNodeId = id;
     selectedNodeId = id;
     renderCanvas();
     renderInspector();
+    renderToolbar();
   });
   return button;
 }
 
-function appendConnector() {
-  elements.canvas.append(node("span", "connector"));
+function appendConnector(insertionIndex) {
+  const connector = node("span", "connector");
+  const canInsert = !isSystemLoop() && !mutationInFlight && draft.inferenceSteps.length < catalog.limits.maxInferenceSteps;
+  if (canInsert) {
+    const add = node("button", "connector-add", "+");
+    add.type = "button";
+    add.setAttribute("aria-label", "Add inference step here");
+    add.addEventListener("click", () => insertInferenceStep(insertionIndex));
+    connector.append(add);
+  }
+  elements.canvas.append(connector);
 }
 
-function triggerSummary() {
+function triggerDescription() {
   const trigger = draft.triggerPolicy;
-  const source = trigger.promptSource === "preset" ? "Preset prompt" : trigger.promptSource === "none" ? "No prompt" : "Invoking user prompt";
-  return `${source} · conversation ${trigger.includeInvokingConversation ? "included" : "excluded"}`;
+  if (trigger.promptSource === "preset") return `The saved preset enters the run${trigger.includeInvokingConversation ? " with a bounded conversation snapshot." : " without conversation history."}`;
+  if (trigger.promptSource === "none") return `The run starts without a prompt${trigger.includeInvokingConversation ? " and includes a bounded conversation snapshot." : " or conversation history."}`;
+  return `The invoking user prompt enters the run${trigger.includeInvokingConversation ? " with a bounded conversation snapshot." : " without conversation history."}`;
 }
 
 function renderInspector() {
   elements.inspectorContent.replaceChildren();
+  const loopSettingsSelected = selectedNodeId === "loop-settings";
+  elements.selectedNodeButton.classList.toggle("active", !loopSettingsSelected);
+  elements.selectedNodeButton.setAttribute("aria-selected", String(!loopSettingsSelected));
+  elements.loopSettingsButton.classList.toggle("active", loopSettingsSelected);
+  elements.loopSettingsButton.setAttribute("aria-selected", String(loopSettingsSelected));
+  elements.selectedNodeButton.tabIndex = loopSettingsSelected ? -1 : 0;
+  elements.loopSettingsButton.tabIndex = loopSettingsSelected ? 0 : -1;
+  elements.inspectorContent.setAttribute("aria-labelledby", loopSettingsSelected ? "loopSettingsButton" : "selectedNodeButton");
   if (!draft) {
     elements.inspectorTitle.textContent = "Loop settings";
     elements.inspectorContent.append(node("p", "empty-state", "No loop selected."));
@@ -1027,10 +1259,12 @@ function renderInspector() {
 
 function renderLoopInspector() {
   elements.inspectorTitle.textContent = "Loop settings";
+  const role = section("Directory role");
+  role.append(node("div", "context-note", `${draft.roleId}. This loop belongs to the current directory role; wave one does not allow a loop to switch durable identity.`));
   const model = section("Inherited provider and model");
   model.append(node("div", "context-note", `${catalog.runtimeModel?.provider ?? "Provider unavailable"} · ${catalog.runtimeModel?.model || "provider default model"}. Provider and model cannot be overridden per loop in wave one.`));
-  const authority = section("Workspace tools");
-  authority.append(node("p", "field-hint", "No tools are assigned by default. Exit decisions are always tool-less."));
+  const authority = section("Workspace tools · governed authority");
+  authority.append(node("p", "field-hint", "Assignments allow inference nodes to request governed capabilities. Permission, approval, and audit policy still decide whether each request may execute. Exit decisions are always tool-less."));
   for (const assignment of catalog.tools?.customAssignable ?? []) {
     authority.append(checkboxRow(capitalize(assignment), `Allow inference nodes to request the governed ${assignment} command.`, draft.toolAssignments.includes(assignment), checked => {
       draft.toolAssignments = checked ? [...draft.toolAssignments, assignment] : draft.toolAssignments.filter(value => value !== assignment);
@@ -1041,7 +1275,7 @@ function renderLoopInspector() {
   defaults.append(node("p", "field-hint", "Versioned server defaults are inspectable here. Context is customized at each Inference or Exit node."));
   defaults.append(contextSummary("Inference", draft.contextDefaults.inference), contextSummary("Exit", draft.contextDefaults.exit));
   defaults.append(evidenceNote());
-  elements.inspectorContent.append(model, authority, defaults);
+  elements.inspectorContent.append(role, model, authority, defaults);
 }
 
 function renderTriggerInspector() {
@@ -1077,8 +1311,9 @@ function renderTriggerInspector() {
 
 function renderInferenceInspector(step) {
   const index = draft.inferenceSteps.indexOf(step);
-  elements.inspectorTitle.textContent = `Inference · Step ${index + 1}`;
-  const instruction = section("Inference");
+  elements.inspectorTitle.textContent = `Inference step ${index + 1}`;
+  const instruction = section("Step definition");
+  instruction.append(node("p", "inspector-subheading", "A model call inside the current role and loop authority."));
   const name = document.createElement("input");
   name.maxLength = catalog.limits.maxNameCharacters; name.value = step.name; name.disabled = isSystemLoop();
   name.addEventListener("input", event => { step.name = event.target.value; markDirty(); renderCanvas(); });
@@ -1089,7 +1324,21 @@ function renderInferenceInspector(step) {
   const actions = node("div", "inline-actions");
   actions.append(actionButton("↑ Move earlier", () => moveStep(index, -1), index === 0 || isSystemLoop()), actionButton("↓ Move later", () => moveStep(index, 1), index === draft.inferenceSteps.length - 1 || isSystemLoop()), actionButton("Remove", () => removeStep(index), draft.inferenceSteps.length === 1 || isSystemLoop(), "danger-button"));
   instruction.append(actions);
-  elements.inspectorContent.append(instruction, contextEditor(step, "inference"));
+  const effective = section("Effective role, model, and tools");
+  effective.append(
+    authorityCard("R", "Role", draft.roleId),
+    authorityCard("M", "Model", `${catalog.runtimeModel?.provider ?? "Unavailable"} / ${catalog.runtimeModel?.model || "provider default"}`),
+    authorityCard("T", "Tools", draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "None assigned"));
+  effective.append(node("p", "field-hint", "Inherited from loop settings. Tool requests remain subject to the current role ceiling, permission rules, approvals, and audit."));
+  elements.inspectorContent.append(instruction, effective, contextEditor(step, "inference"));
+}
+
+function authorityCard(icon, label, value) {
+  const card = node("div", "authority-card");
+  const copy = node("span", "authority-card-copy");
+  copy.append(node("strong", "", label), node("span", "", value));
+  card.append(node("span", "authority-card-icon", icon), copy, node("span", "inheritance-chip", "Inherited"));
+  return card;
 }
 
 function renderExitInspector() {
@@ -1165,27 +1414,52 @@ function evidenceNote() {
 
 function renderToolbar() {
   const editable = Boolean(draft) && !isSystemLoop() && !mutationInFlight;
+  const stepCount = draft?.inferenceSteps.length ?? 0;
+  const hasValidationErrors = validateDraft().length > 0;
   elements.name.disabled = !editable;
   elements.description.disabled = !editable;
-  elements.saveButton.disabled = !editable || !dirty || validateDraft().length > 0;
+  elements.saveButton.disabled = !editable || !dirty || hasValidationErrors;
   elements.reloadButton.disabled = mutationInFlight || !draft || !dirty;
   elements.deleteButton.disabled = !editable;
   elements.invokeButton.disabled = !editable || dirty;
-  elements.addStepButton.disabled = !editable || draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps;
+  elements.addStepButton.disabled = !editable || stepCount >= catalog.limits.maxInferenceSteps;
   elements.loopSettingsButton.disabled = mutationInFlight || !draft;
+  elements.selectedNodeButton.disabled = mutationInFlight || !draft;
   elements.createLoopButton.disabled = mutationInFlight || !catalog || catalog.customDefinitions.length >= catalog.limits.maxDefinitionsPerWorkspace;
-  elements.saveState.textContent = historicalLoopId ? "Archived evidence" : !draft ? "No loop" : isSystemLoop() ? "System managed" : dirty ? "Unsaved changes" : `Saved · v${draft.definitionVersion}`;
+  elements.loopSearch.disabled = mutationInFlight || !catalog;
+  elements.zoomFitButton.disabled = !draft;
+  elements.zoomInButton.disabled = !draft || canvasZoom >= 1.3;
+  elements.zoomOutButton.disabled = !draft || canvasZoom <= 0.7;
+  elements.saveState.textContent = historicalLoopId ? "Archived evidence" : !draft ? "No loop selected" : isSystemLoop() ? "System managed" : dirty ? "Unsaved changes" : hasValidationErrors ? `Saved · v${draft.definitionVersion} · needs attention` : `Saved · v${draft.definitionVersion}`;
+  elements.canvasStepCount.textContent = `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+  elements.loopHeaderMeta.textContent = !draft ? "No loop selected" : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+  elements.canvasAuthority.replaceChildren();
+  if (draft) {
+    elements.canvasAuthority.append(node("strong", "", `Authority: ${draft.roleId}`), document.createTextNode(` · ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "no model-facing tools assigned"} · all inference steps inherit this scope`));
+  }
 }
 
 function renderValidation() {
   const errors = validateDraft();
-  if (errors.length === 0) {
-    elements.validationBanner.textContent = "";
+  elements.validationBanner.replaceChildren();
+  elements.validationBanner.removeAttribute("aria-label");
+  if (!draft) {
     elements.validationBanner.className = "validation-banner";
     return;
   }
+  if (errors.length === 0) {
+    const copy = node("span", "validation-copy");
+    const title = isSystemLoop() ? "System definition is valid and read-only" : dirty ? "Draft is valid and ready to save" : `Definition v${draft.definitionVersion} is valid and runnable`;
+    const detail = isSystemLoop() ? "The system-managed default remains inspectable but cannot be edited here." : dirty ? "Save this definition before starting a run." : "The server will validate again before saving or admitting a run.";
+    copy.append(node("strong", "", title));
+    copy.append(node("span", "", detail));
+    elements.validationBanner.append(node("span", "validation-icon", "✓"), copy);
+    elements.validationBanner.className = "validation-banner visible success";
+    return;
+  }
   elements.validationBanner.textContent = errors[0];
-  elements.validationBanner.className = "validation-banner visible";
+  elements.validationBanner.setAttribute("aria-label", `Definition needs attention: ${errors[0]}`);
+  elements.validationBanner.className = "validation-banner visible error";
 }
 
 function validateDraft() {
@@ -1203,6 +1477,7 @@ function validateDraft() {
 function markDirty() {
   if (isSystemLoop()) return;
   dirty = true;
+  renderList();
   renderToolbar();
   renderValidation();
 }
@@ -1211,12 +1486,6 @@ function updateDraftValue(fieldName, value) {
   if (mutationInFlight || !draft || isSystemLoop()) return;
   draft[fieldName] = value;
   markDirty();
-  renderListDraftName();
-}
-
-function renderListDraftName() {
-  const selected = elements.list.querySelector('[aria-selected="true"] .loop-list-name');
-  if (selected) selected.textContent = draft.displayName || "Untitled loop";
 }
 
 async function createLoop() {
@@ -1298,7 +1567,9 @@ function openInvokeModal() {
   elements.invokeSummary.textContent = `${draft.displayName} v${draft.definitionVersion} will run the saved definition with ${draft.inferenceSteps.length} ordered inference step${draft.inferenceSteps.length === 1 ? "" : "s"} using ${catalog.runtimeModel?.provider ?? "the configured provider"} · ${catalog.runtimeModel?.model || "provider default model"}. Trigger source: ${promptSourceLabel(trigger.promptSource)}. Invoking conversation: ${trigger.includeInvokingConversation ? "admitted as a bounded snapshot" : "excluded from model context"}.`;
   const destinations = [...draft.inferenceSteps.map(step => resolvedPolicy(step, "inference")), resolvedPolicy(draft.exitPolicy, "exit")].filter(policy => policy.contextOut.publishToInvokingConversation).length;
   elements.invokeLimits.textContent = `Hard bounds: ${catalog.limits.maxModelAttemptsPerRun} model attempts per run, ${catalog.limits.maxGovernedToolRequestsPerAttempt} governed tool requests per attempt, and ${catalog.limits.maxGovernedToolRequestsPerRun} per run, within ${formatDuration(catalog.limits.maxRunExecutionMilliseconds)} of accumulated execution time. Each canonical model output is capped at ${catalog.limits.maxCanonicalModelOutputCharacters.toLocaleString()} characters. Conversation snapshots retain at most ${catalog.limits.maxInvokingConversationCharacters.toLocaleString()} characters across ${catalog.limits.maxInvokingConversationEntries} selected messages; older omissions are aggregated. Tool targets are capped at ${catalog.limits.maxGovernedToolTargetCharacters.toLocaleString()} characters, arguments at ${catalog.limits.maxGovernedToolArgumentCharacters.toLocaleString()}, and the exact formatted result returned to the model at ${catalog.limits.maxCanonicalToolResultCharacters.toLocaleString()} characters. Run evidence is capped at ${catalog.limits.maxTraceEventsPerRun} events, including ${catalog.limits.maxLifecycleControlEventsPerRun} lifecycle/control events, and ${formatBytes(catalog.limits.maxRunTraceUtf8Bytes)}. Assigned tools: ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "none"}. ${destinations} node output destination${destinations === 1 ? "" : "s"} may publish to the bound invoking conversation.`;
-  elements.startRunButton.disabled = false;
+  clearInvokeError();
+  setInvokePreparationBusy(false);
+  elements.appShell.inert = true;
   elements.invokeModal.classList.toggle("open", true);
   elements.invokeModal.setAttribute("aria-hidden", "false");
   window.setTimeout(() => (promptRequired ? elements.invocationPrompt : elements.startRunButton).focus?.(), 0);
@@ -1307,15 +1578,68 @@ function openInvokeModal() {
 function closeInvokeModal() {
   elements.invokeModal.classList.toggle("open", false);
   elements.invokeModal.setAttribute("aria-hidden", "true");
+  elements.appShell.inert = false;
   invokeReturnFocus?.focus?.();
   invokeReturnFocus = null;
 }
 
+function cancelInvokeModal() {
+  const attempt = activeInvocationAttempt;
+  if (attempt && !attempt.dispatched) {
+    attempt.cancelled = true;
+    activeInvocationAttempt = null;
+    invocationInFlight = false;
+    setInvokePreparationBusy(false);
+  }
+  closeInvokeModal();
+}
+
+function setInvokePreparationBusy(busy) {
+  elements.closeInvokeButton.disabled = false;
+  elements.cancelInvokeButton.disabled = false;
+  elements.invocationPrompt.disabled = busy;
+  elements.startRunButton.disabled = busy;
+  elements.startRunButton.textContent = busy ? "Preparing" : "Start run";
+  elements.invokeModal.setAttribute("aria-busy", String(busy));
+}
+
+function clearInvokeError() {
+  elements.invokeError.textContent = "";
+  elements.invokeError.hidden = true;
+}
+
+function showInvokeError(message) {
+  elements.invokeError.textContent = message;
+  elements.invokeError.hidden = false;
+  elements.invokeError.focus?.();
+}
+
+function trapInvokeModalFocus(event) {
+  const controls = [
+    elements.closeInvokeButton,
+    ...(elements.invocationPromptField.hidden ? [] : [elements.invocationPrompt]),
+    elements.cancelInvokeButton,
+    elements.startRunButton
+  ].filter(control => !control.disabled && !control.hidden);
+  if (controls.length === 0) return;
+  const first = controls[0];
+  const last = controls.at(-1);
+  const currentIndex = controls.indexOf(document.activeElement);
+  if (event.shiftKey && currentIndex <= 0) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (currentIndex === -1 || currentIndex === controls.length - 1)) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 async function startRun() {
   if (!draft || dirty || isSystemLoop() || invocationInFlight) return;
+  clearInvokeError();
   const invocationPrompt = draft.triggerPolicy.promptSource === "invocation" ? elements.invocationPrompt.value.normalize("NFC") : null;
   if (draft.triggerPolicy.promptSource === "invocation" && !invocationPrompt.trim()) {
-    showBanner("This loop requires an initial user prompt.");
+    showInvokeError("This loop requires an initial user prompt.");
     return;
   }
 
@@ -1327,9 +1651,10 @@ async function startRun() {
     runtimeProvider: catalog.runtimeModel?.provider,
     runtimeModel: catalog.runtimeModel?.model ?? null
   };
+  const attempt = { cancelled: false, dispatched: false };
+  activeInvocationAttempt = attempt;
   invocationInFlight = true;
-  elements.startRunButton.disabled = true;
-  elements.startRunButton.textContent = "Running";
+  setInvokePreparationBusy(true);
   let requestKey = null;
   let operationId = null;
   let reservationId = null;
@@ -1340,20 +1665,28 @@ async function startRun() {
     try {
       requestKey = await invocationRequestKey(invocationRequest);
     } catch (error) {
-      showBanner(`Run could not be prepared safely: ${error.message}`);
+      if (attempt.cancelled) return;
+      showInvokeError(`Run could not be prepared safely: ${error.message}`);
       return;
     }
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) return;
 
     const connection = await getHub();
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) return;
     let reservedInvocationRequest;
     try {
       reservedInvocationRequest = await reservePendingInvocationRequest(requestKey, invocationRequest);
     } catch (error) {
-      showBanner(`Run was not sent because unresolved invocation identity could not be coordinated safely across browser tabs: ${error.message}`);
+      if (attempt.cancelled) return;
+      showInvokeError(`Run was not sent because unresolved invocation identity could not be coordinated safely across browser tabs: ${error.message}`);
+      return;
+    }
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) {
+      if (reservedInvocationRequest) await releasePendingInvocationReservation(requestKey, reservedInvocationRequest.operationId, reservedInvocationRequest.reservationId);
       return;
     }
     if (!reservedInvocationRequest) {
-      showBanner(`Run was not started because ${maximumPendingInvocationRequests} invocation outcomes are still unresolved. Reconcile or definitively reject an existing operation before starting another.`);
+      showInvokeError(`Run was not started because ${maximumPendingInvocationRequests} invocation outcomes are still unresolved. Reconcile or definitively reject an existing operation before starting another.`);
       return;
     }
     operationId = reservedInvocationRequest.operationId;
@@ -1364,10 +1697,17 @@ async function startRun() {
       await markPendingInvocationDispatched(requestKey, operationId, reservationId);
     } catch (error) {
       await releasePendingInvocationReservation(requestKey, operationId, reservationId);
-      showBanner(`Run was not sent because its dispatch state could not be persisted safely: ${error.message}`);
+      if (attempt.cancelled) return;
+      showInvokeError(`Run was not sent because its dispatch state could not be persisted safely: ${error.message}`);
+      return;
+    }
+    if (attempt.cancelled || activeInvocationAttempt !== attempt) {
+      await rollbackPendingInvocationDispatch(requestKey, operationId, reservationId, reservationIdsBeforeDispatch, wasPreviouslyDispatched);
       return;
     }
     dispatchAttempted = true;
+    attempt.dispatched = true;
+    closeInvokeModal();
     const invocation = connection.invoke("InvokeLoop", {
       loopId: invocationRequest.loopId,
       expectedDefinitionVersion: invocationRequest.expectedDefinitionVersion,
@@ -1375,7 +1715,6 @@ async function startRun() {
       operationId,
       invocationPrompt: invocationRequest.invocationPrompt
     });
-    closeInvokeModal();
     currentView = "runs";
     selectedRunId = null;
     selectedRun = null;
@@ -1416,9 +1755,10 @@ async function startRun() {
     renderAll();
     showToast(response?.detail ?? "Run finished. Durable evidence is available in Runs.");
   } catch (error) {
+    if (attempt.cancelled) return;
     if (!dispatchAttempted) {
       if (requestKey && operationId && reservationId) await releasePendingInvocationReservation(requestKey, operationId, reservationId);
-      showBanner(`Run could not be sent because the live connection was not established: ${error.message}`);
+      showInvokeError(`Run could not be sent because the live connection was not established: ${error.message}`);
       return;
     }
     if (error?.name === "SignalRPreDispatchError") {
@@ -1432,9 +1772,11 @@ async function startRun() {
     }
     await reconcileAndApplyInvocationOperation(invocationRequest, requestKey, operationId);
   } finally {
-    invocationInFlight = false;
-    elements.startRunButton.disabled = false;
-    elements.startRunButton.textContent = "Start run";
+    if (activeInvocationAttempt === attempt) {
+      activeInvocationAttempt = null;
+      invocationInFlight = false;
+      setInvokePreparationBusy(false);
+    }
   }
 }
 
@@ -1949,16 +2291,18 @@ function scheduleSelectedRunRefresh() {
     window.clearTimeout(selectedRunRefreshTimer);
     selectedRunRefreshTimer = null;
   }
-  if (activeRunOperationMonitors > 0 || currentView !== "runs" || !selectedRun || !isNonterminalRun(selectedRun)) return;
+  if (!loopBuilderSurfaceActive || selectedRunRefreshInFlight || activeRunOperationMonitors > 0 || currentView !== "runs" || !selectedRun || !isNonterminalRun(selectedRun)) return;
   const runId = selectedRun.id;
   selectedRunRefreshTimer = window.setTimeout(async () => {
     selectedRunRefreshTimer = null;
-    if (currentView !== "runs" || selectedRun?.id !== runId) return;
+    if (!loopBuilderSurfaceActive || currentView !== "runs" || selectedRun?.id !== runId) return;
+    selectedRunRefreshInFlight = true;
     try {
       const monitored = await refreshSelectedRunFromMonitor(runId);
       if (!monitored) await fallbackSelectedRunAfterMonitorFailure(runId);
     } finally {
-      if (currentView === "runs" && selectedRun?.id === runId && isNonterminalRun(selectedRun)) scheduleSelectedRunRefresh();
+      selectedRunRefreshInFlight = false;
+      scheduleSelectedRunRefresh();
     }
   }, 1000);
 }
@@ -2029,11 +2373,28 @@ async function deleteSelectedTrace() {
 
 async function getHub() {
   if (hub?.connected) return hub;
-  hub = new JsonSignalRConnection(createHubUrl());
-  hub.on("ApprovalsChanged", renderLoopApprovals);
-  hub.onclose = () => { renderLoopApprovals([]); hub = null; };
-  await hub.start();
-  return hub;
+  const connection = new JsonSignalRConnection(createHubUrl());
+  hub = connection;
+  connection.on("ApprovalsChanged", approvals => {
+    if (hub === connection) renderLoopApprovals(approvals);
+  });
+  connection.onclose = () => {
+    if (hub !== connection) return;
+    renderLoopApprovals([]);
+    hub = null;
+  };
+  try {
+    await connection.start();
+  } catch (error) {
+    connection.stop();
+    if (hub === connection) hub = null;
+    throw error;
+  }
+  if (hub !== connection) {
+    connection.stop();
+    throw new SignalRPreDispatchError("SignalR connection setup was superseded by a newer invocation.");
+  }
+  return connection;
 }
 
 function renderLoopApprovals(approvals) {
@@ -2105,12 +2466,39 @@ async function reloadCurrent() {
 }
 
 function addInferenceStep() {
+  insertInferenceStep(draft?.inferenceSteps.length ?? 0);
+}
+
+function insertInferenceStep(index) {
   if (!draft || isSystemLoop() || draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps) return;
   const id = `local-${newOperationId()}`;
-  draft.inferenceSteps.push({ id, name: `Step ${draft.inferenceSteps.length + 1}`, instruction: "", contextPolicy: { mode: "inherit", customPolicy: null } });
+  const boundedIndex = Math.max(0, Math.min(index, draft.inferenceSteps.length));
+  draft.inferenceSteps.splice(boundedIndex, 0, { id, name: `Step ${boundedIndex + 1}`, instruction: "", contextPolicy: { mode: "inherit", customPolicy: null } });
+  lastSelectedNodeId = id;
   selectedNodeId = id;
   markDirty();
   renderCanvas(); renderInspector(); renderToolbar();
+}
+
+function setCanvasZoom(value) {
+  canvasZoom = Math.max(0.7, Math.min(1.3, Math.round(value * 10) / 10));
+  if (elements.canvas.style) elements.canvas.style.zoom = String(canvasZoom);
+  elements.zoomLevel.textContent = `${Math.round(canvasZoom * 100)}%`;
+  renderToolbar();
+}
+
+function applyCanvasZoom() {
+  if (elements.canvas.style) elements.canvas.style.zoom = String(canvasZoom);
+  elements.zoomLevel.textContent = `${Math.round(canvasZoom * 100)}%`;
+}
+
+function fitCanvas() {
+  const viewportWidth = Number(elements.canvas.parentElement?.clientWidth);
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) {
+    setCanvasZoom(1);
+    return;
+  }
+  setCanvasZoom(Math.min(1, (viewportWidth - 48) / 520));
 }
 
 function moveStep(index, delta) {
@@ -2125,6 +2513,7 @@ function removeStep(index) {
   if (draft.inferenceSteps.length <= 1) return;
   draft.inferenceSteps.splice(index, 1);
   selectedNodeId = draft.inferenceSteps[Math.min(index, draft.inferenceSteps.length - 1)].id;
+  lastSelectedNodeId = selectedNodeId;
   markDirty(); renderCanvas(); renderInspector();
 }
 
@@ -2145,9 +2534,11 @@ function setBusy(busy, label) {
 }
 
 function setInteractive(enabled) {
-  for (const button of [elements.createLoopButton, elements.saveButton, elements.deleteButton, elements.reloadButton, elements.addStepButton, elements.invokeButton, elements.builderTab, elements.runsTab]) button.disabled = !enabled;
+  for (const button of [elements.createLoopButton, elements.saveButton, elements.deleteButton, elements.reloadButton, elements.addStepButton, elements.invokeButton, elements.builderTab, elements.runsTab, elements.selectedNodeButton, elements.loopSettingsButton, elements.zoomOutButton, elements.zoomInButton, elements.zoomFitButton]) button.disabled = !enabled;
+  for (const item of elements.list.children) item.disabled = !enabled;
   elements.name.disabled = !enabled;
   elements.description.disabled = !enabled;
+  elements.loopSearch.disabled = !enabled;
 }
 
 function showResponseError(error) {
@@ -2163,8 +2554,17 @@ function showResponseError(error) {
 }
 
 function showBanner(message, style) {
+  elements.validationBanner.removeAttribute("aria-label");
   elements.validationBanner.textContent = message;
   elements.validationBanner.className = `validation-banner visible${style ? ` ${style}` : ""}`;
+}
+
+function appendActivationRetry() {
+  const retry = actionButton("Retry", async () => {
+    retry.disabled = true;
+    await activate();
+  }, false, "secondary-button validation-retry");
+  elements.validationBanner.append(retry);
 }
 
 function showToast(message) {
@@ -2347,6 +2747,16 @@ class JsonSignalRConnection {
     this.keepAliveTimer = null;
   }
 
+  stop() {
+    this.closedByClient = true;
+    try {
+      this.socket?.close();
+    } catch {
+      // A failed or still-connecting socket can reject close; local state must still be released.
+    }
+    this.handleClose();
+  }
+
   async receive(data) {
     const text = typeof data === "string" ? data : await data.text();
     this.buffer += text;
@@ -2393,4 +2803,5 @@ class JsonSignalRConnection {
   }
 }
 
-boot();
+window.embodySenseLoopBuilder = Object.freeze({ activate, deactivate, refreshWorkspace });
+if (!elements.loopsView.hidden) void activate();

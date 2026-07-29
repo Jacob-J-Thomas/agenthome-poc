@@ -6,7 +6,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const builderSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url), "utf8");
-const loopsHtml = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loops.html", import.meta.url), "utf8");
+const loopsHtml = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url), "utf8");
 
 test("catalog loading is authenticated and projects the system loop as read-only", async () => {
   const app = await loadLoopBuilder();
@@ -26,6 +26,241 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("initialization refresh hydrates a loop builder that booted disabled", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let initialized = false;
+  server.on("GET", "/api/status", () => ({ status: 200, body: { workspaceRoot: "C:/workspace", initialized } }));
+  const app = await loadLoopBuilder({ server });
+
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  assert.match(app.elements.validationBanner.textContent, /Initialize the workspace from Chat/);
+  initialized = true;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+
+  assert.equal(app.elements.createLoopButton.disabled, false);
+  assert.equal(app.elements.loopSearch.disabled, false);
+  assert.match(app.elements.loopList.textContent, /Default conversation/);
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+});
+
+test("initialization refresh queues behind a stale activation status read", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let releaseStaleStatus;
+  let statusReads = 0;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 1) {
+      return new Promise(resolve => {
+        releaseStaleStatus = () => resolve({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: false } });
+      });
+    }
+    return { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } };
+  });
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+  const activation = app.window.embodySenseLoopBuilder.activate();
+  for (let attempt = 0; attempt < 20 && !releaseStaleStatus; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+
+  const initializationRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  releaseStaleStatus();
+  await Promise.all([activation, initializationRefresh]);
+
+  assert.equal(statusReads, 2);
+  assert.equal(app.elements.createLoopButton.disabled, false);
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+});
+
+test("hidden Loops defers catalog and evidence requests until first activation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+
+  assert.equal(server.calls.some(call => call.url === "/api/loops"), false);
+  assert.equal(server.calls.some(call => call.url.startsWith("/api/loop-runs")), false);
+  await app.window.embodySenseLoopBuilder.activate();
+
+  assert.equal(server.calls.some(call => call.url === "/api/loops"), true);
+  assert.equal(server.calls.some(call => call.url.startsWith("/api/loop-runs")), true);
+});
+
+test("revisiting Loops preserves an unsaved draft without reloading the catalog", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+  await app.window.embodySenseLoopBuilder.activate();
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved reviewer notes";
+  await app.elements.loopDescription.input();
+  const catalogRequests = server.calls.filter(call => call.url === "/api/loops").length;
+
+  await app.window.embodySenseLoopBuilder.activate();
+
+  assert.equal(app.elements.loopDescription.value, "Unsaved reviewer notes");
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.equal(server.calls.filter(call => call.url === "/api/loops").length, catalogRequests);
+});
+
+test("a transient first activation failure retries without rebinding events", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let catalogAttempts = 0;
+  server.on("GET", "/api/loops", () => {
+    catalogAttempts++;
+    return catalogAttempts === 1
+      ? { status: 503, body: { detail: "Catalog temporarily unavailable." } }
+      : { status: 200, body: createCatalog() };
+  });
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.match(app.elements.validationBanner.textContent, /Catalog temporarily unavailable/);
+  assert.ok(findByTag(app.elements.validationBanner, "button").some(button => button.textContent === "Retry"));
+
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+
+  assert.equal(catalogAttempts, 2);
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+  assert.equal(app.elements.createLoopButton.listeners.get("click") != null, true);
+});
+
+test("run-evidence activation retry preserves the draft and clears its failure state", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let runAttempts = 0;
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => {
+    runAttempts++;
+    return runAttempts === 1
+      ? { status: 503, body: { detail: "Evidence temporarily unavailable." } }
+      : { status: 200, body: { items: [], continuationCursor: null } };
+  });
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.match(app.elements.validationBanner.textContent, /Run evidence unavailable/);
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved retry notes";
+  await app.elements.loopDescription.input();
+
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+
+  assert.equal(runAttempts, 2);
+  assert.equal(server.calls.filter(call => call.url === "/api/loops").length, 1);
+  assert.equal(app.elements.loopDescription.value, "Unsaved retry notes");
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Run evidence unavailable|Retry/);
+});
+
+test("a status refresh failure becomes retryable and cached-catalog recovery restores the UI", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusAvailable = true;
+  server.on("GET", "/api/status", () => statusAvailable
+    ? { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } }
+    : { status: 503, body: { detail: "Status temporarily unavailable." } });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved status retry notes";
+  await app.elements.loopDescription.input();
+
+  statusAvailable = false;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), false);
+  assert.equal(app.elements.loopDescription.disabled, true);
+  assert.match(app.elements.validationBanner.textContent, /Status temporarily unavailable.*Retry/);
+
+  statusAvailable = true;
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.equal(server.calls.filter(call => call.url === "/api/loops").length, 1);
+  assert.equal(app.elements.loopDescription.value, "Unsaved status retry notes");
+  assert.equal(app.elements.loopDescription.disabled, false);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /unavailable|Retry/i);
+});
+
+test("a queued refresh failure leaves the builder retryable", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusReads = 0;
+  let releaseActiveRefresh;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 2) {
+      return new Promise(resolve => {
+        releaseActiveRefresh = () => resolve({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } });
+      });
+    }
+    if (statusReads === 3) return { status: 503, body: { detail: "Queued refresh failed." } };
+    return { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  const activeRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  for (let attempt = 0; attempt < 20 && !releaseActiveRefresh; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  const queuedRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  releaseActiveRefresh();
+  await Promise.all([activeRefresh, queuedRefresh]);
+
+  assert.equal(statusReads, 3);
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), false);
+  assert.match(app.elements.validationBanner.textContent, /Queued refresh failed.*Retry/);
+
+  await app.window.embodySenseLoopBuilder.refreshWorkspace();
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /failed|Retry/i);
+});
+
+test("Retry joins a still-draining refresh chain instead of starting a competing refresh", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusReads = 0;
+  let releaseFailedRefresh;
+  let releaseQueuedRefresh;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 2) {
+      return new Promise(resolve => {
+        releaseFailedRefresh = () => resolve({ status: 503, body: { detail: "First refresh failed." } });
+      });
+    }
+    if (statusReads === 3) {
+      return new Promise(resolve => {
+        releaseQueuedRefresh = () => resolve({ status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } });
+      });
+    }
+    return { status: 200, body: { workspaceRoot: "C:/workspace", initialized: true } };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  const failedRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  for (let attempt = 0; attempt < 20 && !releaseFailedRefresh; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  const queuedRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  releaseFailedRefresh();
+  for (let attempt = 0; attempt < 20 && !releaseQueuedRefresh; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  const retry = findByTag(app.elements.validationBanner, "button").find(button => button.textContent === "Retry");
+  assert.ok(retry);
+
+  const retryRefresh = retry.click();
+  await Promise.resolve();
+  assert.equal(statusReads, 3);
+  releaseQueuedRefresh();
+  await Promise.all([failedRefresh, queuedRefresh, retryRefresh]);
+
+  assert.equal(statusReads, 3);
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /failed|Retry/i);
+});
+
+test("selecting another loop during first evidence hydration does not fail activation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let releaseWorkspaceRuns;
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => new Promise(resolve => {
+    releaseWorkspaceRuns = () => resolve({ status: 200, body: { items: [], continuationCursor: null } });
+  }));
+  const app = await loadLoopBuilder({ server, loopsViewHidden: true });
+  const activation = app.window.embodySenseLoopBuilder.activate();
+  for (let attempt = 0; attempt < 20 && !releaseWorkspaceRuns; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+
+  await selectCustomLoop(app);
+  releaseWorkspaceRuns();
+  await activation;
+
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.equal(app.elements.loopName.value, "Research pass");
+  assert.doesNotMatch(app.elements.validationBanner.textContent, /Retry|unavailable/i);
 });
 
 test("server-controlled loop text is rendered as text and cannot create executable markup", async () => {
@@ -69,6 +304,41 @@ test("trigger controls support invocation, preset, and no-prompt admission with 
   assert.equal(findByTag(app.elements.inspectorContent, "textarea").length, 0);
   assert.match(app.elements.loopCanvas.textContent, /No prompt · conversation included/);
   assert.match(app.elements.inspectorContent.textContent, /Trigger admission does not append it again or write durable memory/);
+});
+
+test("prototype-aligned search, insertion, and zoom controls update the projected builder", async () => {
+  const app = await loadLoopBuilder();
+
+  app.elements.loopSearch.value = "research";
+  await app.elements.loopSearch.input();
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+  assert.doesNotMatch(app.elements.loopList.textContent, /Default conversation/);
+
+  app.elements.loopSearch.value = "";
+  await app.elements.loopSearch.input();
+  await selectCustomLoop(app);
+  app.elements.loopSearch.value = "pass";
+  await app.elements.loopSearch.input();
+  app.elements.loopName.value = "Renamed working loop";
+  await app.elements.loopName.input();
+  assert.doesNotMatch(app.elements.loopList.textContent, /Renamed working loop/);
+  app.elements.loopSearch.value = "renamed working";
+  await app.elements.loopSearch.input();
+  assert.match(app.elements.loopList.textContent, /Renamed working loop/);
+  app.elements.loopSearch.value = "research pass";
+  await app.elements.loopSearch.input();
+  assert.doesNotMatch(app.elements.loopList.textContent, /Renamed working loop/);
+  app.elements.loopSearch.value = "";
+  await app.elements.loopSearch.input();
+  const insertionControls = findByClass(app.elements.loopCanvas, "connector-add");
+  assert.equal(insertionControls.length, 2);
+  await insertionControls[1].click();
+
+  assert.match(app.elements.loopCanvas.textContent, /Step 2/);
+  assert.match(app.elements.loopList.textContent, /2 steps/);
+  assert.match(app.elements.validationBanner.textContent, /Every inference step needs a name and instruction/);
+  await app.elements.zoomInButton.click();
+  assert.equal(app.elements.zoomLevel.textContent, "110%");
 });
 
 test("Inference and Exit expose inherited or custom context without redundant fixed context", async () => {
@@ -349,10 +619,13 @@ test("client validation blocks incomplete definitions before save", async () => 
   app.elements.loopName.value = "";
   await app.elements.loopName.input();
   assert.equal(app.elements.validationBanner.textContent, "Loop name is required.");
+  assert.equal(app.elements.validationBanner.attributes.get("aria-label"), "Definition needs attention: Loop name is required.");
   assert.equal(app.elements.saveButton.disabled, true);
 
   app.elements.loopName.value = "Research pass";
   await app.elements.loopName.input();
+  assert.match(app.elements.validationBanner.textContent, /Draft is valid and ready to save/);
+  assert.equal(app.elements.validationBanner.attributes.has("aria-label"), false);
   const source = findControlByLabel(app.elements.inspectorContent, "Prompt source", "select");
   source.value = "preset";
   await source.change();
@@ -1399,10 +1672,29 @@ test("a connection setup failure is reported before dispatch without creating an
   app.elements.invocationPrompt.value = "Never dispatched.";
   await app.elements.startRunButton.click();
 
-  assert.match(app.elements.validationBanner.textContent, /could not be sent.*live connection was not established.*handshake failed/i);
-  assert.doesNotMatch(app.elements.validationBanner.textContent, /outcome.*unknown/i);
+  assert.match(app.elements.invokeError.textContent, /could not be sent.*live connection was not established.*handshake failed/i);
+  assert.equal(app.elements.invokeError.hidden, false);
+  assert.equal(app.elements.appShell.inert, true);
+  assert.equal(app.elements.invokeModal.attributes.get("aria-hidden"), "false");
+  assert.doesNotMatch(app.elements.invokeError.textContent, /outcome.*unknown/i);
   assert.equal(server.calls.filter(call => call.url.startsWith("/api/loop-runs/invocations/")).length, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
+});
+
+test("secure invocation preparation failures remain visible and retryable inside the modal", async () => {
+  const app = await loadLoopBuilder({ crypto: { subtle: null, randomUUID: () => "00000000-0000-4000-8000-000000000001" } });
+  await selectCustomLoop(app);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Prepare this securely.";
+  await app.elements.startRunButton.click();
+
+  assert.match(app.elements.invokeError.textContent, /could not be prepared safely.*secure request identity hashing is unavailable/i);
+  assert.equal(app.elements.invokeError.hidden, false);
+  assert.equal(app.elements.appShell.inert, true);
+  assert.equal(app.elements.startRunButton.disabled, false);
+  assert.equal(app.elements.closeInvokeButton.disabled, false);
+  assert.equal(app.elements.cancelInvokeButton.disabled, false);
 });
 
 test("a cached hub disconnect before invocation send is not reconciled as an ambiguous operation", async () => {
@@ -1621,6 +1913,9 @@ test("invocation is locked before asynchronous request hashing completes", async
 
   const first = app.context.startRun();
   assert.equal(app.elements.startRunButton.disabled, true);
+  assert.equal(app.elements.closeInvokeButton.disabled, false);
+  assert.equal(app.elements.cancelInvokeButton.disabled, false);
+  assert.equal(app.elements.invocationPrompt.disabled, true);
   const second = app.context.startRun();
   await second;
   assert.equal(attempts.length, 0);
@@ -1629,6 +1924,121 @@ test("invocation is locked before asynchronous request hashing completes", async
 
   assert.equal(attempts.length, 1);
   assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+  assert.doesNotMatch(app.elements.invokeModal.className, /open/);
+  assert.equal(app.elements.appShell.inert, false);
+});
+
+test("cancelling stalled preparation prevents its later dispatch without blocking a new attempt", async () => {
+  let releaseFirstDigest;
+  let digestCalls = 0;
+  const delayedFirstCrypto = {
+    subtle: {
+      digest(algorithm, data) {
+        digestCalls++;
+        if (digestCalls > 1) return webcrypto.subtle.digest(algorithm, data);
+        return new Promise(resolve => {
+          releaseFirstDigest = async () => resolve(await webcrypto.subtle.digest(algorithm, data));
+        });
+      }
+    },
+    randomUUID: () => `00000000-0000-4000-8000-${String(digestCalls).padStart(12, "0")}`
+  };
+  const app = await loadLoopBuilder({ crypto: delayedFirstCrypto });
+  await selectCustomLoop(app);
+  const attempts = [];
+  app.context.testHub = {
+    connected: true,
+    invoke: (_target, input) => {
+      attempts.push(input);
+      return Promise.resolve({ admissionStatus: "Invalid", run: null, detail: "Definitive response." });
+    }
+  };
+  vm.runInContext("hub = testHub", app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Cancel the stalled request.";
+
+  const cancelledAttempt = app.context.startRun();
+  await app.elements.cancelInvokeButton.click();
+  assert.doesNotMatch(app.elements.invokeModal.className, /open/);
+  assert.equal(app.elements.appShell.inert, false);
+  assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Dispatch only the replacement.";
+  await app.elements.startRunButton.click();
+  assert.equal(attempts.length, 1);
+
+  releaseFirstDigest();
+  await cancelledAttempt;
+  assert.equal(attempts.length, 1);
+  assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+});
+
+test("cancelling stalled connection setup cannot clobber or dispatch through its replacement hub", async () => {
+  const app = await loadLoopBuilder();
+  await selectCustomLoop(app);
+  vm.runInContext(`
+    testConnections = [];
+    testInvocations = [];
+    releaseFirstConnection = null;
+    invocationRequestKey = async () => "a".repeat(64);
+    createHubUrl = () => "ws://127.0.0.1/agent-hub";
+    JsonSignalRConnection = class {
+      constructor() {
+        this.index = testConnections.length;
+        this.connected = false;
+        this.handlers = new Map();
+        this.onclose = null;
+        this.stopped = false;
+        testConnections.push(this);
+      }
+      on(target, handler) {
+        this.handlers.set(target, handler);
+      }
+      async start() {
+        if (this.index === 0) await new Promise(resolve => { releaseFirstConnection = resolve; });
+        this.connected = true;
+      }
+      async invoke(_target, input) {
+        testInvocations.push(input);
+        return { admissionStatus: "Invalid", run: null, detail: "Definitive response." };
+      }
+      stop() {
+        this.stopped = true;
+        this.connected = false;
+        this.onclose?.();
+      }
+    };
+  `, app.context);
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Cancel while the first connection starts.";
+
+  assert.equal(vm.runInContext("dirty || isSystemLoop() || invocationInFlight", app.context), false);
+  const cancelledAttempt = app.context.startRun();
+  for (let attempt = 0; attempt < 20 && !vm.runInContext("releaseFirstConnection", app.context); attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(vm.runInContext("testConnections.length", app.context), 1);
+  assert.equal(typeof vm.runInContext("releaseFirstConnection", app.context), "function");
+  await app.elements.cancelInvokeButton.click();
+
+  await app.elements.invokeButton.click();
+  app.elements.invocationPrompt.value = "Dispatch through the replacement connection.";
+  await app.elements.startRunButton.click();
+  assert.equal(vm.runInContext("testInvocations.length", app.context), 1);
+  assert.equal(vm.runInContext("hub === testConnections[1]", app.context), true);
+  vm.runInContext("testConnections[1].handlers.get('ApprovalsChanged')([{ requestId: 'replacement-approval' }])", app.context);
+  assert.equal(app.elements.approvalCount.textContent, "1 pending");
+
+  vm.runInContext(`
+    releaseFirstConnection();
+    testConnections[0].handlers.get("ApprovalsChanged")([]);
+  `, app.context);
+  await cancelledAttempt;
+
+  assert.equal(vm.runInContext("testConnections[0].stopped", app.context), true);
+  assert.equal(vm.runInContext("hub === testConnections[1]", app.context), true);
+  assert.equal(vm.runInContext("testInvocations.length", app.context), 1);
+  assert.equal(vm.runInContext("invocationInFlight", app.context), false);
+  assert.equal(app.elements.approvalCount.textContent, "1 pending");
 });
 
 test("a runtime model change allocates a new operation without discarding the older pending identity", async () => {
@@ -1808,7 +2218,7 @@ test("the unresolved invocation limit refuses new work without evicting an older
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
   assert.equal(vm.runInContext("pendingInvocationRequests.values().next().value.operationId", app.context), oldestOperation);
-  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+  assert.match(app.elements.invokeError.textContent, /100 invocation outcomes are still unresolved/i);
 });
 
 test("the unresolved invocation limit reconciles completed receipts before refusing new work", async () => {
@@ -1886,7 +2296,7 @@ test("the unresolved invocation limit retains admitted receipts until exact run 
 
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
-  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+  assert.match(app.elements.invokeError.textContent, /100 invocation outcomes are still unresolved/i);
 });
 
 test("the unresolved invocation limit retains audit-unavailable receipts until exact run evidence is verified", async () => {
@@ -1925,7 +2335,7 @@ test("the unresolved invocation limit retains audit-unavailable receipts until e
 
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 100);
-  assert.match(app.elements.validationBanner.textContent, /100 invocation outcomes are still unresolved/i);
+  assert.match(app.elements.invokeError.textContent, /100 invocation outcomes are still unresolved/i);
 });
 
 test("the unresolved invocation limit releases a completed audit-unavailable rejection without a run", async () => {
@@ -2175,7 +2585,7 @@ test("invocation dispatch fails closed when the shared registry cannot be persis
 
   assert.equal(invocationAttempts, 0);
   assert.equal(vm.runInContext("pendingInvocationRequests.size", app.context), 0);
-  assert.match(app.elements.validationBanner.textContent, /could not be coordinated safely across browser tabs.*storage quota exceeded/i);
+  assert.match(app.elements.invokeError.textContent, /could not be coordinated safely across browser tabs.*storage quota exceeded/i);
 });
 
 test("a pre-dispatch tab failure releases only its own shared reservation", async () => {
@@ -2483,6 +2893,105 @@ test("opening an existing nonterminal run keeps refreshing independently of its 
 
   assert.match(app.elements.runSubtitle.textContent, /Completed/);
   assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+});
+
+test("run monitoring stops while Loops is hidden and resumes when it returns", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 1);
+  app.window.embodySenseLoopBuilder.deactivate();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 1);
+});
+
+test("rapidly leaving and returning during an in-flight run poll keeps one monitoring chain", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [{ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }];
+  server.runDetails.set(run.id, run);
+  let monitorStarted;
+  let releaseMonitor;
+  const monitorPending = new Promise(resolve => { monitorStarted = resolve; });
+  const monitorReleased = new Promise(resolve => { releaseMonitor = resolve; });
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, async () => {
+    monitorStarted();
+    await monitorReleased;
+    return { status: 200, body: server.runs[0] };
+  });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+
+  const refresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  refresh.cancelled = true;
+  const inFlightRefresh = refresh.handler();
+  await monitorPending;
+  app.window.embodySenseLoopBuilder.deactivate();
+  await app.window.embodySenseLoopBuilder.activate();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+
+  releaseMonitor();
+  await inFlightRefresh;
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 1);
+});
+
+test("selecting another active run during an in-flight poll transfers the monitoring chain", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const firstRun = createRunSnapshot();
+  firstRun.status = "Running";
+  firstRun.completedAtUtc = null;
+  const secondRun = createRunSnapshot();
+  secondRun.id = "run-second-active";
+  secondRun.admissionOperationId = "op-second-active";
+  secondRun.status = "Running";
+  secondRun.completedAtUtc = null;
+  secondRun.createdAtUtc = "2026-07-20T11:59:00Z";
+  secondRun.updatedAtUtc = "2026-07-20T11:59:02Z";
+  server.runs = [firstRun, secondRun].map(run => ({ id: run.id, loopId: run.loopId, admissionOperationId: run.admissionOperationId, definitionVersion: 2, status: run.status, createdAtUtc: run.createdAtUtc, updatedAtUtc: run.updatedAtUtc, completedAtUtc: null, iteration: 1, nextStepIndex: 1, failureCode: null, isDeleted: false }));
+  server.runDetails.set(firstRun.id, firstRun);
+  server.runDetails.set(secondRun.id, secondRun);
+  let monitorStarted;
+  let releaseMonitor;
+  const monitorPending = new Promise(resolve => { monitorStarted = resolve; });
+  const monitorReleased = new Promise(resolve => { releaseMonitor = resolve; });
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const polledRunId = vm.runInContext("selectedRun.id", app.context);
+  const alternateRun = polledRunId === firstRun.id ? secondRun : firstRun;
+  server.on("GET", `/api/loop-runs/${polledRunId}/monitor`, async () => {
+    monitorStarted();
+    await monitorReleased;
+    return { status: 200, body: server.runs.find(run => run.id === polledRunId) };
+  });
+
+  const firstRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  firstRefresh.cancelled = true;
+  const inFlightRefresh = firstRefresh.handler();
+  await monitorPending;
+  const secondRunButton = app.elements.runList.children.find(item => item.textContent.includes(alternateRun.id));
+  await secondRunButton.click();
+  assert.equal(app.window.delayedHandlers.filter(item => item.delay === 1000 && !item.cancelled).length, 0);
+
+  releaseMonitor();
+  await inFlightRefresh;
+  const transferredRefresh = app.window.delayedHandlers.find(item => item.delay === 1000 && !item.cancelled);
+  assert.ok(transferredRefresh);
+  transferredRefresh.cancelled = true;
+  await transferredRefresh.handler();
+  assert.equal(server.calls.some(call => call.url === `/api/loop-runs/${alternateRun.id}/monitor`), true);
 });
 
 test("long active-run approval waits use conditional monitor reads without reloading full evidence", async () => {
@@ -3042,6 +3551,7 @@ test("owned run approvals expose resolved governance evidence in the loop builde
 
 async function loadLoopBuilder(options = {}) {
   const document = new FakeDocument(loopsHtml);
+  document.elementsObject.loopsView.hidden = options.loopsViewHidden ?? false;
   const server = options.server ?? new FakeFetchServer(options.catalog ?? createCatalog());
   const sessionStorage = options.sessionStorage ?? new FakeStorage();
   const localStorage = options.localStorage ?? new FakeStorage();
@@ -3095,6 +3605,9 @@ async function loadLoopBuilder(options = {}) {
   context.globalThis = context;
   vm.runInNewContext(builderSource, context, { filename: "loop-builder.js" });
   await flushAsyncWork();
+  document.elementsObject.approvalPanel = document.elementsObject.loopApprovalPanel;
+  document.elementsObject.approvalCount = document.elementsObject.loopApprovalCount;
+  document.elementsObject.approvals = document.elementsObject.loopApprovals;
   return { context, document, elements: document.elementsObject, server, window };
 }
 
@@ -3551,6 +4064,7 @@ class FakeElement {
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = []; this._textContent = ""; this.append(...nodes); }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  removeAttribute(name) { this.attributes.delete(name); }
   addEventListener(name, handler) { this.listeners.set(name, handler); }
   async dispatch(name) { return this.listeners.get(name)?.({ target: this, preventDefault() { }, returnValue: undefined }); }
   async click() { if (!this.disabled) return this.dispatch("click"); }

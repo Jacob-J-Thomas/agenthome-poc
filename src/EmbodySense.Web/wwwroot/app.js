@@ -2,6 +2,7 @@ let sessionToken = "";
 let status = null;
 let configuration = null;
 let activeConfigTab = "overview";
+let activeAppView = "chat";
 let activeAgentMessage = null;
 let hub = null;
 let conversationSynchronization = Promise.resolve();
@@ -17,16 +18,26 @@ const elements = {
   approvals: document.getElementById("approvals"),
   approvalCount: document.getElementById("approvalCount"),
   cancelButton: document.getElementById("cancelButton"),
+  chatApprovalAlert: document.getElementById("chatApprovalAlert"),
+  chatApprovalsTitle: document.getElementById("chatApprovalsTitle"),
   cliRole: document.getElementById("cliRole"),
   clientRole: document.getElementById("clientRole"),
   clientStatus: document.getElementById("clientStatus"),
+  connectionDot: document.getElementById("connectionDot"),
   configContent: document.getElementById("configContent"),
   configTabs: Array.from(document.querySelectorAll("[data-config-tab]")),
+  configurationSubtitle: document.getElementById("configurationSubtitle"),
+  configurationTitle: document.getElementById("configurationTitle"),
+  configurationView: document.getElementById("configurationView"),
+  appTabs: Array.from(document.querySelectorAll("[data-app-view]")),
+  chatView: document.getElementById("chatView"),
   initButton: document.getElementById("initButton"),
+  loopsView: document.getElementById("loopsView"),
   messageForm: document.getElementById("messageForm"),
   messageInput: document.getElementById("messageInput"),
   refreshConfigButton: document.getElementById("refreshConfigButton"),
   sendButton: document.getElementById("sendButton"),
+  surfaceTitle: document.getElementById("surfaceTitle"),
   transcript: document.getElementById("transcript"),
   verboseToggle: document.getElementById("verboseToggle"),
   workspaceRoot: document.getElementById("workspaceRoot"),
@@ -34,6 +45,57 @@ const elements = {
 };
 
 const recordSeparator = "\u001e";
+
+const configurationViewCopy = {
+  overview: ["Overview", "Runtime posture, paths, and implemented concepts."],
+  permissions: ["Permissions", "The current workspace permission policy and governed reach."],
+  agent: ["Agent", "Role, identity, personality, context, memory, and model documents."],
+  audit: ["Audit", "Recent attributable actions and governance outcomes."],
+  history: ["History", "Current and archived logical conversation transcripts."]
+};
+
+function selectAppView(view, sourceTab = null) {
+  const previousAppView = activeAppView;
+  activeAppView = ["chat", "loops", "configuration"].includes(view) ? view : "chat";
+  if (previousAppView === "loops" && activeAppView !== "loops") {
+    window.embodySenseLoopBuilder?.deactivate();
+  }
+  elements.chatView.hidden = activeAppView !== "chat";
+  elements.loopsView.hidden = activeAppView !== "loops";
+  elements.configurationView.hidden = activeAppView !== "configuration";
+  if (activeAppView === "loops") {
+    void window.embodySenseLoopBuilder?.activate();
+  }
+
+  let selectedTab = null;
+  for (const tab of elements.appTabs) {
+    const selected = sourceTab
+      ? tab === sourceTab
+      : activeAppView === "configuration"
+        ? tab.dataset.configTab === activeConfigTab
+        : tab.dataset.appView === activeAppView;
+    if (selected) selectedTab = tab;
+    tab.classList.toggle("active", selected);
+    tab.setAttribute("aria-selected", selected ? "true" : "false");
+    tab.tabIndex = selected ? 0 : -1;
+  }
+
+  if (activeAppView === "configuration") {
+    const [title, subtitle] = configurationViewCopy[activeConfigTab] ?? configurationViewCopy.overview;
+    elements.configurationTitle.textContent = title;
+    elements.configurationSubtitle.textContent = subtitle;
+    elements.surfaceTitle.textContent = title;
+    if (selectedTab?.id) elements.configurationView.setAttribute("aria-labelledby", selectedTab.id);
+    renderConfiguration();
+  } else {
+    elements.surfaceTitle.textContent = activeAppView === "loops" ? "Loops" : "Chat";
+  }
+
+  if (sourceTab && window.history?.replaceState) {
+    const route = activeAppView === "configuration" ? activeConfigTab : activeAppView;
+    window.history.replaceState(null, "", `/?view=${route}`);
+  }
+}
 
 async function boot() {
   const session = await fetchJson("/api/session");
@@ -58,8 +120,8 @@ function createSessionHeaders() {
 }
 
 async function refreshStatus() {
-  status = await fetchJson("/api/status");
-  applyStatus(status);
+  const nextStatus = await fetchJson("/api/status");
+  applyStatus(nextStatus);
 }
 
 async function refreshConfiguration() {
@@ -80,15 +142,20 @@ async function refreshConfiguration() {
 }
 
 function applyStatus(nextStatus) {
+  const wasInitialized = Boolean(status?.initialized);
   status = nextStatus;
   elements.workspaceRoot.textContent = status.workspaceRoot;
   elements.workspaceStatus.textContent = status.initialized ? "Initialized" : "Needs initialization";
+  elements.connectionDot.classList.toggle("ready", status.initialized);
   elements.clientStatus.textContent = hub?.connected ? "Web primary" : "Web reconnecting";
   elements.clientRole.textContent = status.client;
   elements.cliRole.textContent = status.cliRole;
   elements.initButton.disabled = status.initialized || !hub?.connected;
   elements.sendButton.disabled = !status.initialized || !hub?.connected;
   elements.verboseToggle.disabled = !status.initialized || !hub?.connected;
+  if (!wasInitialized && status.initialized) {
+    void window.embodySenseLoopBuilder?.refreshWorkspace();
+  }
 }
 
 async function connectHub() {
@@ -229,7 +296,7 @@ function renderConfiguration() {
   }
 
   for (const tab of elements.configTabs) {
-    const selected = tab.dataset.configTab === activeConfigTab;
+    const selected = activeAppView === "configuration" && tab.dataset.configTab === activeConfigTab;
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", selected ? "true" : "false");
   }
@@ -578,8 +645,11 @@ function groupBy(items, selector) {
 }
 
 function renderApprovals(approvals) {
-  elements.approvalCount.textContent = `${approvals.length} pending`;
-  elements.approvals.replaceChildren(...approvals.map(renderApproval));
+  const pending = Array.isArray(approvals) ? approvals : [];
+  elements.approvalCount.textContent = `${pending.length} pending`;
+  elements.chatApprovalAlert.textContent = `${pending.length} chat approval${pending.length === 1 ? "" : "s"} · Review`;
+  elements.chatApprovalAlert.hidden = pending.length === 0;
+  elements.approvals.replaceChildren(...pending.map(renderApproval));
 }
 
 function renderApproval(approval) {
@@ -608,12 +678,14 @@ function renderApproval(approval) {
   reject.className = "reject";
   reject.type = "button";
   reject.textContent = "Reject";
+  reject.setAttribute("aria-label", `Reject ${approval.command} ${approval.operation} for ${approval.targetPath}`);
   reject.addEventListener("click", () => decideApproval(approval.requestId, false));
 
   const approve = document.createElement("button");
   approve.className = "approve";
   approve.type = "button";
   approve.textContent = "Approve";
+  approve.setAttribute("aria-label", `Approve ${approval.command} ${approval.operation} for ${approval.targetPath}`);
   approve.addEventListener("click", () => decideApproval(approval.requestId, true));
 
   actions.append(reject, approve);
@@ -738,11 +810,32 @@ elements.verboseToggle.addEventListener("change", async () => {
   }
 });
 
-for (const tab of elements.configTabs) {
+for (const tab of elements.appTabs) {
   tab.addEventListener("click", () => {
-    activeConfigTab = tab.dataset.configTab ?? "overview";
-    renderConfiguration();
+    if (tab.dataset.configTab) activeConfigTab = tab.dataset.configTab;
+    selectAppView(tab.dataset.appView ?? "chat", tab);
   });
+  tab.addEventListener("keydown", event => moveAppTabFocus(event, tab));
+}
+
+elements.chatApprovalAlert.addEventListener("click", () => {
+  const chatTab = elements.appTabs.find(tab => tab.dataset.appView === "chat");
+  selectAppView("chat", chatTab);
+  elements.chatApprovalsTitle.focus();
+});
+
+function moveAppTabFocus(event, currentTab) {
+  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const currentIndex = elements.appTabs.indexOf(currentTab);
+  const nextIndex = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? elements.appTabs.length - 1
+      : (currentIndex + (event.key === "ArrowUp" ? -1 : 1) + elements.appTabs.length) % elements.appTabs.length;
+  const nextTab = elements.appTabs[nextIndex];
+  nextTab.focus();
+  nextTab.click();
 }
 
 elements.cancelButton.addEventListener("click", async () => {
@@ -928,4 +1021,7 @@ class JsonSignalRConnection {
 elements.cancelButton.disabled = true;
 elements.refreshConfigButton.disabled = true;
 renderConfigLoading();
+const requestedView = new URL(window.location.href).searchParams.get("view");
+activeConfigTab = configurationViewCopy[requestedView] ? requestedView : "overview";
+selectAppView(requestedView === "loops" ? "loops" : configurationViewCopy[requestedView] ? "configuration" : "chat");
 boot().catch(error => appendMessage("error", error.message));

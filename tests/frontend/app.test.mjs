@@ -5,7 +5,74 @@ import vm from "node:vm";
 
 const appSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/app.js", import.meta.url), "utf8");
 const indexSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url), "utf8");
+const loopsRedirectSource = fs.readFileSync(new URL("../../src/EmbodySense.Web/wwwroot/loops.html", import.meta.url), "utf8");
 const recordSeparator = "\u001e";
+
+test("the shared shell owns primary navigation while Builder and Runs stay local to Loops", () => {
+  assert.match(indexSource, /class="app-rail"/);
+  assert.match(indexSource, /data-app-view="chat"/);
+  assert.match(indexSource, /data-app-view="loops"/);
+  assert.match(indexSource, /data-app-view="configuration" data-config-tab="permissions"/);
+  assert.match(indexSource, /class="workspace-tabs"/);
+  assert.match(indexSource, /id="builderTab"/);
+  assert.match(indexSource, /id="runsTab"/);
+  assert.match(loopsRedirectSource, /\?view=loops/);
+});
+
+test("shared-shell navigation switches views and keeps the refresh route aligned", async () => {
+  const app = await loadApp();
+  const loopsTab = app.appTabs.find(tab => tab.dataset.appView === "loops");
+  const chatTab = app.appTabs.find(tab => tab.dataset.appView === "chat");
+
+  await loopsTab.click();
+  assert.equal(app.elements.chatView.hidden, true);
+  assert.equal(app.elements.loopsView.hidden, false);
+  assert.match(app.context.window.location.href, /\?view=loops$/);
+
+  await chatTab.click();
+  assert.equal(app.elements.chatView.hidden, false);
+  assert.equal(app.elements.loopsView.hidden, true);
+  assert.match(app.context.window.location.href, /\?view=chat$/);
+});
+
+test("workspace initialization wakes an activated loop builder", async () => {
+  let refreshes = 0;
+  const loopBuilder = { activate() { }, refreshWorkspace() { refreshes++; } };
+  const app = await loadApp({
+    loopBuilder,
+    status: { workspaceRoot: "C:/workspace", initialized: false, client: "web", cliRole: "CLI remains available." }
+  });
+
+  assert.equal(app.elements.connectionDot.className.includes("ready"), false);
+  vm.runInContext("applyStatus({ workspaceRoot: 'C:/workspace', initialized: true, client: 'web', cliRole: 'CLI remains available.' })", app.context);
+
+  assert.equal(refreshes, 1);
+  assert.equal(app.elements.connectionDot.className.includes("ready"), true);
+});
+
+test("the initial initialized status wakes a loop builder that observed the prior state", async () => {
+  let refreshes = 0;
+  const loopBuilder = { activate() { }, refreshWorkspace() { refreshes++; } };
+
+  await loadApp({ loopBuilder });
+
+  assert.equal(refreshes, 1);
+});
+
+test("leaving Loops suspends its surface activity", async () => {
+  let activations = 0;
+  let deactivations = 0;
+  const loopBuilder = { activate() { activations++; }, deactivate() { deactivations++; }, refreshWorkspace() { } };
+  const app = await loadApp({ loopBuilder });
+  const loopsTab = app.appTabs.find(tab => tab.dataset.appView === "loops");
+  const overviewTab = app.appTabs.find(tab => tab.dataset.configTab === "overview");
+
+  await loopsTab.click();
+  await overviewTab.click();
+
+  assert.equal(activations, 1);
+  assert.equal(deactivations, 1);
+});
 
 test("history_loaded replaces the transcript using role labels and text content", async () => {
   const app = await loadApp();
@@ -243,6 +310,8 @@ test("approval panel renders pending requests and dispatches approve and reject 
   assert.match(app.elements.approvals.textContent, /shared\/note\.txt/);
 
   const buttons = findByTag(app.elements.approvals, "button");
+  assert.equal(buttons.find(button => button.textContent === "Approve").attributes.get("aria-label"), "Approve read file for shared/note.txt");
+  assert.equal(buttons.find(button => button.textContent === "Reject").attributes.get("aria-label"), "Reject read file for shared/note.txt");
   await buttons.find(button => button.textContent === "Approve").click();
   await buttons.find(button => button.textContent === "Reject").click();
 
@@ -252,11 +321,46 @@ test("approval panel renders pending requests and dispatches approve and reject 
   ]);
 });
 
+test("pending chat approvals remain visible and actionable outside the Chat view", async () => {
+  const app = await loadApp();
+  const loopsTab = app.appTabs.find(tab => tab.dataset.appView === "loops");
+  await loopsTab.click();
+
+  app.socket.serverSendInvocation("ApprovalsChanged", [{
+    requestId: "req-away",
+    command: "read",
+    operation: "file",
+    targetPath: "shared/note.txt",
+    resolvedPath: "C:/workspace/shared/note.txt",
+    matchedPath: "shared/**",
+    reason: "Need to inspect the note."
+  }]);
+  await flushAsyncWork();
+
+  assert.equal(app.elements.chatView.hidden, true);
+  assert.equal(app.elements.chatApprovalAlert.hidden, false);
+  assert.equal(app.elements.chatApprovalAlert.textContent, "1 chat approval · Review");
+  let focusedApprovalHeading = false;
+  app.elements.chatApprovalsTitle.focus = () => { focusedApprovalHeading = true; };
+
+  await app.elements.chatApprovalAlert.click();
+
+  assert.equal(app.elements.chatView.hidden, false);
+  assert.equal(app.elements.loopsView.hidden, true);
+  assert.match(app.context.window.location.href, /\?view=chat$/);
+  assert.equal(focusedApprovalHeading, true);
+
+  app.socket.serverSendInvocation("ApprovalsChanged", []);
+  await flushAsyncWork();
+  assert.equal(app.elements.chatApprovalAlert.hidden, true);
+});
+
 async function loadApp(overrides = {}) {
   FakeWebSocket.instances = [];
   FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
   FakeWebSocket.transcriptError = overrides.transcriptError ?? null;
   const document = new FakeDocument(indexSource);
+  const location = { href: "http://127.0.0.1:4378/" };
   const context = {
     URL,
     console,
@@ -264,14 +368,20 @@ async function loadApp(overrides = {}) {
     fetch: createFetch(overrides),
     setTimeout,
     clearTimeout,
-    window: { location: { href: "http://127.0.0.1:4378/" }, setTimeout, clearTimeout },
+    window: {
+      location,
+      history: { replaceState(_state, _unused, url) { location.href = new URL(url, location.href).href; } },
+      embodySenseLoopBuilder: overrides.loopBuilder,
+      setTimeout,
+      clearTimeout
+    },
     WebSocket: FakeWebSocket
   };
   context.globalThis = context;
   vm.runInNewContext(appSource, context, { filename: "app.js" });
   for (let attempt = 0; attempt < 4; attempt++) await flushAsyncWork();
   assert.equal(FakeWebSocket.instances.length, 1);
-  return { context, elements: document.elementsObject, configTabs: document.configTabs, socket: FakeWebSocket.instances[0] };
+  return { context, elements: document.elementsObject, appTabs: document.appTabs, configTabs: document.configTabs, socket: FakeWebSocket.instances[0] };
 }
 
 function createFetch(overrides) {
@@ -400,11 +510,17 @@ class FakeDocument {
   constructor(html) {
     this.elements = new Map();
     this.elementsObject = {};
-    this.configTabs = [...html.matchAll(/<([a-z0-9]+)[^>]*\sdata-config-tab="([^"]+)"/gi)].map(match => {
+    this.appTabs = [...html.matchAll(/<button\b([^>]*)>/gi)].filter(match => /\bdata-app-view="[^"]+"/i.test(match[1])).map(match => {
       const element = new FakeElement("button");
-      element.dataset.configTab = match[2];
+      const appView = match[1].match(/\bdata-app-view="([^"]+)"/i);
+      const configTab = match[1].match(/\bdata-config-tab="([^"]+)"/i);
+      const id = match[1].match(/\bid="([^"]+)"/i);
+      element.dataset.appView = appView?.[1];
+      if (configTab) element.dataset.configTab = configTab[1];
+      if (id) element.id = id[1];
       return element;
     });
+    this.configTabs = this.appTabs.filter(element => element.dataset.configTab);
 
     for (const match of html.matchAll(/<([a-z0-9]+)[^>]*\sid="([^"]+)"/gi)) {
       const element = new FakeElement(match[1]);
@@ -418,7 +534,9 @@ class FakeDocument {
   }
 
   querySelectorAll(selector) {
-    return selector === "[data-config-tab]" ? this.configTabs : [];
+    if (selector === "[data-config-tab]") return this.configTabs;
+    if (selector === "[data-app-view]") return this.appTabs;
+    return [];
   }
 
   createElement(tagName) {
