@@ -124,7 +124,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
     {
         var previousOwnerConnectionId = _currentOwnerConnectionId.Value;
         _currentOwnerConnectionId.Value = ownerConnectionId;
-        return new ApprovalScope(this, previousOwnerConnectionId);
+        return new ApprovalScope(_currentOwnerConnectionId, previousOwnerConnectionId);
     }
 
     public IReadOnlyList<WebPendingApproval> GetPending(string? ownerConnectionId = null)
@@ -229,29 +229,5 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
     private bool IsCurrentPending(PendingApproval pending)
     {
         return _pending.TryGetValue(pending.Request.RequestId, out var current) && ReferenceEquals(current, pending);
-    }
-
-    private sealed class ApprovalScope : IDisposable
-    {
-        private readonly WebApprovalCoordinator _coordinator;
-        private readonly string? _previousOwnerConnectionId;
-        private bool _disposed;
-
-        public ApprovalScope(WebApprovalCoordinator coordinator, string? previousOwnerConnectionId)
-        {
-            _coordinator = coordinator;
-            _previousOwnerConnectionId = previousOwnerConnectionId;
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _coordinator._currentOwnerConnectionId.Value = _previousOwnerConnectionId;
-            _disposed = true;
-        }
     }
 }
