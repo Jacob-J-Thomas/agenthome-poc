@@ -13,8 +13,8 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// </summary>
 /// <remarks>
 /// Saves validate the complete record and atomically replace the target file through <see cref="LoopArtifactFileWriter"/>.
-/// Loads return <see langword="null"/> for missing artifacts; malformed JSON, unsupported enum values, identity mismatches,
-/// invalid lifecycle state, and file I/O failures are surfaced. Listings are ordered by newest start time and then run identity.
+/// Loads return <see langword="null"/> for missing artifacts; malformed JSON, unsupported enum values, syntactically invalid
+/// record identifiers, invalid lifecycle state, and file I/O failures are surfaced. Listings are ordered by newest start time and then run identity.
 /// </remarks>
 public sealed class LoopRunStore : ILoopRunStore
 {
@@ -49,8 +49,11 @@ public sealed class LoopRunStore : ILoopRunStore
     }
 
     /// <summary>
-    /// Loads and validates one run by its canonical loop and run identifiers.
+    /// Loads and validates one run from the canonical path for the supplied loop and run identifiers.
     /// </summary>
+    /// <remarks>
+    /// The deserialized record identifiers are validated syntactically but are not compared with the supplied identifiers or artifact path.
+    /// </remarks>
     /// <param name="loopId">The loop ID.</param>
     /// <param name="runId">The run ID.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>

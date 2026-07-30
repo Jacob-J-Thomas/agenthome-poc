@@ -334,8 +334,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
     }
 
     /// <summary>
-    /// Appends one version-1 message while holding current-conversation ownership and updates the identity version.
+    /// Appends one version-1 message while holding current-conversation ownership.
     /// </summary>
+    /// <remarks>
+    /// Ordinary appends do not change the conversation-generation identity established when the current conversation is created or resumed.
+    /// </remarks>
     /// <param name="message">The message.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task that represents the asynchronous operation.</returns>
