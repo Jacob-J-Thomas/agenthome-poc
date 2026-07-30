@@ -13,7 +13,7 @@ public interface IWebLoopRuntimeInvoker
     /// </summary>
     /// <param name="input">The validated invocation identity, definition binding, and context options.</param>
     /// <param name="ownerConnectionId">The authenticated SignalR connection that owns any resulting approval interaction.</param>
-    /// <param name="cancellationToken">The token used to cancel admission before durable ownership is established.</param>
+    /// <param name="cancellationToken">The token used to cancel runtime acquisition, durable admission, and the synchronously executing invocation.</param>
     /// <returns>The durable admission or rejection response.</returns>
     Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default);
 

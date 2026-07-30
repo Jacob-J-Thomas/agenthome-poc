@@ -28,7 +28,7 @@ public sealed class WebConversationPublicationObserver : IAgentRuntimeConversati
     /// Broadcasts projection metadata for a durably committed conversation publication.
     /// </summary>
     /// <param name="publication">The committed publication identity and transcript metadata.</param>
-    /// <param name="cancellationToken">The token used to cancel notification.</param>
+    /// <param name="cancellationToken">Reserved for notification implementations; the production SignalR notifier does not observe this token.</param>
     /// <returns>A task that completes when notification finishes.</returns>
     public Task PublicationCommittedAsync(AgentRuntimeConversationPublication publication, CancellationToken cancellationToken = default)
     {
