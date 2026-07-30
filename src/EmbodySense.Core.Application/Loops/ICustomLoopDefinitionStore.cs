@@ -40,8 +40,12 @@ public interface ICustomLoopDefinitionStore
     Task<CustomLoopCreateOperationLookupResult> GetCreateOperationAsync(string operationId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Loads a durable create, update, or delete mutation receipt.
+    /// Allows a store to load a durable create, update, or delete mutation receipt.
     /// </summary>
+    /// <remarks>
+    /// The compatibility implementation reports the receipt as not found. Adapters that advertise durable
+    /// idempotent authoring receipts must override this member.
+    /// </remarks>
     /// <param name="operationId">The operation ID.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The stored receipt or a not-found result.</returns>
