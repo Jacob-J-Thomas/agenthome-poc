@@ -29,6 +29,42 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.RootPath, "private"), paths.WorkspacePrivatePath);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void File_helpers_canonicalize_valid_nested_descendants(bool agentFile)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = agentFile ? paths.AgentPath : paths.WorkspacePath;
+
+        var result = Resolve(paths, agentFile, Path.Combine("nested", ".", "child", "..", "file.txt"));
+
+        Assert.Equal(Path.Combine(root, "nested", "file.txt"), result);
+        Assert.True(Path.IsPathFullyQualified(result));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void File_helpers_reject_rooted_empty_and_escaping_paths(bool agentFile)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = agentFile ? paths.AgentPath : paths.WorkspacePath;
+        var siblingName = Path.GetFileName(root) + "-sibling";
+        var siblingPrefixEscape = Path.Combine("..", siblingName, "file.txt");
+        var directEscape = agentFile ? Path.Combine("..", "shared", "file.txt") : Path.Combine("..", "outside.txt");
+
+        Assert.Throws<ArgumentNullException>(() => Resolve(paths, agentFile, null!));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, string.Empty));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, " "));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, "."));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, workspace.File("rooted.txt")));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, directEscape));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, siblingPrefixEscape));
+    }
+
     [Fact]
     public async Task WorkspaceInstructionLocator_finds_nearest_agents_file_from_root()
     {
@@ -42,4 +78,6 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.GetFullPath(workspace.File("project", "AGENTS.md")), path);
         Assert.Equal("../AGENTS.md", WorkspaceInstructionLocator.GetDisplayPath(workspace.File("project", "nested"), path!));
     }
+
+    private static string Resolve(WorkspacePaths paths, bool agentFile, string relativePath) => agentFile ? paths.AgentFile(relativePath) : paths.WorkspaceFile(relativePath);
 }

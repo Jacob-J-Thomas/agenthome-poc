@@ -36,20 +36,22 @@ public sealed class WorkspacePaths
     public string WorkspacePath { get; }
 
     /// <summary>
-    /// Gets the agent file path.
+    /// Resolves a file path contained by the <c>.agent</c> directory.
     /// </summary>
-    /// <param name="relativePath">The unvalidated path segment to combine with <see cref="AgentPath"/>.</param>
-    /// <returns>The combined path; parent traversal in <paramref name="relativePath"/> is not rejected or canonicalized.</returns>
-    // TODO(#141): Reject rooted and traversal inputs whose canonical path escapes AgentPath.
-    public string AgentFile(string relativePath) => Path.Combine(AgentPath, relativePath);
+    /// <param name="relativePath">A nonempty, non-rooted path whose canonical target must remain within <see cref="AgentPath"/>.</param>
+    /// <returns>The canonical absolute path beneath <see cref="AgentPath"/>.</returns>
+    /// <exception cref="ArgumentNullException">The path is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">The path is empty, rooted, or does not resolve to a descendant of <see cref="AgentPath"/>.</exception>
+    public string AgentFile(string relativePath) => ContainedFile(AgentPath, relativePath);
 
     /// <summary>
-    /// Gets the workspace file path.
+    /// Resolves a file path contained by the workspace root.
     /// </summary>
-    /// <param name="relativePath">The unvalidated path segment to combine with <see cref="WorkspacePath"/>.</param>
-    /// <returns>The combined path; parent traversal in <paramref name="relativePath"/> is not rejected or canonicalized.</returns>
-    // TODO(#141): Reject rooted and traversal inputs whose canonical path escapes WorkspacePath.
-    public string WorkspaceFile(string relativePath) => Path.Combine(WorkspacePath, relativePath);
+    /// <param name="relativePath">A nonempty, non-rooted path whose canonical target must remain within <see cref="WorkspacePath"/>.</param>
+    /// <returns>The canonical absolute path beneath <see cref="WorkspacePath"/>.</returns>
+    /// <exception cref="ArgumentNullException">The path is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">The path is empty, rooted, or does not resolve to a descendant of <see cref="WorkspacePath"/>.</exception>
+    public string WorkspaceFile(string relativePath) => ContainedFile(WorkspacePath, relativePath);
 
     /// <summary>
     /// Gets the logs path.
@@ -284,4 +286,23 @@ public sealed class WorkspacePaths
     /// </summary>
     /// <value><see langword="true"/> when the <c>.agent</c> directory, permissions document, and role document exist; otherwise, <see langword="false"/>.</value>
     public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath);
+
+    private static string ContainedFile(string rootPath, string relativePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
+        if (Path.IsPathRooted(relativePath))
+        {
+            throw new ArgumentException("Path must be relative to its declared workspace boundary.", nameof(relativePath));
+        }
+
+        var candidate = Path.GetFullPath(Path.Combine(rootPath, relativePath));
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var rootWithSeparator = Path.EndsInDirectorySeparator(rootPath) ? rootPath : rootPath + Path.DirectorySeparatorChar;
+        if (!candidate.StartsWith(rootWithSeparator, comparison))
+        {
+            throw new ArgumentException("Path must resolve to a descendant of its declared workspace boundary.", nameof(relativePath));
+        }
+
+        return candidate;
+    }
 }
