@@ -2,11 +2,23 @@ using System.Text;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Enforces workspace containment, rejects reparse-point traversal, and supplies bounded durable artifact I/O.
+/// </summary>
+/// <remarks>
+/// Every path is canonicalized beneath the configured workspace root before use. Mutations use an exclusive cross-process
+/// file lease and write-through sibling temporary files whose rename is the single-artifact commit boundary. Unsafe,
+/// oversized, or structurally ambiguous artifacts fail closed.
+/// </remarks>
 internal sealed class CustomLoopArtifactPathGuard
 {
     private readonly string _workspaceRoot;
     private readonly StringComparison _pathComparison;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopArtifactPathGuard"/> type.
+    /// </summary>
+    /// <param name="workspaceRoot">The absolute workspace root path.</param>
     public CustomLoopArtifactPathGuard(string workspaceRoot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRoot);
@@ -15,6 +27,11 @@ internal sealed class CustomLoopArtifactPathGuard
         _pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
     }
 
+    /// <summary>
+    /// Determines whether a contained, non-reparse artifact directory exists.
+    /// </summary>
+    /// <param name="root">The root.</param>
+    /// <returns><see langword="true"/> when the validated directory exists; otherwise, <see langword="false"/>.</returns>
     public bool DirectoryExists(string root)
     {
         var safeRoot = ValidateRoot(root);
@@ -22,6 +39,10 @@ internal sealed class CustomLoopArtifactPathGuard
         return Directory.Exists(safeRoot);
     }
 
+    /// <summary>
+    /// Validates and creates a contained artifact root, rejecting reparse points before and after creation.
+    /// </summary>
+    /// <param name="root">The root.</param>
     public void PrepareRoot(string root)
     {
         var safeRoot = ValidateRoot(root);
@@ -30,6 +51,12 @@ internal sealed class CustomLoopArtifactPathGuard
         EnsureNoReparsePoints(safeRoot);
     }
 
+    /// <summary>
+    /// Resolves and validates one direct artifact path beneath a configured root.
+    /// </summary>
+    /// <param name="root">The root.</param>
+    /// <param name="fileName">The file name.</param>
+    /// <returns>The canonical contained path after reparse-point validation.</returns>
     public string GetFilePath(string root, string fileName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
@@ -42,6 +69,11 @@ internal sealed class CustomLoopArtifactPathGuard
         return path;
     }
 
+    /// <summary>
+    /// Acquires the exclusive cross-process mutation lease for one artifact root.
+    /// </summary>
+    /// <param name="root">The root.</param>
+    /// <returns>The ownership stream; disposal releases the lease.</returns>
     public FileStream AcquireExclusiveMutationLock(string root)
     {
         PrepareRoot(root);
@@ -65,6 +97,15 @@ internal sealed class CustomLoopArtifactPathGuard
         }
     }
 
+    /// <summary>
+    /// Reads one contained non-reparse artifact while enforcing the byte limit before and during the read.
+    /// </summary>
+    /// <param name="root">The root.</param>
+    /// <param name="path">The path.</param>
+    /// <param name="maximumBytes">The maximum bytes.</param>
+    /// <param name="artifactName">The artifact name.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The complete artifact bytes.</returns>
     public async Task<byte[]> ReadAllBytesAsync(string root, string path, long maximumBytes, string artifactName, CancellationToken cancellationToken)
     {
         EnsureContained(ValidateRoot(root), Path.GetFullPath(path), "Artifact path escaped its configured root.");
@@ -97,6 +138,14 @@ internal sealed class CustomLoopArtifactPathGuard
         return content.ToArray();
     }
 
+    /// <summary>
+    /// Flushes text to a sibling temporary file and renames it over the contained destination.
+    /// </summary>
+    /// <param name="root">The root.</param>
+    /// <param name="path">The path.</param>
+    /// <param name="content">The content.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task WriteTextAtomicallyAsync(string root, string path, string content, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(content);
@@ -130,6 +179,11 @@ internal sealed class CustomLoopArtifactPathGuard
         }
     }
 
+    /// <summary>
+    /// Deletes one contained non-reparse artifact if it exists.
+    /// </summary>
+    /// <param name="root">The root.</param>
+    /// <param name="path">The path.</param>
     public void DeleteFile(string root, string path)
     {
         EnsureContained(ValidateRoot(root), Path.GetFullPath(path), "Artifact path escaped its configured root.");

@@ -11,6 +11,15 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Persists version-1 custom-loop definitions, tombstones, and idempotent authoring-operation receipts.
+/// </summary>
+/// <remarks>
+/// Mutations hold both the per-process gate and the cross-process artifact lease, validate the complete workspace state, and
+/// commit each JSON artifact through a write-through atomic replace. Live definitions, tombstones, and receipts must form one
+/// unambiguous lineage. Unknown fields, unsupported versions, corrupt JSON, duplicate identities, or incomplete transitions
+/// throw <see cref="FormatException"/> and require explicit cleanup; no automatic migration or compatibility fallback exists.
+/// </remarks>
 public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 {
     private const int DefinitionMutationOperationSchemaVersion = 1;
@@ -30,6 +39,10 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     private readonly CustomLoopArtifactPathGuard _pathGuard;
     private readonly SemaphoreSlim _mutationGate;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopDefinitionStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public CustomLoopDefinitionStore(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -39,6 +52,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         _mutationGate = _mutationGates.GetOrAdd(Path.GetFullPath(paths.CustomLoopDefinitionsPath), _ => new SemaphoreSlim(1, 1));
     }
 
+    /// <summary>
+    /// Creates a version-1 definition using its last-mutation identifier as the durable idempotency key.
+    /// </summary>
+    /// <param name="definition">The complete canonical definition to persist.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing creation, idempotent replay, version/tombstone conflict, or workspace capacity exhaustion.</returns>
     public async Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CancellationToken cancellationToken = default)
     {
         ValidateCanonicalDefinition(definition);
@@ -67,6 +86,16 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         return CustomLoopDefinitionStoreResult.VersionConflict(existing.Operation.PlannedDefinition, expectedDefinitionVersion: 0);
     }
 
+    /// <summary>
+    /// Creates a version-1 definition and coordinates its explicit durable mutation receipt.
+    /// </summary>
+    /// <param name="definition">The complete canonical definition to persist.</param>
+    /// <param name="mutation">The request binding and recovery snapshots for the idempotent create operation.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// A result describing creation, replay, operation/version/tombstone conflict, or workspace capacity exhaustion. A
+    /// matching interrupted receipt or orphaned committed definition is recovered under the workspace mutation lock.
+    /// </returns>
     public async Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default)
     {
         ValidateCanonicalDefinition(definition);
@@ -97,6 +126,8 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                         && existingOperation.Outcome == CustomLoopDefinitionStoreStatus.Created
                         && !HasCommittedCreateArtifact(state, existingOperation)))
                 {
+                    // A persisted receipt can survive a process failure on either side of the definition commit.
+                    // Reconcile the exact original snapshot under the same workspace lock instead of allocating a new identity.
                     if (existingOperation.OutcomeAuditRecorded)
                     {
                         throw new FormatException($"Create operation `{operationId}` records a completed audit outcome without a committed definition.");
@@ -123,6 +154,8 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
             if (orphanedCreates.Length == 1)
             {
+                // The definition rename committed but its receipt did not. Reconstruct only from one exact version-one
+                // artifact; multiple or mismatched candidates remain an explicit integrity conflict.
                 var orphaned = orphanedCreates[0];
                 if (orphaned.DefinitionVersion != 1 || !string.Equals(orphaned.RoleId, definition.RoleId, StringComparison.Ordinal))
                 {
@@ -170,6 +203,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Looks up the durable state of a create operation and its original definition snapshot.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing absence, a pending definition commit, or a committed create with its audit integrity.</returns>
     public async Task<CustomLoopCreateOperationLookupResult> GetCreateOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -202,6 +241,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Looks up a durable create, update, or delete receipt after validating the complete persisted lineage.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated mutation receipt and whether its planned artifact is applied, or a not-found result.</returns>
     public async Task<CustomLoopDefinitionMutationLookupResult> GetMutationOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -242,6 +287,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Loads the current live definition after validating the complete persisted lineage.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated definition, or <see langword="null"/> when no live definition exists.</returns>
     public async Task<CustomLoopDefinition?> GetAsync(string loopId, CancellationToken cancellationToken = default)
     {
         var safeLoopId = CustomLoopArtifactIdentifier.Require(loopId, nameof(loopId));
@@ -259,6 +310,11 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Lists all live definitions after validating definitions, tombstones, and mutation receipts as one workspace state.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The live definitions in ordinal identifier order.</returns>
     public async Task<IReadOnlyList<CustomLoopDefinition>> ListAsync(CancellationToken cancellationToken = default)
     {
         await _mutationGate.WaitAsync(cancellationToken);
@@ -275,6 +331,13 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Replaces one definition using optimistic definition-version concurrency.
+    /// </summary>
+    /// <param name="definition">The complete replacement whose version is exactly one greater than the expected version.</param>
+    /// <param name="expectedDefinitionVersion">The currently expected durable definition version.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing update, absence, version conflict, tombstone conflict, or capacity failure.</returns>
     public async Task<CustomLoopDefinitionStoreResult> UpdateAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CancellationToken cancellationToken = default)
     {
         ValidateCanonicalDefinition(definition);
@@ -298,6 +361,14 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Replaces one definition with optimistic concurrency and an idempotent durable mutation receipt.
+    /// </summary>
+    /// <param name="definition">The complete replacement whose version is exactly one greater than the expected version.</param>
+    /// <param name="expectedDefinitionVersion">The currently expected durable definition version.</param>
+    /// <param name="mutation">The canonical request binding, prior snapshot, and planned replacement used for replay recovery.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing update, replay, operation/version/tombstone conflict, absence, or capacity failure.</returns>
     public async Task<CustomLoopDefinitionStoreResult> UpdateAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default)
     {
         ValidateCanonicalDefinition(definition);
@@ -347,6 +418,15 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Replaces a live definition with its version-bound tombstone.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="expectedDefinitionVersion">The currently expected durable definition version.</param>
+    /// <param name="mutationOperationId">The identifier recorded in the tombstone for idempotent deletion.</param>
+    /// <param name="deletedAtUtc">The non-default UTC deletion timestamp.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing deletion, idempotent prior deletion, absence, version conflict, or tombstone conflict.</returns>
     public async Task<CustomLoopDefinitionStoreResult> DeleteAsync(
         string loopId,
         int expectedDefinitionVersion,
@@ -404,6 +484,16 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Replaces a live definition with its tombstone while coordinating an idempotent durable mutation receipt.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="expectedDefinitionVersion">The currently expected durable definition version.</param>
+    /// <param name="mutationOperationId">The identifier recorded in both the receipt and tombstone.</param>
+    /// <param name="deletedAtUtc">The non-default UTC deletion timestamp.</param>
+    /// <param name="mutation">The canonical request binding and prior snapshot used for replay recovery.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing deletion, replay, operation/version/tombstone conflict, or absence.</returns>
     public async Task<CustomLoopDefinitionStoreResult> DeleteAsync(
         string loopId,
         int expectedDefinitionVersion,
@@ -460,6 +550,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    /// <summary>
+    /// Marks a committed definition-mutation receipt after its outcome audit event is durable.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A status reporting a newly recorded mark, an existing mark, or a missing operation.</returns>
     public async Task<CustomLoopOperationAuditMarkStatus> MarkOperationOutcomeAuditedAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);

@@ -2,6 +2,9 @@ using EmbodySense.Core.Application.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Tracks routed cancellation delivery and acknowledgement for one provider attempt generation.
+/// </summary>
 internal sealed class ActiveAttempt
 {
     private readonly CancellationTokenSource _cancellation;
@@ -9,6 +12,12 @@ internal sealed class ActiveAttempt
     private int _signalQueued;
     private int _routedSignalDelivered;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ActiveAttempt"/> type.
+    /// </summary>
+    /// <param name="cancellation">The cancellation.</param>
+    /// <param name="competingCancellationToken">The competing cancellation token.</param>
+    /// <param name="generation">The generation.</param>
     public ActiveAttempt(CancellationTokenSource cancellation, CancellationToken competingCancellationToken, long generation)
     {
         _cancellation = cancellation;
@@ -16,10 +25,21 @@ internal sealed class ActiveAttempt
         Generation = generation;
     }
 
+    /// <summary>
+    /// Gets the generation used to reject stale registration completion.
+    /// </summary>
+    /// <value>The generation.</value>
     public long Generation { get; }
 
+    /// <summary>
+    /// Gets the asynchronous cancellation acknowledgement completed by the provider-attempt owner.
+    /// </summary>
+    /// <value>The task completion source.</value>
     public TaskCompletionSource<CustomLoopAttemptCancellationResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    /// <summary>
+    /// Queues at most one asynchronous cancellation signal without invoking callbacks under the host lock.
+    /// </summary>
     public void Signal()
     {
         if (Interlocked.Exchange(ref _signalQueued, 1) == 0)
@@ -28,6 +48,11 @@ internal sealed class ActiveAttempt
         }
     }
 
+    /// <summary>
+    /// Determines whether the observed cancellation token can confirm provider interruption.
+    /// </summary>
+    /// <param name="observedCancellationToken">The observed cancellation token.</param>
+    /// <returns><see langword="true"/> when can confirm provider interruption; otherwise, <see langword="false"/>.</returns>
     public bool CanConfirmProviderInterruption(CancellationToken observedCancellationToken)
     {
         return Volatile.Read(ref _routedSignalDelivered) != 0
@@ -37,16 +62,26 @@ internal sealed class ActiveAttempt
             && _cancellation.IsCancellationRequested;
     }
 
+    /// <summary>
+    /// Completes the acknowledgement as a confirmed provider interruption.
+    /// </summary>
     public void ConfirmProviderInterruption()
     {
         Completion.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, "The provider attempt observed the routed cancellation signal."));
     }
 
+    /// <summary>
+    /// Completes the acknowledgement without claiming that the provider observed the routed signal.
+    /// </summary>
     public void CompleteWithoutConfirmedInterruption()
     {
         Completion.TrySetResult(CreateUnconfirmedResult());
     }
 
+    /// <summary>
+    /// Creates an unconfirmed result.
+    /// </summary>
+    /// <returns>The custom loop attempt cancellation result.</returns>
     public CustomLoopAttemptCancellationResult CreateUnconfirmedResult()
     {
         if (Volatile.Read(ref _routedSignalDelivered) != 0 && !_competingCancellationToken.IsCancellationRequested)
@@ -63,6 +98,9 @@ internal sealed class ActiveAttempt
         return new CustomLoopAttemptCancellationResult(status, detail);
     }
 
+    /// <summary>
+    /// Completes the acknowledgement because the workspace-host owner is no longer available.
+    /// </summary>
     public void CompleteOwnerUnavailable()
     {
         Completion.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.OwnerUnavailable, "The workspace-host owner exited before provider interruption was confirmed."));

@@ -5,6 +5,14 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Workspace;
 
+/// <summary>
+/// Reads the nearest workspace instructions and the ordered optional <c>.agent</c> context documents.
+/// </summary>
+/// <remarks>
+/// Documents are returned in deterministic authority order: nearest <c>AGENTS.md</c>, role, identity, contextual state,
+/// memory, and model configuration. Missing files are represented by the document reader's omission state; cancellation and
+/// file I/O failures propagate rather than silently changing source authority.
+/// </remarks>
 public sealed class WorkspaceContextStore : IWorkspaceContextStore
 {
     private static readonly (string SourceId, string FileName, WorkspaceContextDocumentKind Kind)[] _agentContextFiles =
@@ -17,6 +25,12 @@ public sealed class WorkspaceContextStore : IWorkspaceContextStore
         ("models", "models.json", WorkspaceContextDocumentKind.ContextualState)
     ];
 
+    /// <summary>
+    /// Loads the complete ordered workspace-context document set.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the workspace context documents.</returns>
     public async Task<IReadOnlyList<WorkspaceContextDocument>> LoadDocumentsAsync(WorkspacePaths paths, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);

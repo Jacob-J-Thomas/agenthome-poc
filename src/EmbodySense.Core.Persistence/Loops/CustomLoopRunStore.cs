@@ -16,6 +16,16 @@ using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Persists canonical version-1 run traces, lifecycle updates, discovery metadata, deletion receipts, and tombstones.
+/// </summary>
+/// <remarks>
+/// Run mutation uses optimistic lifecycle versions plus process-local and cross-process serialization. Artifacts are bounded,
+/// written through sibling temporary files, flushed, and renamed at the single-file commit boundary. The discovery index is
+/// derived acceleration data and is repaired from canonical artifacts when safely possible; unsupported index versions remain
+/// explicit failures. Duplicate identities, corrupt JSON, unknown fields, unsupported run shapes, broken evidence ordering, or
+/// ambiguous recovery state throw <see cref="FormatException"/>. No legacy run reader or automatic schema migration is provided.
+/// </remarks>
 public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 {
     private const string MutationLockFileName = ".custom-loop-runs.lock";
@@ -56,10 +66,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private long _monitorArtifactTopologyVersion;
     private long _monitorRunOwnershipVersion = -1;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopRunStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null) : this(paths, timeProvider, static path => new FileSystemWatcher(path))
     {
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopRunStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="monitorWatcherFactory">The monitor watcher factory.</param>
     public CustomLoopRunStore(WorkspacePaths paths, Func<string, FileSystemWatcher> monitorWatcherFactory) : this(paths, null, monitorWatcherFactory)
     {
     }
@@ -85,6 +105,15 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         _monitorArtifactPaths = new HashSet<string>(PathComparer);
     }
 
+    /// <summary>
+    /// Admits and persists a new version-1 run while enforcing unique identities, one active run per loop, and trace capacity.
+    /// </summary>
+    /// <param name="run">The complete admitted run with lifecycle version one.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// A result describing creation, idempotent admission replay, identity/operation conflict, active-loop conflict, deletion
+    /// conflict, or insufficient trace capacity.
+    /// </returns>
     public async Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default)
     {
         ValidateCanonicalRun(run);
@@ -100,6 +129,8 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
         var serialized = SerializeBounded(run);
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
+        // Scan canonical traces and tombstones while mutation ownership is held. Tombstoned identities remain reserved,
+        // and any ambiguous active-run state fails closed before a new artifact becomes visible.
         CustomLoopRunRecord? operationMatch = null;
         CustomLoopRunRecord? runIdMatch = null;
         CustomLoopRunRecord? activeLoopRun = null;
@@ -183,6 +214,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return CustomLoopRunStoreResult.Created(run);
     }
 
+    /// <summary>
+    /// Loads the unique canonical run artifact for a run identifier.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated run, or <see langword="null"/> when no artifact exists.</returns>
     public async Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
     {
         var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
@@ -202,6 +239,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return artifact.Run;
     }
 
+    /// <summary>
+    /// Loads the lightweight monitor projection for one live run.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated monitor projection, or <see langword="null"/> when no live artifact exists.</returns>
     public async Task<CustomLoopRunMonitor?> GetMonitorAsync(string runId, CancellationToken cancellationToken = default)
     {
         var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
@@ -279,6 +322,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
     }
 
+    /// <summary>
+    /// Loads the unique live run bound to an admission operation identifier.
+    /// </summary>
+    /// <param name="admissionOperationId">The admission operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated run, or <see langword="null"/> when no live artifact has that admission operation.</returns>
     public async Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(admissionOperationId, nameof(admissionOperationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -309,6 +358,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return match;
     }
 
+    /// <summary>
+    /// Loads the unique nonterminal run for a loop identifier.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated nonterminal run, or <see langword="null"/> when the loop has none.</returns>
     public async Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default)
     {
         var safeLoopId = CustomLoopArtifactIdentifier.Require(loopId, nameof(loopId));
@@ -333,11 +388,23 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return match;
     }
 
+    /// <summary>
+    /// Lists the most recent live run summaries across the workspace.
+    /// </summary>
+    /// <param name="maximumCount">The positive maximum number of summaries to return.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>Summaries ordered from newest to oldest by the canonical discovery ordering.</returns>
     public async Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default)
     {
         return (await ListPageAsync(new CustomLoopRunPageRequest(maximumCount), cancellationToken)).Items;
     }
 
+    /// <summary>
+    /// Lists one validated cursor page of live run summaries, optionally restricted to a loop.
+    /// </summary>
+    /// <param name="request">The page size, optional loop filter, and opaque continuation cursor.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The ordered page and an opaque next cursor when more matching runs remain.</returns>
     public async Task<CustomLoopRunPage> ListPageAsync(CustomLoopRunPageRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -392,6 +459,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         throw new FormatException("The custom loop run discovery index changed independently of its canonical artifacts and could not be repaired.");
     }
 
+    /// <summary>
+    /// Scans canonical artifacts and returns every live nonterminal run.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated nonterminal runs in deterministic loop and run identity order.</returns>
     public async Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default)
     {
         var runs = new List<CustomLoopRunRecord>();
@@ -408,6 +480,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             .ToArray();
     }
 
+    /// <summary>
+    /// Calculates used and available trace storage from canonical run, tombstone, and deletion-operation artifacts.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The workspace trace quota snapshot after validating all accounted artifacts.</returns>
     public async Task<CustomLoopTraceQuota> GetTraceQuotaAsync(CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(_runsRoot) && !Directory.Exists(_traceDeletionOperationsRoot))
@@ -420,6 +497,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return quota with { DeletionOperationCount = EnumerateTraceDeletionOperationPaths().Count };
     }
 
+    /// <summary>
+    /// Inspects one run trace without mutating it, including its canonical persisted size and hash.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated inspection, or <see langword="null"/> when no live trace exists for the run.</returns>
     public async Task<CustomLoopTraceInspection?> InspectTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
         var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
@@ -471,6 +554,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             tombstone);
     }
 
+    /// <summary>
+    /// Loads and validates one durable trace-deletion receipt.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The receipt and its persisted transition state, or a not-found result.</returns>
     public async Task<CustomLoopTraceDeletionLookupResult> GetTraceDeletionOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -484,6 +573,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return operation is null ? CustomLoopTraceDeletionLookupResult.NotFound() : CustomLoopTraceDeletionLookupResult.Found(operation);
     }
 
+    /// <summary>
+    /// Reserves or idempotently replays the intent receipt for deleting one terminal run trace.
+    /// </summary>
+    /// <param name="mutation">The deletion request, expected trace binding, actor, surface, and operation identity.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing reservation, replay, request conflict, trace conflict, absence, or nonterminal refusal.</returns>
     public async Task<CustomLoopTraceDeletionReservationResult> ReserveTraceDeletionOperationAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
     {
         ValidateDeletionMutation(mutation);
@@ -528,6 +623,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.Reserved, operation);
     }
 
+    /// <summary>
+    /// Records that the deletion intent audit failed before any terminal trace was removed.
+    /// </summary>
+    /// <param name="mutation">The exact mutation previously used to reserve the deletion operation.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The durable audit-failure outcome, replay, conflict, or not-found result.</returns>
     public async Task<CustomLoopTraceDeletionStoreResult> CommitTraceDeletionAuditFailureAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
     {
         ValidateDeletionMutation(mutation);
@@ -551,6 +652,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.AuditUnavailable, null, cancellationToken);
     }
 
+    /// <summary>
+    /// Revalidates and replaces one terminal trace with its tombstone after the intent audit is durable.
+    /// </summary>
+    /// <param name="mutation">The exact reserved deletion request and expected trace hash.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing deletion, replay, request/trace conflict, absence, or nonterminal refusal.</returns>
     public async Task<CustomLoopTraceDeletionStoreResult> DeleteTerminalTraceAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default)
     {
         ValidateDeletionMutation(mutation);
@@ -660,6 +767,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return await CommitDeletionOutcomeAsync(operation, CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, cancellationToken);
     }
 
+    /// <summary>
+    /// Marks the terminal audit-integrity outcome of a committed trace-deletion receipt.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="integrity">The terminal recorded or warning integrity state.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A status reporting a new mark, idempotent prior mark, conflict, or missing operation.</returns>
     public async Task<CustomLoopTraceDeletionAuditMarkStatus> MarkTraceDeletionOutcomeAsync(string operationId, CustomLoopTraceDeletionIntegrity integrity, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -713,6 +827,14 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return CustomLoopTraceDeletionAuditMarkStatus.Marked;
     }
 
+    /// <summary>
+    /// Appends one idempotent integrity-warning event to an otherwise immutable terminal run.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="expectedLifecycleVersion">The currently expected durable lifecycle version.</param>
+    /// <param name="warning">The validated terminal integrity-warning event to append.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result describing update, idempotent replay, absence, version conflict, or deletion conflict.</returns>
     public async Task<CustomLoopRunStoreResult> AppendTerminalIntegrityWarningAsync(string runId, int expectedLifecycleVersion, CustomLoopRunEvent warning, CancellationToken cancellationToken = default)
     {
         var safeRunId = CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
@@ -773,6 +895,15 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return CustomLoopRunStoreResult.Updated(candidate);
     }
 
+    /// <summary>
+    /// Replaces one nonterminal run using optimistic lifecycle-version concurrency.
+    /// </summary>
+    /// <param name="run">The complete replacement whose lifecycle version is exactly one greater than the expected version.</param>
+    /// <param name="expectedLifecycleVersion">The currently expected durable lifecycle version.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// A result describing update, absence, version conflict, terminal immutability, deletion conflict, or trace-capacity refusal.
+    /// </returns>
     public async Task<CustomLoopRunStoreResult> UpdateAsync(CustomLoopRunRecord run, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
     {
         ValidateCanonicalRun(run);
@@ -830,6 +961,17 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return CustomLoopRunStoreResult.Updated(run);
     }
 
+    /// <summary>
+    /// Determines whether a matching live run can reserve enough trace capacity for the candidate dispatch.
+    /// </summary>
+    /// <param name="candidate">The canonical candidate state whose encoded size and remaining lifecycle reserve are measured.</param>
+    /// <param name="expectedLifecycleVersion">The live lifecycle version the caller expects to dispatch from.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// <see langword="false"/> only when the unique live, nonterminal run at the expected version lacks capacity.
+    /// Missing, stale, terminal, deleted, or ambiguous state returns <see langword="true"/> so the authoritative mutation path
+    /// can report that separate conflict.
+    /// </returns>
     public async Task<bool> HasSufficientTraceCapacityForDispatchAsync(CustomLoopRunRecord candidate, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
     {
         ValidateCanonicalRun(candidate);
@@ -1355,6 +1497,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             && CustomLoopArtifactIdentifier.IsValid(Path.GetFileNameWithoutExtension(parts[1]));
     }
 
+    /// <summary>
+    /// Executes the dispose operation.
+    /// </summary>
+    /// <returns>The operation.</returns>
     public void Dispose()
     {
         lock (_monitorCacheGate)
@@ -1819,6 +1965,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
     }
 
+    /// <summary>
+    /// Calculates the reserved trace capacity required for the current persisted run state.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <param name="persistedUtf8Bytes">The persisted UTF-8 bytes.</param>
+    /// <returns>The persisted bytes plus any lifecycle-dependent capacity reservation.</returns>
     internal static long CalculateRequiredTraceCapacity(CustomLoopRunRecord run, long persistedUtf8Bytes)
     {
         if (persistedUtf8Bytes < 0)
@@ -1894,6 +2046,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         return item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning;
     }
 
+    /// <summary>
+    /// Determines whether the run has terminal integrity warning.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <returns><see langword="true"/> when has terminal integrity warning; otherwise, <see langword="false"/>.</returns>
     internal static bool HasTerminalIntegrityWarning(CustomLoopRunRecord run)
     {
         return run.Events.LastOrDefault() is { Kind: CustomLoopRunEventKind.IntegrityWarning };

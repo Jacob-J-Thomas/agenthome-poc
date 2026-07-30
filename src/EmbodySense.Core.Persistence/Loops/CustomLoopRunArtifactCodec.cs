@@ -9,16 +9,36 @@ using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Maps custom-loop run records to and from the canonical compact version-1 JSON envelope.
+/// </summary>
+/// <remarks>
+/// The envelope de-duplicates content, context blocks, authorities, and tool requests into hash-verified registries. Decoding
+/// rejects duplicate or unknown properties, invalid UTF-8, unsupported schema versions, noncanonical reference ordering,
+/// unreferenced registry entries, hash mismatches, and semantically invalid reconstructed runs.
+/// </remarks>
 internal static class CustomLoopRunArtifactCodec
 {
+    /// <summary>
+    /// Identifies the canonical custom-loop run envelope kind.
+    /// </summary>
     internal const string ArtifactKind = "custom-loop-run";
+    /// <summary>
+    /// Identifies the only supported envelope schema version.
+    /// </summary>
     internal const int CurrentArtifactSchemaVersion = 1;
+    /// <summary>
+    /// Identifies the only supported projected-run schema version.
+    /// </summary>
     internal const int CurrentProjectionSchemaVersion = 1;
     private const string EncodingName = "utf-8";
     private const string ContentReferenceProperty = "$content";
     private const string BlockReferenceProperty = "$contextBlock";
     private const string AuthorityReferenceProperty = "$authority";
     private const string ToolRequestReferenceProperty = "$toolRequest";
+    /// <summary>
+    /// Provides the no-BOM UTF-8 encoding that rejects invalid byte sequences.
+    /// </summary>
     internal static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -29,6 +49,11 @@ internal static class CustomLoopRunArtifactCodec
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
 
+    /// <summary>
+    /// Encodes one validated run into a canonical compact envelope.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <returns>The canonical UTF-8 JSON bytes.</returns>
     internal static byte[] Encode(CustomLoopRunRecord run)
     {
         ArgumentNullException.ThrowIfNull(run);
@@ -45,12 +70,24 @@ internal static class CustomLoopRunArtifactCodec
         return encoded;
     }
 
+    /// <summary>
+    /// Decodes a canonical envelope and validates both JSON depth and reconstructed run semantics.
+    /// </summary>
+    /// <param name="utf8Json">The utf8 JSON.</param>
+    /// <param name="path">The path.</param>
+    /// <returns>The reconstructed custom-loop run.</returns>
     internal static CustomLoopRunRecord Decode(byte[] utf8Json, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(utf8Json);
         return Parse(utf8Json, requireCanonical: true, validateDepth: true, path: path).Run;
     }
 
+    /// <summary>
+    /// Decodes a canonical envelope whose JSON depth has already been validated by the caller.
+    /// </summary>
+    /// <param name="utf8Json">The utf8 JSON.</param>
+    /// <param name="path">The path.</param>
+    /// <returns>The reconstructed custom-loop run.</returns>
     internal static CustomLoopRunRecord DecodeDepthValidated(byte[] utf8Json, string path)
     {
         ArgumentNullException.ThrowIfNull(utf8Json);
@@ -58,6 +95,11 @@ internal static class CustomLoopRunArtifactCodec
         return Parse(utf8Json, requireCanonical: true, validateDepth: false, path: path).Run;
     }
 
+    /// <summary>
+    /// Determines whether a JSON root advertises the canonical custom-loop run artifact kind.
+    /// </summary>
+    /// <param name="root">The root.</param>
+    /// <returns><see langword="true"/> when is envelope; otherwise, <see langword="false"/>.</returns>
     internal static bool IsEnvelope(JsonElement root)
     {
         return root.ValueKind == JsonValueKind.Object
@@ -1058,6 +1100,11 @@ internal static class CustomLoopRunArtifactCodec
         return items;
     }
 
+    /// <summary>
+    /// Serializes one codec node with the bounded canonical JSON options.
+    /// </summary>
+    /// <param name="node">The node.</param>
+    /// <returns>The UTF-8 JSON bytes.</returns>
     internal static byte[] SerializeNode(JsonNode node)
     {
         return CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(node, _jsonOptions, "Custom-loop run artifact");
@@ -1165,11 +1212,22 @@ internal static class CustomLoopRunArtifactCodec
         }
     }
 
+    /// <summary>
+    /// Computes the lowercase SHA-256 binding for persisted content.
+    /// </summary>
+    /// <param name="content">The content.</param>
+    /// <returns>The lowercase hexadecimal SHA-256 digest.</returns>
     internal static string Hash(ReadOnlySpan<byte> content)
     {
         return Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Formats a deterministic compact base-36 identifier for a registry entry.
+    /// </summary>
+    /// <param name="prefix">The prefix.</param>
+    /// <param name="index">The index.</param>
+    /// <returns>The prefix followed by the base-36 index.</returns>
     internal static string IndexedId(string prefix, int index)
     {
         const string Digits = "0123456789abcdefghijklmnopqrstuvwxyz";
@@ -1199,28 +1257,104 @@ internal static class CustomLoopRunArtifactCodec
 
     private sealed class ToolProjectionState(JsonObject request, JsonObject authority, string authorityId, string requestId)
     {
+        /// <summary>
+        /// Gets the request JSON object.
+        /// </summary>
+        /// <value>The request JSON object.</value>
         public JsonObject Request { get; } = request;
+        /// <summary>
+        /// Gets the authority JSON object.
+        /// </summary>
+        /// <value>The authority JSON object.</value>
         public JsonObject Authority { get; set; } = authority;
+        /// <summary>
+        /// Gets the authority ID.
+        /// </summary>
+        /// <value>The authority ID.</value>
         public string AuthorityId { get; set; } = authorityId;
+        /// <summary>
+        /// Gets the request ID.
+        /// </summary>
+        /// <value>The request ID.</value>
         public string RequestId { get; } = requestId;
+        /// <summary>
+        /// Gets the governance JSON object.
+        /// </summary>
+        /// <value>The governance JSON object.</value>
         public JsonObject? Governance { get; set; }
+        /// <summary>
+        /// Gets the broker request ID JSON node.
+        /// </summary>
+        /// <value>The broker request ID JSON node.</value>
         public JsonNode? BrokerRequestId { get; set; }
+        /// <summary>
+        /// Gets the outcome JSON object.
+        /// </summary>
+        /// <value>The outcome JSON object.</value>
         public JsonObject? Outcome { get; set; }
+        /// <summary>
+        /// Gets the outcome sequence.
+        /// </summary>
+        /// <value>The outcome sequence.</value>
         public long? OutcomeSequence { get; set; }
+        /// <summary>
+        /// Gets a value indicating whether the returned condition holds.
+        /// </summary>
+        /// <value><see langword="true"/> when the returned condition holds; otherwise, <see langword="false"/>.</value>
         public bool Returned { get; set; }
+        /// <summary>
+        /// Gets a value indicating whether the integrity failed condition holds.
+        /// </summary>
+        /// <value><see langword="true"/> when the integrity failed condition holds; otherwise, <see langword="false"/>.</value>
         public bool IntegrityFailed { get; set; }
     }
 
     private sealed class ToolHydrationState(JsonObject request, JsonObject authority, string authorityId)
     {
+        /// <summary>
+        /// Gets the request JSON object.
+        /// </summary>
+        /// <value>The request JSON object.</value>
         public JsonObject Request { get; } = request;
+        /// <summary>
+        /// Gets the authority JSON object.
+        /// </summary>
+        /// <value>The authority JSON object.</value>
         public JsonObject Authority { get; set; } = authority;
+        /// <summary>
+        /// Gets the authority ID.
+        /// </summary>
+        /// <value>The authority ID.</value>
         public string AuthorityId { get; set; } = authorityId;
+        /// <summary>
+        /// Gets the governance JSON object.
+        /// </summary>
+        /// <value>The governance JSON object.</value>
         public JsonObject? Governance { get; set; }
+        /// <summary>
+        /// Gets the broker request ID JSON node.
+        /// </summary>
+        /// <value>The broker request ID JSON node.</value>
         public JsonNode? BrokerRequestId { get; set; }
+        /// <summary>
+        /// Gets the outcome evidence JSON object.
+        /// </summary>
+        /// <value>The outcome evidence JSON object.</value>
         public JsonObject? OutcomeEvidence { get; set; }
+        /// <summary>
+        /// Gets the outcome sequence.
+        /// </summary>
+        /// <value>The outcome sequence.</value>
         public long? OutcomeSequence { get; set; }
+        /// <summary>
+        /// Gets a value indicating whether the returned condition holds.
+        /// </summary>
+        /// <value><see langword="true"/> when the returned condition holds; otherwise, <see langword="false"/>.</value>
         public bool Returned { get; set; }
+        /// <summary>
+        /// Gets a value indicating whether the integrity failed condition holds.
+        /// </summary>
+        /// <value><see langword="true"/> when the integrity failed condition holds; otherwise, <see langword="false"/>.</value>
         public bool IntegrityFailed { get; set; }
     }
 }

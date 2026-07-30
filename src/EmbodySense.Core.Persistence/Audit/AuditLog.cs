@@ -7,6 +7,13 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Audit;
 
+/// <summary>
+/// Persists append-only audit events as newline-delimited JSON beneath the workspace audit directory.
+/// </summary>
+/// <remarks>
+/// Appends targeting the same file are serialized across instances in this process. The store does not claim a cross-process
+/// transaction. Tail reads preserve file order, ignore blank or malformed lines, and propagate cancellation and file I/O failures.
+/// </remarks>
 public sealed class AuditLog : IAuditLog
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _fileLocks = new(StringComparer.OrdinalIgnoreCase);
@@ -19,6 +26,10 @@ public sealed class AuditLog : IAuditLog
 
     private readonly WorkspacePaths _paths;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AuditLog"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public AuditLog(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -26,6 +37,11 @@ public sealed class AuditLog : IAuditLog
         _paths = paths;
     }
 
+    /// <summary>
+    /// Creates an audit sink only when the requested root already contains EmbodySense agent scaffolding.
+    /// </summary>
+    /// <param name="rootPath">The absolute workspace root path.</param>
+    /// <returns>The workspace audit sink, or <see langword="null"/> for a missing, blank, or uninitialized root.</returns>
     public static AuditLog? TryCreateForExistingWorkspace(string? rootPath)
     {
         if (string.IsNullOrWhiteSpace(rootPath))
@@ -38,6 +54,12 @@ public sealed class AuditLog : IAuditLog
         return Directory.Exists(paths.AgentPath) ? new AuditLog(paths) : null;
     }
 
+    /// <summary>
+    /// Appends one canonical audit event as a single newline-delimited JSON record.
+    /// </summary>
+    /// <param name="auditEvent">The audit event.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that completes after the record has been appended to the workspace audit file.</returns>
     public async Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(auditEvent);
@@ -57,6 +79,15 @@ public sealed class AuditLog : IAuditLog
         }
     }
 
+    /// <summary>
+    /// Reads the last bounded set of nonblank audit lines and returns the records that deserialize successfully in file order.
+    /// </summary>
+    /// <param name="limit">The limit.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// Up to <paramref name="limit"/> deserialized events from the last <paramref name="limit"/> nonblank lines. Malformed
+    /// lines are skipped without backfilling from older lines, and a missing audit file produces an empty result.
+    /// </returns>
     public async Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)
     {
         if (limit <= 0)
