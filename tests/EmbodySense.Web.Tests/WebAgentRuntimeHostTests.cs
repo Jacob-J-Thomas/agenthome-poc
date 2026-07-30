@@ -227,6 +227,22 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task Transcript_hydration_remains_available_while_another_process_owns_custom_loop_hosting()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+        await WriteCurrentTranscriptAsync(workspace, "hosted elsewhere", "durable answer");
+        await using var competingGate = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace.RootPath));
+        using var activeExecution = competingGate.TryAcquire("competing-custom-loop", new string('a', CustomLoopLimits.Sha256HexCharacters)).Lease!;
+
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await host.GetCurrentTranscriptAsync());
+
+        Assert.Equal(["hosted elsewhere", "durable answer"], transcript.Select(message => message.Content));
+    }
+
+    [Fact]
     public async Task Transcript_hydration_on_a_fresh_initialized_workspace_returns_an_empty_canonical_transcript()
     {
         using var workspace = new TestWorkspace();

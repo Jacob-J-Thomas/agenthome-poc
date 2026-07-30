@@ -18,7 +18,11 @@ public sealed class ConversationTranscriptReader
     public async Task<IReadOnlyList<AgentRuntimeTranscriptMessage>> ReadCurrentAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
-        var snapshot = await new ConversationMemoryStore(new WorkspacePaths(workingDirectory)).LoadCurrentConversationSnapshotAsync(cancellationToken);
-        return snapshot.Messages.Select(message => new AgentRuntimeTranscriptMessage(message.Role.ToString(), message.Content)).ToArray();
+        var paths = new WorkspacePaths(workingDirectory);
+        using (await new FileConversationWorkspaceLease(paths).AcquireAsync(cancellationToken))
+        {
+            var snapshot = await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync(cancellationToken);
+            return snapshot.Messages.Select(message => new AgentRuntimeTranscriptMessage(message.Role.ToString(), message.Content)).ToArray();
+        }
     }
 }

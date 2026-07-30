@@ -33,6 +33,24 @@ public sealed class ConversationTranscriptReaderTests
     }
 
     [Fact]
+    public async Task ReadCurrentAsync_waits_for_the_workspace_turn_lease_before_reading()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("complete turn"));
+        using var activeTurn = await new FileConversationWorkspaceLease(paths).AcquireAsync();
+
+        var hydration = new ConversationTranscriptReader().ReadCurrentAsync(workspace.RootPath);
+        await Task.Delay(100);
+
+        Assert.False(hydration.IsCompleted);
+        activeTurn.Dispose();
+        var transcript = await hydration.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("complete turn", Assert.Single(transcript).Content);
+    }
+
+    [Fact]
     public async Task ReadCurrentAsync_rejects_a_missing_workspace_root()
     {
         await Assert.ThrowsAsync<ArgumentException>(() => new ConversationTranscriptReader().ReadCurrentAsync(" "));

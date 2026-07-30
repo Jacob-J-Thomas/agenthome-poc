@@ -96,7 +96,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                     else
                     {
                         await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
-                        if (_runtime is null && _loopRecoveryCompleted && _preserveCurrentConversationOnNextRuntimeCreation)
+                        if (_runtime is null && _preserveCurrentConversationOnNextRuntimeCreation)
                         {
                             var persistedTranscript = await new ConversationTranscriptReader().ReadCurrentAsync(_options.WorkingDirectory, cancellationToken);
                             return persistedTranscript.Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
