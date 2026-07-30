@@ -92,6 +92,7 @@ public sealed class BrowserFlowTests
         try
         {
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('refreshConfigButton').disabled");
             await SubmitMessageAsync(browser, "configuration-overlap-turn");
             await browser.WaitForExpressionAsync("document.getElementById('refreshConfigButton').disabled && document.getElementById('sendButton').disabled");
             await externalLease.DisposeAsync();
