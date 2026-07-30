@@ -79,7 +79,7 @@ public sealed record CustomLoopToolAuthoritySnapshot(
     /// Determines whether this snapshot is a non-widening refresh of the attempt-start authority.
     /// </summary>
     /// <param name="attemptStart">The authority snapshot captured at attempt start.</param>
-    /// <returns><see langword="true"/> when admission and catalog identities are unchanged, evaluation time does not move backward, and every effective assignment remains within the admitted, current-role, and implemented ceilings; otherwise, <see langword="false"/>.</returns>
+    /// <returns><see langword="true"/> when admission and catalog ceilings are unchanged, evaluation time does not move backward, and every effective assignment remains within all three ceilings. The role identity must also match unless this snapshot is invalid and grants no effective assignments.</returns>
     public bool IsBoundedRefreshOf(CustomLoopToolAuthoritySnapshot? attemptStart)
     {
         return attemptStart is not null

@@ -38,15 +38,17 @@ public sealed class WorkspacePaths
     /// <summary>
     /// Gets the agent file path.
     /// </summary>
-    /// <param name="relativePath">The relative path.</param>
-    /// <returns>The path formed beneath <see cref="AgentPath"/>.</returns>
+    /// <param name="relativePath">The unvalidated path segment to combine with <see cref="AgentPath"/>.</param>
+    /// <returns>The combined path; parent traversal in <paramref name="relativePath"/> is not rejected or canonicalized.</returns>
+    // TODO(#141): Reject rooted and traversal inputs whose canonical path escapes AgentPath.
     public string AgentFile(string relativePath) => Path.Combine(AgentPath, relativePath);
 
     /// <summary>
     /// Gets the workspace file path.
     /// </summary>
-    /// <param name="relativePath">The relative path.</param>
-    /// <returns>The path formed beneath <see cref="WorkspacePath"/>.</returns>
+    /// <param name="relativePath">The unvalidated path segment to combine with <see cref="WorkspacePath"/>.</param>
+    /// <returns>The combined path; parent traversal in <paramref name="relativePath"/> is not rejected or canonicalized.</returns>
+    // TODO(#141): Reject rooted and traversal inputs whose canonical path escapes WorkspacePath.
     public string WorkspaceFile(string relativePath) => Path.Combine(WorkspacePath, relativePath);
 
     /// <summary>
