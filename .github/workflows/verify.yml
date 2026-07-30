@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install pinned .NET SDK
         uses: actions/setup-dotnet@v5
