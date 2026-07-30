@@ -8,8 +8,9 @@ namespace EmbodySense.Cli.Command;
 /// </summary>
 /// <remarks>
 /// The host owns console projection and serializes all runtime turns until the user requests exit,
-/// the input stream closes, or cancellation is observed before a read or during a turn. Synchronous
-/// console input cannot be interrupted by the token. The host does not own or dispose the supplied runtime.
+/// the input stream closes, or cancellation is observed before a top-level prompt read or during a turn.
+/// Synchronous console input, including a command's follow-up prompt, cannot be interrupted by the token.
+/// The host does not own or dispose the supplied runtime.
 /// </remarks>
 public sealed class AgentRuntimeConsoleHost
 {
@@ -37,9 +38,9 @@ public sealed class AgentRuntimeConsoleHost
     /// <param name="banner">Optional text written once before the first prompt.</param>
     /// <param name="prompt">The prompt written before each input read.</param>
     /// <param name="verbose">Whether to enable verbose runtime context before accepting input.</param>
-    /// <param name="cancellationToken">The token observed before each synchronous input read and during the subsequent turn; it cannot interrupt a read already in progress.</param>
+    /// <param name="cancellationToken">The token checked before each top-level prompt read and passed through runtime turns; it cannot interrupt any synchronous input read and is not rechecked before a command follow-up read.</param>
     /// <returns>Zero after an orderly exit or end-of-input.</returns>
-    /// <exception cref="OperationCanceledException">The token is observed as cancelled before an input read or during a turn.</exception>
+    /// <exception cref="OperationCanceledException">The token is observed as cancelled before a top-level prompt read or during a runtime turn.</exception>
     public async Task<int> RunAsync(
         string? banner = null,
         string prompt = UserPrompt,
