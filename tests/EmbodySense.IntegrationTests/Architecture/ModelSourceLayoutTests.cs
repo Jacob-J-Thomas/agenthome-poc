@@ -114,7 +114,7 @@ public sealed class ModelSourceLayoutTests
     }
 
     [Fact]
-    public void Behavior_classification_catches_field_events_and_nested_behavior()
+    public void Behavior_classification_catches_behavior_without_rejecting_storage_only_constructors()
     {
         const string source = """
             namespace Example;
@@ -136,9 +136,33 @@ public sealed class ModelSourceLayoutTests
             {
                 private sealed record Metadata(string Value);
             }
+
+            internal sealed record StoredState
+            {
+                public StoredState()
+                {
+                }
+
+                public StoredState(string value)
+                {
+                    Value = value;
+                }
+
+                public string Value { get; init; } = string.Empty;
+            }
+
+            internal sealed record NormalizedState
+            {
+                public NormalizedState(string value)
+                {
+                    Value = value.Trim();
+                }
+
+                public string Value { get; init; }
+            }
             """;
 
-        Assert.Equal(["EventfulState", "NestedValidatorState"], FindTopLevelBehaviorBearingTypeNames(source));
+        Assert.Equal(["EventfulState", "NestedValidatorState", "NormalizedState"], FindTopLevelBehaviorBearingTypeNames(source));
     }
 
     private static bool IsModelFile(string sourceRoot, string file)
@@ -182,15 +206,43 @@ public sealed class ModelSourceLayoutTests
         }
 
         return typeDeclaration.Members.Any(member => member is MethodDeclarationSyntax
-            or ConstructorDeclarationSyntax
             or DestructorDeclarationSyntax
             or OperatorDeclarationSyntax
             or ConversionOperatorDeclarationSyntax
             or IndexerDeclarationSyntax
             or EventFieldDeclarationSyntax
+            || member is ConstructorDeclarationSyntax constructor && ConstructorOwnsBehavior(constructor)
             || member is PropertyDeclarationSyntax property && (property.ExpressionBody is not null || property.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true)
             || member is EventDeclarationSyntax eventDeclaration && eventDeclaration.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true
             || member is BaseTypeDeclarationSyntax nestedType && OwnsBehavior(nestedType));
+    }
+
+    private static bool ConstructorOwnsBehavior(ConstructorDeclarationSyntax constructor)
+    {
+        if (constructor.Initializer is not null)
+        {
+            return true;
+        }
+
+        var parameterNames = constructor.ParameterList.Parameters.Select(parameter => parameter.Identifier.ValueText).ToHashSet(StringComparer.Ordinal);
+        if (constructor.ExpressionBody is not null)
+        {
+            return !IsStorageAssignment(constructor.ExpressionBody.Expression, parameterNames);
+        }
+
+        return constructor.Body?.Statements.Any(statement => statement is not ExpressionStatementSyntax expressionStatement || !IsStorageAssignment(expressionStatement.Expression, parameterNames)) == true;
+    }
+
+    private static bool IsStorageAssignment(ExpressionSyntax expression, IReadOnlySet<string> parameterNames)
+    {
+        if (expression is not AssignmentExpressionSyntax assignment || assignment.RawKind != (int)SyntaxKind.SimpleAssignmentExpression)
+        {
+            return false;
+        }
+
+        var targetIsStoredMember = assignment.Left is IdentifierNameSyntax
+            || assignment.Left is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax };
+        return targetIsStoredMember && assignment.Right is IdentifierNameSyntax value && parameterNames.Contains(value.Identifier.ValueText);
     }
 
     private static IReadOnlyList<string> ProductionProjectRoots(string sourceRoot)

@@ -1,5 +1,4 @@
-using EmbodySense.Web.Models;
-namespace EmbodySense.Web;
+namespace EmbodySense.Web.Models;
 
 public sealed record WebApprovalDecision
 {
