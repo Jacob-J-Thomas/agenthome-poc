@@ -9,18 +9,42 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
+/// <summary>
+/// Appends mandatory correlated tool-governance evidence to a nonterminal custom-loop run trace.
+/// </summary>
 public sealed class CustomLoopRunToolEvidenceSink : ICustomLoopToolEvidenceSink
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
     private readonly ICustomLoopRunStore _runStore;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Creates a compare-and-swap evidence sink over the run store.
+    /// </summary>
+    /// <param name="runStore">The durable run store whose lifecycle version protects append-only evidence.</param>
+    /// <param name="timeProvider">The optional clock used to timestamp evidence.</param>
     public CustomLoopRunToolEvidenceSink(ICustomLoopRunStore runStore, TimeProvider? timeProvider = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Validates and appends one mandatory evidence phase, retrying bounded lifecycle-version conflicts.
+    /// </summary>
+    /// <param name="runId">The nonterminal run identity.</param>
+    /// <param name="iteration">The positive loop iteration.</param>
+    /// <param name="stepId">The inference step identity.</param>
+    /// <param name="attempt">The positive model-attempt number.</param>
+    /// <param name="evidence">The bounded request, governance, outcome, or integrity evidence to append.</param>
+    /// <param name="cancellationToken">The token used for request-reservation and governance-decision writes.</param>
+    /// <returns>A task that completes after the validated append commits.</returns>
+    /// <remarks>
+    /// Outcome and integrity evidence use an independent bounded integrity window so caller
+    /// cancellation cannot suppress mandatory post-actuation evidence. Missing or terminal runs,
+    /// invalid successors, exhausted conflicts, and storage failures raise
+    /// <see cref="CustomLoopToolEvidenceIntegrityException"/>.
+    /// </remarks>
     public async Task RecordAsync(string runId, int iteration, string stepId, int attempt, CustomLoopToolTraceEvidence evidence, CancellationToken cancellationToken = default)
     {
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));

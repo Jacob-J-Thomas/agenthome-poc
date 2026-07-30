@@ -14,6 +14,12 @@ internal sealed class CustomLoopToolActuationAuthorityRevalidator : IToolActuati
     private readonly CustomLoopInferenceAttemptRequest _attempt;
     private readonly CorrelatedToolEvidenceObserver _observer;
 
+    /// <summary>
+    /// Creates an attempt-bound revalidator for the final pre-actuation authority check.
+    /// </summary>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="attempt">The attempt.</param>
+    /// <param name="observer">The observer.</param>
     public CustomLoopToolActuationAuthorityRevalidator(ICustomLoopToolAuthorityProvider authorityProvider, CustomLoopInferenceAttemptRequest attempt, CorrelatedToolEvidenceObserver observer)
     {
         _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
@@ -21,6 +27,13 @@ internal sealed class CustomLoopToolActuationAuthorityRevalidator : IToolActuati
         _observer = observer ?? throw new ArgumentNullException(nameof(observer));
     }
 
+    /// <summary>
+    /// Reloads current role authority immediately before actuation, refreshes correlated evidence,
+    /// and permits only commands still present in the effective admitted intersection.
+    /// </summary>
+    /// <param name="request">The previously approved and correlated request.</param>
+    /// <param name="cancellationToken">The token used to cancel current-authority loading.</param>
+    /// <returns>A task whose result contains the allow-or-revoke decision and audit metadata for the current authority snapshot.</returns>
     public async Task<ToolActuationAuthorityRevalidation> RevalidateAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);

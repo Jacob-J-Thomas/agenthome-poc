@@ -15,6 +15,15 @@ using EmbodySense.Core.Persistence.Memory;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
+/// <summary>
+/// Exposes durable custom-loop run, operation, monitor, trace, and quota evidence through Core.Startup.
+/// </summary>
+/// <remarks>
+/// Supplying neither authenticated identity value creates a read-only facade. Supplying both enables
+/// interrupted-run recovery and audited terminal trace deletion. Unsupported run-discovery schemas are
+/// translated to <see cref="LoopRunEvidenceUnsupportedSchemaException"/> so interfaces can provide
+/// explicit cleanup guidance. Dispose the facade to release its run store and optional execution gate.
+/// </remarks>
 public sealed class LoopRunInspectionFacade : IAsyncDisposable
 {
     private readonly WorkspacePaths _paths;
@@ -28,6 +37,13 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
     private CustomLoopWorkspaceExecutionGate? _executionGate;
     private int _disposed;
 
+    /// <summary>
+    /// Creates a read-only or authenticated inspection facade for one workspace.
+    /// </summary>
+    /// <param name="workingDirectory">The workspace root, normalized to an absolute path.</param>
+    /// <param name="authenticatedActor">The optional server-owned actor used for recovery and deletion audit events.</param>
+    /// <param name="authenticatedSurface">The optional server-owned interface surface paired with <paramref name="authenticatedActor"/>.</param>
+    /// <remarks>Actor and surface must either both be supplied or both be omitted.</remarks>
     public LoopRunInspectionFacade(string workingDirectory, string? authenticatedActor = null, string? authenticatedSurface = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
@@ -47,6 +63,15 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         _retention = audit is null ? null : new CustomLoopTraceRetentionService(_runStore, audit);
     }
 
+    /// <summary>
+    /// Attempts to acquire workspace execution ownership and safely parks interrupted custom runs.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel recovery and conversation snapshot reads.</param>
+    /// <returns>
+    /// A task whose result reports whether this process completed recovery and whether the invoking
+    /// conversation must be rehydrated. A busy or unavailable workspace host returns
+    /// <c>Completed = false</c> instead of waiting or stealing ownership.
+    /// </returns>
     public async Task<LoopRunRecoverySnapshot> RecoverInterruptedRunsAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -94,6 +119,10 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Idempotently disposes the run store and any workspace execution gate created for recovery.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -105,6 +134,12 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         if (_executionGate is not null) await _executionGate.DisposeAsync();
     }
 
+    /// <summary>
+    /// Reads the full durable projection of one run.
+    /// </summary>
+    /// <param name="runId">The durable run identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel evidence reads.</param>
+    /// <returns>A task whose result is the run, or null when it is not retained.</returns>
     public async Task<LoopRunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken = default)
     {
         return await ReadEvidenceAsync(async () =>
@@ -114,6 +149,12 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Reads the lightweight monitor projection and artifact validator for one run.
+    /// </summary>
+    /// <param name="runId">The durable run identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel evidence reads.</param>
+    /// <returns>A task whose result is the monitor snapshot, or null when the run is not retained.</returns>
     public async Task<LoopRunMonitorSnapshot?> GetMonitorAsync(string runId, CancellationToken cancellationToken = default)
     {
         return await ReadEvidenceAsync(async () =>
@@ -123,6 +164,12 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Reads the durable reconciliation receipt for an invocation operation identity.
+    /// </summary>
+    /// <param name="operationId">The invocation idempotency identity.</param>
+    /// <param name="cancellationToken">The token used to cancel the receipt read.</param>
+    /// <returns>A task whose result is the operation snapshot, or null when no receipt exists.</returns>
     public async Task<LoopInvocationOperationSnapshot?> GetInvocationOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var operation = await _invocationOperationStore.GetAsync(operationId, cancellationToken);
@@ -140,6 +187,12 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
                 operation.Detail);
     }
 
+    /// <summary>
+    /// Reads the durable reconciliation receipt for a pause, cancel, or resume operation identity.
+    /// </summary>
+    /// <param name="operationId">The lifecycle-control idempotency identity.</param>
+    /// <param name="cancellationToken">The token used to cancel the receipt read.</param>
+    /// <returns>A task whose result is the operation snapshot, or null when no receipt exists.</returns>
     public async Task<LoopControlOperationSnapshot?> GetControlOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var operation = await _controlOperationStore.GetAsync(operationId, cancellationToken);
@@ -160,11 +213,25 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
                 operation.UpdatedAtUtc);
     }
 
+    /// <summary>
+    /// Reads the newest retained run summaries across the workspace.
+    /// </summary>
+    /// <param name="maximumCount">The bounded maximum number of summaries to return.</param>
+    /// <param name="cancellationToken">The token used to cancel evidence reads.</param>
+    /// <returns>A task whose result contains the newest retained summaries in store order.</returns>
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> ListRecentAsync(int maximumCount = CustomLoopLimits.MaxRecentRunsPageSize, CancellationToken cancellationToken = default)
     {
         return await ReadEvidenceAsync(async () => (await _runStore.ListRecentAsync(maximumCount, cancellationToken)).Select(CustomLoopRuntimeFacade.Map).ToArray());
     }
 
+    /// <summary>
+    /// Reads one cursor page of retained run summaries, optionally restricted to a loop.
+    /// </summary>
+    /// <param name="maximumCount">The bounded maximum page size.</param>
+    /// <param name="loopId">An optional exact loop identifier filter.</param>
+    /// <param name="cursor">An opaque continuation cursor returned by a prior matching request.</param>
+    /// <param name="cancellationToken">The token used to cancel evidence reads.</param>
+    /// <returns>A task whose result contains the page and an optional continuation cursor.</returns>
     public async Task<LoopRunSummaryPageSnapshot> ListPageAsync(int maximumCount = CustomLoopLimits.MaxRecentRunsPageSize, string? loopId = null, string? cursor = null, CancellationToken cancellationToken = default)
     {
         return await ReadEvidenceAsync(async () =>
@@ -174,6 +241,12 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Reads retained trace metadata or its deletion tombstone for one run.
+    /// </summary>
+    /// <param name="runId">The durable run identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel evidence reads.</param>
+    /// <returns>A task whose result is retained trace evidence, a tombstone projection, or null when neither exists.</returns>
     public async Task<LoopTraceInspectionSnapshot?> GetTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
         return await ReadEvidenceAsync(async () =>
@@ -183,6 +256,11 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Reads actual, reserved, and bounded trace-retention accounting for the workspace.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel evidence reads.</param>
+    /// <returns>A task whose result is the current trace quota snapshot.</returns>
     public async Task<LoopTraceQuotaSnapshot> GetTraceQuotaAsync(CancellationToken cancellationToken = default)
     {
         return await ReadEvidenceAsync(async () =>
@@ -208,6 +286,17 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Conditionally replaces one terminal retained trace with an auditable tombstone.
+    /// </summary>
+    /// <param name="runId">The terminal run whose retained trace is targeted.</param>
+    /// <param name="expectedTraceHash">The retained trace hash required for optimistic concurrency.</param>
+    /// <param name="operationId">The idempotency identity for this exact deletion request.</param>
+    /// <param name="cancellationToken">The token used to cancel persistence and auditing.</param>
+    /// <returns>
+    /// A task whose result distinguishes committed deletion, committed outcome, rejection, replay,
+    /// and audit-warning states and includes the retained tombstone when available.
+    /// </returns>
     public async Task<LoopTraceDeletionResponse> DeleteTraceAsync(string runId, string expectedTraceHash, string operationId, CancellationToken cancellationToken = default)
     {
         if (_retention is null || _actor is null || _surface is null)

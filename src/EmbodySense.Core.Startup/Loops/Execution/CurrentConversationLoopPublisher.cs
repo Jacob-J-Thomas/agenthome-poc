@@ -33,6 +33,12 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
     private readonly Dictionary<string, LinkedListNode<string>> _notifiedOperations = new(StringComparer.Ordinal);
     private readonly LinkedList<string> _notificationOrder = [];
 
+    /// <summary>
+    /// Creates the serialized publication boundary for one active runtime conversation.
+    /// </summary>
+    /// <param name="conversationState">The conversation state.</param>
+    /// <param name="conversationMemory">The conversation memory.</param>
+    /// <param name="observer">The observer.</param>
     public CurrentConversationLoopPublisher(
         ConversationRuntimeState conversationState,
         IConversationMemoryStore conversationMemory,
@@ -43,6 +49,21 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
         _observer = observer;
     }
 
+    /// <summary>
+    /// Atomically appends one verified canonical loop output to the admitted invoking conversation
+    /// and reconciles ambiguous append outcomes.
+    /// </summary>
+    /// <param name="request">The operation identity, admitted conversation identity and prefix, prior publications, and exact hashed output.</param>
+    /// <param name="cancellationToken">The token used to cancel serialized verification and append work.</param>
+    /// <returns>
+    /// A task whose result distinguishes verified publication, definite non-publication, and an
+    /// uncertain outcome that callers must not retry as though nothing committed.
+    /// </returns>
+    /// <remarks>
+    /// Publication requires the active and durable conversations to match the immutable admission
+    /// prefix plus exact prior publications. Append uses the persistence compare-and-append boundary.
+    /// Post-append notification is de-duplicated per operation and does not replace durable verification.
+    /// </remarks>
     public async Task<CustomLoopConversationPublicationResult> PublishAsync(CustomLoopConversationPublicationRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);

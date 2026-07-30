@@ -43,6 +43,29 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     private bool _customExecutionReacquisitionAllowed;
     private bool _customRecoveryRequired;
 
+    /// <summary>
+    /// Composes the retained custom-loop host over persistence, admission, lifecycle, execution,
+    /// context-capture, and workspace-ownership services.
+    /// </summary>
+    /// <param name="definitionStore">The definition store.</param>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="invocationOperationStore">The invocation operation store.</param>
+    /// <param name="invocationReceiptRetention">The invocation receipt retention.</param>
+    /// <param name="controlOperationStore">The control operation store.</param>
+    /// <param name="executionGate">The execution gate.</param>
+    /// <param name="admissionService">The admission service.</param>
+    /// <param name="recoveryService">The recovery service.</param>
+    /// <param name="lifecycleService">The lifecycle service.</param>
+    /// <param name="runner">The runner.</param>
+    /// <param name="runtimeContext">The runtime context.</param>
+    /// <param name="customExecutionAvailable">The custom execution available.</param>
+    /// <param name="customExecutionReacquisitionAllowed">The custom execution reacquisition allowed.</param>
+    /// <param name="customRecoveryRequired">The custom recovery required.</param>
+    /// <param name="surface">The surface.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="currentRoleId">The current role identifier.</param>
+    /// <param name="modelSnapshot">The model snapshot.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopRuntimeFacade(
         ICustomLoopDefinitionStore definitionStore,
         ICustomLoopRunStore runStore,
@@ -87,6 +110,22 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     internal bool CustomRecoveryRequired => Volatile.Read(ref _customRecoveryRequired);
 
+    /// <summary>
+    /// Reconciles or admits one idempotent custom-loop invocation and, only after durable admission,
+    /// executes its ordered run while holding workspace execution ownership.
+    /// </summary>
+    /// <param name="input">The canonical request identity, expected definition, prompt, and invoking conversation version.</param>
+    /// <param name="cancellationToken">The token used to cancel reconciliation, admission, execution, and persistence.</param>
+    /// <returns>
+    /// A task whose result reports durable admission, execution, validation, conflict, busy-host,
+    /// receipt, recovery, and audit-integrity outcomes without making ambiguous failures look successful.
+    /// </returns>
+    /// <remarks>
+    /// Reusing an operation identity with different canonical request content is rejected. Replays
+    /// reconcile durable receipts and prior admissions before any provider dispatch. If strict receipt
+    /// completion fails after admission, the undispatched run is conservatively parked when that can be
+    /// proved. Unsupported run-discovery schemas fail closed with explicit cleanup guidance.
+    /// </remarks>
     public async Task<LoopRunInvocationResponse> InvokeAsync(LoopRunInvocationInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -419,24 +458,50 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Reads the full durable projection of one retained run.
+    /// </summary>
+    /// <param name="runId">The durable run identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel the read.</param>
+    /// <returns>A task whose result is the run, or null when it is not retained.</returns>
     public async Task<LoopRunSnapshot?> GetAsync(string runId, CancellationToken cancellationToken)
     {
         var run = await _runStore.GetAsync(runId, cancellationToken);
         return run is null ? null : Map(run);
     }
 
+    /// <summary>
+    /// Reads the newest retained run summaries across the workspace.
+    /// </summary>
+    /// <param name="maximumCount">The bounded maximum number of summaries.</param>
+    /// <param name="cancellationToken">The token used to cancel the read.</param>
+    /// <returns>A task whose result contains the newest retained summaries in store order.</returns>
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken)
     {
         var summaries = await ExecuteRunStoreReadAsync(() => _runStore.ListRecentAsync(maximumCount, cancellationToken));
         return summaries.Select(Map).ToArray();
     }
 
+    /// <summary>
+    /// Reads one cursor page of retained run summaries, optionally restricted to one loop.
+    /// </summary>
+    /// <param name="maximumCount">The bounded maximum page size.</param>
+    /// <param name="loopId">An optional exact loop identifier filter.</param>
+    /// <param name="cursor">An opaque continuation cursor from a prior matching request.</param>
+    /// <param name="cancellationToken">The token used to cancel the read.</param>
+    /// <returns>A task whose result contains the page and an optional continuation cursor.</returns>
     public async Task<LoopRunSummaryPageSnapshot> ListPageAsync(int maximumCount, string? loopId, string? cursor, CancellationToken cancellationToken)
     {
         var page = await ExecuteRunStoreReadAsync(() => _runStore.ListPageAsync(new CustomLoopRunPageRequest(maximumCount, loopId, cursor), cancellationToken));
         return new LoopRunSummaryPageSnapshot(page.Items.Select(Map).ToArray(), page.ContinuationCursor);
     }
 
+    /// <summary>
+    /// Idempotently requests a lifecycle pause at a safe execution boundary.
+    /// </summary>
+    /// <param name="input">The run, expected lifecycle version, and operation identity.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery and lifecycle persistence.</param>
+    /// <returns>A task whose result reports the durable control status and resulting run projection when available.</returns>
     public async Task<LoopRunControlResponse> PauseAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -460,6 +525,13 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Idempotently requests cancellation and, when required, reacquires retained runtime ownership
+    /// before retrying the exact operation.
+    /// </summary>
+    /// <param name="input">The run, expected lifecycle version, and operation identity.</param>
+    /// <param name="cancellationToken">The token used to cancel receipt reconciliation, recovery, and lifecycle persistence.</param>
+    /// <returns>A task whose result reports the durable control status and resulting run projection when available.</returns>
     public async Task<LoopRunControlResponse> CancelAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -494,6 +566,12 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         return MapControl(await ExecuteControlResultAsync(_lifecycleService.CancelAsync(request, cancellationToken)));
     }
 
+    /// <summary>
+    /// Idempotently resumes a paused run after retained runtime recovery and workspace ownership are available.
+    /// </summary>
+    /// <param name="input">The run, expected lifecycle version, and operation identity.</param>
+    /// <param name="cancellationToken">The token used to cancel receipt reconciliation, recovery, execution, and persistence.</param>
+    /// <returns>A task whose result reports the durable control status and resulting run projection when available.</returns>
     public async Task<LoopRunControlResponse> ResumeAsync(LoopRunControlInput input, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -512,6 +590,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         return await ExecuteControlAsync(awaitable: _lifecycleService.ResumeAsync(new CustomLoopResumeRequest(input.RunId, input.ExpectedLifecycleVersion, input.OperationId, _actor), cancellationToken));
     }
 
+    /// <summary>
+    /// Disposes workspace execution ownership and the in-process availability gate.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
         await _executionGate.DisposeAsync();
