@@ -9,6 +9,9 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 
 namespace EmbodySense.Core.Application.Loops.TraceRetention;
 
+/// <summary>
+/// Inspects quota evidence and performs authenticated, hash-bound deletion of terminal custom-loop traces.
+/// </summary>
 public sealed class CustomLoopTraceRetentionService
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
@@ -17,6 +20,12 @@ public sealed class CustomLoopTraceRetentionService
     private readonly IAuditLog _auditLog;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopTraceRetentionService"/> type.
+    /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopTraceRetentionService(ICustomLoopRunStore store, IAuditLog auditLog, TimeProvider? timeProvider = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -24,10 +33,27 @@ public sealed class CustomLoopTraceRetentionService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Inspects retained artifacts and computes the deletion evidence hash for one run.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The inspection, or <see langword="null"/> when the run is unknown.</returns>
     public Task<CustomLoopTraceInspection?> InspectAsync(string runId, CancellationToken cancellationToken = default) => _store.InspectTraceAsync(runId, cancellationToken);
 
+    /// <summary>
+    /// Reads current trace usage and configured limits.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop trace quota.</returns>
     public Task<CustomLoopTraceQuota> GetQuotaAsync(CancellationToken cancellationToken = default) => _store.GetTraceQuotaAsync(cancellationToken);
 
+    /// <summary>
+    /// Deletes a terminal trace through an idempotent, audited, expected-hash-bound operation.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The committed or replayed tombstone, or a bounded rejection/conflict result.</returns>
     public async Task<CustomLoopTraceDeletionResult> DeleteAsync(CustomLoopTraceDeletionRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -37,6 +63,8 @@ public sealed class CustomLoopTraceRetentionService
             return Result(CustomLoopTraceDeletionStatus.Invalid, null, validationDetail);
         }
 
+        // The operation receipt binds actor, run, surface, and expected hash. Reusing its id for any
+        // other authenticated request is an explicit conflict.
         var requestHash = CustomLoopTraceDeletionRequestHash.Compute(request);
         var mutation = new CustomLoopTraceDeletionMutation(request, requestHash, _timeProvider.GetUtcNow().ToUniversalTime());
         CustomLoopTraceDeletionLookupResult lookup;

@@ -31,7 +31,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private int _activeCustomRuntimeOperations;
     private bool _discardRuntimeWhenCustomOperationsComplete;
     private bool _loopRecoveryCompleted;
-    private bool _preserveCurrentConversationAfterRecovery;
+    private bool _preserveCurrentConversationOnNextRuntimeCreation = true;
     private int _disposed;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
@@ -96,9 +96,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                     else
                     {
                         await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
-                        if (_runtime is null && _loopRecoveryCompleted && _preserveCurrentConversationAfterRecovery)
+                        if (_runtime is null && _preserveCurrentConversationOnNextRuntimeCreation)
                         {
-                            await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+                            var persistedTranscript = await new ConversationTranscriptReader().ReadCurrentAsync(_options.WorkingDirectory, cancellationToken);
+                            return persistedTranscript.Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
                         }
 
                         return _runtime?.GetActiveConversationTranscript().Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
@@ -451,7 +452,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             var factory = _conversationPublicationObserver is null
                 ? new AgentRuntimeFactory(_approvalCoordinator, codexRuntimeStatus)
                 : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver, codexRuntimeStatus);
-            var preserveCurrentConversation = _preserveCurrentConversationAfterRecovery;
+            var preserveCurrentConversation = _preserveCurrentConversationOnNextRuntimeCreation;
             _runtime = await factory.CreateAsync(
                 _options.Model,
                 _options.WorkingDirectory,
@@ -461,7 +462,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 preserveCurrentConversation,
                 cancellationToken);
             _loopRecoveryCompleted = !_runtime.CustomLoopRecoveryRequired;
-            _preserveCurrentConversationAfterRecovery = false;
+            _preserveCurrentConversationOnNextRuntimeCreation = false;
         }
 
         return _runtime;
@@ -508,7 +509,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
         var recovery = await _loopRuns.RecoverInterruptedRunsAsync(cancellationToken);
         _loopRecoveryCompleted = recovery.Completed;
-        _preserveCurrentConversationAfterRecovery |= recovery.PreserveCurrentConversation;
+        _preserveCurrentConversationOnNextRuntimeCreation |= recovery.PreserveCurrentConversation;
     }
 
     private void EnsureWorkspaceInitialized(string operation)
@@ -551,7 +552,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         var runtime = _runtime;
         var discardCompletion = _runtimeDiscardCompletion;
-        _preserveCurrentConversationAfterRecovery |= runtime is not null;
+        _preserveCurrentConversationOnNextRuntimeCreation |= runtime is not null;
         _runtime = null;
         _runtimeDiscardCompletion = null;
         _discardRuntimeWhenCustomOperationsComplete = false;

@@ -4,10 +4,17 @@ using EmbodySense.Core.Common.Memory.Models;
 
 namespace EmbodySense.Core.Application.Runtime.Commands;
 
+/// <summary>
+/// Provides operations for runtime command output.
+/// </summary>
 public static class RuntimeCommandOutput
 {
     private const int ConversationPromptPreviewLength = 96;
 
+    /// <summary>
+    /// Gets the help lines text values.
+    /// </summary>
+    /// <value>The help lines text values.</value>
     public static IReadOnlyList<string> HelpLines
     {
         get
@@ -18,10 +25,22 @@ public static class RuntimeCommandOutput
         }
     }
 
+    /// <summary>
+    /// Gets the help text.
+    /// </summary>
+    /// <value>The help text.</value>
     public static string HelpText => string.Join(Environment.NewLine, HelpLines);
 
+    /// <summary>
+    /// Identifies the verbose enabled text runtime command output.
+    /// </summary>
     public const string VerboseEnabledText = "Verbose mode enabled. EmbodySense will print visible inference context; this is not private model reasoning or hidden chain-of-thought.";
 
+    /// <summary>
+    /// Formats the conversation list.
+    /// </summary>
+    /// <param name="conversations">The conversations.</param>
+    /// <returns>The text value.</returns>
     public static string FormatConversationList(IReadOnlyList<ConversationTranscriptListItem> conversations)
     {
         ArgumentNullException.ThrowIfNull(conversations);
@@ -36,6 +55,12 @@ public static class RuntimeCommandOutput
         return builder.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// Formats the conversation line.
+    /// </summary>
+    /// <param name="number">The number.</param>
+    /// <param name="conversation">The conversation.</param>
+    /// <returns>The text value.</returns>
     public static string FormatConversationLine(int number, ConversationTranscriptListItem conversation)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(number);
@@ -47,6 +72,11 @@ public static class RuntimeCommandOutput
         return $"{number}. {conversation.ConversationId}{currentMarker} | {conversation.MessageCount} messages | {timestamp} | {promptPreview}";
     }
 
+    /// <summary>
+    /// Formats the prompt preview.
+    /// </summary>
+    /// <param name="prompt">The prompt.</param>
+    /// <returns>The text value.</returns>
     public static string FormatPromptPreview(string? prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt))

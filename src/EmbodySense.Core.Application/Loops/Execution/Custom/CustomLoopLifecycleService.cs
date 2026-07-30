@@ -11,6 +11,13 @@ using System.Text;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Applies idempotent, version-checked pause, cancel, and explicit-resume controls to durable custom-loop runs.
+/// </summary>
+/// <remarks>
+/// Lifecycle receipts are reserved before run mutation. Resume is never automatic: it requires an available workspace host,
+/// the admitted model, an exact paused lifecycle version, and an authenticated explicit request.
+/// </remarks>
 public sealed class CustomLoopLifecycleService
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
@@ -24,6 +31,17 @@ public sealed class CustomLoopLifecycleService
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopLifecycleService"/> type.
+    /// </summary>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="operationStore">The operation store.</param>
+    /// <param name="resumeExecutor">The resume executor.</param>
+    /// <param name="modelAvailability">The model availability.</param>
+    /// <param name="cancellationSignal">The cancellation signal.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="executionGate">The execution gate.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopLifecycleService(
         ICustomLoopRunStore runStore,
         ICustomLoopControlOperationStore operationStore,
@@ -44,18 +62,36 @@ public sealed class CustomLoopLifecycleService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Requests a checkpoint-bound pause under optimistic lifecycle concurrency.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The durable, replayed, conflicting, or in-progress control outcome.</returns>
     public Task<CustomLoopControlResult> PauseAsync(CustomLoopPauseRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         return ExecuteAsync(CustomLoopControlKind.Pause, request.RunId, request.ExpectedLifecycleVersion, request.OperationId, request.Actor, cancellationToken);
     }
 
+    /// <summary>
+    /// Requests cancellation and signals an active provider attempt when one is locally owned.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The durable, replayed, conflicting, or in-progress control outcome.</returns>
     public Task<CustomLoopControlResult> CancelAsync(CustomLoopCancelRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         return ExecuteAsync(CustomLoopControlKind.Cancel, request.RunId, request.ExpectedLifecycleVersion, request.OperationId, request.Actor, cancellationToken);
     }
 
+    /// <summary>
+    /// Explicitly resumes a paused run only after ownership, model, and lifecycle checks succeed.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The durable, replayed, conflicting, or dispatch outcome.</returns>
     public Task<CustomLoopControlResult> ResumeAsync(CustomLoopResumeRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -83,11 +119,14 @@ public sealed class CustomLoopLifecycleService
             false,
             "The custom-loop control operation is durably pending.");
 
+        // A resume receipt must not claim ownership before this process can host the execution.
         if (kind == CustomLoopControlKind.Resume && !_executionGate.IsWorkspaceHostAvailable)
         {
             return Result(CustomLoopControlStatus.WorkspaceHostUnavailable, null, operationId, "workspace_host_unavailable: another process owns custom-loop hosting; no Resume receipt was created and the operation can be retried after hosting becomes available.");
         }
 
+        // Reserve the receipt before reading or mutating the run. Replays are then safe even when the
+        // prior caller disappeared after the lifecycle transition.
         CustomLoopControlOperationStoreResult begun;
         try
         {

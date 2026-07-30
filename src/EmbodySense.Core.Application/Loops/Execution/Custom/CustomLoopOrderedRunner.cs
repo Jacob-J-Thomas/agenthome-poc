@@ -13,6 +13,15 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Executes admitted custom-loop steps in order with durable checkpoints, bounded attempts, authority revalidation, and fail-closed recovery evidence.
+/// </summary>
+/// <remarks>
+/// Provider dispatch occurs only after admission integrity, lifecycle, the run store's pre-dispatch hook, and current
+/// tool-authority checks. Trace-capacity and lifecycle revalidation at that boundary depend on the store overriding the
+/// compatibility hook, whose default only observes cancellation. A provider outcome is never silently retried when
+/// persistence is uncertain; durable trace evidence instead stops the run for review.
+/// </remarks>
 public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustomLoopExecutionCancellationSignal
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
@@ -28,6 +37,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopOrderedRunner"/> type.
+    /// </summary>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="contextResolver">The context resolver.</param>
+    /// <param name="inferenceExecutor">The inference executor.</param>
+    /// <param name="conversationPublisher">The conversation publisher.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="timeProvider">The time provider.</param>
+    /// <param name="attemptCancellationBroker">The attempt cancellation broker.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -48,6 +68,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _attemptCancellationBroker = attemptCancellationBroker;
     }
 
+    /// <summary>
+    /// Starts public execution from the durable <c>Admitted</c> state only.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The terminal, paused, cancelled, failed, or invalid-state execution result.</returns>
     public async Task<CustomLoopOrderedRunResult> RunAsync(CustomLoopOrderedRunRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -104,6 +130,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Public execution starts only from Admitted. Interrupted runs require explicit recovery to Paused and a separate authenticated Resume path.");
     }
 
+    /// <summary>
+    /// Continues a run after an authenticated, durably recorded paused-to-running transition.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The continued execution result, or a fail-closed ownership/state result.</returns>
     public async Task<CustomLoopOrderedRunResult> ResumeAsync(CustomLoopResumeExecutionRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -162,6 +194,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             : await ContinueRegisteredAsync(run, request.Actor, cancellationToken);
     }
 
+    /// <summary>
+    /// Attempts to claim in-process ownership for one active run.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <returns>A registration lease, or <see langword="null"/> when this runtime already owns the run.</returns>
     public IDisposable? TryRegisterActiveRun(string runId)
     {
         if (!CustomLoopArtifactIdentifier.IsValid(runId) || !_activeRuns.TryAdd(runId, 0))
@@ -172,6 +209,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return new ActiveRunRegistration(_activeRuns, runId);
     }
 
+    /// <summary>
+    /// Signals cancellation to the provider attempt currently owned by this runtime.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
     public void CancelActiveAttempt(string runId)
     {
         if (!CustomLoopArtifactIdentifier.IsValid(runId))
@@ -201,6 +242,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         throw new InvalidOperationException("The active provider attempt is not owned by this runtime and could not be signalled locally.");
     }
 
+    /// <summary>
+    /// Requests idempotent cancellation of the active provider attempt.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>Whether the signal was delivered, no attempt was active, or its owner was unavailable.</returns>
     public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
     {
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));

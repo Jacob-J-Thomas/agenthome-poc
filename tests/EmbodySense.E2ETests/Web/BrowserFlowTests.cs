@@ -46,7 +46,9 @@ public sealed class BrowserFlowTests
             await browser.ReloadAsync();
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             browser.EndExpectedServerRestart();
-            // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/125): Require the first turn to be restored after the Web process restarts.
+            await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
+            Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
+            Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.agent')).filter(message => message.textContent.includes('browser response: browser-first-turn')).length"));
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
             await SubmitMessageAsync(browser, "browser-second-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-second-turn')");
@@ -802,7 +804,7 @@ public sealed class BrowserFlowTests
                 && entry.TryGetProperty("level", out var level)
                 && string.Equals(level.GetString(), "error", StringComparison.OrdinalIgnoreCase))
             {
-                if (IsKnownBaselineBrowserLogEntry(entry) || IsExpectedServerRestartLogEntry(entry))
+                if (IsExpectedServerRestartLogEntry(entry))
                 {
                     return;
                 }
@@ -815,9 +817,9 @@ public sealed class BrowserFlowTests
                 && parameters.TryGetProperty("response", out var response)
                 && response.TryGetProperty("status", out var status)
                 && status.TryGetDouble(out var statusCode)
-                && statusCode >= 500)
+                && statusCode >= 400)
             {
-                AddDiagnostic("critical HTTP response: " + response.GetRawText());
+                AddDiagnostic("HTTP error response: " + response.GetRawText());
                 return;
             }
 
@@ -929,19 +931,6 @@ public sealed class BrowserFlowTests
             {
                 throw new InvalidOperationException("Browser DevTools reader failed." + Environment.NewLine + FormatOutput(), _readerFailure);
             }
-        }
-
-        private static bool IsKnownBaselineBrowserLogEntry(JsonElement entry)
-        {
-            // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/126): Remove these exceptions after the CSP and favicon load cleanly.
-            var source = entry.TryGetProperty("source", out var sourceValue) ? sourceValue.GetString() : null;
-            var text = entry.TryGetProperty("text", out var textValue) ? textValue.GetString() : null;
-            var url = entry.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null;
-            return (string.Equals(source, "security", StringComparison.Ordinal)
-                    && text?.Contains("ws://[::1]:*", StringComparison.Ordinal) == true
-                || (string.Equals(source, "network", StringComparison.Ordinal)
-                    && url?.EndsWith("/favicon.ico", StringComparison.Ordinal) == true
-                    && text?.Contains("404", StringComparison.Ordinal) == true));
         }
 
         private static string FormatOutput(BoundedProcessOutput output, BoundedProcessOutput error)

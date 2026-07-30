@@ -4,8 +4,16 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Application.Loops.TraceRetention;
 
+/// <summary>
+/// Computes, applies, and verifies the canonical custom loop trace deletion request hash.
+/// </summary>
 public static class CustomLoopTraceDeletionRequestHash
 {
+    /// <summary>
+    /// Computes the custom loop trace deletion request hash.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <returns>The text value.</returns>
     public static string Compute(CustomLoopTraceDeletionRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);

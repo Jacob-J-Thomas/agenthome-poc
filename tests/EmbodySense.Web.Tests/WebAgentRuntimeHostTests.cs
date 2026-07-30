@@ -82,6 +82,8 @@ public sealed class WebAgentRuntimeHostTests
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, advertiseConfiguredModels: false);
         await using var host = CreateHost(workspace.RootPath, codexPath, "gpt-test");
         await host.InitializeWorkspaceAsync();
+        await WriteCurrentTranscriptAsync(workspace, "restored while unavailable", "durable answer");
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await host.GetCurrentTranscriptAsync());
         var configuration = await host.GetConfigurationAsync();
         var events = new List<WebStreamEvent>();
 
@@ -92,6 +94,7 @@ public sealed class WebAgentRuntimeHostTests
         });
 
         Assert.Equal(CodexRuntimeCompatibility.ModelUnavailable, configuration.Runtime.CodexRuntime!.Compatibility);
+        Assert.Equal(["restored while unavailable", "durable answer"], transcript.Select(message => message.Content));
         var failure = Assert.Single(events);
         Assert.Equal("error", failure.Type);
         Assert.Contains(Path.GetFullPath(codexPath), failure.Error, StringComparison.Ordinal);
@@ -126,6 +129,7 @@ public sealed class WebAgentRuntimeHostTests
         await using var host = CreateHost(workspace.RootPath, codexPath);
         await host.InitializeWorkspaceAsync();
         await WriteCurrentTranscriptAsync(workspace, "web archived prompt", "web archived answer");
+        await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).StartFreshConversationAsync();
         var events = new List<WebStreamEvent>();
 
         await host.SendMessageAsync("/history", (streamEvent, _) =>
@@ -223,6 +227,79 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task Transcript_hydration_remains_available_while_another_process_owns_custom_loop_hosting()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+        await WriteCurrentTranscriptAsync(workspace, "hosted elsewhere", "durable answer");
+        await using var competingGate = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace.RootPath));
+        using var activeExecution = competingGate.TryAcquire("competing-custom-loop", new string('a', CustomLoopLimits.Sha256HexCharacters)).Lease!;
+
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await host.GetCurrentTranscriptAsync());
+
+        Assert.Equal(["hosted elsewhere", "durable answer"], transcript.Select(message => message.Content));
+    }
+
+    [Fact]
+    public async Task Transcript_hydration_on_a_fresh_initialized_workspace_returns_an_empty_canonical_transcript()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
+        await host.InitializeWorkspaceAsync();
+
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await host.GetCurrentTranscriptAsync());
+        var snapshot = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadCurrentConversationSnapshotAsync();
+
+        Assert.Empty(transcript);
+        Assert.Empty(snapshot.Messages);
+        Assert.False(HasArchivedConversation(workspace));
+    }
+
+    [Fact]
+    public async Task Restarted_web_host_restores_and_continues_the_same_logical_conversation()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
+        string conversationVersion;
+
+        await using (var firstHost = CreateHost(workspace.RootPath, codexPath))
+        {
+            await firstHost.InitializeWorkspaceAsync();
+            await firstHost.SendMessageAsync("web first turn", (_, _) => Task.CompletedTask);
+            conversationVersion = (await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadCurrentConversationSnapshotAsync()).Version;
+        }
+
+        await using var restartedHost = CreateHost(workspace.RootPath, codexPath);
+        var restored = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await restartedHost.GetCurrentTranscriptAsync());
+
+        Assert.Collection(
+            restored,
+            message =>
+            {
+                Assert.Equal("User", message.Role);
+                Assert.Equal("web first turn", message.Content);
+            },
+            message =>
+            {
+                Assert.Equal("Assistant", message.Role);
+                Assert.Equal("web response: web first turn", message.Content);
+            });
+
+        await restartedHost.SendMessageAsync("web second turn", (_, _) => Task.CompletedTask);
+        var continued = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await restartedHost.GetCurrentTranscriptAsync());
+        var current = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadCurrentConversationSnapshotAsync();
+
+        Assert.Equal(conversationVersion, current.Version);
+        Assert.Equal(4, continued.Count);
+        Assert.Equal(["web first turn", "web response: web first turn", "web second turn", "web response: web second turn"], continued.Select(message => message.Content));
+        Assert.Equal(continued.Select(message => message.Content), current.Messages.Select(message => message.Content));
+        Assert.False(HasArchivedConversation(workspace));
+    }
+
+    [Fact]
     public async Task Transcript_hydration_waits_for_the_active_turn_and_returns_its_complete_canonical_messages()
     {
         using var workspace = new TestWorkspace();
@@ -286,7 +363,7 @@ public sealed class WebAgentRuntimeHostTests
 
         releaseResponse.TrySetResult();
         await send;
-        Assert.Null(await hydration);
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await hydration));
     }
 
     [Fact]
@@ -683,6 +760,12 @@ public sealed class WebAgentRuntimeHostTests
     private static string CurrentTranscriptPath(TestWorkspace workspace)
     {
         return workspace.File(".agent", "memory", "conversations", "current.ndjson");
+    }
+
+    private static bool HasArchivedConversation(TestWorkspace workspace)
+    {
+        var archivePath = workspace.File(".agent", "memory", "conversations", "archive");
+        return Directory.Exists(archivePath) && Directory.EnumerateFiles(archivePath, "*.ndjson").Any();
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(
