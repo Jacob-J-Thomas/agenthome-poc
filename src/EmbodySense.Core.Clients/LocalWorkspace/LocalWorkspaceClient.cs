@@ -13,7 +13,7 @@ namespace EmbodySense.Core.Clients.LocalWorkspace;
 /// <remarks>
 /// This adapter does not perform permission decisions or path authorization. Callers must supply a governed canonical target.
 /// Listings and searches are deterministic and bounded; recursive search skips reparse points, inaccessible entries, and
-/// EmbodySense internal artifacts. Cancellation and underlying file-system exceptions propagate.
+/// the custom-loop host lock file. Cancellation and underlying file-system exceptions propagate.
 /// </remarks>
 public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 {
@@ -231,7 +231,7 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
     }
 
     /// <summary>
-    /// Deletes one authorized file or an empty authorized directory.
+    /// Deletes one authorized file or recursively deletes one authorized directory tree.
     /// </summary>
     /// <param name="resolvedPath">The resolved path.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
