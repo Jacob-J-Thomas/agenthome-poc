@@ -12,6 +12,16 @@ using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Core.Startup.Configuration;
 
+/// <summary>
+/// Builds the bounded, redacted configuration snapshot consumed by interface configuration surfaces.
+/// </summary>
+/// <remarks>
+/// The reader does not mutate workspace state. It combines live paths, fail-closed permission status,
+/// selected startup documents, recent audit events, and coordinated conversation-history snapshots.
+/// Each category has explicit size and count limits; malformed entries are reported up to the problem
+/// limit. Likely secret-bearing lines are heuristically redacted from displayed document and permission
+/// content, but callers must not treat that heuristic as a general secret scanner.
+/// </remarks>
 public sealed class WorkspaceConfigurationReader
 {
     // TODO: revisit what appropriate figures should actually be.
@@ -26,6 +36,16 @@ public sealed class WorkspaceConfigurationReader
     private const int MaxConversationHistorySnapshotCharacters = 4_000_000;
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
+    /// <summary>
+    /// Captures the current bounded workspace configuration projection.
+    /// </summary>
+    /// <param name="rootPath">The workspace root, normalized to an absolute path.</param>
+    /// <param name="runtime">The interface-supplied runtime selection to include in the snapshot.</param>
+    /// <param name="cancellationToken">The token used to cancel file and conversation snapshot reads.</param>
+    /// <returns>
+    /// A task whose result is a point-in-time projection. Expected parse and selected document-read
+    /// problems are represented in the snapshot; cancellation and unhandled file-system failures propagate.
+    /// </returns>
     public async Task<WorkspaceConfigurationSnapshot> ReadAsync(string rootPath, WorkspaceRuntimeConfiguration runtime, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);

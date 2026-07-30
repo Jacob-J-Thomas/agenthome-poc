@@ -11,6 +11,11 @@ namespace EmbodySense.Core.Startup.Runtime;
 
 internal static class AgentRuntimeTurnResultFactory
 {
+    /// <summary>
+    /// Projects one handled runtime command into interface turn status and events.
+    /// </summary>
+    /// <param name="result">The command output, prompt, restored transcript, and exit state.</param>
+    /// <returns>A command-handled or exit-requested runtime result.</returns>
     public static AgentRuntimeTurnResult FromCommand(RuntimeCommandResult result)
     {
         if (result.ExitRequested)
@@ -22,6 +27,11 @@ internal static class AgentRuntimeTurnResultFactory
         return AgentRuntimeTurnResult.CommandOutput(result.Output, result.Prompt, result.AwaitingInput, restoredMessages, result.ReplaceTranscript);
     }
 
+    /// <summary>
+    /// Projects one default-conversation loop outcome while preserving accepted assistant output and run identity.
+    /// </summary>
+    /// <param name="result">The completed, canceled, or failed loop turn.</param>
+    /// <returns>The corresponding terminal runtime result.</returns>
     public static AgentRuntimeTurnResult FromDefaultLoop(DefaultConversationLoopTurnResult result)
     {
         var runIdentity = ToRuntimeRunIdentity(result.RunIdentity);

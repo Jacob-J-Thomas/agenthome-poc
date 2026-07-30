@@ -9,18 +9,38 @@ using EmbodySense.Core.Persistence.Loops;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
+/// <summary>
+/// Resolves fail-closed custom-loop tool authority from the immutable admitted maximum, the current
+/// default-conversation role ceiling, and the implemented read-only catalog.
+/// </summary>
 public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityProvider
 {
     private static readonly CustomLoopToolAssignment[] _catalog = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search];
     private readonly LoopDefinitionStore _definitionStore;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Creates an authority provider over the persisted system definition.
+    /// </summary>
+    /// <param name="definitionStore">The store for the current default-conversation authority definition.</param>
+    /// <param name="timeProvider">The optional clock used to timestamp authority evidence.</param>
     public CustomLoopToolAuthorityProvider(LoopDefinitionStore definitionStore, TimeProvider? timeProvider = null)
     {
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Intersects the admitted maximum with current role capability and the implemented catalog.
+    /// </summary>
+    /// <param name="roleId">The immutable role identity captured at admission.</param>
+    /// <param name="admittedMaximum">The immutable tool-assignment maximum captured at admission.</param>
+    /// <param name="cancellationToken">The token used to cancel system-definition loading.</param>
+    /// <returns>
+    /// A task whose result contains the admitted, current, catalog, and effective assignments plus
+    /// canonical hashes. Missing, unreadable, substituted, role-mismatched, duplicate, or unsupported
+    /// authority produces an invalid snapshot with no effective assignments.
+    /// </returns>
     public async Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(roleId);
@@ -69,6 +89,11 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
             detail);
     }
 
+    /// <summary>
+    /// Derives the currently implemented read-only assignments allowed by a system definition's capabilities.
+    /// </summary>
+    /// <param name="definition">The authoritative default-conversation definition.</param>
+    /// <returns>Sorted list, read, and search assignments allowed by the definition.</returns>
     public static CustomLoopToolAssignment[] ResolveCurrentRoleCeiling(LoopDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
@@ -78,6 +103,12 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
             .ToArray();
     }
 
+    /// <summary>
+    /// Computes the canonical content hash for a role identity and normalized assignment set.
+    /// </summary>
+    /// <param name="roleId">The nonblank role identity.</param>
+    /// <param name="assignments">Assignments canonicalized by distinct value and enum order.</param>
+    /// <returns>The SHA-256 trace-content hash of the canonical role ceiling.</returns>
     public static string ComputeRoleCeilingHash(string roleId, IReadOnlyList<CustomLoopToolAssignment> assignments)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(roleId);
@@ -86,6 +117,10 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
         return CustomLoopTraceContentHash.Compute(canonical);
     }
 
+    /// <summary>
+    /// Computes the canonical hash of the implemented custom-loop tool catalog.
+    /// </summary>
+    /// <returns>The stable SHA-256 trace-content hash for the ordered list, read, and search catalog.</returns>
     public static string ComputeCatalogHash()
     {
         return CustomLoopTraceContentHash.Compute(string.Join('\n', _catalog.Select(value => value.ToString().ToLowerInvariant())));

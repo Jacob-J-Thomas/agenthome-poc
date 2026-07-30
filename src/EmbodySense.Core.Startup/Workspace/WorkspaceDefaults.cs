@@ -13,6 +13,11 @@ internal static class WorkspaceDefaults
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
 
+    /// <summary>
+    /// Returns the ordered directory set required by the version-one workspace scaffold.
+    /// </summary>
+    /// <param name="paths">The canonical workspace paths.</param>
+    /// <returns>The root, agent, persistence, capability, and governed workspace directories in creation order.</returns>
     public static IReadOnlyList<string> GetDirectories(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -42,6 +47,14 @@ internal static class WorkspaceDefaults
         ];
     }
 
+    /// <summary>
+    /// Returns the version-one seed documents and their explicit overwrite policies.
+    /// </summary>
+    /// <param name="paths">The canonical workspace paths used to derive file locations and default permissions.</param>
+    /// <returns>
+    /// Seeds that preserve identity, context, configuration, loop, permission, and audit-log files
+    /// when present. Generated memory, audit, and permission README files are refreshed.
+    /// </returns>
     public static IReadOnlyList<WorkspaceSeedFile> GetSeedFiles(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);

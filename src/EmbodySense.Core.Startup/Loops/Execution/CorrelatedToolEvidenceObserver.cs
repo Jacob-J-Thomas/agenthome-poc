@@ -30,12 +30,26 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
     private readonly Dictionary<string, RequestEvidenceState> _requests = new(StringComparer.Ordinal);
     private readonly object _gate = new();
 
+    /// <summary>
+    /// Creates an attempt-scoped observer that enforces one ordered evidence lifecycle per correlation identity.
+    /// </summary>
+    /// <param name="sink">The sink.</param>
+    /// <param name="attempt">The attempt.</param>
     public CorrelatedToolEvidenceObserver(ICustomLoopToolEvidenceSink sink, CustomLoopInferenceAttemptRequest attempt)
     {
         _sink = sink;
         _attempt = attempt;
     }
 
+    /// <summary>
+    /// Reserves the exact bounded request, resolved target, ordinal, and authority before governance begins.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="resolvedTarget">The resolved target.</param>
+    /// <param name="authority">The authority.</param>
+    /// <param name="requestOrdinal">The request ordinal.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task ReserveAsync(ToolRequest request, string resolvedTarget, CustomLoopToolAuthoritySnapshot authority, int requestOrdinal, CancellationToken cancellationToken)
     {
         var correlationId = request.CorrelationId ?? throw new CustomLoopToolEvidenceIntegrityException("A bounded tool request must have a correlation id before evidence reservation.");
@@ -50,26 +64,62 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
         await RecordAsync(State(correlationId), CustomLoopToolEvidencePhase.RequestReserved, null, null, null, false, cancellationToken);
     }
 
+    /// <summary>
+    /// Accepts the generic broker approval notification; the later governance-decision evidence is
+    /// the canonical custom-loop phase retained by this observer.
+    /// </summary>
+    /// <param name="requestId">The request identifier.</param>
+    /// <param name="request">The request.</param>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="evidence">The evidence.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public Task ObserveApprovalRequestAsync(string requestId, ToolRequest request, string resolvedPath, ToolGovernanceEvidence evidence, CancellationToken cancellationToken = default)
     {
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Records the correlated governance decision after request reservation.
+    /// </summary>
+    /// <param name="requestId">The request identifier.</param>
+    /// <param name="request">The request.</param>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="evidence">The evidence.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public Task ObserveDecisionAsync(string requestId, ToolRequest request, string resolvedPath, ToolGovernanceEvidence evidence, CancellationToken cancellationToken = default)
     {
         return RecordAsync(State(request), CustomLoopToolEvidencePhase.GovernanceDecided, requestId, evidence, null, false, cancellationToken);
     }
 
+    /// <summary>
+    /// Records the canonical correlated tool outcome before it is returned to the model.
+    /// </summary>
+    /// <param name="result">The result.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public Task ObserveOutcomeAsync(ToolResult result, CancellationToken cancellationToken = default)
     {
         return RecordAsync(State(result.Request), CustomLoopToolEvidencePhase.OutcomeObserved, result.RequestId, result.Governance, result, false, cancellationToken);
     }
 
+    /// <summary>
+    /// Records that the canonical correlated result was returned to the model.
+    /// </summary>
+    /// <param name="result">The result.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public Task RecordReturnedAsync(ToolResult result, CancellationToken cancellationToken)
     {
         return RecordAsync(State(result.Request), CustomLoopToolEvidencePhase.OutcomeObserved, result.RequestId, result.Governance, result, true, cancellationToken);
     }
 
+    /// <summary>
+    /// Replaces the reserved request's authority with its actuation-boundary revalidation snapshot.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="authority">The authority.</param>
     public void RefreshAuthority(ToolRequest request, CustomLoopToolAuthoritySnapshot authority)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -84,6 +134,15 @@ internal sealed class CorrelatedToolEvidenceObserver : IToolGovernanceObserver
         }
     }
 
+    /// <summary>
+    /// Records bounded non-actuating evidence for a repeated request that violates the tool evidence contract.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="resolvedTarget">The resolved target.</param>
+    /// <param name="authority">The authority.</param>
+    /// <param name="requestOrdinal">The request ordinal.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public Task RecordIntegrityAsync(
         ToolRequest request,
         string resolvedTarget,

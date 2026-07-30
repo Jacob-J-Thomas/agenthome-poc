@@ -2,8 +2,15 @@ using EmbodySense.Core.Startup.Runtime.Models;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
+/// <summary>
+/// Reports that runtime composition could not resolve a Codex executable compatible with the configured model.
+/// </summary>
 public sealed class CodexRuntimeUnavailableException : InvalidOperationException
 {
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CodexRuntimeUnavailableException"/> type.
+    /// </summary>
+    /// <param name="status">The incompatible resolution result used to build the diagnostic message.</param>
     public CodexRuntimeUnavailableException(CodexRuntimeStatus status) : base(CreateMessage(status))
     {
         ArgumentNullException.ThrowIfNull(status);
@@ -11,6 +18,9 @@ public sealed class CodexRuntimeUnavailableException : InvalidOperationException
         Status = status;
     }
 
+    /// <summary>
+    /// Gets the complete incompatible Codex resolution result.
+    /// </summary>
     public CodexRuntimeStatus Status { get; }
 
     private static string CreateMessage(CodexRuntimeStatus status)

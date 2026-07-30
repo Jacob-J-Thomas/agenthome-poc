@@ -361,6 +361,7 @@ function renderConfiguration() {
     history: renderHistoryTab,
   };
   elements.configContent.replaceChildren(
+    // TODO(#149): Restrict renderer dispatch to explicit owned configuration-tab names.
     renderers[activeConfigTab]?.() ?? renderOverviewTab(),
   );
 }
