@@ -30,16 +30,6 @@ internal static class CustomLoopCrossProcessFileLock
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
     private static extern int Flock(int fileDescriptor, int operation);
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Overlapped
-    {
-        public IntPtr Internal;
-        public IntPtr InternalHigh;
-        public uint Offset;
-        public uint OffsetHigh;
-        public IntPtr EventHandle;
-    }
-
     private const uint LockFileExclusive = 0x00000002;
     private const uint LockFileFailImmediately = 0x00000001;
 }

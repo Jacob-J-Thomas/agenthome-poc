@@ -23,7 +23,7 @@ You are working on EmbodySense.
 - Run `npm run lint` and `npm run format:check` for frontend changes.
 - Keep each class, record, struct, interface, and enum in its own file, with the file named after the type. Extract every behavior-bearing private helper type, including helpers that coordinate, synchronize, mutate, validate, dispose, or own lifecycle state, into its own matching file.
 - Place model and DTO types under an appropriate `Models/` folder, and give each non-private model or DTO its own named file.
-- A small model or DTO that is truly private to one containing class may remain in that class's file when it has no independent meaning, no behavior beyond property storage, and only a limited number of such private types have accumulated. Extract it once it grows, multiplies, or becomes useful outside that class. Generated and partial types are the only source-layout exceptions, and each must be explicit and narrow.
+- A small model or DTO that is truly private to one containing class may remain in that class's file when it has no independent meaning, no behavior beyond property storage, and only a limited number of such private types have accumulated. Extract it once it grows, multiplies, or becomes useful outside that class. Generated files and partial declarations are the only source-layout exceptions: generated files require both a conventional generated suffix and an auto-generated marker, while a partial fragment may contain only its filename-matching type plus necessary partial ancestor containers.
 
 ## Implementation discipline
 
