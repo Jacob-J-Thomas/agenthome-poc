@@ -18,6 +18,9 @@ using EmbodySense.Core.Common.Loops.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution;
 
+/// <summary>
+/// Serializes one interactive conversation turn through durable transcript synchronization, inference, projection, and run evidence.
+/// </summary>
 public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunner
 {
     private readonly ILlmInferenceClient _inferenceClient;
@@ -27,6 +30,15 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     private readonly ILoopRunStore? _loopRunStore;
     private readonly RuntimeSurfaceId _surface;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DefaultConversationLoopRunner"/> type.
+    /// </summary>
+    /// <param name="inferenceClient">The inference client.</param>
+    /// <param name="conversationState">The conversation state.</param>
+    /// <param name="conversationMemoryStore">The conversation memory store.</param>
+    /// <param name="loopDefinition">The loop definition.</param>
+    /// <param name="loopRunStore">The loop run store.</param>
+    /// <param name="surface">The surface.</param>
     public DefaultConversationLoopRunner(
         ILlmInferenceClient inferenceClient,
         ConversationRuntimeState conversationState,
@@ -46,10 +58,17 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         _surface = surface ?? RuntimeSurfaceId.Runtime;
     }
 
+    /// <summary>
+    /// Runs one default conversation turn while holding exclusive conversation ownership.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <returns>The completed, cancelled, or failed turn and its updated runtime projection.</returns>
     public async Task<DefaultConversationLoopTurnResult> RunTurnAsync(DefaultConversationLoopTurnRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        // A turn owns transcript synchronization, inference, and projection as one serialized unit;
+        // concurrent callers wait rather than race durable and in-memory conversation state.
         IDisposable conversationLease;
         try
         {

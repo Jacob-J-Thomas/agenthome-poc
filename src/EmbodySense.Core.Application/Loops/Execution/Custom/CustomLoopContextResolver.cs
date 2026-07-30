@@ -10,13 +10,29 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Assembles integrity-checked inference context while preserving instruction authority and omission evidence.
+/// </summary>
 public sealed class CustomLoopContextResolver
 {
+    /// <summary>
+    /// Resolves the inference context using the run's admitted tool assignments.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <param name="step">The step.</param>
+    /// <returns>The custom loop context assembly.</returns>
     public CustomLoopContextAssembly ResolveInference(CustomLoopRunRecord run, CustomLoopInferenceStep step)
     {
         return ResolveInference(run, step, run?.AdmittedDefinition?.ToolAssignments ?? []);
     }
 
+    /// <summary>
+    /// Resolves the inference context using the revalidated effective tool assignments.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <param name="step">The step.</param>
+    /// <param name="effectiveToolAssignments">The effective tool assignments.</param>
+    /// <returns>The custom loop context assembly.</returns>
     public CustomLoopContextAssembly ResolveInference(CustomLoopRunRecord run, CustomLoopInferenceStep step, IReadOnlyList<CustomLoopToolAssignment> effectiveToolAssignments)
     {
         ArgumentNullException.ThrowIfNull(run);
@@ -27,6 +43,11 @@ public sealed class CustomLoopContextResolver
         return Resolve(run, step.Id, step.Instruction, policy, isExit: false, effectiveToolAssignments);
     }
 
+    /// <summary>
+    /// Resolves a tool-less exit-decision context that requires one canonical decision token.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <returns>The custom loop context assembly.</returns>
     public CustomLoopContextAssembly ResolveExit(CustomLoopRunRecord run)
     {
         ArgumentNullException.ThrowIfNull(run);
@@ -37,6 +58,12 @@ public sealed class CustomLoopContextResolver
         return Resolve(run, "exit", instruction, policy, isExit: true, []);
     }
 
+    /// <summary>
+    /// Resolves a node's inherited or custom context policy.
+    /// </summary>
+    /// <param name="configured">The configured.</param>
+    /// <param name="defaults">The defaults.</param>
+    /// <returns>The custom loop context policy.</returns>
     public static CustomLoopContextPolicy ResolvePolicy(CustomLoopNodeContextPolicy configured, CustomLoopContextPolicy defaults)
     {
         ArgumentNullException.ThrowIfNull(configured);
@@ -64,6 +91,8 @@ public sealed class CustomLoopContextResolver
             throw new InvalidOperationException("Custom loop node instruction is required for execution.");
         }
 
+        // Context is immutable admission evidence. Refuse to assemble a prompt if the manifest no
+        // longer hashes to the snapshot admitted before execution.
         if (!CustomLoopContextSnapshotHash.Matches(run.ContextSnapshot))
         {
             throw new InvalidOperationException("The admitted custom-loop context manifest failed its integrity check.");
@@ -72,6 +101,8 @@ public sealed class CustomLoopContextResolver
         var messages = new List<LlmMessage>();
         var blocks = new List<CustomLoopContextBlock>();
         var trustedInstructions = new List<EmbodySenseTrustedInstruction>();
+        // Harness governance and node instructions remain trusted instructions; admitted workspace,
+        // trigger, conversation, and prior-output data stay lower-authority model context.
         var governance = EmbodySenseDeveloperInstructions.Capture(isExit ? [] : MapToolAssignments(effectiveToolAssignments));
         AddIncluded(blocks, CustomLoopContextSource.HarnessGovernance, "harness-governance", LlmMessageRole.System, governance.Content, sourceVersion: governance.Version);
 
