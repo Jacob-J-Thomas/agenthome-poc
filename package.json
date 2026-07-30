@@ -8,7 +8,7 @@
     "test:frontend": "node --test tests/frontend/*.test.mjs"
   },
   "devDependencies": {
-    "eslint": "9.39.5",
+    "eslint": "10.8.0",
     "prettier": "3.9.6"
   }
 }
