@@ -485,6 +485,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             authority);
 
         CustomLoopInferenceAttemptResult result;
+        // This flag is the effect boundary: cancellation before the callback is safe to report as
+        // pre-dispatch, while any failure after it must assume the external provider may have acted.
         var providerInvoked = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
         using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
@@ -697,6 +699,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             authority);
 
         CustomLoopInferenceAttemptResult result;
+        // Exit inference has the same effect boundary as an ordinary step. Once dispatch starts,
+        // cancellation and faults are evidence-uncertain rather than safe pre-invocation failures.
         var providerInvoked = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
         using var providerBoundaryToken = CreateProviderToken(run, cancellationToken);
@@ -991,6 +995,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(terminal.Run, terminal);
         }
 
+        // Commit the stable operation identity before dispatch. Recovery can then retry the same
+        // idempotent append without inventing a second conversation publication.
         var intent = Event(run, Now(run), CustomLoopRunEventKind.ConversationPublicationStarted, "Conversation publication intent committed before the idempotent append.", run.Checkpoint.Iteration, stepId, publicationId: operationId);
         var intentPersisted = await PersistAsync(run, Append(run, intent.TimestampUtc, [intent]), IntegrityToken(), outcomeMayExist: false);
         if (intentPersisted.Terminal is not null)
@@ -1281,6 +1287,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var appended = latest.Events.Skip(current.Events.Length).ToArray();
+        // Concurrent successors may append governed tool evidence and a lifecycle request only.
+        // Any checkpoint mutation or other execution event could hide a second traversal and is rejected.
         var supported = appended.All(item => item.Kind is CustomLoopRunEventKind.LifecycleChanged
             or CustomLoopRunEventKind.ToolRequestReserved
             or CustomLoopRunEventKind.ToolGovernanceDecided
@@ -1378,6 +1386,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         terminalMetadata["terminalTraceSequence"] = terminalEvent.Sequence;
         try
         {
+            // The terminal trace is already the source of truth. Audit failure cannot roll it back;
+            // the fallback appends an integrity warning while preserving the truthful terminal status.
             var auditOutcome = status switch
             {
                 CustomLoopRunStatus.Failed => AuditSchema.Outcomes.Failed,
@@ -1410,6 +1420,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private async Task<RunAdvance> PersistAsync(CustomLoopRunRecord current, CustomLoopRunRecord candidate, CancellationToken cancellationToken, bool outcomeMayExist, bool propagateCancellation = false)
     {
+        // Before an external effect, persistence failure is a definite stop. After a provider or
+        // publication may have acted, the same failure must park the run in NeedsReview to forbid replay.
         try
         {
             var result = await _runStore.UpdateAsync(candidate, current.LifecycleVersion, cancellationToken);

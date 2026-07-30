@@ -17,7 +17,8 @@ namespace EmbodySense.Core.Clients.LocalWorkspace;
 /// </remarks>
 public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 {
-    // TODO: revisit what an appropriate figures should actually be.
+    // These caps keep one workspace result bounded before retention and model-facing formatting.
+    // Change them only with the result-retention, truncation, and hostile-filesystem coverage.
     private const int MaxListEntries = 500;
     private const int MaxReadCharacters = 120_000;
     private const int MaxSearchFiles = 500;

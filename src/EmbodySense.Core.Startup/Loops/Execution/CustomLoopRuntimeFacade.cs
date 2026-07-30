@@ -139,6 +139,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return Invalid(exception.Message);
         }
 
+        // Receipts are reconciled before availability or lease acquisition so an older durable outcome
+        // cannot be overwritten by a newer workspace-busy observation for the same operation identity.
         CustomLoopInvocationOperation? existingOperation;
         try
         {
@@ -203,6 +205,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 break;
             }
 
+            // Admission can commit before its receipt is finalized. Reconcile that evidence first so
+            // the later busy host never replaces an already admitted outcome.
             var recoveredAdmission = existingOperation is null ? null : await ReconcilePendingAdmissionBeforeBusyAsync(existingOperation, cancellationToken);
             if (recoveredAdmission is not null)
             {
@@ -557,6 +561,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return MapControl(result);
         }
 
+        // A pending cancel receipt can outlive its original host owner. Reacquire retained hosting,
+        // then replay the exact operation id instead of creating a second control request.
         var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
         if (!availability.Available)
         {
@@ -607,6 +613,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return _availableCustomExecution;
         }
 
+        // Serialize host reacquisition and recovery. Only one caller may decide whether retained
+        // execution is safe to expose again to every later invocation/control caller.
         await _executionAvailabilityGate.WaitAsync(cancellationToken);
         try
         {
@@ -651,6 +659,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
+                    // Integrity-ambiguous recovery permanently disables automatic reacquisition for
+                    // this facade instance; repeated callers must not keep probing unsafe evidence.
                     _customExecutionReacquisitionAllowed = false;
                     _executionGate.RelinquishWorkspaceHost();
                     return new CustomExecutionAvailability(false, "Failed", $"custom_loop_recovery_failed: runtime host reacquisition could not recover interrupted runs safely: {exception.GetType().Name}.");
@@ -658,6 +668,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
                 if (recovery.Any(result => result.Status is CustomLoopRecoveryStatus.Conflict or CustomLoopRecoveryStatus.Failed))
                 {
+                    // A failed parking decision is not retry-safe. Relinquish workspace ownership and
+                    // require operator intervention instead of reopening dispatch.
                     _customExecutionReacquisitionAllowed = false;
                     _executionGate.RelinquishWorkspaceHost();
                     return new CustomExecutionAvailability(false, "Failed", "custom_loop_recovery_failed: runtime host reacquisition found interrupted work that could not be parked safely.");
@@ -665,6 +677,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
                 try
                 {
+                    // Hosting becomes available only after durable transcript state agrees with the
+                    // retained in-process conversation; otherwise execution could publish to the wrong history.
                     if (!await _runtimeContext.TryReconcileConversationAsync(cancellationToken))
                     {
                         _executionGate.RelinquishWorkspaceHost();
@@ -944,6 +958,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     private async Task<LoopRunInvocationResponse?> ReconcilePendingAdmissionBeforeBusyAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)
     {
+        // The admission index is authoritative when the receipt is still pending. Finding a prior run
+        // binds and completes that receipt before the newer host's busy outcome is considered.
         CustomLoopRunRecord? run;
         try
         {
@@ -1204,6 +1220,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             return result;
         }
 
+        // Capacity is reclaimed only through governed retention. The original write is retried once
+        // after retention succeeds so no caller can bypass replay and audit guarantees.
         var retention = await _invocationReceiptRetention.PruneForCapacityAsync(_actor, _surface, cancellationToken);
         if (!retention.AllowsReceiptWrite)
         {
@@ -1241,6 +1259,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     private async Task<LoopRunInvocationResponse> ReplayOperationAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken)
     {
+        // A receipt is not sufficient by itself: its run or deletion tombstone must still bind to the
+        // same conversation, context, and status-specific outcome before replay returns success.
         LoopRunSnapshot? run = null;
         CustomLoopRunRecord? durableRun = null;
         CustomLoopTraceInspection? deletedTrace = null;

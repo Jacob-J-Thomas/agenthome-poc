@@ -104,6 +104,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             using var messageDocument = await ReadMessageAsync(cancellationToken);
             var message = messageDocument.RootElement;
 
+            // App-server requests may interleave with the turn/start response and notifications.
+            // Answer them immediately so the protocol cannot deadlock while this turn awaits completion.
             if (IsServerRequest(message))
             {
                 await HandleServerRequestAsync(message, cancellationToken);
@@ -253,6 +255,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             using var messageDocument = await ReadMessageAsync(cancellationToken);
             var message = messageDocument.RootElement;
 
+            // Initialization can itself elicit server requests, so the client services them while it
+            // waits for the correlated initialize response.
             if (IsServerRequest(message))
             {
                 await HandleServerRequestAsync(message, cancellationToken);
@@ -280,6 +284,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             ["ephemeral"] = true,
             ["approvalPolicy"] = CreateGranularApprovalPolicy(),
             ["sandbox"] = NormalizeSandboxMode(_options.CodexSandbox),
+            // Native command, file-change, MCP, and subagent surfaces stay disabled. The dynamic
+            // embodysense.command bridge below is the governed, audited workspace-action boundary.
             ["config"] = CreateRestrictedConfig()
         };
 
@@ -384,6 +390,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private async Task<JsonDocument> ReadMessageAsync(CancellationToken cancellationToken)
     {
         var transport = GetTransport();
+        // Link the caller token with a protocol deadline, then translate only deadline cancellation
+        // into TimeoutException. Caller cancellation keeps its OperationCanceledException identity.
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_protocolReadTimeout);
         string? line;
@@ -460,6 +468,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         if (turnId is null)
         {
+            // Notifications can arrive before turn/start supplies the id. Thread identity is still
+            // mandatory, and public turns are serialized, so this temporary correlation is unambiguous.
             return true;
         }
 
@@ -522,6 +532,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             }
         }
 
+        // Prefer the protocol's final-answer phase; the last generic agent message is only a fallback
+        // for servers that omit a distinct final-answer item.
         return lastFinalAnswer ?? lastAgentMessage;
     }
 

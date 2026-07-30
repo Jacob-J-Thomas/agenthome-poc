@@ -52,7 +52,7 @@ You are working on EmbodySense.
 ## Documentation maintenance
 
 - Production assemblies generate XML documentation. Document public and protected contracts, their meaningful parameters and return values, cancellation and exception behavior, lifecycle/concurrency constraints, and non-obvious authority, persistence, audit, or integrity invariants. Prefer an accurate explanation of why behavior exists over comments that restate syntax. Do not introduce a documentation claim that source and tests cannot support.
-- Keep the missing-documentation baseline explicit while it is being completed. Do not add broad permanent suppressions; narrow generated-code exclusions or temporary baselines must name their reason and removal condition.
+- CS1591 is unsuppressed for production projects and therefore fails the warning-as-error build when a public or protected contract is undocumented. Do not add a broad `NoWarn`, authored-source exclusion, or replacement suppression. Any genuinely necessary generated-code exclusion must identify the generator and explain why its emitted API is outside the authored contract.
 - Pull-request descriptions should state which contract or behavior documentation changed and identify any remaining source slices before claiming a documentation gate is complete.
 - Keep `README.md` aligned with the real CLI behavior.
 - Keep `docs/AGENT_LOOP.drawio` aligned with the real implementation whenever the default conversation loop, inference path, workspace scaffolding, permissions, or audit behavior changes.
