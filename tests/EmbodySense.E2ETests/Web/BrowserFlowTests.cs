@@ -97,8 +97,13 @@ public sealed class BrowserFlowTests
             await externalLease.DisposeAsync();
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: configuration-overlap-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('refreshConfigButton').disabled && !document.getElementById('sendButton').disabled");
+            await ClickAsync(browser, "#historyNav");
+            await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('configuration overlap seed')");
 
+            var configurationText = await browser.EvaluateStringAsync("document.getElementById('configContent').textContent");
             var conversationEvidence = await ReadConversationEvidenceAsync(workspace);
+            Assert.DoesNotContain("Configuration unavailable:", configurationText, StringComparison.Ordinal);
+            Assert.Contains("configuration overlap seed", configurationText, StringComparison.Ordinal);
             Assert.Contains("configuration overlap seed", conversationEvidence, StringComparison.Ordinal);
             Assert.Contains("configuration-overlap-turn", conversationEvidence, StringComparison.Ordinal);
             Assert.Contains("browser response: configuration-overlap-turn", conversationEvidence, StringComparison.Ordinal);

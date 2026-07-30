@@ -22,6 +22,8 @@ public sealed class WorkspaceConfigurationReader
     private const int MaxConversationFiles = 50;
     private const int MaxConversationMessagesPerTranscript = 200;
     private const int MaxConversationMessageCharacters = 4_000;
+    private const int MaxConversationLinesPerTranscript = 400;
+    private const int MaxConversationHistorySnapshotCharacters = 4_000_000;
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     public async Task<WorkspaceConfigurationSnapshot> ReadAsync(string rootPath, WorkspaceRuntimeConfiguration runtime, CancellationToken cancellationToken = default)
@@ -331,7 +333,11 @@ public sealed class WorkspaceConfigurationReader
     {
         var transcripts = new List<WorkspaceConversationTranscript>();
         var problems = new List<string>();
-        var snapshot = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(MaxConversationFiles, cancellationToken);
+        var snapshot = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(
+            MaxConversationFiles,
+            MaxConversationLinesPerTranscript,
+            MaxConversationHistorySnapshotCharacters,
+            cancellationToken);
         foreach (var transcript in snapshot.Transcripts)
         {
             transcripts.Add(ReadTranscript(transcript, cancellationToken, problems));
@@ -412,6 +418,11 @@ public sealed class WorkspaceConfigurationReader
         if (omittedMessages > 0)
         {
             AddProblem(problems, $"{transcript.ConversationId} snapshot includes the first {MaxConversationMessagesPerTranscript} messages and omits {omittedMessages} later messages.");
+        }
+
+        if (transcript.AdditionalContentOmitted)
+        {
+            AddProblem(problems, $"{transcript.ConversationId} snapshot omits additional transcript content after its bounded coordinated read.");
         }
 
         var orderedMessages = messages.OrderBy(message => message.Sequence).ThenBy(message => message.TimestampUtc).ToArray();

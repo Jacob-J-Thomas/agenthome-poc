@@ -227,7 +227,7 @@ public sealed class ConversationMemoryStoreTests
         await store.AppendMessageAsync(LlmMessage.Assistant("snapshot answer"));
         await using var externalLease = new FileStream(paths.CurrentConversationPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
 
-        var snapshotTask = store.LoadConversationHistorySnapshotAsync(50);
+        var snapshotTask = store.LoadConversationHistorySnapshotAsync(50, 400, 4_000_000);
         await Task.Delay(75);
 
         Assert.False(snapshotTask.IsCompleted);
@@ -239,20 +239,22 @@ public sealed class ConversationMemoryStoreTests
         Assert.Equal(2, current.Lines.Count);
         Assert.Contains("snapshot prompt", current.Lines[0], StringComparison.Ordinal);
         Assert.Contains("snapshot answer", current.Lines[1], StringComparison.Ordinal);
+        Assert.False(current.AdditionalContentOmitted);
         Assert.False(snapshot.AdditionalFilesOmitted);
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public async Task LoadConversationHistorySnapshotAsync_rejects_nonpositive_file_bounds(int maxTranscriptFiles)
+    [InlineData(0, 1, 1, "maxTranscriptFiles")]
+    [InlineData(1, 0, 1, "maxLinesPerTranscript")]
+    [InlineData(1, 1, 0, "maxTotalCharacters")]
+    public async Task LoadConversationHistorySnapshotAsync_rejects_nonpositive_bounds(int maxTranscriptFiles, int maxLinesPerTranscript, int maxTotalCharacters, string parameterName)
     {
         using var workspace = new TestWorkspace();
         var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
 
-        var exception = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.LoadConversationHistorySnapshotAsync(maxTranscriptFiles));
+        var exception = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.LoadConversationHistorySnapshotAsync(maxTranscriptFiles, maxLinesPerTranscript, maxTotalCharacters));
 
-        Assert.Equal("maxTranscriptFiles", exception.ParamName);
+        Assert.Equal(parameterName, exception.ParamName);
     }
 
     [Fact]
@@ -263,7 +265,7 @@ public sealed class ConversationMemoryStoreTests
         await WriteConversationAsync(paths, "saved-a", Entry("saved-a", 1, "user", "first saved"));
         await WriteConversationAsync(paths, "saved-b", Entry("saved-b", 1, "user", "second saved"));
 
-        var snapshot = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(2);
+        var snapshot = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(2, 400, 4_000_000);
 
         Assert.Collection(
             snapshot.Transcripts,
@@ -274,6 +276,29 @@ public sealed class ConversationMemoryStoreTests
             },
             saved => Assert.Equal("saved-a", saved.ConversationId));
         Assert.True(snapshot.AdditionalFilesOmitted);
+    }
+
+    [Fact]
+    public async Task LoadConversationHistorySnapshotAsync_bounds_retained_lines_and_aggregate_characters()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteConversationAsync(
+            paths,
+            "saved-a",
+            Entry("saved-a", 1, "user", "first"),
+            Entry("saved-a", 2, "assistant", "second"),
+            Entry("saved-a", 3, "user", "third"));
+        await WriteConversationAsync(paths, "saved-b", Entry("saved-b", 1, "user", "later"));
+
+        var lineBound = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(3, 2, 4_000);
+        var characterBound = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(3, 20, 30);
+
+        var lineBoundSaved = Assert.Single(lineBound.Transcripts, transcript => transcript.ConversationId == "saved-a");
+        Assert.Equal(2, lineBoundSaved.Lines.Count);
+        Assert.True(lineBoundSaved.AdditionalContentOmitted);
+        Assert.Contains(characterBound.Transcripts, transcript => transcript.AdditionalContentOmitted);
+        Assert.InRange(characterBound.Transcripts.Sum(transcript => transcript.Lines.Sum(line => line.Length)), 0, 30);
     }
 
     [Fact]
