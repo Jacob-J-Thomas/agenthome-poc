@@ -105,6 +105,7 @@ public sealed class PermissionsDocument
     /// </summary>
     /// <param name="paths">The canonical workspace paths used to resolve permission-rule paths.</param>
     /// <returns><see langword="true"/> when non-approval coverage was removed or approval-required coverage was added; otherwise, <see langword="false"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="paths"/> is <see langword="null"/>.</exception>
     public bool EnsureToolResponseInspectionApproval(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
