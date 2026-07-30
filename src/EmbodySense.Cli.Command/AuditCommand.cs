@@ -3,11 +3,19 @@ using EmbodySense.Cli.Command;
 
 namespace EmbodySense.Cli.Command;
 
+/// <summary>
+/// Implements the CLI audit-tail command.
+/// </summary>
 public static class AuditCommand
 {
     private static readonly IReadOnlySet<string> _ignoredRootTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tail" };
     private static readonly IReadOnlySet<string> _optionsWithValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--limit", "-n" };
 
+    /// <summary>
+    /// Parses an audit command and prints the selected workspace's most recent audit events.
+    /// </summary>
+    /// <param name="arguments">The complete CLI token sequence, including the root <c>audit</c> token.</param>
+    /// <returns>Zero for help or a successful tail read; one for a reserved but unsupported audit subcommand.</returns>
     public static async Task<int> RunAsync(CliArguments arguments)
     {
         var subcommand = arguments.At(1);

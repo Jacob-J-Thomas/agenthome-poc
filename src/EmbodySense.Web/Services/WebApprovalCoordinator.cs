@@ -5,6 +5,15 @@ using EmbodySense.Web.Models;
 
 namespace EmbodySense.Web.Services;
 
+/// <summary>
+/// Coordinates connection-owned, server-timed governed tool approvals for the Web runtime.
+/// </summary>
+/// <remarks>
+/// Approval ownership is captured from an async-local scope established by the hub or host. A request
+/// without a live owner is denied before publication. Pending requests cannot transfer between connections:
+/// cancellation removes them, owner disconnect rejects them, and a server-owned five-minute deadline
+/// rejects them if no decision arrives.
+/// </remarks>
 public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
 {
     private static readonly (bool Approved, string DecisionBy, string Detail) _ownerDisconnected = (false, "system.web", "owner_disconnected");
@@ -18,11 +27,20 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
     private readonly TimeProvider _timeProvider;
     private long _lastSequence;
 
+    /// <summary>
+    /// Initializes a coordinator using system time.
+    /// </summary>
+    /// <param name="notifier">The client notifier, or <see langword="null"/> for a no-op notifier.</param>
     public WebApprovalCoordinator(IWebClientNotifier? notifier = null)
         : this(notifier, TimeProvider.System)
     {
     }
 
+    /// <summary>
+    /// Initializes a coordinator with an explicit clock.
+    /// </summary>
+    /// <param name="notifier">The client notifier, or <see langword="null"/> for a no-op notifier.</param>
+    /// <param name="timeProvider">The clock used to enforce the server-owned deadline.</param>
     public WebApprovalCoordinator(IWebClientNotifier? notifier, TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -31,8 +49,22 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         _timeProvider = timeProvider;
     }
 
+    /// <summary>
+    /// Gets the exact server-owned lifetime of a pending approval.
+    /// </summary>
     public static TimeSpan ApprovalTimeout => TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Publishes one governed tool request to its live scoped owner and waits for a terminal disposition.
+    /// </summary>
+    /// <param name="request">The unique governed request to authorize.</param>
+    /// <param name="cancellationToken">The token that cancels and removes this pending request.</param>
+    /// <returns>
+    /// The browser decision, an immediate owner-unavailable rejection, an owner-disconnected rejection,
+    /// or a server-timeout rejection.
+    /// </returns>
+    /// <exception cref="InvalidOperationException">The request identity is already pending.</exception>
+    /// <exception cref="OperationCanceledException">The supplied token is cancelled while the request is pending.</exception>
     public async Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -86,6 +118,10 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         }
     }
 
+    /// <summary>
+    /// Marks a SignalR connection as eligible to own approval requests.
+    /// </summary>
+    /// <param name="ownerConnectionId">The nonblank server-issued connection identifier.</param>
     public void RegisterOwnerConnection(string ownerConnectionId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
@@ -95,6 +131,12 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         }
     }
 
+    /// <summary>
+    /// Removes a live owner and rejects every pending request still owned by that connection.
+    /// </summary>
+    /// <param name="ownerConnectionId">The disconnected server-issued connection identifier.</param>
+    /// <returns>A task that completes after any changed approval projection is published.</returns>
+    /// <remarks>Reconnects receive a new connection identity and cannot decide or revive removed requests.</remarks>
     public async Task DisconnectOwnerAsync(string ownerConnectionId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
@@ -121,6 +163,11 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         }
     }
 
+    /// <summary>
+    /// Establishes approval ownership for asynchronous runtime work started inside the returned scope.
+    /// </summary>
+    /// <param name="ownerConnectionId">The intended owner connection, or <see langword="null"/> to force safe denial.</param>
+    /// <returns>A scope that restores the preceding async-local owner when disposed.</returns>
     public IDisposable BeginApprovalScope(string? ownerConnectionId)
     {
         var previousOwnerConnectionId = _currentOwnerConnectionId.Value;
@@ -128,6 +175,11 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         return new ApprovalScope(_currentOwnerConnectionId, previousOwnerConnectionId);
     }
 
+    /// <summary>
+    /// Gets pending requests visible to one owner in stable creation order.
+    /// </summary>
+    /// <param name="ownerConnectionId">The owner connection identity; null or blank reveals no requests.</param>
+    /// <returns>Immutable projections of requests owned by the supplied connection.</returns>
     public IReadOnlyList<WebPendingApproval> GetPending(string? ownerConnectionId = null)
     {
         return _pending.Values
@@ -137,6 +189,20 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
             .ToArray();
     }
 
+    /// <summary>
+    /// Attempts to complete one pending request as the deciding live connection.
+    /// </summary>
+    /// <param name="requestId">The pending request identity.</param>
+    /// <param name="approved">Whether the human approved the operation.</param>
+    /// <param name="detail">Optional audit detail; a bounded default is generated when blank.</param>
+    /// <param name="decisionConnectionId">The live deciding connection identity.</param>
+    /// <param name="cancellationToken">
+    /// Reserved for notification implementations; cleanup publication is intentionally non-cancellable.
+    /// </param>
+    /// <returns>
+    /// A completed, absent, already-completed, or unauthorized disposition. Null, blank, disconnected,
+    /// or non-owning connection identities are unauthorized.
+    /// </returns>
     public async Task<WebApprovalDecisionResult> SubmitDecisionAsync(string requestId, bool approved, string? detail, string? decisionConnectionId = null, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);

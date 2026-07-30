@@ -10,6 +10,17 @@ using EmbodySense.Web.Services;
 
 namespace EmbodySense.Web;
 
+/// <summary>
+/// Owns the process-wide Web projection of workspace status, one lazy agent runtime, conversation turns,
+/// custom-loop operations, durable run recovery, and shutdown.
+/// </summary>
+/// <remarks>
+/// Default-conversation turns are serialized. Custom-loop operations may share the retained runtime and
+/// cross SignalR disconnects, but approval ownership remains bound to the initiating connection. A cancelled
+/// conversation discards its runtime at the next safe boundary without disposing a runtime still used by a
+/// custom operation. Evidence reads recover interrupted runs before returning state. The application container
+/// owns this host and must dispose it asynchronously.
+/// </remarks>
 public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker
 {
     private readonly WebRunOptions _options;
@@ -34,16 +45,36 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private bool _preserveCurrentConversationOnNextRuntimeCreation = true;
     private int _disposed;
 
+    /// <summary>
+    /// Initializes a Web host with the production workspace initializer and no publication observer.
+    /// </summary>
+    /// <param name="options">The validated Web host and runtime options.</param>
+    /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
         : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null)
     {
     }
 
+    /// <summary>
+    /// Initializes a Web host with an explicit workspace initializer and no publication observer.
+    /// </summary>
+    /// <param name="options">The validated Web host and runtime options.</param>
+    /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
+    /// <param name="workspaceInitializer">The workspace initializer used by explicit initialization requests.</param>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator, IWorkspaceInitializer workspaceInitializer)
         : this(options, approvalCoordinator, workspaceInitializer, null)
     {
     }
 
+    /// <summary>
+    /// Initializes a Web host with explicit workspace and durable-conversation publication dependencies.
+    /// </summary>
+    /// <param name="options">The validated Web host and runtime options.</param>
+    /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
+    /// <param name="workspaceInitializer">The workspace initializer used by explicit initialization requests.</param>
+    /// <param name="conversationPublicationObserver">
+    /// The observer notified after durable conversation publication, or <see langword="null"/> for no notification.
+    /// </param>
     public WebAgentRuntimeHost(
         WebRunOptions options,
         WebApprovalCoordinator approvalCoordinator,
@@ -63,16 +94,38 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         _loopRuns = new LoopRunInspectionFacade(options.WorkingDirectory, WorkspaceActors.Web, AgentRuntimeSurface.Web.Id);
     }
 
+    /// <summary>
+    /// Reads current Web binding and workspace status without creating a runtime.
+    /// </summary>
+    /// <returns>The current browser status projection.</returns>
     public WebStatus GetStatus()
     {
         return WebStatusFactory.Create(_options, _statusReader.Read(_options.WorkingDirectory));
     }
 
+    /// <summary>
+    /// Gets the custom-loop inference provider and explicitly configured model.
+    /// </summary>
+    /// <returns>
+    /// An OpenAI Codex model snapshot whose model is null when selection is delegated to external configuration.
+    /// </returns>
     public LoopRunModelSnapshot GetCustomLoopModel()
     {
         return new LoopRunModelSnapshot("OpenAiCodex", string.IsNullOrWhiteSpace(_options.Model) ? null : _options.Model);
     }
 
+    /// <summary>
+    /// Gets the complete canonical default-conversation transcript at a serialized turn boundary.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel gate waits, recovery, or durable history reads.</param>
+    /// <returns>
+    /// Null when the workspace is uninitialized or no transcript source remains; otherwise the complete
+    /// persisted or in-memory transcript, including an empty transcript for a fresh initialized workspace.
+    /// </returns>
+    /// <remarks>
+    /// The read waits for an active turn and any deferred runtime discard. Before first runtime creation it
+    /// hydrates durable history directly so another process owning custom-loop execution does not block transcript access.
+    /// </remarks>
     public async Task<IReadOnlyList<WebTranscriptMessage>?> GetCurrentTranscriptAsync(CancellationToken cancellationToken = default)
     {
         if (!_statusReader.Read(_options.WorkingDirectory).IsInitialized)
@@ -91,6 +144,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 {
                     if (_discardRuntimeWhenCustomOperationsComplete)
                     {
+                        // A cancelled chat cannot reuse this runtime, but transcript hydration must not
+                        // observe it between the final custom operation and its deferred disposal.
                         discardCompletion = _runtimeDiscardCompletion?.Task;
                     }
                     else
@@ -124,6 +179,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Idempotently initializes the configured workspace for the Web actor.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel initialization.</param>
+    /// <returns>The resulting Web status.</returns>
     public async Task<WebStatus> InitializeWorkspaceAsync(CancellationToken cancellationToken = default)
     {
         var status = _statusReader.Read(_options.WorkingDirectory);
@@ -135,12 +195,27 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return GetStatus();
     }
 
+    /// <summary>
+    /// Reads effective workspace configuration and cached Codex runtime compatibility.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel waiting for discovery or reading configuration.</param>
+    /// <returns>The read-only configuration snapshot.</returns>
+    /// <remarks>Runtime discovery is shared and cached; caller cancellation stops only that caller's wait.</remarks>
     public async Task<WorkspaceConfigurationSnapshot> GetConfigurationAsync(CancellationToken cancellationToken = default)
     {
         var codexRuntimeStatus = await GetCodexRuntimeStatusAsync(cancellationToken);
         return await _configurationReader.ReadAsync(_options.WorkingDirectory, CreateRuntimeConfiguration(codexRuntimeStatus), cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and lists one bounded page of durable custom-loop summaries.
+    /// </summary>
+    /// <param name="maximumCount">The maximum summaries to return.</param>
+    /// <param name="loopId">An optional loop identifier filter.</param>
+    /// <param name="cursor">An optional opaque continuation cursor.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery or reading.</param>
+    /// <returns>The requested summary page.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopRunSummaryPageSnapshot> GetLoopRunsAsync(int maximumCount = 50, string? loopId = null, string? cursor = null, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop run evidence");
@@ -148,6 +223,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.ListPageAsync(maximumCount, loopId, cursor, cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and gets one complete durable run snapshot.
+    /// </summary>
+    /// <param name="runId">The run artifact identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery or reading.</param>
+    /// <returns>The run snapshot, or null when no valid artifact exists.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopRunSnapshot?> GetLoopRunAsync(string runId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop run evidence");
@@ -155,6 +237,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.GetAsync(runId, cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and gets monitor-visible state plus its canonical artifact hash.
+    /// </summary>
+    /// <param name="runId">The run artifact identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery or reading.</param>
+    /// <returns>The monitor snapshot, or null when no valid artifact exists.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopRunMonitorSnapshot?> GetLoopRunMonitorAsync(string runId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("monitoring custom-loop run evidence");
@@ -162,6 +251,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.GetMonitorAsync(runId, cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and gets one durable invocation reconciliation record.
+    /// </summary>
+    /// <param name="operationId">The caller-owned invocation operation identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery or reading.</param>
+    /// <returns>The operation snapshot, or null when no record exists.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopInvocationOperationSnapshot?> GetLoopInvocationOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reconciling custom-loop invocation evidence");
@@ -169,6 +265,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.GetInvocationOperationAsync(operationId, cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and gets one durable lifecycle-control reconciliation record.
+    /// </summary>
+    /// <param name="operationId">The caller-owned control operation identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery or reading.</param>
+    /// <returns>The operation snapshot, or null when no record exists.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopControlOperationSnapshot?> GetLoopControlOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reconciling custom-loop control evidence");
@@ -176,6 +279,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.GetControlOperationAsync(operationId, cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and gets retained trace content for one run.
+    /// </summary>
+    /// <param name="runId">The run artifact identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery or reading.</param>
+    /// <returns>The retained trace snapshot, or null when no trace exists.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopTraceInspectionSnapshot?> GetLoopTraceAsync(string runId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop trace evidence");
@@ -183,6 +293,12 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.GetTraceAsync(runId, cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and gets retained-trace quota and usage.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel recovery or reading.</param>
+    /// <returns>The current trace quota snapshot.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopTraceQuotaSnapshot> GetLoopTraceQuotaAsync(CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("reading custom-loop trace quota");
@@ -190,6 +306,15 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.GetTraceQuotaAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Recovers interrupted runs and deletes retained trace content using optimistic, idempotent evidence.
+    /// </summary>
+    /// <param name="runId">The owning run artifact identifier.</param>
+    /// <param name="expectedTraceHash">The exact trace-content hash observed by the caller.</param>
+    /// <param name="operationId">The caller-owned deletion operation identity.</param>
+    /// <param name="cancellationToken">The token used to cancel recovery or deletion.</param>
+    /// <returns>The durable deletion disposition.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or recovery cannot safely proceed yet.</exception>
     public async Task<LoopTraceDeletionResponse> DeleteLoopTraceAsync(string runId, string expectedTraceHash, string operationId, CancellationToken cancellationToken = default)
     {
         EnsureWorkspaceInitialized("deleting custom-loop trace content");
@@ -197,6 +322,18 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return await _loopRuns.DeleteTraceAsync(runId, expectedTraceHash, operationId, cancellationToken);
     }
 
+    /// <summary>
+    /// Invokes an exact saved custom-loop definition under one live browser connection's approval ownership.
+    /// </summary>
+    /// <param name="input">The invocation operation identity, definition binding, and context selection.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection that owns governed approvals.</param>
+    /// <param name="cancellationToken">The caller token linked with host shutdown for the full operation.</param>
+    /// <returns>The durable admission or rejection response.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or a compatible runtime cannot be created.</exception>
+    /// <remarks>
+    /// Runtime activity accounting is released in a finally block. Host disposal cancels admitted invocation
+    /// execution and waits until the operation leaves the shared runtime before disposing it.
+    /// </remarks>
     public async Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -215,6 +352,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Pauses a custom-loop run through the shared runtime.
+    /// </summary>
+    /// <param name="input">The optimistic, idempotent pause request.</param>
+    /// <param name="cancellationToken">The token used to cancel acquisition or control processing.</param>
+    /// <returns>The durable lifecycle-control response.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or a runtime cannot be created.</exception>
     public async Task<LoopRunControlResponse> PauseLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -229,6 +373,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Cancels a custom-loop run through the shared runtime.
+    /// </summary>
+    /// <param name="input">The optimistic, idempotent cancel request.</param>
+    /// <param name="cancellationToken">The token used to cancel acquisition or control processing.</param>
+    /// <returns>The durable lifecycle-control response.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or a runtime cannot be created.</exception>
     public async Task<LoopRunControlResponse> CancelLoopAsync(LoopRunControlInput input, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -243,6 +394,15 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Explicitly resumes a paused custom-loop run under one live browser connection's approval ownership.
+    /// </summary>
+    /// <param name="input">The optimistic, idempotent resume request.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection that owns governed approvals.</param>
+    /// <param name="cancellationToken">The caller token linked with host shutdown for the full operation.</param>
+    /// <returns>The durable lifecycle-control response.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or a compatible runtime cannot be created.</exception>
+    /// <remarks>Runtime activity accounting is released even when resume fails or is cancelled.</remarks>
     public async Task<LoopRunControlResponse> ResumeLoopAsync(LoopRunControlInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -261,6 +421,26 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Runs one supported static command or serialized default-conversation turn and emits typed Web events.
+    /// </summary>
+    /// <param name="message">The nonblank user message or supported static runtime command.</param>
+    /// <param name="writeEventAsync">The ordered event sink for deltas, context, final state, or failure.</param>
+    /// <param name="ownerConnectionId">
+    /// The SignalR connection that owns governed approvals, or null to make approval-required tools reject safely.
+    /// </param>
+    /// <param name="cancellationToken">The caller token used to cancel gate waits, runtime work, and event writes.</param>
+    /// <returns>A task that completes after the terminal event is written.</returns>
+    /// <exception cref="ArgumentException">The message is null, empty, or whitespace.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// Caller cancellation interrupts the turn. Cancellation requested through <see cref="CancelCurrentTurn"/>
+    /// is instead represented by a cancellation event when its event write succeeds.
+    /// </exception>
+    /// <remarks>
+    /// Static commands are handled before workspace initialization is required. A cancelled model turn marks
+    /// the retained runtime for disposal so its session is not reused after an ambiguous cancellation boundary.
+    /// Expected Codex compatibility failures are projected as bounded failure events.
+    /// </remarks>
     public async Task SendMessageAsync(
         string message,
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
@@ -319,6 +499,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Changes verbose context projection on the retained runtime and emits the resulting system message.
+    /// </summary>
+    /// <param name="enabled">Whether verbose context should be emitted during subsequent turns.</param>
+    /// <param name="writeEventAsync">The event sink that receives the system result.</param>
+    /// <param name="cancellationToken">The token used to cancel runtime acquisition or event writing.</param>
+    /// <returns>A task that completes after the system event is written.</returns>
+    /// <exception cref="InvalidOperationException">The workspace is not initialized or a compatible runtime cannot be created.</exception>
     public async Task SetVerboseModeAsync(
         bool enabled,
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
@@ -331,6 +519,12 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         await writeEventAsync(WebStreamEvent.System(result.Output), cancellationToken);
     }
 
+    /// <summary>
+    /// Signals cancellation for the active default-conversation turn.
+    /// </summary>
+    /// <returns>
+    /// True when an uncancelled active turn was signalled; false when no turn is active or cancellation was already requested.
+    /// </returns>
     public bool CancelCurrentTurn()
     {
         lock (_turnCancellationGate)
@@ -345,6 +539,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Cancels host-owned invocation and resume work, waits for active custom operations, and disposes retained state.
+    /// </summary>
+    /// <returns>A value task that completes after runtime and run-inspection resources are disposed.</returns>
+    /// <remarks>
+    /// Disposal is idempotent. Conversation gate waits are not independently cancelled; application shutdown
+    /// must first stop admitting request work through the ASP.NET host.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -413,6 +615,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         try
         {
             var runtime = await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+            // The runtime gate protects the counter transition, not the full operation. This lets lifecycle
+            // control reach a run while another custom operation is awaiting inference or approval.
             _activeCustomRuntimeOperations++;
             return runtime;
         }
@@ -499,6 +703,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             _loopRecoveryCompleted = false;
             if (_activeCustomRuntimeOperations > 0)
             {
+                // Recovery requires exclusive ownership of persisted execution state. Retire the retained
+                // runtime at its next safe boundary and make this read retry instead of racing that state.
                 _discardRuntimeWhenCustomOperationsComplete = true;
                 _runtimeDiscardCompletion ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 throw new InvalidOperationException("custom_loop_recovery_pending: the retained runtime will be discarded when its active custom-loop operation reaches a safe boundary; retry the evidence request afterward.");
@@ -528,6 +734,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         {
             if (_activeCustomRuntimeOperations > 0)
             {
+                // Conversation cancellation invalidates session reuse without interrupting a separately
+                // admitted durable custom operation. Its final decrement owns the actual disposal.
                 _discardRuntimeWhenCustomOperationsComplete = true;
                 _runtimeDiscardCompletion ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 discardCompletion = _runtimeDiscardCompletion.Task;
@@ -552,6 +760,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         var runtime = _runtime;
         var discardCompletion = _runtimeDiscardCompletion;
+        // Any replacement runtime must reopen the same durable conversation rather than selecting a new one.
         _preserveCurrentConversationOnNextRuntimeCreation |= runtime is not null;
         _runtime = null;
         _runtimeDiscardCompletion = null;
@@ -617,6 +826,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
                 case AgentRuntimeTurnEventKind.CommandOutput:
                 case AgentRuntimeTurnEventKind.Prompt:
+                    // Static command output is projected as one final browser message so command prompts
+                    // cannot be mistaken for streamed model deltas.
                     commandOutputParts.Add(turnEvent.Text);
                     break;
 
