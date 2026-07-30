@@ -4,7 +4,6 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.ReceiptRetention;
 

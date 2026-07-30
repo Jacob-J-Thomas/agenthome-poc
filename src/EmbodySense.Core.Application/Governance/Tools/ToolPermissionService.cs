@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Governance.Permissions;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Common;

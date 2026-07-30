@@ -1,3 +1,10 @@
+using EmbodySense.Core.Common.Governance.Permissions;
+using EmbodySense.Core.Common.Governance.Tools;
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -13,7 +20,6 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
-using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 
@@ -842,12 +848,12 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         return paths;
     }
 
-    private static string? Metadata(EmbodySense.Core.Common.Governance.Audit.Models.AuditEvent auditEvent, string key)
+    private static string? Metadata(EmbodySense.Core.Common.Governance.Audit.AuditEvent auditEvent, string key)
     {
         return auditEvent.Metadata.TryGetValue(key, out var value) ? value?.ToString() : null;
     }
 
-    private static void AssertCorrelation(EmbodySense.Core.Common.Governance.Audit.Models.AuditEvent auditEvent)
+    private static void AssertCorrelation(EmbodySense.Core.Common.Governance.Audit.AuditEvent auditEvent)
     {
         Assert.Equal("run-1", Metadata(auditEvent, "run_id"));
         Assert.Equal("loop-1", Metadata(auditEvent, "loop_id"));

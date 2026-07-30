@@ -1,5 +1,6 @@
+using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Startup.Audit;
 using System.Text.Json;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 
 namespace EmbodySense.Core.Startup.Audit;
 

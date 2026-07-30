@@ -1,5 +1,4 @@
 using EmbodySense.Cli.Command;
-using EmbodySense.Cli.Command.Models;
 
 namespace EmbodySense.Cli;
 

@@ -1,3 +1,4 @@
+using EmbodySense.Web.Models;
 namespace EmbodySense.Web;
 
 public sealed record WebRunOptions(

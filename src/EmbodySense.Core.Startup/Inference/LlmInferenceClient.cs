@@ -1,7 +1,7 @@
+using EmbodySense.Core.Common.Inference;
 using System.Diagnostics;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Common.Inference.Models;

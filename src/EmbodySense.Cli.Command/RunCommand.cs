@@ -1,4 +1,5 @@
-using EmbodySense.Cli.Command.Models;
+using EmbodySense.Core.Startup.Workspace.Models;
+using EmbodySense.Cli.Command;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;

@@ -1,3 +1,6 @@
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Application.Context;
@@ -15,7 +18,6 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Memory.Models;
-using EmbodySense.Core.Common.Runtime.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Tests.Runtime;

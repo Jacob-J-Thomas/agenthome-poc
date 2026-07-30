@@ -36,27 +36,26 @@ public sealed class ModelSourceLayoutTests
     ];
 
     [Fact]
-    public void Foundation_model_files_use_path_matching_models_namespaces()
+    public void Production_model_files_use_path_matching_models_namespaces()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = MigratedProjectRoots(sourceRoot)
+        var violations = ProductionProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => IsModelFile(sourceRoot, file))
             .Where(file => !HasExpectedNamespace(sourceRoot, file))
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Startup, CLI, and Web as their model slices are migrated.
-        Assert.Empty(violations);
+        Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
     [Fact]
-    public void Foundation_model_declarations_are_not_left_outside_models_directories()
+    public void Production_model_declarations_are_not_left_outside_models_directories()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = MigratedProjectRoots(sourceRoot)
+        var violations = ProductionProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => !IsModelFile(sourceRoot, file))
             .SelectMany(file => FindTopLevelModelCandidateNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares model candidate {name} outside Models."))
@@ -86,13 +85,12 @@ public sealed class ModelSourceLayoutTests
     }
 
     [Fact]
-    public void CoreApplication_model_files_do_not_own_behavior()
+    public void Production_model_files_do_not_own_behavior()
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var projectRoot = Path.Combine(sourceRoot, "EmbodySense.Core.Application");
         var violations = Directory
-            .EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
+            .EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
             .Where(file => IsModelFile(sourceRoot, file))
             .SelectMany(file => FindTopLevelBehaviorBearingTypeNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares behavior-bearing type {name} in Models."))
             .ToArray();
@@ -112,11 +110,11 @@ public sealed class ModelSourceLayoutTests
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
-        Assert.Empty(violations);
+        Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
     [Fact]
-    public void Behavior_classification_catches_field_events_and_nested_behavior()
+    public void Behavior_classification_catches_behavior_without_rejecting_storage_only_constructors()
     {
         const string source = """
             namespace Example;
@@ -138,9 +136,43 @@ public sealed class ModelSourceLayoutTests
             {
                 private sealed record Metadata(string Value);
             }
+
+            internal sealed record StoredState
+            {
+                public StoredState()
+                {
+                }
+
+                public StoredState(string value)
+                {
+                    Value = value;
+                }
+
+                public string Value { get; init; } = string.Empty;
+            }
+
+            internal sealed record NormalizedState
+            {
+                public NormalizedState(string value)
+                {
+                    Value = value.Trim();
+                }
+
+                public string Value { get; init; }
+            }
+
+            internal sealed record StaticMutationState
+            {
+                public StaticMutationState(string value)
+                {
+                    LastSeen = value;
+                }
+
+                private static string LastSeen { get; set; } = string.Empty;
+            }
             """;
 
-        Assert.Equal(["EventfulState", "NestedValidatorState"], FindTopLevelBehaviorBearingTypeNames(source));
+        Assert.Equal(["EventfulState", "NestedValidatorState", "NormalizedState", "StaticMutationState"], FindTopLevelBehaviorBearingTypeNames(source));
     }
 
     private static bool IsModelFile(string sourceRoot, string file)
@@ -184,26 +216,70 @@ public sealed class ModelSourceLayoutTests
         }
 
         return typeDeclaration.Members.Any(member => member is MethodDeclarationSyntax
-            or ConstructorDeclarationSyntax
             or DestructorDeclarationSyntax
             or OperatorDeclarationSyntax
             or ConversionOperatorDeclarationSyntax
             or IndexerDeclarationSyntax
             or EventFieldDeclarationSyntax
+            || member is ConstructorDeclarationSyntax constructor && ConstructorOwnsBehavior(constructor)
             || member is PropertyDeclarationSyntax property && (property.ExpressionBody is not null || property.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true)
             || member is EventDeclarationSyntax eventDeclaration && eventDeclaration.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true
             || member is BaseTypeDeclarationSyntax nestedType && OwnsBehavior(nestedType));
     }
 
-    private static IReadOnlyList<string> MigratedProjectRoots(string sourceRoot)
+    private static bool ConstructorOwnsBehavior(ConstructorDeclarationSyntax constructor)
     {
-        return
-        [
-            Path.Combine(sourceRoot, "EmbodySense.Core.Common"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Application"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Clients"),
-            Path.Combine(sourceRoot, "EmbodySense.Core.Persistence")
-        ];
+        if (constructor.Initializer is not null)
+        {
+            return true;
+        }
+
+        var parameterNames = constructor.ParameterList.Parameters.Select(parameter => parameter.Identifier.ValueText).ToHashSet(StringComparer.Ordinal);
+        var instanceStorageNames = constructor.Parent is TypeDeclarationSyntax containingType
+            ? FindInstanceStorageNames(containingType)
+            : new HashSet<string>(StringComparer.Ordinal);
+        if (constructor.ExpressionBody is not null)
+        {
+            return !IsStorageAssignment(constructor.ExpressionBody.Expression, parameterNames, instanceStorageNames);
+        }
+
+        return constructor.Body?.Statements.Any(statement => statement is not ExpressionStatementSyntax expressionStatement || !IsStorageAssignment(expressionStatement.Expression, parameterNames, instanceStorageNames)) == true;
+    }
+
+    private static IReadOnlySet<string> FindInstanceStorageNames(TypeDeclarationSyntax containingType)
+    {
+        return containingType.Members
+            .SelectMany(member => member switch
+            {
+                PropertyDeclarationSyntax property when !property.Modifiers.Any(modifier => modifier.RawKind == (int)SyntaxKind.StaticKeyword) => [property.Identifier.ValueText],
+                FieldDeclarationSyntax field when !field.Modifiers.Any(modifier => modifier.RawKind == (int)SyntaxKind.StaticKeyword) => field.Declaration.Variables.Select(variable => variable.Identifier.ValueText),
+                _ => []
+            })
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static bool IsStorageAssignment(ExpressionSyntax expression, IReadOnlySet<string> parameterNames, IReadOnlySet<string> instanceStorageNames)
+    {
+        if (expression is not AssignmentExpressionSyntax assignment || assignment.RawKind != (int)SyntaxKind.SimpleAssignmentExpression)
+        {
+            return false;
+        }
+
+        var targetIsStoredMember = assignment.Left switch
+        {
+            IdentifierNameSyntax identifier => instanceStorageNames.Contains(identifier.Identifier.ValueText),
+            MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax, Name: IdentifierNameSyntax member } => instanceStorageNames.Contains(member.Identifier.ValueText),
+            _ => false
+        };
+        return targetIsStoredMember && assignment.Right is IdentifierNameSyntax value && parameterNames.Contains(value.Identifier.ValueText);
+    }
+
+    private static IReadOnlyList<string> ProductionProjectRoots(string sourceRoot)
+    {
+        return Directory
+            .EnumerateDirectories(sourceRoot, "EmbodySense.*", SearchOption.TopDirectoryOnly)
+            .Where(directory => File.Exists(Path.Combine(directory, $"{Path.GetFileName(directory)}.csproj")))
+            .ToArray();
     }
 
     private static bool HasExpectedNamespace(string sourceRoot, string file)

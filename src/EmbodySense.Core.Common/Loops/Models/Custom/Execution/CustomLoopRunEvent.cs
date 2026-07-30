@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 public sealed record CustomLoopRunEvent(

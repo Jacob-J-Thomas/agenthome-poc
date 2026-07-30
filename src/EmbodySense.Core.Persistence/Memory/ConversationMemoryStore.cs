@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Application.Memory.Models;
 using System.Collections.Concurrent;
 using System.Globalization;

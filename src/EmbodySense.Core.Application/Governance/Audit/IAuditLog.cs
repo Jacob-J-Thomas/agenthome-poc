@@ -1,4 +1,4 @@
-using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Audit;
 
 namespace EmbodySense.Core.Application.Governance.Audit;
 

@@ -1,8 +1,8 @@
+using EmbodySense.Core.Common.Governance.Audit;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Collections.Concurrent;
 using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Audit;

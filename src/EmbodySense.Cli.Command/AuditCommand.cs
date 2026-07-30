@@ -1,5 +1,5 @@
-using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Startup.Audit;
+using EmbodySense.Cli.Command;
 
 namespace EmbodySense.Cli.Command;
 

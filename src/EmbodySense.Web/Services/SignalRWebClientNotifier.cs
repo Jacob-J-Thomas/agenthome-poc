@@ -1,3 +1,4 @@
+using EmbodySense.Web;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Models;
 using Microsoft.AspNetCore.SignalR;
