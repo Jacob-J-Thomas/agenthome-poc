@@ -33,6 +33,9 @@ public sealed class WebApiControllerTests
             var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
             using var beforeResponse = await client.GetAsync("/api/status");
             var before = await beforeResponse.Content.ReadFromJsonAsync<WebStatus>(_jsonOptions);
+            using var indexResponse = await client.GetAsync("/");
+            var index = await indexResponse.Content.ReadAsStringAsync();
+            using var faviconResponse = await client.GetAsync("/favicon.svg");
             var rejectedInit = await client.PostAsJsonAsync("/api/workspace/init", new { }, _jsonOptions);
             var rejectedQueryTokenConfiguration = await client.GetAsync($"/api/configuration?access_token={Uri.EscapeDataString(session!.Token)}");
             var initRequest = new HttpRequestMessage(HttpMethod.Post, "/api/workspace/init");
@@ -56,11 +59,16 @@ public sealed class WebApiControllerTests
 
             Assert.False(before!.Initialized);
             Assert.True(beforeResponse.Headers.TryGetValues("Content-Security-Policy", out var csp));
-            Assert.Contains("frame-ancestors 'none'", csp.Single());
+            Assert.Equal("default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'", csp.Single());
+            Assert.DoesNotContain("ws://", csp.Single(), StringComparison.Ordinal);
             Assert.True(beforeResponse.Headers.TryGetValues("X-Content-Type-Options", out var contentTypeOptions));
             Assert.Equal("nosniff", contentTypeOptions.Single());
             Assert.True(beforeResponse.Headers.TryGetValues("Referrer-Policy", out var referrerPolicy));
             Assert.Equal("no-referrer", referrerPolicy.Single());
+            Assert.True(indexResponse.IsSuccessStatusCode);
+            Assert.Contains("<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\" />", index, StringComparison.Ordinal);
+            Assert.True(faviconResponse.IsSuccessStatusCode);
+            Assert.Equal("image/svg+xml", faviconResponse.Content.Headers.ContentType?.MediaType);
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedInit.StatusCode);
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedQueryTokenConfiguration.StatusCode);
             Assert.True(initialized.IsSuccessStatusCode);
