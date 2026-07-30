@@ -1,16 +1,16 @@
+using EmbodySense.Core.Common.Governance.Audit;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Collections.Concurrent;
 using EmbodySense.Core.Application.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Audit;
 
 public sealed class AuditLog : IAuditLog
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> FileLocks = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _fileLocks = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly JsonSerializerOptions _jsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -43,12 +43,12 @@ public sealed class AuditLog : IAuditLog
         ArgumentNullException.ThrowIfNull(auditEvent);
 
         Directory.CreateDirectory(_paths.AuditPath);
-        var fileLock = FileLocks.GetOrAdd(_paths.EventsLogPath, _ => new SemaphoreSlim(1, 1));
+        var fileLock = _fileLocks.GetOrAdd(_paths.EventsLogPath, _ => new SemaphoreSlim(1, 1));
 
         await fileLock.WaitAsync(cancellationToken);
         try
         {
-            var line = JsonSerializer.Serialize(auditEvent, JsonOptions);
+            var line = JsonSerializer.Serialize(auditEvent, _jsonOptions);
             await File.AppendAllTextAsync(_paths.EventsLogPath, line + Environment.NewLine, cancellationToken);
         }
         finally
@@ -94,7 +94,7 @@ public sealed class AuditLog : IAuditLog
         {
             try
             {
-                var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, JsonOptions);
+                var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, _jsonOptions);
                 if (auditEvent is not null)
                 {
                     events.Add(auditEvent);

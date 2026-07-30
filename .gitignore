@@ -4,6 +4,7 @@ TestResults/
 .vs/
 .vscode/
 .idea/
+node_modules/
 *.user
 *.suo
 .DS_Store

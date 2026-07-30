@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Loops.Custom;
 using System.Buffers.Binary;
 using System.IO.Pipes;
 using System.Security.Cryptography;
@@ -12,9 +13,9 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 {
-    private static readonly TimeSpan AcknowledgementTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan ConnectionIoTimeout = TimeSpan.FromSeconds(1);
-    private static readonly JsonSerializerOptions WireJsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan _acknowledgementTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan _connectionIoTimeout = TimeSpan.FromSeconds(1);
+    private static readonly JsonSerializerOptions _wireJsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaxWireUtf8Bytes = 4 * 1024;
 
     private readonly WorkspacePaths _paths;
@@ -78,7 +79,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         try
         {
-            var result = await attempt.Completion.Task.WaitAsync(AcknowledgementTimeout, cancellationToken);
+            var result = await attempt.Completion.Task.WaitAsync(_acknowledgementTimeout, cancellationToken);
             return result with { OwnerId = _ownerId, OwnerProcessId = Environment.ProcessId };
         }
         catch (TimeoutException)
@@ -105,7 +106,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         {
             using var client = new NamedPipeClientStream(".", descriptor.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(AcknowledgementTimeout + TimeSpan.FromSeconds(1));
+            timeout.CancelAfter(_acknowledgementTimeout + TimeSpan.FromSeconds(1));
             await client.ConnectAsync(timeout.Token);
             await WriteFrameAsync(client, request, timeout.Token);
             var response = await ReadFrameAsync<CancellationWireResponse>(client, timeout.Token);
@@ -219,13 +220,13 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private async Task HandleConnectionAsync(Stream stream, CancellationToken cancellationToken)
     {
         using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        readTimeout.CancelAfter(ConnectionIoTimeout);
+        readTimeout.CancelAfter(_connectionIoTimeout);
         var request = await ReadFrameAsync<CancellationWireRequest>(stream, readTimeout.Token);
         var result = !IsAuthenticated(request)
             ? new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.Invalid, "The cancellation request did not authenticate to the current workspace-host generation.")
             : await RequestCancellationAsync(request.RunId, cancellationToken);
         using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        writeTimeout.CancelAfter(ConnectionIoTimeout);
+        writeTimeout.CancelAfter(_connectionIoTimeout);
         await WriteFrameAsync(stream, new CancellationWireResponse(1, result.Status, result.Detail, _ownerId, Environment.ProcessId), writeTimeout.Token);
     }
 
@@ -255,7 +256,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         pathGuard.PrepareRoot(_paths.LoopRunsPath);
         var path = pathGuard.GetFilePath(_paths.LoopRunsPath, Path.GetFileName(_paths.CustomLoopCancellationOwnerPath));
         var descriptor = new CancellationOwnerDescriptor(1, _ownerId, _pipeName, _encodedSecret, Environment.ProcessId, DateTimeOffset.UtcNow.ToUniversalTime());
-        var payload = JsonSerializer.SerializeToUtf8Bytes(descriptor, WireJsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(descriptor, _wireJsonOptions);
         if (payload.Length > MaxWireUtf8Bytes)
         {
             throw new FormatException("The workspace-host owner descriptor exceeds its bounded size.");
@@ -309,7 +310,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             }
 
             var payload = File.ReadAllBytes(path);
-            var descriptor = payload.Length <= MaxWireUtf8Bytes ? JsonSerializer.Deserialize<CancellationOwnerDescriptor>(payload, WireJsonOptions) : null;
+            var descriptor = payload.Length <= MaxWireUtf8Bytes ? JsonSerializer.Deserialize<CancellationOwnerDescriptor>(payload, _wireJsonOptions) : null;
             if (string.Equals(descriptor?.OwnerId, _ownerId, StringComparison.Ordinal))
             {
                 File.Delete(path);
@@ -333,7 +334,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         var bytes = new byte[(int)stream.Length];
         await stream.ReadExactlyAsync(bytes, cancellationToken);
-        var descriptor = JsonSerializer.Deserialize<CancellationOwnerDescriptor>(bytes, WireJsonOptions) ?? throw new FormatException("The workspace-host owner descriptor is empty.");
+        var descriptor = JsonSerializer.Deserialize<CancellationOwnerDescriptor>(bytes, _wireJsonOptions) ?? throw new FormatException("The workspace-host owner descriptor is empty.");
         ValidateOwnerDescriptor(descriptor);
         return descriptor;
     }
@@ -398,7 +399,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
     private static async Task WriteFrameAsync<T>(Stream stream, T value, CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(value, WireJsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(value, _wireJsonOptions);
         if (payload.Length <= 0 || payload.Length > MaxWireUtf8Bytes)
         {
             throw new FormatException("The cancellation IPC payload is outside its bounded size.");
@@ -423,121 +424,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         var payload = new byte[payloadLength];
         await stream.ReadExactlyAsync(payload, cancellationToken);
-        return JsonSerializer.Deserialize<T>(payload, WireJsonOptions) ?? throw new FormatException("The cancellation IPC payload is empty.");
-    }
-
-    private sealed class ActiveAttempt
-    {
-        private readonly CancellationTokenSource _cancellation;
-        private readonly CancellationToken _competingCancellationToken;
-        private int _signalQueued;
-        private int _routedSignalDelivered;
-
-        public ActiveAttempt(CancellationTokenSource cancellation, CancellationToken competingCancellationToken, long generation)
-        {
-            _cancellation = cancellation;
-            _competingCancellationToken = competingCancellationToken;
-            Generation = generation;
-        }
-
-        public long Generation { get; }
-
-        public TaskCompletionSource<CustomLoopAttemptCancellationResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public void Signal()
-        {
-            if (Interlocked.Exchange(ref _signalQueued, 1) == 0)
-            {
-                ThreadPool.UnsafeQueueUserWorkItem(static attempt => attempt.DeliverSignal(), this, preferLocal: false);
-            }
-        }
-
-        public bool CanConfirmProviderInterruption(CancellationToken observedCancellationToken)
-        {
-            return Volatile.Read(ref _routedSignalDelivered) != 0
-                && !_competingCancellationToken.IsCancellationRequested
-                && observedCancellationToken.CanBeCanceled
-                && observedCancellationToken == _cancellation.Token
-                && _cancellation.IsCancellationRequested;
-        }
-
-        public void ConfirmProviderInterruption()
-        {
-            Completion.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, "The provider attempt observed the routed cancellation signal."));
-        }
-
-        public void CompleteWithoutConfirmedInterruption()
-        {
-            Completion.TrySetResult(CreateUnconfirmedResult());
-        }
-
-        public CustomLoopAttemptCancellationResult CreateUnconfirmedResult()
-        {
-            if (Volatile.Read(ref _routedSignalDelivered) != 0 && !_competingCancellationToken.IsCancellationRequested)
-            {
-                return new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "The cancellation signal was delivered, but the active operation completed or the acknowledgement window elapsed without confirmed provider interruption.");
-            }
-
-            var status = Volatile.Read(ref _signalQueued) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.OwnerUnavailable;
-            var detail = status == CustomLoopAttemptCancellationStatus.NoActiveAttempt
-                ? "The active operation completed before cancellation was routed."
-                : _competingCancellationToken.IsCancellationRequested
-                    ? "A caller or deadline cancellation competed with the routed signal, so routed delivery could not be proved."
-                    : "The cancellation signal was queued, but delivery was not observed before the active operation completed or the acknowledgement window elapsed.";
-            return new CustomLoopAttemptCancellationResult(status, detail);
-        }
-
-        public void CompleteOwnerUnavailable()
-        {
-            Completion.TrySetResult(new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.OwnerUnavailable, "The workspace-host owner exited before provider interruption was confirmed."));
-        }
-
-        private void DeliverSignal()
-        {
-            try
-            {
-                if (_cancellation.IsCancellationRequested || _competingCancellationToken.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                Volatile.Write(ref _routedSignalDelivered, 1);
-                _cancellation.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-                Volatile.Write(ref _routedSignalDelivered, 0);
-                CompleteWithoutConfirmedInterruption();
-            }
-            catch (AggregateException)
-            {
-                // The cancellation state is already visible even when a provider callback fails.
-            }
-        }
-    }
-
-    private sealed class ActiveAttemptRegistration(CustomLoopAttemptCancellationHost host, string runId, ActiveAttempt attempt) : ICustomLoopAttemptCancellationRegistration
-    {
-        private int _completed;
-
-        public bool TryConfirmProviderInterruption(CancellationToken observedCancellationToken)
-        {
-            if (!attempt.CanConfirmProviderInterruption(observedCancellationToken) || Interlocked.Exchange(ref _completed, 1) != 0)
-            {
-                return false;
-            }
-
-            host.CompleteAttempt(runId, attempt.Generation, interrupted: true);
-            return true;
-        }
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _completed, 1) == 0)
-            {
-                host.CompleteAttempt(runId, attempt.Generation, interrupted: false);
-            }
-        }
+        return JsonSerializer.Deserialize<T>(payload, _wireJsonOptions) ?? throw new FormatException("The cancellation IPC payload is empty.");
     }
 
     private sealed record CancellationOwnerDescriptor(int SchemaVersion, string OwnerId, string PipeName, string Secret, int ProcessId, DateTimeOffset StartedAtUtc);

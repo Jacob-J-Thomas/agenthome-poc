@@ -1,15 +1,26 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops.Models;
 using System.Text;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Freezes a validated definition, current role authority, model, trigger, and context into an auditable run snapshot.
+/// </summary>
+/// <remarks>
+/// Admission never invokes a model. The run becomes dispatchable only after its canonical snapshot and admission audit-completion
+/// marker are durable, and an operation identifier can replay only the same canonical invocation.
+/// </remarks>
 public sealed class CustomLoopAdmissionService
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly IAuditLog _auditLog;
@@ -17,6 +28,15 @@ public sealed class CustomLoopAdmissionService
     private readonly TimeProvider _timeProvider;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopAdmissionService"/> type.
+    /// </summary>
+    /// <param name="definitionStore">The definition store.</param>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="identityGenerator">The identity generator.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopAdmissionService(ICustomLoopDefinitionStore definitionStore, ICustomLoopRunStore runStore, IAuditLog auditLog, ICustomLoopToolAuthorityProvider authorityProvider, ICustomLoopRunIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null)
     {
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
@@ -27,6 +47,12 @@ public sealed class CustomLoopAdmissionService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Admits an idempotent invocation without dispatching a provider request.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The admitted or replayed run, or a bounded validation, conflict, quota, or integrity result.</returns>
     public async Task<CustomLoopAdmissionResult> AdmitAsync(CustomLoopAdmissionRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -70,6 +96,8 @@ public sealed class CustomLoopAdmissionService
             return await AuditOutcomeAsync(request, result, useIntegrityWindow: false, cancellationToken);
         }
 
+        // Tool authority is captured from current server-owned role policy, never trusted from the
+        // caller or stale definition snapshot.
         CustomLoopToolAuthoritySnapshot authority;
         try
         {
@@ -142,6 +170,8 @@ public sealed class CustomLoopAdmissionService
             return await AuditOutcomeAsync(request, CustomLoopAdmissionResult.Invalid(validation.Errors), useIntegrityWindow: false, cancellationToken);
         }
 
+        // The store owns the atomic one-nonterminal-run and operation-id constraints. A competing
+        // admission therefore becomes a replay or explicit conflict, never a duplicate run.
         CustomLoopRunStoreResult stored;
         try
         {
@@ -178,12 +208,12 @@ public sealed class CustomLoopAdmissionService
         run = stored.Run ?? run;
         try
         {
-            using (var auditIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout))
+            using (var auditIntegrityWindow = new CancellationTokenSource(_integrityWriteTimeout))
             {
                 await _auditLog.AppendAsync(CreateAdmissionAudit(request, Result(CustomLoopAdmissionStatus.Admitted, run, "The custom-loop run was admitted and is ready for ordered execution.")), auditIntegrityWindow.Token);
             }
 
-            using var markerIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+            using var markerIntegrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
             run = await CompleteAdmissionAuditAsync(run, markerIntegrityWindow.Token);
             return Result(CustomLoopAdmissionStatus.Admitted, run, "The custom-loop run was admitted and its audit-integrity marker is durable before ordered execution.");
         }
@@ -421,7 +451,7 @@ public sealed class CustomLoopAdmissionService
 
     private async Task<CustomLoopAdmissionResult> AuditOutcomeAsync(CustomLoopAdmissionRequest request, CustomLoopAdmissionResult result, bool useIntegrityWindow, CancellationToken cancellationToken)
     {
-        using var integrityWindow = useIntegrityWindow ? new CancellationTokenSource(IntegrityWriteTimeout) : null;
+        using var integrityWindow = useIntegrityWindow ? new CancellationTokenSource(_integrityWriteTimeout) : null;
         var auditToken = integrityWindow?.Token ?? cancellationToken;
         try
         {
@@ -488,7 +518,7 @@ public sealed class CustomLoopAdmissionService
             FailureCode = "admission_audit_failed",
             FailureDetail = detail
         };
-        using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var integrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             var result = await _runStore.UpdateAsync(candidate, run.LifecycleVersion, integrityWindow.Token);

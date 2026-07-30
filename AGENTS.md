@@ -18,9 +18,13 @@ You are working on EmbodySense.
 - Prefer single-line method calls and argument lists.
 - Do not split method arguments across multiple lines unless there are more than 3 arguments, or keeping one line would make the code genuinely hard to read.
 - When a call must be split, use the smallest readable split and avoid cascading vertical formatting through nearby code.
-- Almost always keep each class, record, struct, interface, and enum in its own file, with the file named after the type. Extract independently meaningful private helper types instead of accumulating several types in one file.
+- For C#, use `PascalCase` for public types, members, positional-record properties, and compile-time constants; `camelCase` for parameters and locals; `_camelCase` for private instance, static, and readonly fields; `ITypeName` for interfaces; and `TName` for type parameters.
+- For intentionally unused lambda and anonymous-method parameters, prefer `_`, including the single-parameter form. Although a lone `_` remains an addressable C# parameter, this repository treats it as the explicit unused-value convention; do not replace it with a synthetic name solely to satisfy `camelCase`.
+- Run `dotnet format whitespace EmbodySense.sln --verify-no-changes --no-restore` and `dotnet format style EmbodySense.sln --verify-no-changes --no-restore --severity warn --diagnostics IDE1006` for C# changes.
+- Run `npm run lint` and `npm run format:check` for frontend changes.
+- Keep each class, record, struct, interface, and enum in its own file, with the file named after the type. Extract every behavior-bearing private helper type, including helpers that coordinate, synchronize, mutate, validate, dispose, or own lifecycle state, into its own matching file.
 - Place model and DTO types under an appropriate `Models/` folder, and give each non-private model or DTO its own named file.
-- A small model or DTO that is truly private to one containing class may remain in that class's file when it has no independent meaning and only a limited number of such private types have accumulated. Extract it once it grows, multiplies, or becomes useful outside that class.
+- A small model or DTO that is truly private to one containing class may remain in that class's file when it has no independent meaning, no behavior beyond property storage, and only a limited number of such private types have accumulated. Extract it once it grows, multiplies, or becomes useful outside that class. Generated files and partial declarations are the only source-layout exceptions: generated files require both a conventional generated suffix and an auto-generated marker, while a partial fragment may contain only its filename-matching type plus necessary partial ancestor containers.
 
 ## Implementation discipline
 
@@ -32,6 +36,7 @@ You are working on EmbodySense.
 - If documentation claims a capability that the source does not contain, treat that as a documentation/source mismatch and report it before filling in code.
 - If source contains partial or accidental work, do not treat it as project direction without user confirmation.
 - The current CLI `run` path prompts before initializing workspace scaffolding when the workspace is not already initialized, uses `codex app-server --stdio`, streams app-server `item/agentMessage/delta`, and exposes governed workspace actions through `embodysense.command`. Do not describe or reintroduce `codex exec` as the live run path without an explicit user decision.
+- Web and CLI share deterministic Codex runtime resolution through `Core.Clients` and the `Core.Startup` status facade. `--codex-path` is authoritative; otherwise Windows discovery prefers current Codex Desktop-managed binaries before PATH candidates. The runtime records the resolved path and version, requires an explicitly configured model to appear in app-server `model/list`, and never substitutes a model silently. Keep compatibility failures actionable and visible before accepting a conversation turn.
 - The current CLI `run` path loads the nearest `AGENTS.md` found by walking upward from `--workdir` and `.agent/ROLE.md` as contextual role instructions, `.agent/SOUL.md` and `.agent/PERSONALITY.md` as durable agent identity, and `.agent/CONTEXT.md`, `.agent/MEMORY.md`, and `.agent/models.json` as lower-authority startup context when those files exist and are non-empty. `.agent/AGENT.md` is intentionally unsupported; this POC requires workspace reinitialization after the rename.
 - The runtime context should tell the agent that `.agent/MEMORY.md` is the primary durable memory registry for storing, updating, creating, and retrieving most memories.
 - Conversation history under `.agent/memory/conversations/` is supporting transcript evidence. Query it only for specific cases such as exact wording, chronology, or recovering context that has not yet been distilled into `.agent/MEMORY.md`.
@@ -46,6 +51,9 @@ You are working on EmbodySense.
 
 ## Documentation maintenance
 
+- Production assemblies generate XML documentation. Document public and protected contracts, their meaningful parameters and return values, cancellation and exception behavior, lifecycle/concurrency constraints, and non-obvious authority, persistence, audit, or integrity invariants. Prefer an accurate explanation of why behavior exists over comments that restate syntax. Do not introduce a documentation claim that source and tests cannot support.
+- Keep the missing-documentation baseline explicit while it is being completed. Do not add broad permanent suppressions; narrow generated-code exclusions or temporary baselines must name their reason and removal condition.
+- Pull-request descriptions should state which contract or behavior documentation changed and identify any remaining source slices before claiming a documentation gate is complete.
 - Keep `README.md` aligned with the real CLI behavior.
 - Keep `docs/AGENT_LOOP.drawio` aligned with the real implementation whenever the default conversation loop, inference path, workspace scaffolding, permissions, or audit behavior changes.
 - Treat `docs/AGENT_LOOP.drawio` as editable source for diagrams.net / draw.io, not as a generated screenshot.

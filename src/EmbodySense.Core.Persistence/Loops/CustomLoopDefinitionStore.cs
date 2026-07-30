@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Models;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,8 +17,8 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     private const long MaxDefinitionArtifactBytes = 512 * 1024;
     private const long MaxTombstoneArtifactBytes = 16 * 1024;
     private const long MaxDefinitionMutationOperationArtifactBytes = 640 * 1024;
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> MutationGates = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _mutationGates = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -34,7 +36,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
         _paths = paths;
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
-        _mutationGate = MutationGates.GetOrAdd(Path.GetFullPath(paths.CustomLoopDefinitionsPath), _ => new SemaphoreSlim(1, 1));
+        _mutationGate = _mutationGates.GetOrAdd(Path.GetFullPath(paths.CustomLoopDefinitionsPath), _ => new SemaphoreSlim(1, 1));
     }
 
     public async Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CancellationToken cancellationToken = default)
@@ -590,7 +592,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         {
             var utf8Json = await _pathGuard.ReadAllBytesAsync(root, path, maximumBytes, artifactName, cancellationToken);
             RejectDuplicateProperties(utf8Json);
-            return JsonSerializer.Deserialize<T>(utf8Json, JsonOptions) ?? throw new FormatException($"{artifactName} `{path}` was empty.");
+            return JsonSerializer.Deserialize<T>(utf8Json, _jsonOptions) ?? throw new FormatException($"{artifactName} `{path}` was empty.");
         }
         catch (JsonException exception)
         {
@@ -600,7 +602,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
     private async Task WriteJsonAsync<T>(string root, string path, T artifact, CancellationToken cancellationToken)
     {
-        var json = JsonSerializer.Serialize(artifact, JsonOptions) + Environment.NewLine;
+        var json = JsonSerializer.Serialize(artifact, _jsonOptions) + Environment.NewLine;
         await _pathGuard.WriteTextAtomicallyAsync(root, path, json, cancellationToken);
     }
 
@@ -1263,50 +1265,6 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 RejectDuplicateProperties(item, $"{path}[{index}]", new HashSet<string>(StringComparer.Ordinal));
                 index++;
             }
-        }
-    }
-
-    private sealed record CustomLoopDefinitionMutationOperationRecord(
-        int SchemaVersion,
-        CustomLoopDefinitionMutationKind Kind,
-        string OperationId,
-        string RequestHash,
-        string LoopId,
-        string RoleId,
-        int? ExpectedDefinitionVersion,
-        CustomLoopDefinition? PlannedDefinition,
-        CustomLoopDefinition? PriorDefinition,
-        DateTimeOffset RequestedAtUtc,
-        DateTimeOffset UpdatedAtUtc,
-        CustomLoopDefinitionMutationState State,
-        CustomLoopDefinitionStoreStatus Outcome,
-        CustomLoopDefinition? ResultDefinition,
-        CustomLoopDefinitionConflict? ResultConflict,
-        CustomLoopDefinitionTombstone? ResultTombstone,
-        bool OutcomeAuditRecorded,
-        CustomLoopDefinition? OriginalDefinition,
-        DateTimeOffset RecordedAtUtc)
-    {
-        public CustomLoopDefinitionMutationOperation ToPublic()
-        {
-            return new CustomLoopDefinitionMutationOperation(
-                SchemaVersion,
-                Kind,
-                OperationId,
-                RequestHash,
-                LoopId,
-                RoleId,
-                ExpectedDefinitionVersion,
-                PlannedDefinition,
-                PriorDefinition,
-                RequestedAtUtc,
-                UpdatedAtUtc,
-                State,
-                Outcome,
-                ResultDefinition,
-                ResultConflict,
-                ResultTombstone,
-                OutcomeAuditRecorded);
         }
     }
 

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Loops;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
@@ -8,7 +9,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class LoopDefinitionStore : ILoopDefinitionStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
     private readonly WorkspacePaths _paths;
 
     public LoopDefinitionStore(WorkspacePaths paths)
@@ -23,7 +24,7 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         ValidateDefinition(definition);
 
         Directory.CreateDirectory(_paths.LoopDefinitionsPath);
-        var json = JsonSerializer.Serialize(definition, JsonOptions) + Environment.NewLine;
+        var json = JsonSerializer.Serialize(definition, _jsonOptions) + Environment.NewLine;
         await LoopArtifactFileWriter.WriteTextAsync(LoopArtifactPaths.GetDefinitionPath(_paths, definition.Id), json, cancellationToken);
     }
 
@@ -61,7 +62,7 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         try
         {
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            definition = await JsonSerializer.DeserializeAsync<LoopDefinition>(stream, JsonOptions, cancellationToken);
+            definition = await JsonSerializer.DeserializeAsync<LoopDefinition>(stream, _jsonOptions, cancellationToken);
         }
         catch (JsonException exception)
         {

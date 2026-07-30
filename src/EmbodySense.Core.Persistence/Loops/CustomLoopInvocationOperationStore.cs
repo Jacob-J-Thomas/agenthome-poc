@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Models;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
@@ -15,8 +17,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 {
     private const string MutationLockFileName = ".custom-loop-mutations.lock";
     private const string RetentionOperationFileName = "active.json";
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessGates = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _processGates = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -37,7 +39,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         _root = Path.GetFullPath(paths.CustomLoopInvocationOperationsPath);
         _retentionRoot = Path.GetFullPath(paths.CustomLoopInvocationReceiptRetentionPath);
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
-        _processGate = ProcessGates.GetOrAdd(_root, _ => new SemaphoreSlim(1, 1));
+        _processGate = _processGates.GetOrAdd(_root, _ => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -481,11 +483,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
 
         var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, CustomLoopLimits.MaxInvocationOperationUtf8Bytes, "Custom-loop invocation operation", cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, JsonOptions.MaxDepth, "Custom-loop invocation operation", path);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, _jsonOptions.MaxDepth, "Custom-loop invocation operation", path);
         CustomLoopInvocationOperation? operation;
         try
         {
-            operation = JsonSerializer.Deserialize<CustomLoopInvocationOperation>(bytes, JsonOptions);
+            operation = JsonSerializer.Deserialize<CustomLoopInvocationOperation>(bytes, _jsonOptions);
         }
         catch (JsonException exception)
         {
@@ -512,11 +514,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         string json;
         try
         {
-            json = JsonSerializer.Serialize(operation, JsonOptions);
+            json = JsonSerializer.Serialize(operation, _jsonOptions);
         }
         catch (JsonException exception)
         {
-            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop invocation operation", JsonOptions.MaxDepth, exception);
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop invocation operation", _jsonOptions.MaxDepth, exception);
         }
 
         if (Encoding.UTF8.GetByteCount(json) > CustomLoopLimits.MaxInvocationOperationUtf8Bytes)
@@ -681,11 +683,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
 
         var bytes = await _pathGuard.ReadAllBytesAsync(_retentionRoot, expectedPath, CustomLoopLimits.MaxInvocationReceiptRetentionOperationUtf8Bytes, "Invocation-receipt retention operation", cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, JsonOptions.MaxDepth, "Invocation-receipt retention operation", expectedPath);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, _jsonOptions.MaxDepth, "Invocation-receipt retention operation", expectedPath);
         CustomLoopInvocationReceiptRetentionOperation? operation;
         try
         {
-            operation = JsonSerializer.Deserialize<CustomLoopInvocationReceiptRetentionOperation>(bytes, JsonOptions);
+            operation = JsonSerializer.Deserialize<CustomLoopInvocationReceiptRetentionOperation>(bytes, _jsonOptions);
         }
         catch (JsonException exception)
         {
@@ -702,11 +704,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         string json;
         try
         {
-            json = JsonSerializer.Serialize(operation, JsonOptions);
+            json = JsonSerializer.Serialize(operation, _jsonOptions);
         }
         catch (JsonException exception)
         {
-            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Invocation-receipt retention operation", JsonOptions.MaxDepth, exception);
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Invocation-receipt retention operation", _jsonOptions.MaxDepth, exception);
         }
 
         if (Encoding.UTF8.GetByteCount(json) > CustomLoopLimits.MaxInvocationReceiptRetentionOperationUtf8Bytes)
@@ -826,21 +828,21 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
 
     private static bool IsAtomicWriteTemp(string fileName, Func<string, bool> validTarget)
     {
-        const string suffix = ".tmp";
-        const int guidLength = 32;
-        if (fileName.Length == 0 || fileName[0] != '.' || !fileName.EndsWith(suffix, StringComparison.Ordinal))
+        const string Suffix = ".tmp";
+        const int GuidLength = 32;
+        if (fileName.Length == 0 || fileName[0] != '.' || !fileName.EndsWith(Suffix, StringComparison.Ordinal))
         {
             return false;
         }
 
-        var guidStart = fileName.Length - suffix.Length - guidLength;
+        var guidStart = fileName.Length - Suffix.Length - GuidLength;
         if (guidStart <= 2 || fileName[guidStart - 1] != '.')
         {
             return false;
         }
 
         var target = fileName[1..(guidStart - 1)];
-        var guid = fileName.Substring(guidStart, guidLength);
+        var guid = fileName.Substring(guidStart, GuidLength);
         return validTarget(target) && Guid.TryParseExact(guid, "N", out _);
     }
 

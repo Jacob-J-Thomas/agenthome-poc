@@ -1,6 +1,7 @@
 using System.Text;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.LocalWorkspace;
+using EmbodySense.Core.Common.LocalWorkspace.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Clients.LocalWorkspace.Models;
 

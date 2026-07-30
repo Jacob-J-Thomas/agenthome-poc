@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Models;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
@@ -11,7 +13,7 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopInvocationOperationStoreTests
 {
-    private static readonly DateTimeOffset Timestamp = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _timestamp = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public async Task Pending_receipt_binds_context_once_and_conflicts_on_a_different_conversation()
@@ -59,7 +61,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var bound = await BindConversationAsync(first, pending, CustomLoopInvocationBindingState.ConversationWorkspaceExecutionBusy);
         var completed = bound with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
             State = CustomLoopInvocationOperationState.Complete,
             Outcome = CustomLoopInvocationOutcome.WorkspaceExecutionBusy,
             AdmissionStatus = "WorkspaceExecutionBusy",
@@ -93,20 +95,20 @@ public sealed class CustomLoopInvocationOperationStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopInvocationOperationStore(paths);
-        var pending = Pending("invoke-chronology", "prompt") with { UpdatedAtUtc = Timestamp.AddSeconds(5) };
+        var pending = Pending("invoke-chronology", "prompt") with { UpdatedAtUtc = _timestamp.AddSeconds(5) };
         await store.BeginAsync(pending);
         pending = await BindContextAsync(store, pending);
 
-        var regressed = CompletedAdmitted(pending) with { CreatedAtUtc = Timestamp.AddMinutes(-1), UpdatedAtUtc = Timestamp.AddSeconds(4) };
+        var regressed = CompletedAdmitted(pending) with { CreatedAtUtc = _timestamp.AddMinutes(-1), UpdatedAtUtc = _timestamp.AddSeconds(4) };
         var conflict = await store.CompleteAsync(regressed);
-        var completed = await store.CompleteAsync(regressed with { UpdatedAtUtc = Timestamp.AddSeconds(6) });
-        var replayed = await store.CompleteAsync(regressed with { UpdatedAtUtc = Timestamp.AddSeconds(6) });
+        var completed = await store.CompleteAsync(regressed with { UpdatedAtUtc = _timestamp.AddSeconds(6) });
+        var replayed = await store.CompleteAsync(regressed with { UpdatedAtUtc = _timestamp.AddSeconds(6) });
 
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, conflict.Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, completed.Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, replayed.Status);
-        Assert.Equal(Timestamp, completed.Operation!.CreatedAtUtc);
-        Assert.Equal(Timestamp.AddSeconds(6), completed.Operation.UpdatedAtUtc);
+        Assert.Equal(_timestamp, completed.Operation!.CreatedAtUtc);
+        Assert.Equal(_timestamp.AddSeconds(6), completed.Operation.UpdatedAtUtc);
     }
 
     [Fact]
@@ -158,11 +160,11 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var now = Timestamp.AddDays(30).AddSeconds(1);
+        var now = _timestamp.AddDays(30).AddSeconds(1);
         var time = new MutableTimeProvider(now);
         var store = new CustomLoopInvocationOperationStore(paths, time);
-        await PersistCompletedAsync(store, "invoke-expired", Timestamp.AddSeconds(1));
-        await PersistCompletedAsync(store, "invoke-newer", Timestamp.AddSeconds(2));
+        await PersistCompletedAsync(store, "invoke-expired", _timestamp.AddSeconds(1));
+        await PersistCompletedAsync(store, "invoke-newer", _timestamp.AddSeconds(2));
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(Pending("invoke-pending-retained", "pending"))).Status);
         var request = RetentionRequest(now);
 
@@ -171,7 +173,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.Reserved, reserved.Status);
         var candidate = Assert.Single(reserved.Operation!.Candidates);
         Assert.Equal("invoke-expired", candidate.OperationId);
-        Assert.Equal(Timestamp.AddSeconds(1), candidate.CompletedAtUtc);
+        Assert.Equal(_timestamp.AddSeconds(1), candidate.CompletedAtUtc);
         Assert.True(candidate.ArtifactUtf8Bytes > 0);
         Assert.Equal(CustomLoopLimits.Sha256HexCharacters, candidate.ArtifactHash.Length);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.RetentionRequired, (await store.BeginAsync(Pending("invoke-blocked-during-retention", "blocked"))).Status);
@@ -198,10 +200,10 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var now = Timestamp.AddDays(31);
+        var now = _timestamp.AddDays(31);
         var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
-        await PersistCompletedAsync(store, "invoke-changed", Timestamp.AddSeconds(1));
-        await PersistCompletedAsync(store, "invoke-still-expired", Timestamp.AddSeconds(2));
+        await PersistCompletedAsync(store, "invoke-changed", _timestamp.AddSeconds(1));
+        await PersistCompletedAsync(store, "invoke-still-expired", _timestamp.AddSeconds(2));
         var request = RetentionRequest(now);
         var reserved = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await store.ReserveCompletedReceiptRetentionAsync(request)).Operation);
         await store.MarkReceiptRetentionIntentAuditedAsync(reserved.OperationId, now.AddSeconds(1));
@@ -233,7 +235,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     public async Task Retention_never_selects_pending_receipts_and_reports_nothing_eligible()
     {
         using var workspace = new TestWorkspace();
-        var now = Timestamp.AddDays(90);
+        var now = _timestamp.AddDays(90);
         var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath), new MutableTimeProvider(now));
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(Pending("invoke-old-pending", "pending"))).Status);
 
@@ -249,10 +251,10 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var now = Timestamp.AddDays(31);
+        var now = _timestamp.AddDays(31);
         var time = new MutableTimeProvider(now);
         var first = new CustomLoopInvocationOperationStore(paths, time);
-        await PersistCompletedAsync(first, "invoke-crash-recovery", Timestamp.AddSeconds(1));
+        await PersistCompletedAsync(first, "invoke-crash-recovery", _timestamp.AddSeconds(1));
         var request = RetentionRequest(now);
         Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.Reserved, (await first.ReserveCompletedReceiptRetentionAsync(request)).Status);
         var second = new CustomLoopInvocationOperationStore(paths, time);
@@ -285,10 +287,10 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var requestedAtUtc = Timestamp.AddDays(31);
+        var requestedAtUtc = _timestamp.AddDays(31);
         var time = new MutableTimeProvider(requestedAtUtc.AddSeconds(12));
         var store = new CustomLoopInvocationOperationStore(paths, time);
-        await PersistCompletedAsync(store, "invoke-reservation-clock", Timestamp.AddSeconds(1));
+        await PersistCompletedAsync(store, "invoke-reservation-clock", _timestamp.AddSeconds(1));
 
         var reserved = await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(requestedAtUtc));
 
@@ -303,10 +305,10 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var now = Timestamp.AddDays(31);
+        var now = _timestamp.AddDays(31);
         var time = new MutableTimeProvider(now);
         var first = new CustomLoopInvocationOperationStore(paths, time);
-        await PersistCompletedAsync(first, "invoke-outcome-warning", Timestamp.AddSeconds(1));
+        await PersistCompletedAsync(first, "invoke-outcome-warning", _timestamp.AddSeconds(1));
         var request = RetentionRequest(now);
         var reserved = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await first.ReserveCompletedReceiptRetentionAsync(request)).Operation);
         await first.MarkReceiptRetentionIntentAuditedAsync(reserved.OperationId, now.AddSeconds(1));
@@ -337,10 +339,10 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var operationTemp = Path.Combine(paths.CustomLoopInvocationOperationsPath, $".invoke-interrupted.json.{Guid.NewGuid():N}.tmp");
         Directory.CreateDirectory(paths.CustomLoopInvocationOperationsPath);
         await File.WriteAllTextAsync(operationTemp, "partial operation");
-        var now = Timestamp.AddDays(31);
+        var now = _timestamp.AddDays(31);
         var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
 
-        await PersistCompletedAsync(store, "invoke-interrupted", Timestamp.AddSeconds(1));
+        await PersistCompletedAsync(store, "invoke-interrupted", _timestamp.AddSeconds(1));
 
         Assert.False(File.Exists(operationTemp));
         var retentionTemp = Path.Combine(paths.CustomLoopInvocationReceiptRetentionPath, $".active.json.{Guid.NewGuid():N}.tmp");
@@ -363,7 +365,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var store = new CustomLoopInvocationOperationStore(paths);
 
         await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(Pending("invoke-unsafe-store", "prompt")));
-        await Assert.ThrowsAsync<FormatException>(() => store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(Timestamp.AddDays(31))));
+        await Assert.ThrowsAsync<FormatException>(() => store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(_timestamp.AddDays(31))));
     }
 
     [Fact]
@@ -371,9 +373,9 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var now = Timestamp.AddDays(31);
+        var now = _timestamp.AddDays(31);
         var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
-        await PersistCompletedAsync(store, "invoke-valid-expired", Timestamp.AddSeconds(1));
+        await PersistCompletedAsync(store, "invoke-valid-expired", _timestamp.AddSeconds(1));
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, "invoke-malformed.json"), "not-json");
 
         await Assert.ThrowsAsync<FormatException>(() => store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now)));
@@ -438,7 +440,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         pending = await BindContextAsync(store, pending);
         var contradictory = pending with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
             State = CustomLoopInvocationOperationState.Complete,
             Outcome = CustomLoopInvocationOutcome.Rejected,
             AdmissionStatus = admissionStatus,
@@ -467,7 +469,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
             : await BindContextAsync(store, pending);
         var rejected = pending with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
             State = CustomLoopInvocationOperationState.Complete,
             Outcome = CustomLoopInvocationOutcome.Rejected,
             AdmissionStatus = admissionStatus,
@@ -495,7 +497,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
             .ToArray();
         var rejected = pending with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
             State = CustomLoopInvocationOperationState.Complete,
             Outcome = CustomLoopInvocationOutcome.Rejected,
             AdmissionStatus = "Invalid",
@@ -536,7 +538,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         pending = await BindContextAsync(store, pending);
         var rejected = pending with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
             State = CustomLoopInvocationOperationState.Complete,
             Outcome = CustomLoopInvocationOutcome.Rejected,
             AdmissionStatus = "Invalid",
@@ -598,17 +600,17 @@ public sealed class CustomLoopInvocationOperationStoreTests
 
     private static CustomLoopInvocationOperation Pending(string operationId, string prompt)
     {
-        const string loopId = "loop-store";
-        const int version = 2;
+        const string LoopId = "loop-store";
+        const int Version = 2;
         var definitionHash = new string('a', CustomLoopLimits.Sha256HexCharacters);
-        var requestHash = CustomLoopInvocationRequestHash.Compute(operationId, loopId, version, definitionHash, "embodysense.web", "web", "default", prompt, "OpenAiCodex", "test-model");
+        var requestHash = CustomLoopInvocationRequestHash.Compute(operationId, LoopId, Version, definitionHash, "embodysense.web", "web", "default", prompt, "OpenAiCodex", "test-model");
         var promptHash = CustomLoopInvocationRequestHash.ComputePromptHash(prompt);
         return new CustomLoopInvocationOperation(
             CustomLoopInvocationOperation.CurrentSchemaVersion,
             operationId,
             requestHash,
-            loopId,
-            version,
+            LoopId,
+            Version,
             definitionHash,
             "embodysense.web",
             "web",
@@ -619,8 +621,8 @@ public sealed class CustomLoopInvocationOperationStoreTests
             CustomLoopInvocationBindingState.Unbound,
             null,
             null,
-            Timestamp,
-            Timestamp,
+            _timestamp,
+            _timestamp,
             CustomLoopInvocationOperationState.Pending,
             CustomLoopInvocationOutcome.Unknown,
             string.Empty,
@@ -633,7 +635,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
     {
         return pending with
         {
-            UpdatedAtUtc = Timestamp.AddSeconds(1),
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
             State = CustomLoopInvocationOperationState.Complete,
             Outcome = CustomLoopInvocationOutcome.Admitted,
             AdmissionStatus = "Admitted",

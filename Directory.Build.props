@@ -4,5 +4,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RepositoryRelativeProjectDirectory>$([System.IO.Path]::GetRelativePath('$(MSBuildThisFileDirectory)', '$(MSBuildProjectDirectory)').Replace('\', '/'))</RepositoryRelativeProjectDirectory>
+    <IsTestProjectLocation>$([System.String]::Copy('$(RepositoryRelativeProjectDirectory)/').StartsWith('tests/'))</IsTestProjectLocation>
+    <GenerateDocumentationFile Condition="'$(IsTestProjectLocation)' != 'True'">true</GenerateDocumentationFile>
+    <!-- The source baseline is documented in issue #83 before CS1591 becomes an error. -->
+    <NoWarn Condition="'$(IsTestProjectLocation)' != 'True'">$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 </Project>

@@ -2,6 +2,7 @@ param(
     [switch]$SkipCoverage,
     [switch]$SkipRestore,
     [switch]$RunBrowserE2E,
+    [switch]$BrowserE2EOnly,
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug"
 )
@@ -11,6 +12,11 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $testsPath = Join-Path $repoRoot "tests"
+$e2eProjectPath = Join-Path $testsPath "EmbodySense.E2ETests\EmbodySense.E2ETests.csproj"
+
+if ($BrowserE2EOnly -and -not $RunBrowserE2E) {
+    throw "-BrowserE2EOnly requires -RunBrowserE2E."
+}
 
 function Invoke-CheckedNative {
     param(
@@ -53,23 +59,31 @@ try {
     if ($SkipRestore) {
         $buildArguments += "--no-restore"
     }
-    $buildArguments += "EmbodySense.sln"
+    $buildArguments += if ($BrowserE2EOnly) { $e2eProjectPath } else { "EmbodySense.sln" }
     $buildArguments += "-c"
     $buildArguments += $Configuration
     $buildArguments += "/p:RestoreIgnoreFailedSources=true"
 
     Invoke-CheckedNative "dotnet" $buildArguments
 
-    $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-    $npm = if ($runningOnWindows) { "npm.cmd" } else { "npm" }
-    Invoke-CheckedNative $npm @("test")
+    if (-not $BrowserE2EOnly) {
+        Invoke-CheckedNative "dotnet" @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal")
+        Invoke-CheckedNative "dotnet" @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal")
+
+        $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+        $npm = if ($runningOnWindows) { "npm.cmd" } else { "npm" }
+        Invoke-CheckedNative $npm @("ci", "--include=dev")
+        Invoke-CheckedNative $npm @("test")
+    }
 
     if ($RunBrowserE2E) {
         $oldRunBrowserE2E = $env:EMBODYSENSE_RUN_BROWSER_E2E
+        $oldBrowserE2EArtifacts = $env:EMBODYSENSE_BROWSER_E2E_ARTIFACTS
         try {
             $env:EMBODYSENSE_RUN_BROWSER_E2E = "1"
-            $e2eProjectPath = Join-Path $testsPath "EmbodySense.E2ETests\EmbodySense.E2ETests.csproj"
-            Invoke-CheckedNative "dotnet" @("test", $e2eProjectPath, "-c", $Configuration, "--no-build", "--no-restore", "--filter", "FullyQualifiedName~BrowserFlowTests", "/p:RestoreIgnoreFailedSources=true")
+            $browserE2ETestResultsPath = Join-Path $testsPath "EmbodySense.E2ETests\TestResults\BrowserE2E"
+            $env:EMBODYSENSE_BROWSER_E2E_ARTIFACTS = $browserE2ETestResultsPath
+            Invoke-CheckedNative "dotnet" @("test", $e2eProjectPath, "-c", $Configuration, "--no-build", "--no-restore", "--filter", "FullyQualifiedName~BrowserFlowTests", "--logger", "trx;LogFileName=browser-e2e.trx", "--results-directory", $browserE2ETestResultsPath, "/p:RestoreIgnoreFailedSources=true")
         }
         finally {
             if ($null -eq $oldRunBrowserE2E) {
@@ -78,7 +92,18 @@ try {
             else {
                 $env:EMBODYSENSE_RUN_BROWSER_E2E = $oldRunBrowserE2E
             }
+
+            if ($null -eq $oldBrowserE2EArtifacts) {
+                Remove-Item Env:\EMBODYSENSE_BROWSER_E2E_ARTIFACTS -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:EMBODYSENSE_BROWSER_E2E_ARTIFACTS = $oldBrowserE2EArtifacts
+            }
         }
+    }
+
+    if ($BrowserE2EOnly) {
+        return
     }
 
     if (-not $SkipCoverage) {

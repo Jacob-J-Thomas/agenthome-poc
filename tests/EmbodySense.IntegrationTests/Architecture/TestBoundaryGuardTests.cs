@@ -4,7 +4,7 @@ namespace EmbodySense.IntegrationTests.Architecture;
 
 public sealed class TestBoundaryGuardTests
 {
-    private static readonly string[] ForbiddenPrivateAccessTokens =
+    private static readonly string[] _forbiddenPrivateAccessTokens =
     [
         "InternalsVisibleTo",
         "System.Reflection",
@@ -18,14 +18,14 @@ public sealed class TestBoundaryGuardTests
         "GetConstructors("
     ];
 
-    private static readonly string[] ForbiddenFrontendPrivateAccessTokens =
+    private static readonly string[] _forbiddenFrontendPrivateAccessTokens =
     [
         "__appTestApi",
         "createApiExport",
         "globalThis.__appTestApi"
     ];
 
-    private static readonly IReadOnlyDictionary<string, string[]> ExpectedTestProjectReferences = new Dictionary<string, string[]>
+    private static readonly IReadOnlyDictionary<string, string[]> _expectedTestProjectReferences = new Dictionary<string, string[]>
     {
         ["EmbodySense.Tests.Support"] = [],
         ["EmbodySense.Core.Common.Tests"] = ["EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
@@ -60,7 +60,7 @@ public sealed class TestBoundaryGuardTests
             .EnumerateFiles(Path.Combine(root, "tests"), "*.cs", SearchOption.AllDirectories)
             .Where(file => IsAuthoredSourceFile(root, file))
             .Where(file => !string.Equals(Path.GetFileName(file), nameof(TestBoundaryGuardTests) + ".cs", StringComparison.Ordinal))
-            .SelectMany(file => ForbiddenPrivateAccessTokens
+            .SelectMany(file => _forbiddenPrivateAccessTokens
                 .Where(token => File.ReadAllText(file).Contains(token, StringComparison.Ordinal))
                 .Select(token => $"{Path.GetRelativePath(root, file)} contains {token}"))
             .ToArray();
@@ -85,7 +85,7 @@ public sealed class TestBoundaryGuardTests
     {
         var root = FindRepositoryRoot();
 
-        foreach (var item in ExpectedTestProjectReferences)
+        foreach (var item in _expectedTestProjectReferences)
         {
             var projectPath = Path.Combine(root, "tests", item.Key, item.Key + ".csproj");
             var actual = ReadProjectReferences(projectPath);
@@ -102,7 +102,7 @@ public sealed class TestBoundaryGuardTests
         var frontendTestPath = Path.Combine(root, "tests", "frontend");
         var violations = Directory
             .EnumerateFiles(frontendTestPath, "*.mjs", SearchOption.AllDirectories)
-            .SelectMany(file => ForbiddenFrontendPrivateAccessTokens
+            .SelectMany(file => _forbiddenFrontendPrivateAccessTokens
                 .Where(token => File.ReadAllText(file).Contains(token, StringComparison.Ordinal))
                 .Select(token => $"{Path.GetRelativePath(root, file)} contains {token}"))
             .ToArray();

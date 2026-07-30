@@ -1,3 +1,6 @@
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Models;
 using EmbodySense.Core.Application.Memory;
@@ -28,7 +31,8 @@ public sealed class AgentRuntime : IAsyncDisposable
         ConversationRuntimeState conversationState,
         IAsyncDisposable inferenceClient,
         IDefaultConversationLoopRunner loopRunner,
-        CustomLoopRuntimeFacade customLoops)
+        CustomLoopRuntimeFacade customLoops,
+        CodexRuntimeStatus codexRuntimeStatus)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(surface);
@@ -38,6 +42,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(inferenceClient);
         ArgumentNullException.ThrowIfNull(loopRunner);
         ArgumentNullException.ThrowIfNull(customLoops);
+        ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
         Paths = paths;
         Surface = surface;
@@ -48,11 +53,14 @@ public sealed class AgentRuntime : IAsyncDisposable
         _loopRunner = loopRunner;
         _customLoops = customLoops;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
+        CodexRuntimeStatus = codexRuntimeStatus;
     }
 
     internal WorkspacePaths Paths { get; }
 
     public AgentRuntimeSurface Surface { get; }
+
+    public CodexRuntimeStatus CodexRuntimeStatus { get; }
 
     public bool CustomLoopRecoveryRequired => _customLoops.CustomRecoveryRequired;
 

@@ -16,9 +16,9 @@ internal static class CustomLoopCrossProcessFileLock
 
         if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
         {
-            const int exclusiveNonblocking = 2 | 4;
+            const int ExclusiveNonblocking = 2 | 4;
             var descriptor = ownership.SafeFileHandle.DangerousGetHandle().ToInt32();
-            return Flock(descriptor, exclusiveNonblocking) == 0;
+            return Flock(descriptor, ExclusiveNonblocking) == 0;
         }
 
         return false;
@@ -29,16 +29,6 @@ internal static class CustomLoopCrossProcessFileLock
 
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
     private static extern int Flock(int fileDescriptor, int operation);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Overlapped
-    {
-        public IntPtr Internal;
-        public IntPtr InternalHigh;
-        public uint Offset;
-        public uint OffsetHigh;
-        public IntPtr EventHandle;
-    }
 
     private const uint LockFileExclusive = 0x00000002;
     private const uint LockFileFailImmediately = 0x00000001;

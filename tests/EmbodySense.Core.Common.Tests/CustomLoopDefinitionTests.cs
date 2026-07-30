@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Loops.Custom;
 using System.Text.Json;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 
@@ -5,7 +6,7 @@ namespace EmbodySense.Core.Common.Tests;
 
 public sealed class CustomLoopDefinitionTests
 {
-    private static readonly DateTimeOffset CreatedAtUtc = new(2026, 7, 16, 12, 30, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _createdAtUtc = new(2026, 7, 16, 12, 30, 0, TimeSpan.Zero);
 
     [Fact]
     public void Seed_is_valid_and_matches_the_approved_prompt_only_defaults()
@@ -18,8 +19,8 @@ public sealed class CustomLoopDefinitionTests
         Assert.Empty(result.Errors);
         Assert.Equal(CustomLoopDefinition.CurrentSchemaVersion, definition.SchemaVersion);
         Assert.Equal(1, definition.DefinitionVersion);
-        Assert.Equal(CreatedAtUtc, definition.CreatedAtUtc);
-        Assert.Equal(CreatedAtUtc, definition.UpdatedAtUtc);
+        Assert.Equal(_createdAtUtc, definition.CreatedAtUtc);
+        Assert.Equal(_createdAtUtc, definition.UpdatedAtUtc);
         Assert.Equal("Untitled loop", definition.DisplayName);
         Assert.Empty(definition.Description);
         Assert.Equal("role-default", definition.RoleId);
@@ -211,7 +212,7 @@ public sealed class CustomLoopDefinitionTests
         var definition = ValidDefinition();
         var step = definition.InferenceSteps[0];
         var resolved = definition.ContextDefaults.Inference;
-        var nonUtc = CreatedAtUtc.ToOffset(TimeSpan.FromHours(-5));
+        var nonUtc = _createdAtUtc.ToOffset(TimeSpan.FromHours(-5));
 
         yield return [definition with { SchemaVersion = 2 }, "unsupported_schema_version", "schemaVersion"];
         yield return [definition with { Id = "../escape" }, "invalid_artifact_id", "id"];
@@ -298,6 +299,6 @@ public sealed class CustomLoopDefinitionTests
 
     private static CustomLoopDefinition ValidDefinition()
     {
-        return CustomLoopDefinition.CreateSeed("loop-one", "role-default", "step-one", "operation-one", CreatedAtUtc);
+        return CustomLoopDefinition.CreateSeed("loop-one", "role-default", "step-one", "operation-one", _createdAtUtc);
     }
 }

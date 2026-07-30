@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
@@ -9,7 +11,7 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopDefinitionStoreTests
 {
-    private static readonly DateTimeOffset InitialTimestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+    private static readonly DateTimeOffset _initialTimestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
 
     [Fact]
     public async Task CreateAsync_round_trips_strict_canonical_json_in_the_custom_directory()
@@ -67,7 +69,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
         var created = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, created);
-        var skipped = CustomLoopDefinitionContentHash.Apply(created with { DefinitionVersion = 3, UpdatedAtUtc = InitialTimestamp.AddMinutes(2), LastMutationOperationId = "save-3" });
+        var skipped = CustomLoopDefinitionContentHash.Apply(created with { DefinitionVersion = 3, UpdatedAtUtc = _initialTimestamp.AddMinutes(2), LastMutationOperationId = "save-3" });
 
         var exception = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(skipped, expectedDefinitionVersion: 1));
 
@@ -168,7 +170,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var staleCandidate = Advance(created, "Stale", "save-stale");
 
         var update = await store.UpdateAsync(staleCandidate, expectedDefinitionVersion: 1);
-        var delete = await store.DeleteAsync(created.Id, expectedDefinitionVersion: 1, "delete-stale", InitialTimestamp.AddMinutes(3));
+        var delete = await store.DeleteAsync(created.Id, expectedDefinitionVersion: 1, "delete-stale", _initialTimestamp.AddMinutes(3));
 
         Assert.Equal(CustomLoopDefinitionStoreStatus.Conflict, update.Status);
         Assert.Equal(CustomLoopDefinitionStoreStatus.Conflict, delete.Status);
@@ -190,7 +192,7 @@ public sealed class CustomLoopDefinitionStoreTests
 
         var loaded = await store.GetAsync("missing-loop");
         var update = await store.UpdateAsync(missingUpdate, expectedDefinitionVersion: 1);
-        var delete = await store.DeleteAsync("missing-loop", expectedDefinitionVersion: 1, "delete-missing", InitialTimestamp.AddMinutes(2));
+        var delete = await store.DeleteAsync("missing-loop", expectedDefinitionVersion: 1, "delete-missing", _initialTimestamp.AddMinutes(2));
 
         Assert.Null(loaded);
         Assert.Equal(CustomLoopDefinitionStoreStatus.NotFound, update.Status);
@@ -245,7 +247,7 @@ public sealed class CustomLoopDefinitionStoreTests
 
         await Assert.ThrowsAsync<FormatException>(() => store.CreateAsync(unsafeDefinition));
         await Assert.ThrowsAsync<ArgumentException>(() => store.GetAsync(loopId));
-        await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync(loopId, 1, "delete-safe", InitialTimestamp));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync(loopId, 1, "delete-safe", _initialTimestamp));
     }
 
     [Fact]
@@ -254,9 +256,9 @@ public sealed class CustomLoopDefinitionStoreTests
         using var workspace = new TestWorkspace();
         var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
 
-        await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync("safe-loop", 1, "../escape", InitialTimestamp));
-        await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync("safe-loop", 1, "delete-safe", InitialTimestamp.ToOffset(TimeSpan.FromHours(1))));
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.DeleteAsync("safe-loop", 0, "delete-safe", InitialTimestamp));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync("safe-loop", 1, "../escape", _initialTimestamp));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync("safe-loop", 1, "delete-safe", _initialTimestamp.ToOffset(TimeSpan.FromHours(1))));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.DeleteAsync("safe-loop", 0, "delete-safe", _initialTimestamp));
     }
 
     [Fact]
@@ -370,7 +372,7 @@ public sealed class CustomLoopDefinitionStoreTests
         Directory.CreateDirectory(runDirectory);
         var runPath = Path.Combine(runDirectory, "run-1.json");
         await File.WriteAllTextAsync(runPath, "historical evidence");
-        var deletedAt = InitialTimestamp.AddMinutes(4);
+        var deletedAt = _initialTimestamp.AddMinutes(4);
 
         var result = await store.DeleteAsync(definition.Id, 1, "delete-1", deletedAt);
 
@@ -395,11 +397,11 @@ public sealed class CustomLoopDefinitionStoreTests
         var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
         var definition = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, definition);
-        await store.DeleteAsync(definition.Id, 1, "delete-1", InitialTimestamp.AddMinutes(2));
+        await store.DeleteAsync(definition.Id, 1, "delete-1", _initialTimestamp.AddMinutes(2));
 
-        var replay = await store.DeleteAsync(definition.Id, 1, "delete-1", InitialTimestamp.AddMinutes(3));
-        var otherOperation = await store.DeleteAsync(definition.Id, 1, "delete-2", InitialTimestamp.AddMinutes(3));
-        var otherVersion = await store.DeleteAsync(definition.Id, 2, "delete-1", InitialTimestamp.AddMinutes(3));
+        var replay = await store.DeleteAsync(definition.Id, 1, "delete-1", _initialTimestamp.AddMinutes(3));
+        var otherOperation = await store.DeleteAsync(definition.Id, 1, "delete-2", _initialTimestamp.AddMinutes(3));
+        var otherVersion = await store.DeleteAsync(definition.Id, 2, "delete-1", _initialTimestamp.AddMinutes(3));
 
         Assert.Equal(CustomLoopDefinitionStoreStatus.AlreadyDeleted, replay.Status);
         Assert.Equal("delete-1", replay.Tombstone!.MutationOperationId);
@@ -415,7 +417,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
         var definition = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, definition);
-        await store.DeleteAsync(definition.Id, 1, "delete-1", InitialTimestamp.AddMinutes(2));
+        await store.DeleteAsync(definition.Id, 1, "delete-1", _initialTimestamp.AddMinutes(2));
         var update = Advance(definition, "Attempted resurrection", "save-2");
 
         var recreate = CustomLoopDefinitionContentHash.Apply(definition with { LastMutationOperationId = "create-again" });
@@ -440,7 +442,7 @@ public sealed class CustomLoopDefinitionStoreTests
 
         await Assert.ThrowsAsync<FormatException>(() => store.CreateAsync(CreateDefinition("loop-alpha")));
         await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("loop-alpha"));
-        await Assert.ThrowsAsync<FormatException>(() => store.DeleteAsync("loop-alpha", 1, "delete-1", InitialTimestamp));
+        await Assert.ThrowsAsync<FormatException>(() => store.DeleteAsync("loop-alpha", 1, "delete-1", _initialTimestamp));
     }
 
     [Fact]
@@ -481,10 +483,10 @@ public sealed class CustomLoopDefinitionStoreTests
         await CreateCommittedAsync(store, original);
         var updated = Advance(original, "Updated", "save-2");
         await store.UpdateAsync(updated, expectedDefinitionVersion: 1);
-        var regeneratedRetry = CustomLoopDefinition.CreateSeed("loop-new-id", original.RoleId, "step-new-id", original.LastMutationOperationId, InitialTimestamp.AddHours(1));
+        var regeneratedRetry = CustomLoopDefinition.CreateSeed("loop-new-id", original.RoleId, "step-new-id", original.LastMutationOperationId, _initialTimestamp.AddHours(1));
 
         var replayAfterUpdate = await store.CreateAsync(regeneratedRetry);
-        await store.DeleteAsync(original.Id, 2, "delete-2", InitialTimestamp.AddMinutes(3));
+        await store.DeleteAsync(original.Id, 2, "delete-2", _initialTimestamp.AddMinutes(3));
         var replayAfterDelete = await store.CreateAsync(regeneratedRetry);
 
         Assert.Equal(CustomLoopDefinitionStoreStatus.AlreadyCreated, replayAfterUpdate.Status);
@@ -503,7 +505,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
         var original = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, original);
-        var conflictingRequest = CustomLoopDefinition.CreateSeed("loop-other", "role-other", "step-other", original.LastMutationOperationId, InitialTimestamp.AddHours(1));
+        var conflictingRequest = CustomLoopDefinition.CreateSeed("loop-other", "role-other", "step-other", original.LastMutationOperationId, _initialTimestamp.AddHours(1));
 
         var result = await store.CreateAsync(conflictingRequest);
 
@@ -669,7 +671,7 @@ public sealed class CustomLoopDefinitionStoreTests
 
         var collisionPaths = new WorkspacePaths(collisionWorkspace.RootPath);
         var collisionStore = new CustomLoopDefinitionStore(collisionPaths);
-        var collision = CustomLoopDefinition.CreateSeed(original.Id, original.RoleId, "collision-step", "collision-create", InitialTimestamp.AddHours(1));
+        var collision = CustomLoopDefinition.CreateSeed(original.Id, original.RoleId, "collision-step", "collision-create", _initialTimestamp.AddHours(1));
         await CreateCommittedAsync(collisionStore, collision);
         File.Copy(Path.Combine(collisionPaths.CustomLoopDefinitionsPath, collision.Id + ".json"), Path.Combine(paths.CustomLoopDefinitionsPath, collision.Id + ".json"));
         File.Copy(Path.Combine(collisionPaths.CustomLoopDefinitionOperationsPath, collision.LastMutationOperationId + ".json"), Path.Combine(paths.CustomLoopDefinitionOperationsPath, collision.LastMutationOperationId + ".json"));
@@ -714,7 +716,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var created = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, created);
         var claimedPrior = CustomLoopDefinitionContentHash.Apply(created with { RoleId = "other-role" });
-        var deletedAtUtc = InitialTimestamp.AddMinutes(2);
+        var deletedAtUtc = _initialTimestamp.AddMinutes(2);
         var mutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "delete-wrong-role", 'b', created.Id, claimedPrior.RoleId, 1, null, claimedPrior, deletedAtUtc);
 
         var exception = await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteAsync(created.Id, 1, mutation.OperationId, deletedAtUtc, mutation));
@@ -806,7 +808,7 @@ public sealed class CustomLoopDefinitionStoreTests
                 operation["roleId"] = "role-other";
                 break;
             case "timestamp":
-                operation["recordedAtUtc"] = InitialTimestamp.AddMinutes(1).ToString("O");
+                operation["recordedAtUtc"] = _initialTimestamp.AddMinutes(1).ToString("O");
                 break;
             case "kind":
                 operation["kind"] = "delete";
@@ -835,7 +837,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var store = new CustomLoopDefinitionStore(paths);
         var definition = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, definition);
-        await store.DeleteAsync(definition.Id, 1, "delete-1", InitialTimestamp.AddMinutes(2));
+        await store.DeleteAsync(definition.Id, 1, "delete-1", _initialTimestamp.AddMinutes(2));
         var path = Path.Combine(paths.CustomLoopDefinitionTombstonesPath, definition.Id + ".json");
         var tombstone = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
         switch (corruption)
@@ -847,7 +849,7 @@ public sealed class CustomLoopDefinitionStoreTests
                 tombstone["lastContentHash"] = "bad";
                 break;
             case "timestamp":
-                tombstone["deletedAtUtc"] = InitialTimestamp.ToOffset(TimeSpan.FromHours(1)).ToString("O");
+                tombstone["deletedAtUtc"] = _initialTimestamp.ToOffset(TimeSpan.FromHours(1)).ToString("O");
                 break;
         }
 
@@ -874,7 +876,7 @@ public sealed class CustomLoopDefinitionStoreTests
         await CreateCommittedAsync(secondStore, second);
         var definitionPath = Path.Combine(secondPaths.CustomLoopDefinitionsPath, second.Id + ".json");
         var definitionJson = await File.ReadAllTextAsync(definitionPath);
-        await secondStore.DeleteAsync(second.Id, 1, "delete-beta", InitialTimestamp.AddMinutes(2));
+        await secondStore.DeleteAsync(second.Id, 1, "delete-beta", _initialTimestamp.AddMinutes(2));
         await File.WriteAllTextAsync(definitionPath, definitionJson);
         await Assert.ThrowsAsync<FormatException>(() => secondStore.GetAsync(second.Id));
     }
@@ -887,7 +889,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var store = new CustomLoopDefinitionStore(paths);
         var definition = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, definition);
-        await store.DeleteAsync(definition.Id, 1, "delete-1", InitialTimestamp.AddMinutes(2));
+        await store.DeleteAsync(definition.Id, 1, "delete-1", _initialTimestamp.AddMinutes(2));
         File.Delete(Path.Combine(paths.CustomLoopDefinitionOperationsPath, definition.LastMutationOperationId + ".json"));
 
         var exception = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(definition.Id));
@@ -919,7 +921,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var crossKind = Mutation(CustomLoopDefinitionMutationKind.Delete, updateOne.OperationId, 'd', versionThree.Id, versionThree.RoleId, 3, null, versionThree, versionThree.UpdatedAtUtc.AddMinutes(1));
         var crossKindResult = await restarted.DeleteAsync(versionThree.Id, 3, crossKind.OperationId, crossKind.RequestedAtUtc, crossKind);
 
-        var other = CreateDefinition("loop-beta") with { CreatedAtUtc = InitialTimestamp.AddHours(1), UpdatedAtUtc = InitialTimestamp.AddHours(1) };
+        var other = CreateDefinition("loop-beta") with { CreatedAtUtc = _initialTimestamp.AddHours(1), UpdatedAtUtc = _initialTimestamp.AddHours(1) };
         other = CustomLoopDefinitionContentHash.Apply(other);
         await CreateCommittedAsync(restarted, other);
         var otherUpdate = Advance(other, "Other", updateOne.OperationId);
@@ -952,7 +954,7 @@ public sealed class CustomLoopDefinitionStoreTests
 
         var deletedDefinition = CreateDefinition("loop-delete");
         await CreateCommittedAsync(store, deletedDefinition);
-        var deletedAt = InitialTimestamp.AddMinutes(3);
+        var deletedAt = _initialTimestamp.AddMinutes(3);
         var deleteMutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "shared-delete", 'b', deletedDefinition.Id, deletedDefinition.RoleId, 1, null, deletedDefinition, deletedAt);
         await store.DeleteAsync(deletedDefinition.Id, 1, deleteMutation.OperationId, deletedAt, deleteMutation);
         await store.MarkOperationOutcomeAuditedAsync(deleteMutation.OperationId);
@@ -972,7 +974,7 @@ public sealed class CustomLoopDefinitionStoreTests
         var store = new CustomLoopDefinitionStore(paths);
         var definition = CreateDefinition("loop-alpha");
         await CreateCommittedAsync(store, definition);
-        var deletedAt = InitialTimestamp.AddMinutes(2);
+        var deletedAt = _initialTimestamp.AddMinutes(2);
         var mutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "delete-durable", 'd', definition.Id, definition.RoleId, 1, null, definition, deletedAt);
 
         var deleted = await store.DeleteAsync(definition.Id, 1, mutation.OperationId, deletedAt, mutation);
@@ -997,7 +999,7 @@ public sealed class CustomLoopDefinitionStoreTests
         await CreateCommittedAsync(store, definition);
         var definitionPath = Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json");
         var definitionJson = await File.ReadAllTextAsync(definitionPath);
-        var deletedAt = InitialTimestamp.AddMinutes(2);
+        var deletedAt = _initialTimestamp.AddMinutes(2);
         var mutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "delete-interrupted", 'd', definition.Id, definition.RoleId, 1, null, definition, deletedAt);
         await store.DeleteAsync(definition.Id, 1, mutation.OperationId, deletedAt, mutation);
         await RewriteOperationAsPendingAsync(paths, mutation.OperationId);
@@ -1051,7 +1053,7 @@ public sealed class CustomLoopDefinitionStoreTests
         await CreateCommittedAsync(deleteStore, deleteDefinition);
         var deleteDefinitionPath = Path.Combine(deletePaths.CustomLoopDefinitionsPath, deleteDefinition.Id + ".json");
         var deleteJson = await File.ReadAllTextAsync(deleteDefinitionPath);
-        var deletedAt = InitialTimestamp.AddMinutes(2);
+        var deletedAt = _initialTimestamp.AddMinutes(2);
         var deleteMutation = Mutation(CustomLoopDefinitionMutationKind.Delete, "delete-recovery", 'd', deleteDefinition.Id, deleteDefinition.RoleId, 1, null, deleteDefinition, deletedAt);
         await deleteStore.DeleteAsync(deleteDefinition.Id, 1, deleteMutation.OperationId, deletedAt, deleteMutation);
         await RewriteOperationAsPendingAsync(deletePaths, deleteMutation.OperationId);
@@ -1071,7 +1073,7 @@ public sealed class CustomLoopDefinitionStoreTests
 
     private static CustomLoopDefinition CreateDefinition(string id)
     {
-        return CustomLoopDefinition.CreateSeed(id, "default-assistant", $"{id}-step-1", $"create-{id}", InitialTimestamp);
+        return CustomLoopDefinition.CreateSeed(id, "default-assistant", $"{id}-step-1", $"create-{id}", _initialTimestamp);
     }
 
     private static CustomLoopDefinitionMutationRequest Mutation(CustomLoopDefinitionMutationKind kind, string operationId, char hashCharacter, string loopId, string roleId, int? expectedVersion, CustomLoopDefinition? planned, CustomLoopDefinition? prior, DateTimeOffset requestedAt)

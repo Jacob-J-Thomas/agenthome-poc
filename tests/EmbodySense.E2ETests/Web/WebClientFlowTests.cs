@@ -1,3 +1,5 @@
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Governance;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
@@ -6,7 +8,8 @@ using System.Net.WebSockets;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web;
@@ -19,7 +22,7 @@ namespace EmbodySense.E2ETests.Web;
 
 public sealed class WebClientFlowTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     [Fact]
     public async Task Localhost_web_client_serves_assets_and_bootstrap_endpoints()
@@ -33,8 +36,8 @@ public sealed class WebClientFlowTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var index = await client.GetStringAsync("/");
             var script = await client.GetStringAsync("/app.js");
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
-            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", JsonOptions);
+            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
+            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
             var rejectedConfig = await client.GetAsync("/api/configuration");
 
             Assert.Contains("EmbodySense", index);
@@ -54,13 +57,14 @@ public sealed class WebClientFlowTests
     public async Task Signalr_browser_flow_initializes_workspace_and_loads_history_without_model_inference()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexExecutablePath: codexExecutable);
         await app.StartAsync();
 
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
+            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
             await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
 
             var initializeMessages = await signalr.InvokeAndCollectAsync("InitializeWorkspace");
@@ -69,6 +73,7 @@ public sealed class WebClientFlowTests
             Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
 
             await WriteCurrentTranscriptAsync(workspace, "e2e restored prompt", "e2e restored answer");
+            await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).StartFreshConversationAsync();
 
             var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history");
             var historyEvent = Assert.Single(GetStreamEvents(historyMessages));
@@ -117,7 +122,7 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
+            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
             await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
             var input = new LoopRunInvocationInput("loop-approval", 1, new string('a', 64), "invoke-concurrent-approval", "prompt");
 
@@ -175,13 +180,23 @@ public sealed class WebClientFlowTests
         }
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, Action<IServiceCollection>? configureServices = null)
+    private static WebApplication CreateApp(
+        string rootPath,
+        out WebRunOptions options,
+        Action<IServiceCollection>? configureServices = null,
+        string? codexExecutablePath = null)
     {
         var port = GetFreePort();
         var portText = port.ToString(CultureInfo.InvariantCulture);
-        var args = new[] { "--workdir", rootPath, "--port", portText };
-        options = WebRunOptions.FromArguments(args);
-        var builder = Program.CreateBuilder(args, options);
+        var args = new List<string> { "--workdir", rootPath, "--port", portText };
+        if (!string.IsNullOrWhiteSpace(codexExecutablePath))
+        {
+            args.AddRange(["--model", "gpt-test", "--codex-path", codexExecutablePath]);
+        }
+
+        var arguments = args.ToArray();
+        options = WebRunOptions.FromArguments(arguments);
+        var builder = Program.CreateBuilder(arguments, options);
         configureServices?.Invoke(builder.Services);
         var app = builder.Build();
         Program.ConfigurePipeline(app);
@@ -240,7 +255,7 @@ public sealed class WebClientFlowTests
         {
             try
             {
-                var status = await client.GetFromJsonAsync<WebStatus>("/api/status", JsonOptions);
+                var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
                 return status ?? throw new InvalidOperationException("Status response was empty.");
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
@@ -270,7 +285,7 @@ public sealed class WebClientFlowTests
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "user", prompt);
         var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "assistant", answer);
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, JsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, JsonOptions) + Environment.NewLine);
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, _jsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, _jsonOptions) + Environment.NewLine);
     }
 
     private static IReadOnlyList<JsonElement> GetStreamEvents(IReadOnlyList<JsonElement> messages)
@@ -290,7 +305,7 @@ public sealed class WebClientFlowTests
 
     private static T Deserialize<T>(JsonElement element)
     {
-        return JsonSerializer.Deserialize<T>(element.GetRawText(), JsonOptions) ?? throw new InvalidOperationException($"Could not deserialize {typeof(T).Name}.");
+        return JsonSerializer.Deserialize<T>(element.GetRawText(), _jsonOptions) ?? throw new InvalidOperationException($"Could not deserialize {typeof(T).Name}.");
     }
 
     private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
@@ -475,7 +490,7 @@ public sealed class WebClientFlowTests
 
         private async Task SendRawAsync(object payload, CancellationToken cancellationToken)
         {
-            var text = JsonSerializer.Serialize(payload, JsonOptions) + RecordSeparator;
+            var text = JsonSerializer.Serialize(payload, _jsonOptions) + RecordSeparator;
             var bytes = Encoding.UTF8.GetBytes(text);
             await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
         }

@@ -1,3 +1,7 @@
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -12,7 +16,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
 public sealed class CustomLoopContextResolverTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 16, 18, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _now = new(2026, 7, 16, 18, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public void Resolver_rejects_blank_node_instructions_and_tampered_admitted_context()
@@ -169,7 +173,7 @@ public sealed class CustomLoopContextResolverTests
             false,
             null,
             null,
-            Now);
+            _now);
         run = run with
         {
             ContextSnapshot = CustomLoopContextSnapshotHash.Apply(run.ContextSnapshot with { SourceManifest = manifest })
@@ -269,7 +273,7 @@ public sealed class CustomLoopContextResolverTests
         var evidenceEvent = new CustomLoopRunEvent(
             1,
             "event-evidence",
-            Now,
+            _now,
             CustomLoopRunEventKind.NodeAttemptCompleted,
             1,
             "step-evidence",
@@ -431,7 +435,7 @@ public sealed class CustomLoopContextResolverTests
         string instruction = "Perform the admitted step.",
         CustomLoopExitPolicy? exitPolicy = null)
     {
-        var seed = CustomLoopDefinition.CreateSeed("loop-context", "role-context", "step-main", "op-create", Now);
+        var seed = CustomLoopDefinition.CreateSeed("loop-context", "role-context", "step-main", "op-create", _now);
         var definition = seed with
         {
             DisplayName = "Display name is not model context",
@@ -459,8 +463,8 @@ public sealed class CustomLoopContextResolverTests
             definition.Id,
             1,
             CustomLoopRunStatus.Running,
-            Now,
-            Now,
+            _now,
+            _now,
             null,
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
@@ -472,7 +476,7 @@ public sealed class CustomLoopContextResolverTests
             conversation,
             CustomLoopContextSnapshotHash.Apply(new CustomLoopContextSnapshot(
                 CustomLoopContextSnapshot.CurrentSchemaVersion,
-                Now,
+                _now,
                 CreateManifest(roleMessages ?? [], conversationMessages ?? []),
                 string.Empty)),
             CustomLoopExecutionClock.NotStarted(),
@@ -485,7 +489,7 @@ public sealed class CustomLoopContextResolverTests
 
     private static CustomLoopConversationReference Conversation()
     {
-        return new CustomLoopConversationReference("conversation-1", "version-1", Now);
+        return new CustomLoopConversationReference("conversation-1", "version-1", _now);
     }
 
     private static CustomLoopContextManifestSource[] CreateManifest(
@@ -521,7 +525,7 @@ public sealed class CustomLoopContextResolverTests
         LlmMessageRole role,
         string content)
     {
-        return new CustomLoopContextManifestSource(order, source, sourceId, $"test/{sourceId}", provenance, trustClass, role, content, Hash(content), content.Length, content.Length, false, null, null, Now);
+        return new CustomLoopContextManifestSource(order, source, sourceId, $"test/{sourceId}", provenance, trustClass, role, content, Hash(content), content.Length, content.Length, false, null, null, _now);
     }
 
     private static CustomLoopContextManifestSource OmittedSource(
@@ -532,7 +536,7 @@ public sealed class CustomLoopContextResolverTests
         CustomLoopContextTrustClass trustClass,
         LlmMessageRole role)
     {
-        return new CustomLoopContextManifestSource(order, source, sourceId, $"test/{sourceId}", provenance, trustClass, role, string.Empty, Hash(string.Empty), 0, 0, false, null, "Source absent in test fixture.", Now);
+        return new CustomLoopContextManifestSource(order, source, sourceId, $"test/{sourceId}", provenance, trustClass, role, string.Empty, Hash(string.Empty), 0, 0, false, null, "Source absent in test fixture.", _now);
     }
 
     private static CustomLoopRetainedOutput Retained(string stepId, int iteration, string content)

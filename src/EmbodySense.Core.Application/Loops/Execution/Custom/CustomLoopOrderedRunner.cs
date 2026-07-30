@@ -1,3 +1,6 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
@@ -5,15 +8,23 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Executes admitted custom-loop steps in order with durable checkpoints, bounded attempts, authority revalidation, and fail-closed recovery evidence.
+/// </summary>
+/// <remarks>
+/// Provider dispatch occurs only after admission integrity, lifecycle, the run store's pre-dispatch hook, and current
+/// tool-authority checks. Trace-capacity and lifecycle revalidation at that boundary depend on the store overriding the
+/// compatibility hook, whose default only observes cancellation. A provider outcome is never silently retried when
+/// persistence is uncertain; durable trace evidence instead stops the run for review.
+/// </remarks>
 public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustomLoopExecutionCancellationSignal
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly CustomLoopContextResolver _contextResolver;
@@ -26,6 +37,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopOrderedRunner"/> type.
+    /// </summary>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="contextResolver">The context resolver.</param>
+    /// <param name="inferenceExecutor">The inference executor.</param>
+    /// <param name="conversationPublisher">The conversation publisher.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="timeProvider">The time provider.</param>
+    /// <param name="attemptCancellationBroker">The attempt cancellation broker.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -46,6 +68,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _attemptCancellationBroker = attemptCancellationBroker;
     }
 
+    /// <summary>
+    /// Starts public execution from the durable <c>Admitted</c> state only.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The terminal, paused, cancelled, failed, or invalid-state execution result.</returns>
     public async Task<CustomLoopOrderedRunResult> RunAsync(CustomLoopOrderedRunRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -55,7 +83,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopRunRecord? run;
         try
         {
-            using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+            using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
             run = await _runStore.GetAsync(request.RunId, integrity.Token);
         }
         catch (Exception exception)
@@ -102,6 +130,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Public execution starts only from Admitted. Interrupted runs require explicit recovery to Paused and a separate authenticated Resume path.");
     }
 
+    /// <summary>
+    /// Continues a run after an authenticated, durably recorded paused-to-running transition.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The continued execution result, or a fail-closed ownership/state result.</returns>
     public async Task<CustomLoopOrderedRunResult> ResumeAsync(CustomLoopResumeExecutionRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -160,6 +194,11 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             : await ContinueRegisteredAsync(run, request.Actor, cancellationToken);
     }
 
+    /// <summary>
+    /// Attempts to claim in-process ownership for one active run.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <returns>A registration lease, or <see langword="null"/> when this runtime already owns the run.</returns>
     public IDisposable? TryRegisterActiveRun(string runId)
     {
         if (!CustomLoopArtifactIdentifier.IsValid(runId) || !_activeRuns.TryAdd(runId, 0))
@@ -170,6 +209,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return new ActiveRunRegistration(_activeRuns, runId);
     }
 
+    /// <summary>
+    /// Signals cancellation to the provider attempt currently owned by this runtime.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
     public void CancelActiveAttempt(string runId)
     {
         if (!CustomLoopArtifactIdentifier.IsValid(runId))
@@ -199,6 +242,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         throw new InvalidOperationException("The active provider attempt is not owned by this runtime and could not be signalled locally.");
     }
 
+    /// <summary>
+    /// Requests idempotent cancellation of the active provider attempt.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>Whether the signal was delivered, no attempt was active, or its owner was unavailable.</returns>
     public Task<CustomLoopAttemptCancellationResult> RequestActiveAttemptCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
     {
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
@@ -952,7 +1002,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopConversationPublicationResult publication;
         var publicationDispatched = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
-        using var publicationBoundaryToken = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var publicationBoundaryToken = new CancellationTokenSource(_integrityWriteTimeout);
         using var publicationToken = CancellationTokenSource.CreateLinkedTokenSource(publicationBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, publicationToken))
         {
@@ -1023,13 +1073,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var eventDetail = !publicationIdMatches
             ? "Conversation publisher returned an operation ID that did not match the durable publication intent."
             : publication.Outcome switch
-        {
-            CustomLoopConversationPublicationOutcome.Published => "Canonical output was published to the invoking conversation.",
-            CustomLoopConversationPublicationOutcome.AlreadyPublished => "Idempotent conversation publication was already committed.",
-            CustomLoopConversationPublicationOutcome.DefinitelyFailed => "Conversation publication definitely failed; no success is reported.",
-            CustomLoopConversationPublicationOutcome.Uncertain => "Conversation publication outcome is uncertain and requires review.",
-            _ => "Conversation publisher returned an unsupported outcome that requires review."
-        };
+            {
+                CustomLoopConversationPublicationOutcome.Published => "Canonical output was published to the invoking conversation.",
+                CustomLoopConversationPublicationOutcome.AlreadyPublished => "Idempotent conversation publication was already committed.",
+                CustomLoopConversationPublicationOutcome.DefinitelyFailed => "Conversation publication definitely failed; no success is reported.",
+                CustomLoopConversationPublicationOutcome.Uncertain => "Conversation publication outcome is uncertain and requires review.",
+                _ => "Conversation publisher returned an unsupported outcome that requires review."
+            };
         var publicationEvent = Event(run, Now(run), CustomLoopRunEventKind.ConversationPublished, eventDetail, run.Checkpoint.Iteration, stepId, output: isPublished ? output.Content : null, originalOutputCharacters: isPublished ? output.Content.Length : null, truncated: isPublished ? false : null, published: isPublished, publicationId: publicationId);
         var persisted = await PersistAsync(run, Append(run, publicationEvent.TimestampUtc, [publicationEvent]), IntegrityToken(), outcomeMayExist: publication.Outcome != CustomLoopConversationPublicationOutcome.DefinitelyFailed);
         if (persisted.Terminal is not null)
@@ -1409,7 +1459,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private async Task<RunAdvance> EscalatePostOutcomePersistenceUncertaintyAsync(CustomLoopRunRecord current, string detail)
     {
-        const string failureCode = "post_outcome_persistence_conflict";
+        const string FailureCode = "post_outcome_persistence_conflict";
         try
         {
             for (var attempt = 0; attempt < 2; attempt++)
@@ -1447,7 +1497,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     ExecutionClock = AdvanceClock(latest.ExecutionClock, now, terminal: true),
                     Events = [.. latest.Events, lifecycle],
                     FinalOutput = null,
-                    FailureCode = failureCode,
+                    FailureCode = FailureCode,
                     FailureDetail = detail
                 };
                 var persisted = await _runStore.UpdateAsync(needsReview, latest.LifecycleVersion, IntegrityToken());
@@ -1958,7 +2008,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static CancellationToken IntegrityToken()
     {
-        return new CancellationTokenSource(IntegrityWriteTimeout).Token;
+        return new CancellationTokenSource(_integrityWriteTimeout).Token;
     }
 
     private static string SafeExceptionClass(Exception exception)
@@ -1997,28 +2047,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     }
 
     private sealed record RunAdvance(CustomLoopRunRecord? Run, CustomLoopOrderedRunResult? Terminal);
-
-    private sealed class ProviderDispatchState
-    {
-        private int _providerWasInvoked;
-
-        public bool ProviderWasInvoked => Volatile.Read(ref _providerWasInvoked) != 0;
-
-        public void MarkProviderRequestStarted() => Interlocked.Exchange(ref _providerWasInvoked, 1);
-    }
-
-    private sealed class ActiveRunRegistration(ConcurrentDictionary<string, byte> activeRuns, string runId) : IDisposable
-    {
-        private int _disposed;
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0)
-            {
-                activeRuns.TryRemove(runId, out _);
-            }
-        }
-    }
 
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);
 

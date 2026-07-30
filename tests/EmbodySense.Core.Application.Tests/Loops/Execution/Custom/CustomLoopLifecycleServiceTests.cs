@@ -1,9 +1,11 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -12,7 +14,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
 public sealed class CustomLoopLifecycleServiceTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public async Task Restart_recovery_applies_the_exact_nonterminal_matrix_without_automatic_execution()
@@ -30,7 +32,7 @@ public sealed class CustomLoopLifecycleServiceTests
         };
         var store = new MultiRunStore(runs);
         var audit = new RecordingAuditLog();
-        var recovery = new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(Now.AddDays(1)));
+        var recovery = new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(_now.AddDays(1)));
 
         var results = await recovery.RecoverAsync(AuditSchema.Actors.Web);
 
@@ -56,7 +58,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var run = Run("run-recovery-intent-audit", CustomLoopRunStatus.Running);
         var store = new MultiRunStore([run]);
         var unavailableAudit = new RecordingAuditLog { ThrowOnAppend = true };
-        var firstRecovery = new CustomLoopRecoveryService(store, unavailableAudit, new FixedTimeProvider(Now.AddMinutes(1)));
+        var firstRecovery = new CustomLoopRecoveryService(store, unavailableAudit, new FixedTimeProvider(_now.AddMinutes(1)));
 
         var failed = Assert.Single(await firstRecovery.RecoverAsync(AuditSchema.Actors.Web));
 
@@ -65,7 +67,7 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Contains("intent audit failed before lifecycle mutation", failed.Detail, StringComparison.Ordinal);
 
         var durableAudit = new RecordingAuditLog();
-        var retry = Assert.Single(await new CustomLoopRecoveryService(store, durableAudit, new FixedTimeProvider(Now.AddMinutes(2))).RecoverAsync(AuditSchema.Actors.Web));
+        var retry = Assert.Single(await new CustomLoopRecoveryService(store, durableAudit, new FixedTimeProvider(_now.AddMinutes(2))).RecoverAsync(AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopRecoveryStatus.Paused, retry.Status);
         Assert.Equal(CustomLoopRunStatus.Paused, store[run.Id].Status);
@@ -81,7 +83,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var run = Run("run-recovery-outcome-audit", CustomLoopRunStatus.Running);
         var store = new MultiRunStore([run]);
         var audit = new RecordingAuditLog { ThrowOnAppendNumber = 2 };
-        var recovery = new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(Now.AddMinutes(1)));
+        var recovery = new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(_now.AddMinutes(1)));
 
         var result = Assert.Single(await recovery.RecoverAsync(AuditSchema.Actors.Web));
 
@@ -97,9 +99,9 @@ public sealed class CustomLoopLifecycleServiceTests
     [Fact]
     public async Task Restart_recovery_excludes_downtime_from_the_execution_clock()
     {
-        var run = Run("run-clock", CustomLoopRunStatus.Running, updatedAt: Now.AddSeconds(2));
+        var run = Run("run-clock", CustomLoopRunStatus.Running, updatedAt: _now.AddSeconds(2));
         var store = new MultiRunStore([run]);
-        var recovery = new CustomLoopRecoveryService(store, new RecordingAuditLog(), new FixedTimeProvider(Now.AddDays(2)));
+        var recovery = new CustomLoopRecoveryService(store, new RecordingAuditLog(), new FixedTimeProvider(_now.AddDays(2)));
 
         await recovery.RecoverAsync(AuditSchema.Actors.Web);
 
@@ -115,7 +117,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var incomplete = marked with { LifecycleVersion = 1, Events = [marked.Events[0]] };
         var store = new MultiRunStore([incomplete]);
         var audit = new RecordingAuditLog();
-        var recovery = new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(Now.AddMinutes(1)));
+        var recovery = new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(_now.AddMinutes(1)));
 
         var recovered = Assert.Single(await recovery.RecoverAsync(AuditSchema.Actors.Web));
 
@@ -126,7 +128,7 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(2, audit.Events.Count);
         Assert.All(audit.Events, item => Assert.Equal(false, item.Metadata["admissionAuditComplete"]));
 
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(Now.AddMinutes(2)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(_now.AddMinutes(2)));
         var resume = await service.ResumeAsync(new CustomLoopResumeRequest(incomplete.Id, store[incomplete.Id].LifecycleVersion, "resume-incomplete", AuditSchema.Actors.Web));
         Assert.Equal(CustomLoopControlStatus.InvalidState, resume.Status);
     }
@@ -138,7 +140,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var store = new MultiRunStore([unsupported]);
         var audit = new RecordingAuditLog();
 
-        var result = Assert.Single(await new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(Now.AddMinutes(2))).RecoverAsync(AuditSchema.Actors.Web));
+        var result = Assert.Single(await new CustomLoopRecoveryService(store, audit, new FixedTimeProvider(_now.AddMinutes(2))).RecoverAsync(AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopRecoveryStatus.Failed, result.Status);
         Assert.Equal(CustomLoopRunStatus.Admitted, store[unsupported.Id].Status);
@@ -153,7 +155,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var executor = new NoopResumeExecutor(CustomLoopOrderedRunStatus.Completed);
         var availability = new RecordingModelAvailability(available: true);
         var gate = new TestExecutionGate();
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddMinutes(2)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddMinutes(2)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(unsupported.Id, unsupported.LifecycleVersion, "resume-legacy-context", AuditSchema.Actors.Web));
 
@@ -175,7 +177,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var executor = new NoopResumeExecutor(CustomLoopOrderedRunStatus.Completed);
         var availability = new RecordingModelAvailability(available: false);
         var gate = new TestExecutionGate();
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddMinutes(2)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddMinutes(2)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(incomplete.Id, incomplete.LifecycleVersion, "resume-unmarked", AuditSchema.Actors.Web));
 
@@ -195,7 +197,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var operationStore = new InMemoryOperationStore();
         var executor = new NoopResumeExecutor();
         var cancellation = new RecordingCancellationSignal();
-        var service = new CustomLoopLifecycleService(store, operationStore, executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operationStore, executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var results = await Task.WhenAll(
             service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, "pause-race", AuditSchema.Actors.Web)),
@@ -225,7 +227,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var operations = new InMemoryOperationStore();
         var cancellation = new RecordingCancellationSignal();
         var audit = new RecordingAuditLog();
-        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, audit, new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, audit, new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var paused = await service.PauseAsync(Pause(runs[0], "pause-paused"));
         var requested = await service.PauseAsync(Pause(runs[1], "pause-requested"));
@@ -261,7 +263,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
         var cancellation = new RecordingCancellationSignal();
-        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.CancelAsync(Cancel(run, "cancel-paused-atomic"));
 
@@ -284,7 +286,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
         var cancellation = new RecordingCancellationSignal(failuresBeforeSuccess: 1);
-        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
         var request = Cancel(run, "cancel-signal-retry");
 
         var first = await service.CancelAsync(request);
@@ -318,7 +320,7 @@ public sealed class CustomLoopLifecycleServiceTests
         operations.RecoverPendingReplays = true;
         var executor = new NoopResumeExecutor();
         var cancellation = new RecordingCancellationSignal();
-        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = kind switch
         {
@@ -345,7 +347,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var exception = new UnsupportedCustomLoopRunDiscoveryIndexSchemaException(2);
         var store = new MultiRunStore([run]) { UpdateException = exception };
         var operations = new InMemoryOperationStore { RecoverPendingReplays = true };
-        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
         var operationId = $"{kind.ToString().ToLowerInvariant()}-unsupported-schema";
 
         var thrown = await Assert.ThrowsAsync<UnsupportedCustomLoopRunDiscoveryIndexSchemaException>(() => ExecuteControlAsync(service, kind, run, operationId));
@@ -363,50 +365,50 @@ public sealed class CustomLoopLifecycleServiceTests
     [Fact]
     public async Task Pending_receipt_recovers_from_transition_owned_metadata_after_later_multi_event_writes()
     {
-        const string operationId = "pause-receipt-recovery";
-        const int expectedLifecycleVersion = 2;
+        const string OperationId = "pause-receipt-recovery";
+        const int ExpectedLifecycleVersion = 2;
         var seed = Run("run-receipt", CustomLoopRunStatus.PauseRequested, openAttempt: true);
-        var lifecycle = seed.Events[2] with { EventId = operationId, ControlExpectedLifecycleVersion = expectedLifecycleVersion };
-        var outcome = new CustomLoopRunEvent(5, "outcome-after-control", Now.AddSeconds(3), CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-only", 1, "Outcome observed after control committed.", [], "outcome", 7, false, false, false, null, "provider", "model", "response", null);
-        var completed = new CustomLoopRunEvent(6, "completed-after-control", Now.AddSeconds(3), CustomLoopRunEventKind.NodeAttemptCompleted, 1, "step-only", 1, "Attempt completed after control committed.", [], "outcome", 7, false, false, false, null, "provider", "model", "response", null);
-        var run = seed with { LifecycleVersion = seed.LifecycleVersion + 1, UpdatedAtUtc = Now.AddSeconds(3), Events = [seed.Events[0], seed.Events[1], lifecycle, seed.Events[3], outcome, completed] };
+        var lifecycle = seed.Events[2] with { EventId = OperationId, ControlExpectedLifecycleVersion = ExpectedLifecycleVersion };
+        var outcome = new CustomLoopRunEvent(5, "outcome-after-control", _now.AddSeconds(3), CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-only", 1, "Outcome observed after control committed.", [], "outcome", 7, false, false, false, null, "provider", "model", "response", null);
+        var completed = new CustomLoopRunEvent(6, "completed-after-control", _now.AddSeconds(3), CustomLoopRunEventKind.NodeAttemptCompleted, 1, "step-only", 1, "Attempt completed after control committed.", [], "outcome", 7, false, false, false, null, "provider", "model", "response", null);
+        var run = seed with { LifecycleVersion = seed.LifecycleVersion + 1, UpdatedAtUtc = _now.AddSeconds(3), Events = [seed.Events[0], seed.Events[1], lifecycle, seed.Events[3], outcome, completed] };
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid);
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Pause, run.Id, expectedLifecycleVersion, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, ExpectedLifecycleVersion, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
-        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, OperationId, pending.Actor));
 
         var latestTraceOffset = run.Events.LongLength - run.LifecycleVersion;
         Assert.NotEqual((long)pending.ExpectedLifecycleVersion + 1 + latestTraceOffset, lifecycle.Sequence);
         Assert.Equal(CustomLoopControlStatus.PauseRequested, result.Status);
         Assert.Equal(run.LifecycleVersion, store[run.Id].LifecycleVersion);
-        Assert.True((await operations.GetAsync(operationId))!.OutcomeAuditRecorded);
+        Assert.True((await operations.GetAsync(OperationId))!.OutcomeAuditRecorded);
         Assert.Contains(audit.Events, item => Equals(item.Metadata["recoveredReceipt"], true));
     }
 
     [Fact]
     public async Task Pending_receipt_rejects_an_operation_id_collision_with_a_non_lifecycle_event()
     {
-        const string operationId = "pause-event-collision";
+        const string OperationId = "pause-event-collision";
         var seed = Run("run-event-collision", CustomLoopRunStatus.Running);
-        var run = seed with { Events = [seed.Events[0], seed.Events[1] with { EventId = operationId }, .. seed.Events.Skip(2)] };
+        var run = seed with { Events = [seed.Events[0], seed.Events[1] with { EventId = OperationId }, .. seed.Events.Skip(2)] };
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
-        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.Conflict, result.Status);
         Assert.Equal(run, store[run.Id]);
         Assert.Equal(0, store.UpdateCallCount);
-        var receipt = await operations.GetAsync(operationId);
+        var receipt = await operations.GetAsync(OperationId);
         Assert.Equal(CustomLoopControlStatus.Conflict, receipt!.Outcome);
         Assert.True(receipt.OutcomeAuditRecorded);
         Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.Conflict);
@@ -415,62 +417,62 @@ public sealed class CustomLoopLifecycleServiceTests
     [Fact]
     public async Task Duplicate_pending_control_without_a_durable_transition_reports_in_progress()
     {
-        const string operationId = "pause-still-pending";
+        const string OperationId = "pause-still-pending";
         var run = Run("run-still-pending", CustomLoopRunStatus.Running);
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.OperationInProgress, result.Status);
         Assert.Equal(run, store[run.Id]);
         Assert.Equal(0, store.UpdateCallCount);
-        Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(operationId))!.State);
+        Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(OperationId))!.State);
         Assert.Empty(audit.Events);
     }
 
     [Fact]
     public async Task Unproven_pending_owner_reports_in_progress_before_reading_or_completing_the_run()
     {
-        const string operationId = "pause-owner-unproven";
+        const string OperationId = "pause-owner-unproven";
         var run = Run("run-owner-unproven", CustomLoopRunStatus.Running);
         var store = new MultiRunStore([run]) { ThrowOnGet = true };
         var operations = new InMemoryOperationStore { OwnershipUnprovenPendingReplays = true };
-        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.OperationInProgress, result.Status);
         Assert.Null(result.Run);
-        Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(operationId))!.State);
+        Assert.Equal(CustomLoopControlOperationState.Pending, (await operations.GetAsync(OperationId))!.State);
         Assert.Empty(audit.Events);
     }
 
     [Fact]
     public async Task Pending_control_without_an_owned_transition_retries_an_idempotent_outcome()
     {
-        const string operationId = "pause-already-requested";
+        const string OperationId = "pause-already-requested";
         var run = Run("run-already-requested", CustomLoopRunStatus.PauseRequested);
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.PauseRequested, result.Status);
         Assert.Equal(run, store[run.Id]);
         Assert.Equal(0, store.UpdateCallCount);
-        var completed = await operations.GetAsync(operationId);
+        var completed = await operations.GetAsync(OperationId);
         Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
         Assert.Equal(CustomLoopControlStatus.PauseRequested, completed.Outcome);
         Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.Requested);
@@ -479,19 +481,19 @@ public sealed class CustomLoopLifecycleServiceTests
     [Fact]
     public async Task Pending_control_for_a_missing_run_retries_its_not_found_completion()
     {
-        const string operationId = "pause-missing-retry";
-        const string runId = "run-missing-retry";
+        const string OperationId = "pause-missing-retry";
+        const string RunId = "run-missing-retry";
         var store = new MultiRunStore([]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Pause, runId, 1, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, RunId, 1, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(runId, 1, operationId, pending.Actor));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(RunId, 1, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.NotFound, result.Status);
-        var completed = await operations.GetAsync(operationId);
+        var completed = await operations.GetAsync(OperationId);
         Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
         Assert.Equal(CustomLoopControlStatus.NotFound, completed.Outcome);
         Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.NotFound);
@@ -527,21 +529,21 @@ public sealed class CustomLoopLifecycleServiceTests
     [Fact]
     public async Task Pending_control_completes_as_conflict_after_an_unrelated_transition_advances_the_run()
     {
-        const string operationId = "pause-overtaken";
+        const string OperationId = "pause-overtaken";
         var run = Run("run-overtaken", CustomLoopRunStatus.PauseRequested);
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion - 1, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion - 1, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var audit = new RecordingAuditLog();
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate());
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, pending.ExpectedLifecycleVersion, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.Conflict, result.Status);
         Assert.Equal(run, store[run.Id]);
         Assert.Equal(0, store.UpdateCallCount);
-        var completed = await operations.GetAsync(operationId);
+        var completed = await operations.GetAsync(OperationId);
         Assert.Equal(CustomLoopControlOperationState.Complete, completed!.State);
         Assert.Equal(CustomLoopControlStatus.Conflict, completed.Outcome);
         Assert.Contains(audit.Events, item => item.Outcome == AuditSchema.Outcomes.Conflict);
@@ -568,63 +570,63 @@ public sealed class CustomLoopLifecycleServiceTests
     [Fact]
     public async Task Fresh_control_rejects_a_stale_lifecycle_event_id_collision()
     {
-        const string operationId = "pause-stale-lifecycle";
+        const string OperationId = "pause-stale-lifecycle";
         var seed = Run("run-stale-lifecycle", CustomLoopRunStatus.Running);
-        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = OperationId }] };
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate());
 
-        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web));
+        var result = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopControlStatus.Conflict, result.Status);
         Assert.Equal(run, store[run.Id]);
         Assert.Equal(0, store.UpdateCallCount);
-        Assert.Equal(CustomLoopControlStatus.Conflict, (await operations.GetAsync(operationId))!.Outcome);
+        Assert.Equal(CustomLoopControlStatus.Conflict, (await operations.GetAsync(OperationId))!.Outcome);
     }
 
     [Fact]
     public async Task Pending_control_rejects_a_non_successor_lifecycle_event_id_collision()
     {
-        const string operationId = "resume-non-successor";
+        const string OperationId = "resume-non-successor";
         var seed = Run("run-non-successor", CustomLoopRunStatus.Paused);
-        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId }] };
+        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = OperationId }] };
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Resume, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Resume, run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate());
 
-        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, operationId, pending.Actor));
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.Conflict, result.Status);
         Assert.Equal(run, store[run.Id]);
         Assert.Equal(0, store.UpdateCallCount);
-        Assert.Equal(CustomLoopControlStatus.Conflict, (await operations.GetAsync(operationId))!.Outcome);
+        Assert.Equal(CustomLoopControlStatus.Conflict, (await operations.GetAsync(OperationId))!.Outcome);
     }
 
     [Fact]
     public async Task Pending_resume_receipt_parks_the_undispatched_running_transition_before_replay()
     {
-        const string operationId = "resume-receipt-recovery";
+        const string OperationId = "resume-receipt-recovery";
         var seed = Run("run-resume-receipt", CustomLoopRunStatus.Running);
-        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = operationId, ControlExpectedLifecycleVersion = seed.LifecycleVersion - 1 }] };
+        var run = seed with { Events = [.. seed.Events[..^1], seed.Events[^1] with { EventId = OperationId, ControlExpectedLifecycleVersion = seed.LifecycleVersion - 1 }] };
         var store = new MultiRunStore([run]);
         var operations = new InMemoryOperationStore();
-        var pending = Pending(CustomLoopControlKind.Resume, run.Id, run.LifecycleVersion - 1, operationId, AuditSchema.Actors.Web);
+        var pending = Pending(CustomLoopControlKind.Resume, run.Id, run.LifecycleVersion - 1, OperationId, AuditSchema.Actors.Web);
         await operations.BeginAsync(pending);
         var executor = new NoopResumeExecutor();
         var availability = new RecordingModelAvailability();
-        var service = new CustomLoopLifecycleService(store, operations, executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
-        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, pending.ExpectedLifecycleVersion, operationId, pending.Actor));
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, pending.ExpectedLifecycleVersion, OperationId, pending.Actor));
 
         Assert.Equal(CustomLoopControlStatus.Paused, result.Status);
         Assert.Equal(CustomLoopRunStatus.Paused, store[run.Id].Status);
         Assert.Equal(run.LifecycleVersion + 1, store[run.Id].LifecycleVersion);
         Assert.Empty(availability.Requests);
         Assert.Empty(executor.Requests);
-        var receipt = await operations.GetAsync(operationId);
+        var receipt = await operations.GetAsync(OperationId);
         Assert.Equal(CustomLoopControlOperationState.Complete, receipt!.State);
         Assert.Equal(CustomLoopControlStatus.Paused, receipt.Outcome);
     }
@@ -642,7 +644,7 @@ public sealed class CustomLoopLifecycleServiceTests
     {
         var run = Run($"run-resume-{orderedStatus.ToString().ToLowerInvariant()}", CustomLoopRunStatus.Paused);
         var store = new MultiRunStore([run]);
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), new NoopResumeExecutor(orderedStatus), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), new NoopResumeExecutor(orderedStatus), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, $"resume-{orderedStatus.ToString().ToLowerInvariant()}", AuditSchema.Actors.Web));
 
@@ -656,7 +658,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var store = new MultiRunStore([run]);
         var cancellation = new RecordingCancellationSignal();
         var executor = new NoopResumeExecutor(beforeResult: request => Assert.Contains(request.RunId, cancellation.ActiveRunIds));
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), cancellation, new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-owned", AuditSchema.Actors.Web));
 
@@ -673,7 +675,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var operations = new InMemoryOperationStore();
         var executor = new NoopResumeExecutor(exception: new IOException("Ordered runner failed."));
         var gate = new TestExecutionGate();
-        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-executor-failure", AuditSchema.Actors.Web));
 
@@ -698,13 +700,13 @@ public sealed class CustomLoopLifecycleServiceTests
             beforeResult: _ =>
             {
                 var running = store[run.Id];
-                var cancelledAt = Now.AddSeconds(4);
+                var cancelledAt = _now.AddSeconds(4);
                 var cancelEvent = new CustomLoopRunEvent(running.Events.Length + 1, "cancel-during-resume", cancelledAt, CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Cancellation requested during resumed execution.", [], null, null, null, null, null, null, null, null, null, null);
                 var cancelRequested = running with { LifecycleVersion = running.LifecycleVersion + 1, Status = CustomLoopRunStatus.CancelRequested, UpdatedAtUtc = cancelledAt, Events = [.. running.Events, cancelEvent] };
                 Assert.True(CustomLoopRunValidator.ValidateUpdate(running, cancelRequested).IsValid);
                 store.Runs[run.Id] = cancelRequested;
             });
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-cancelled", AuditSchema.Actors.Web));
 
@@ -725,7 +727,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var executor = new NoopResumeExecutor();
         var availability = new ExactModelAvailability(new CustomLoopModelSnapshot(currentProvider, currentModel));
         var gate = new TestExecutionGate();
-        var service = new CustomLoopLifecycleService(store, operations, executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddSeconds(3)));
         var request = new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, $"resume-unavailable-{currentProvider}", AuditSchema.Actors.Web);
 
         var result = await service.ResumeAsync(request);
@@ -755,7 +757,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var availability = new RecordingModelAvailability(exception: new IOException("Provider catalog unavailable."));
         var audit = new RecordingAuditLog();
         var gate = new TestExecutionGate();
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), audit, gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), audit, gate, new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-model-check-failed", AuditSchema.Actors.Web));
 
@@ -780,7 +782,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var operations = new InMemoryOperationStore();
         var executor = new NoopResumeExecutor();
         var gate = new TestExecutionGate(CustomLoopExecutionLeaseStatus.WorkspaceBusy);
-        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddSeconds(3)));
         var request = new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-busy", AuditSchema.Actors.Web);
 
         var first = await service.ResumeAsync(request);
@@ -805,7 +807,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var operations = new InMemoryOperationStore();
         var executor = new NoopResumeExecutor();
         var gate = new TestExecutionGate(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable);
-        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddSeconds(3)));
         var request = new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-host-unavailable", AuditSchema.Actors.Web);
 
         var unavailable = await service.ResumeAsync(request);
@@ -849,7 +851,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var executor = new NoopResumeExecutor();
         var gate = new TestExecutionGate();
         var audit = new RecordingAuditLog { ThrowOnAppend = true };
-        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, new InMemoryOperationStore(), executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, gate, new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-audit-failure", AuditSchema.Actors.Web));
 
@@ -870,7 +872,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var executor = new NoopResumeExecutor();
         var gate = new TestExecutionGate();
         var operations = new InMemoryOperationStore { ThrowOnComplete = true };
-        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, executor, new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddSeconds(3)));
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(run.Id, run.LifecycleVersion, "resume-receipt-failure", AuditSchema.Actors.Web));
 
@@ -892,7 +894,7 @@ public sealed class CustomLoopLifecycleServiceTests
         var store = new MultiRunStore([run]);
         var audit = new RecordingAuditLog { ThrowOnAppend = true };
         var operations = new InMemoryOperationStore();
-        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(Now.AddSeconds(3)));
+        var service = new CustomLoopLifecycleService(store, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), audit, new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)));
 
         var warning = await service.PauseAsync(Pause(run, "pause-audit-warning"));
 
@@ -958,21 +960,21 @@ public sealed class CustomLoopLifecycleServiceTests
 
     private static CustomLoopControlOperation Pending(CustomLoopControlKind kind, string runId, int expectedVersion, string operationId, string actor)
     {
-        return new CustomLoopControlOperation(CustomLoopControlOperation.CurrentSchemaVersion, operationId, CustomLoopControlRequestHash.Compute(kind, runId, expectedVersion, operationId, actor), kind, runId, expectedVersion, actor, Now, Now, CustomLoopControlOperationState.Pending, CustomLoopControlStatus.Unknown, null, null, false, "Operation pending.");
+        return new CustomLoopControlOperation(CustomLoopControlOperation.CurrentSchemaVersion, operationId, CustomLoopControlRequestHash.Compute(kind, runId, expectedVersion, operationId, actor), kind, runId, expectedVersion, actor, _now, _now, CustomLoopControlOperationState.Pending, CustomLoopControlStatus.Unknown, null, null, false, "Operation pending.");
     }
 
     private static CustomLoopRunRecord Run(string id, CustomLoopRunStatus status, bool openAttempt = false, DateTimeOffset? updatedAt = null)
     {
-        var updated = updatedAt ?? Now.AddSeconds(2);
+        var updated = updatedAt ?? _now.AddSeconds(2);
         var definition = Definition();
         var events = new List<CustomLoopRunEvent>
         {
-            new(1, $"admitted-{id}", Now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null),
-            new(2, $"admission-audit-{id}", Now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null)
+            new(1, $"admitted-{id}", _now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null),
+            new(2, $"admission-audit-{id}", _now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null)
         };
         if (status != CustomLoopRunStatus.Admitted)
         {
-            events.Add(new CustomLoopRunEvent(3, $"lifecycle-{id}", Now.AddSeconds(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, $"Run entered {status}.", [], null, null, null, null, null, null, null, null, null, null));
+            events.Add(new CustomLoopRunEvent(3, $"lifecycle-{id}", _now.AddSeconds(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, $"Run entered {status}.", [], null, null, null, null, null, null, null, null, null, null));
         }
 
         if (openAttempt)
@@ -980,15 +982,15 @@ public sealed class CustomLoopLifecycleServiceTests
             events.Add(new CustomLoopRunEvent(events.Count + 1, $"attempt-{id}", updated, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-only", 1, "Attempt started.", [], null, null, null, null, null, null, "provider", "model", "attempt-correlation", null, null, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes));
         }
 
-        var context = CustomLoopContextSnapshot.CreateEmpty(Now);
-        DateTimeOffset? active = status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested ? Now : status == CustomLoopRunStatus.CancelRequested ? Now : null;
+        var context = CustomLoopContextSnapshot.CreateEmpty(_now);
+        DateTimeOffset? active = status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested ? _now : status == CustomLoopRunStatus.CancelRequested ? _now : null;
         var run = new CustomLoopRunRecord(
             CustomLoopRunRecord.CurrentSchemaVersion,
             id,
             definition.Id,
             events.Count,
             status,
-            Now,
+            _now,
             updated,
             status == CustomLoopRunStatus.Cancelled ? updated : null,
             "web",
@@ -1023,7 +1025,7 @@ public sealed class CustomLoopLifecycleServiceTests
 
     private static CustomLoopDefinition Definition()
     {
-        var seed = CustomLoopDefinition.CreateSeed("loop-lifecycle", "role-workspace", "step-only", "create-loop", Now);
+        var seed = CustomLoopDefinition.CreateSeed("loop-lifecycle", "role-workspace", "step-only", "create-loop", _now);
         return CustomLoopDefinitionContentHash.Apply(seed with { ContentHash = string.Empty });
     }
 
@@ -1306,7 +1308,7 @@ public sealed class CustomLoopLifecycleServiceTests
 
     private sealed class RecordingAuditLog : IAuditLog
     {
-        private int appendCount;
+        private int _appendCount;
 
         public List<AuditEvent> Events { get; } = [];
 
@@ -1316,8 +1318,8 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
         {
-            appendCount++;
-            if (ThrowOnAppend || ThrowOnAppendNumber == appendCount)
+            _appendCount++;
+            if (ThrowOnAppend || ThrowOnAppendNumber == _appendCount)
             {
                 throw new IOException("Audit unavailable.");
             }

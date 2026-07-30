@@ -1,7 +1,11 @@
-using EmbodySense.Core.Common.Governance.Audit.Models;
+using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Governance.Permissions;
+using EmbodySense.Core.Startup.Configuration.Models;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
@@ -111,6 +115,42 @@ public sealed class WorkspaceConfigurationReaderTests
         Assert.Equal(205, current.MessageCount);
         Assert.Equal(200, current.Messages.Count);
         Assert.Contains(snapshot.ConversationHistory.ReadProblems, problem => problem.Contains("omits 5 later messages", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReadAsync_coordinates_a_consistent_snapshot_with_conversation_rotation()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("overlap prompt"));
+        await store.AppendMessageAsync(LlmMessage.Assistant("overlap answer"));
+        await using var externalLease = new FileStream(paths.CurrentConversationPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var snapshotTask = new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime());
+        var rotationTask = store.StartFreshConversationAsync();
+        await Task.Delay(250);
+
+        Assert.False(snapshotTask.IsCompleted);
+        Assert.False(rotationTask.IsCompleted);
+        await externalLease.DisposeAsync();
+        var snapshot = await snapshotTask.WaitAsync(TimeSpan.FromSeconds(3));
+        await rotationTask.WaitAsync(TimeSpan.FromSeconds(3));
+
+        var overlapMessages = snapshot.ConversationHistory.Transcripts
+            .SelectMany(transcript => transcript.Messages)
+            .Where(message => message.Content.StartsWith("overlap ", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Collection(
+            overlapMessages,
+            message => Assert.Equal("overlap prompt", message.Content),
+            message => Assert.Equal("overlap answer", message.Content));
+        Assert.Empty(await store.LoadCurrentConversationAsync());
+        var archivedPath = Assert.Single(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
+        var archivedText = await File.ReadAllTextAsync(archivedPath);
+        Assert.Contains("overlap prompt", archivedText, StringComparison.Ordinal);
+        Assert.Contains("overlap answer", archivedText, StringComparison.Ordinal);
     }
 
     private static WorkspaceRuntimeConfiguration Runtime()

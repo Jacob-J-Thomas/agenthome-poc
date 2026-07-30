@@ -1,3 +1,7 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -12,7 +16,7 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 public sealed class LoopRunInspectionFacadeTests
 {
-    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+    private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
 
     [Fact]
     public async Task Read_only_facade_exposes_empty_quota_but_cannot_delete()
@@ -64,15 +68,15 @@ public sealed class LoopRunInspectionFacadeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
         _ = await CreateInterruptedRunAsync(store);
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
         await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
 
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => facade.RecoverInterruptedRunsAsync());
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
     }
 
     [Theory]
@@ -182,14 +186,14 @@ public sealed class LoopRunInspectionFacadeTests
         var terminal = await CreateTerminalRunAsync(store);
         await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "actor-user", "web");
         var trace = (await facade.GetTraceAsync(terminal.Id))!;
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
 
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => facade.DeleteTraceAsync(terminal.Id, trace.PersistedArtifactHash, "delete-trace"));
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
         Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync("delete-trace")).Status);
 
         File.Delete(indexPath);
@@ -201,9 +205,9 @@ public sealed class LoopRunInspectionFacadeTests
 
     private static async Task<CustomLoopRunRecord> CreateTerminalRunAsync(CustomLoopRunStore store)
     {
-        var definition = CustomLoopDefinition.CreateSeed("loop-alpha", "default-role", "step-1", "create-loop", Timestamp);
-        var admittedEvent = Event(1, "event-1", CustomLoopRunEventKind.Admitted, Timestamp);
-        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-alpha", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-alpha", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        var definition = CustomLoopDefinition.CreateSeed("loop-alpha", "default-role", "step-1", "create-loop", _timestamp);
+        var admittedEvent = Event(1, "event-1", CustomLoopRunEventKind.Admitted, _timestamp);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-alpha", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-alpha", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         await store.CreateAsync(admitted);
         var running = Advance(admitted, CustomLoopRunStatus.Running);
@@ -215,7 +219,7 @@ public sealed class LoopRunInspectionFacadeTests
 
     private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, bool? publishToConversation = null, string? conversationIdentity = null)
     {
-        var definition = CustomLoopDefinition.CreateSeed("loop-interrupted", "default-role", "step-1", "create-interrupted-loop", Timestamp);
+        var definition = CustomLoopDefinition.CreateSeed("loop-interrupted", "default-role", "step-1", "create-interrupted-loop", _timestamp);
         CustomLoopConversationReference? conversation = null;
         if (publishToConversation is { } publish)
         {
@@ -234,18 +238,18 @@ public sealed class LoopRunInspectionFacadeTests
                     }
                 ]
             });
-            conversation = new CustomLoopConversationReference(conversationIdentity ?? "conversation-interrupted", new string('a', CustomLoopLimits.Sha256HexCharacters), Timestamp);
+            conversation = new CustomLoopConversationReference(conversationIdentity ?? "conversation-interrupted", new string('a', CustomLoopLimits.Sha256HexCharacters), _timestamp);
         }
 
-        var admittedEvent = Event(1, "interrupted-admitted", CustomLoopRunEventKind.Admitted, Timestamp);
-        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-interrupted", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-interrupted", "test-user", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        var admittedEvent = Event(1, "interrupted-admitted", CustomLoopRunEventKind.Admitted, _timestamp);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-interrupted", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-interrupted", "test-user", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
         var audited = admitted with
         {
             LifecycleVersion = 2,
-            Events = [admittedEvent, Event(2, "interrupted-admission-audit", CustomLoopRunEventKind.AdmissionAuditCompleted, Timestamp)]
+            Events = [admittedEvent, Event(2, "interrupted-admission-audit", CustomLoopRunEventKind.AdmissionAuditCompleted, _timestamp)]
         };
         Assert.True(CustomLoopRunValidator.Validate(audited).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(audited, admitted.LifecycleVersion)).Status);

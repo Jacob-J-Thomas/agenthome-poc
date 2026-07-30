@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Application.Runtime;
 using System.Collections.Concurrent;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Memory;
@@ -6,9 +8,16 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Application.Runtime.State;
 
+/// <summary>
+/// Owns the ordered in-memory conversation projection and serializes turns against optional workspace-wide ownership.
+/// </summary>
+/// <remarks>
+/// Startup context is retained separately from the mutable transcript. Durable synchronization must either replace the transcript
+/// under exclusive ownership or prove that the in-memory transcript is a prefix before extending it.
+/// </remarks>
 public sealed class ConversationRuntimeState
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WorkspaceExclusiveAccess = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _workspaceExclusiveAccess = new(StringComparer.OrdinalIgnoreCase);
     private readonly IResettableInferenceClient? _resettableInferenceClient;
     private readonly List<RuntimeContextMessage> _messages;
     private readonly object _messagesSync = new();
@@ -16,6 +25,13 @@ public sealed class ConversationRuntimeState
     private readonly IConversationWorkspaceLease? _workspaceLease;
     private string? _durableConversationVersion;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConversationRuntimeState"/> type.
+    /// </summary>
+    /// <param name="initialMessages">The initial messages.</param>
+    /// <param name="resettableInferenceClient">The resettable inference client.</param>
+    /// <param name="exclusiveAccessScope">The exclusive access scope.</param>
+    /// <param name="workspaceLease">The workspace lease.</param>
     public ConversationRuntimeState(
         IReadOnlyList<LlmMessage>? initialMessages = null,
         IResettableInferenceClient? resettableInferenceClient = null,
@@ -27,9 +43,13 @@ public sealed class ConversationRuntimeState
         _messages = initialMessages?.Select(message => CreateContextMessage(message, RuntimeContextSource.StartupContext)).ToList() ?? [];
         _exclusiveAccess = string.IsNullOrWhiteSpace(exclusiveAccessScope)
             ? new SemaphoreSlim(1, 1)
-            : WorkspaceExclusiveAccess.GetOrAdd(exclusiveAccessScope.Trim(), _ => new SemaphoreSlim(1, 1));
+            : _workspaceExclusiveAccess.GetOrAdd(exclusiveAccessScope.Trim(), _ => new SemaphoreSlim(1, 1));
     }
 
+    /// <summary>
+    /// Gets an immutable snapshot of model messages.
+    /// </summary>
+    /// <value>The LLM messages.</value>
     public IReadOnlyList<LlmMessage> Messages
     {
         get
@@ -41,6 +61,10 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    /// <summary>
+    /// Gets an immutable snapshot of messages with runtime provenance.
+    /// </summary>
+    /// <value>The runtime context messages.</value>
     public IReadOnlyList<RuntimeContextMessage> ContextMessages
     {
         get
@@ -52,6 +76,10 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    /// <summary>
+    /// Gets the durable conversation version synchronized into this runtime projection.
+    /// </summary>
+    /// <value>The durable conversation version.</value>
     public string? DurableConversationVersion
     {
         get
@@ -63,11 +91,18 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    /// <summary>
+    /// Acquires both in-process conversation ownership and, when configured, the cross-process workspace lease.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A lease that releases workspace ownership before in-process ownership.</returns>
     public async Task<IDisposable> AcquireExclusiveAccessAsync(CancellationToken cancellationToken = default)
     {
         await _exclusiveAccess.WaitAsync(cancellationToken);
         try
         {
+            // Acquire cross-process ownership only after the in-process semaphore. Every caller uses
+            // this order, avoiding lease inversion while keeping one durable transcript writer.
             var workspaceLease = _workspaceLease is null ? null : await _workspaceLease.AcquireAsync(cancellationToken);
             return new ExclusiveAccessLease(_exclusiveAccess, workspaceLease);
         }
@@ -78,6 +113,11 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    /// <summary>
+    /// Appends a message to the in-memory projection with source provenance.
+    /// </summary>
+    /// <param name="message">The message.</param>
+    /// <param name="source">The source.</param>
     public void AppendMessage(LlmMessage message, RuntimeContextSource source = RuntimeContextSource.SessionTranscript)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -88,6 +128,13 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    /// <summary>
+    /// Replaces the projection and resets any inference client that retains provider conversation state.
+    /// </summary>
+    /// <param name="messages">The messages.</param>
+    /// <param name="startupContextCount">The startup context count.</param>
+    /// <param name="remainingSource">The remaining source.</param>
+    /// <param name="remainingDetail">The remaining detail.</param>
     public void ReplaceMessages(
         IReadOnlyList<LlmMessage> messages,
         int startupContextCount = 0,
@@ -114,6 +161,10 @@ public sealed class ConversationRuntimeState
         _resettableInferenceClient?.ResetConversation();
     }
 
+    /// <summary>
+    /// Records the version of durable conversation content represented in memory.
+    /// </summary>
+    /// <param name="version">The version.</param>
     public void SetDurableConversationVersion(string version)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(version);
@@ -123,6 +174,10 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    /// <summary>
+    /// Replaces non-startup messages with the authoritative durable transcript.
+    /// </summary>
+    /// <param name="transcript">The transcript.</param>
     public void SynchronizeConversationTranscript(IReadOnlyList<LlmMessage> transcript)
     {
         ArgumentNullException.ThrowIfNull(transcript);
@@ -147,6 +202,11 @@ public sealed class ConversationRuntimeState
         }
     }
 
+    /// <summary>
+    /// Extends the projection from a durable transcript only when the in-memory transcript is its prefix.
+    /// </summary>
+    /// <param name="transcript">The transcript.</param>
+    /// <returns><see langword="true"/> when the transcript already matched or was safely extended; otherwise, <see langword="false"/>.</returns>
     public bool TrySynchronizeConversationTranscript(IReadOnlyList<LlmMessage> transcript)
     {
         ArgumentNullException.ThrowIfNull(transcript);
@@ -205,27 +265,4 @@ public sealed class ConversationRuntimeState
         };
     }
 
-    private sealed class ExclusiveAccessLease : IDisposable
-    {
-        private SemaphoreSlim? _gate;
-        private IDisposable? _workspaceLease;
-
-        public ExclusiveAccessLease(SemaphoreSlim gate, IDisposable? workspaceLease)
-        {
-            _gate = gate;
-            _workspaceLease = workspaceLease;
-        }
-
-        public void Dispose()
-        {
-            try
-            {
-                Interlocked.Exchange(ref _workspaceLease, null)?.Dispose();
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _gate, null)?.Release();
-            }
-        }
-    }
 }

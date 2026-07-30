@@ -1,3 +1,9 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Web;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Application.Loops.Models;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
@@ -23,13 +29,13 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class LoopRunApiControllerTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
-    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-20T12:00:00+00:00");
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
+    private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-20T12:00:00+00:00");
 
     [Fact]
     public void Monitor_etag_changes_for_every_previously_omitted_summary_field()
     {
-        var summary = new LoopRunSummarySnapshot("run-test", "loop-test", "invoke-test", 1, 2, "Running", Timestamp, Timestamp.AddSeconds(1), null, 1, 2, null, false);
+        var summary = new LoopRunSummarySnapshot("run-test", "loop-test", "invoke-test", 1, 2, "Running", _timestamp, _timestamp.AddSeconds(1), null, 1, 2, null, false);
         string Etag(LoopRunSummarySnapshot value, string artifactHash = "a") => LoopRunMonitorEtag.Create(value, artifactHash);
 
         Assert.NotEqual(Etag(summary), Etag(summary with { DefinitionVersion = 2 }));
@@ -50,15 +56,17 @@ public sealed class LoopRunApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var unauthorized = await client.GetAsync("/api/loop-runs");
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var unauthorizedControlReceipt = await client.GetAsync("/api/loop-runs/controls/control-web");
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
             var beforeInitialization = await SendAsync(client, "/api/loop-runs", token);
+            var controlBeforeInitialization = await SendAsync(client, "/api/loop-runs/controls/control-web", token);
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
             var paths = new WorkspacePaths(workspace.RootPath);
-            const string transcriptEvidence = "existing conversation evidence must survive a run read";
-            await File.WriteAllTextAsync(paths.CurrentConversationPath, transcriptEvidence);
+            const string TranscriptEvidence = "existing conversation evidence must survive a run read";
+            await File.WriteAllTextAsync(paths.CurrentConversationPath, TranscriptEvidence);
 
             var list = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
-            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions);
+            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(_jsonOptions);
             var invalidMaximum = await SendAsync(client, "/api/loop-runs?maximumCount=0", token);
             var invalidCursor = await SendAsync(client, "/api/loop-runs?cursor=not-a-cursor", token);
             var invalidLoopFilter = await SendAsync(client, "/api/loop-runs?loopId=INVALID%20ID", token);
@@ -67,9 +75,28 @@ public sealed class LoopRunApiControllerTests
             var monitoredRun = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths));
             await CreateCompletedInvocationReceiptAsync(paths, monitoredRun);
             var invocationReceipt = await SendAsync(client, $"/api/loop-runs/invocations/{monitoredRun.AdmissionOperationId}", token);
-            var invocationSnapshot = await invocationReceipt.Content.ReadFromJsonAsync<LoopInvocationOperationSnapshot>(JsonOptions);
+            var invocationSnapshot = await invocationReceipt.Content.ReadFromJsonAsync<LoopInvocationOperationSnapshot>(_jsonOptions);
+            var control = await BeginControlReceiptAsync(paths);
+            using var controlLease = control.Lease;
+            var pendingControlReceipt = await SendAsync(client, $"/api/loop-runs/controls/{control.Operation.OperationId}", token);
+            var pendingControlSnapshot = await pendingControlReceipt.Content.ReadFromJsonAsync<LoopControlOperationSnapshot>(_jsonOptions);
+            Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await control.Store.CompleteAsync(control.Operation with
+            {
+                UpdatedAtUtc = control.Operation.UpdatedAtUtc.AddSeconds(1),
+                State = CustomLoopControlOperationState.Complete,
+                Outcome = CustomLoopControlStatus.Paused,
+                ResultLifecycleVersion = 3,
+                ResultRunStatus = CustomLoopRunStatus.Paused,
+                OutcomeAuditRecorded = true,
+                Detail = "The run paused."
+            })).Status);
+            var completedControlReceipt = await SendAsync(client, $"/api/loop-runs/controls/{control.Operation.OperationId}", token);
+            var completedControlJson = await completedControlReceipt.Content.ReadAsStringAsync();
+            var completedControlSnapshot = JsonSerializer.Deserialize<LoopControlOperationSnapshot>(completedControlJson, _jsonOptions);
+            var missingControlReceipt = await SendAsync(client, "/api/loop-runs/controls/control-missing", token);
+            var invalidControlReceipt = await SendAsync(client, "/api/loop-runs/controls/INVALID%20ID", token);
             var monitor = await SendAsync(client, $"/api/loop-runs/{monitoredRun.Id}/monitor", token);
-            var monitorSummary = await monitor.Content.ReadFromJsonAsync<LoopRunSummarySnapshot>(JsonOptions);
+            var monitorSummary = await monitor.Content.ReadFromJsonAsync<LoopRunSummarySnapshot>(_jsonOptions);
             var monitorEtag = monitor.Headers.ETag;
             using var conditionalRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/loop-runs/{monitoredRun.Id}/monitor");
             conditionalRequest.Headers.Add(WebSessionSecurity.HeaderName, token);
@@ -103,11 +130,13 @@ public sealed class LoopRunApiControllerTests
             var corruptBody = await corrupt.Content.ReadAsStringAsync();
 
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedControlReceipt.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, controlBeforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.OK, list.StatusCode);
             Assert.Empty(summaries!.Items);
             Assert.Null(summaries.ContinuationCursor);
-            Assert.Equal(transcriptEvidence, await File.ReadAllTextAsync(paths.CurrentConversationPath));
+            Assert.Equal(TranscriptEvidence, await File.ReadAllTextAsync(paths.CurrentConversationPath));
             Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
             Assert.Equal(HttpStatusCode.BadRequest, invalidMaximum.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, invalidCursor.StatusCode);
@@ -118,6 +147,25 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal("Complete", invocationSnapshot?.State);
             Assert.Equal("Admitted", invocationSnapshot?.Outcome);
             Assert.Equal(monitoredRun.Id, invocationSnapshot?.RunId);
+            Assert.Equal(HttpStatusCode.OK, pendingControlReceipt.StatusCode);
+            Assert.Equal("Pending", pendingControlSnapshot?.State);
+            Assert.Equal("Unknown", pendingControlSnapshot?.Outcome);
+            Assert.False(pendingControlSnapshot?.CompletionDurablyProved);
+            Assert.Equal(HttpStatusCode.OK, completedControlReceipt.StatusCode);
+            Assert.Equal("control-web", completedControlSnapshot?.OperationId);
+            Assert.Equal("Pause", completedControlSnapshot?.Kind);
+            Assert.Equal("run-web-recovery", completedControlSnapshot?.RunId);
+            Assert.Equal(2, completedControlSnapshot?.ExpectedLifecycleVersion);
+            Assert.Equal("Complete", completedControlSnapshot?.State);
+            Assert.Equal("Paused", completedControlSnapshot?.Outcome);
+            Assert.Equal(3, completedControlSnapshot?.ResultLifecycleVersion);
+            Assert.Equal("Paused", completedControlSnapshot?.ResultRunStatus);
+            Assert.True(completedControlSnapshot?.OutcomeAuditRecorded);
+            Assert.True(completedControlSnapshot?.CompletionDurablyProved);
+            Assert.DoesNotContain("\"detail\"", completedControlJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("\"actor\"", completedControlJson, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(HttpStatusCode.NotFound, missingControlReceipt.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, invalidControlReceipt.StatusCode);
             Assert.Equal(HttpStatusCode.OK, monitor.StatusCode);
             Assert.Equal(monitoredRun.Id, monitorSummary?.Id);
             Assert.Equal(monitoredRun.LifecycleVersion, monitorSummary?.LifecycleVersion);
@@ -141,6 +189,56 @@ public sealed class LoopRunApiControllerTests
     }
 
     [Fact]
+    public async Task Run_evidence_and_mutation_routes_preserve_initialization_missing_resource_and_missing_body_boundaries()
+    {
+        using var workspace = new TestWorkspace();
+        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var monitorBeforeInitialization = await SendAsync(client, "/api/loop-runs/run-missing/monitor", token);
+            var invocationBeforeInitialization = await SendAsync(client, "/api/loop-runs/invocations/invoke-missing", token);
+            var quotaBeforeInitialization = await SendAsync(client, "/api/loop-runs/quota", token);
+            var traceBeforeInitialization = await SendAsync(client, "/api/loop-runs/run-missing/trace", token);
+            var deletionBeforeInitialization = await SendControlAsync(client, "/api/loop-runs/run-missing/trace/delete", token, new { expectedTraceHash = new string('0', 64), operationId = "delete-before-init" });
+            var pauseBeforeInitialization = await SendControlAsync(client, "/api/loop-runs/run-missing/pause", token, new { expectedLifecycleVersion = 1, operationId = "pause-before-init" });
+            var cancelBeforeInitialization = await SendControlAsync(client, "/api/loop-runs/run-missing/cancel", token, new { expectedLifecycleVersion = 1, operationId = "cancel-before-init" });
+
+            Assert.Equal(HttpStatusCode.Conflict, monitorBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, invocationBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, quotaBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, traceBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, deletionBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, pauseBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, cancelBeforeInitialization.StatusCode);
+
+            Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
+            var missingMonitor = await SendAsync(client, "/api/loop-runs/run-missing/monitor", token);
+            var missingInvocation = await SendAsync(client, "/api/loop-runs/invocations/invoke-missing", token);
+            var quota = await SendAsync(client, "/api/loop-runs/quota", token);
+            var missingTrace = await SendAsync(client, "/api/loop-runs/run-missing/trace", token);
+            var missingDeletionBody = await SendJsonNullAsync(client, "/api/loop-runs/run-missing/trace/delete", token);
+            var missingPauseBody = await SendJsonNullAsync(client, "/api/loop-runs/run-missing/pause", token);
+            var missingCancelBody = await SendJsonNullAsync(client, "/api/loop-runs/run-missing/cancel", token);
+
+            Assert.Equal(HttpStatusCode.NotFound, missingMonitor.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, missingInvocation.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, quota.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, missingTrace.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missingDeletionBody.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missingPauseBody.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missingCancelBody.StatusCode);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Run_evidence_api_surfaces_unsupported_discovery_index_cleanup_without_rewriting_the_index()
     {
         using var workspace = new TestWorkspace();
@@ -150,13 +248,13 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
             var paths = new WorkspacePaths(workspace.RootPath);
             Directory.CreateDirectory(paths.CustomLoopRunsPath);
             var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-            const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
-            await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+            const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+            await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
 
             var response = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
             var body = await response.Content.ReadAsStringAsync();
@@ -164,7 +262,7 @@ public sealed class LoopRunApiControllerTests
             Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
             Assert.Contains("unsupported_loop_persistence_schema", body, StringComparison.Ordinal);
             Assert.Contains("Delete `.custom-loop-run-index.json`", body, StringComparison.Ordinal);
-            Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+            Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
         }
         finally
         {
@@ -183,7 +281,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
             var host = app.Services.GetRequiredService<WebAgentRuntimeHost>();
             await host.InitializeWorkspaceAsync();
             var definition = await CreateInvocationLoopAsync(workspace);
@@ -192,24 +290,24 @@ public sealed class LoopRunApiControllerTests
             await Assert.ThrowsAsync<ArgumentException>(() => host.InvokeLoopAsync(input, " "));
             var invocation = await host.InvokeLoopAsync(input, "connection-owned-by-hub");
             var list = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
-            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions);
+            var summaries = await list.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(_jsonOptions);
             var detailResponse = await SendAsync(client, $"/api/loop-runs/{invocation.Run!.Id}", token);
-            var detail = await detailResponse.Content.ReadFromJsonAsync<LoopRunSnapshot>(JsonOptions);
+            var detail = await detailResponse.Content.ReadFromJsonAsync<LoopRunSnapshot>(_jsonOptions);
             var quotaResponse = await SendAsync(client, "/api/loop-runs/quota", token);
-            var quota = await quotaResponse.Content.ReadFromJsonAsync<LoopTraceQuotaSnapshot>(JsonOptions);
+            var quota = await quotaResponse.Content.ReadFromJsonAsync<LoopTraceQuotaSnapshot>(_jsonOptions);
             var traceResponse = await SendAsync(client, $"/api/loop-runs/{invocation.Run.Id}/trace", token);
-            var trace = await traceResponse.Content.ReadFromJsonAsync<LoopTraceInspectionSnapshot>(JsonOptions);
-            var unauthorizedDeletion = await client.PostAsJsonAsync($"/api/loop-runs/{invocation.Run.Id}/trace/delete", new { expectedTraceHash = trace!.PersistedArtifactHash, operationId = "delete-web-trace-unauthorized" }, JsonOptions);
+            var trace = await traceResponse.Content.ReadFromJsonAsync<LoopTraceInspectionSnapshot>(_jsonOptions);
+            var unauthorizedDeletion = await client.PostAsJsonAsync($"/api/loop-runs/{invocation.Run.Id}/trace/delete", new { expectedTraceHash = trace!.PersistedArtifactHash, operationId = "delete-web-trace-unauthorized" }, _jsonOptions);
             var hashMismatch = await SendControlAsync(client, $"/api/loop-runs/{invocation.Run.Id}/trace/delete", token, new { expectedTraceHash = new string('0', 64), operationId = "delete-web-trace-mismatch" });
             var forgedIdentity = await SendControlAsync(client, $"/api/loop-runs/{invocation.Run.Id}/trace/delete", token, new { expectedTraceHash = trace.PersistedArtifactHash, operationId = "delete-web-trace-forged", actor = "browser-forged" });
             var deletionResponse = await SendControlAsync(client, $"/api/loop-runs/{invocation.Run.Id}/trace/delete", token, new { expectedTraceHash = trace.PersistedArtifactHash, operationId = "delete-web-trace" });
-            var deletion = await deletionResponse.Content.ReadFromJsonAsync<LoopTraceDeletionResponse>(JsonOptions);
+            var deletion = await deletionResponse.Content.ReadFromJsonAsync<LoopTraceDeletionResponse>(_jsonOptions);
             var replayResponse = await SendControlAsync(client, $"/api/loop-runs/{invocation.Run.Id}/trace/delete", token, new { expectedTraceHash = trace.PersistedArtifactHash, operationId = "delete-web-trace" });
-            var replay = await replayResponse.Content.ReadFromJsonAsync<LoopTraceDeletionResponse>(JsonOptions);
+            var replay = await replayResponse.Content.ReadFromJsonAsync<LoopTraceDeletionResponse>(_jsonOptions);
             var tombstoneResponse = await SendAsync(client, $"/api/loop-runs/{invocation.Run.Id}/trace", token);
-            var tombstone = await tombstoneResponse.Content.ReadFromJsonAsync<LoopTraceInspectionSnapshot>(JsonOptions);
-            var summariesAfterDeletion = await (await SendAsync(client, $"/api/loop-runs?maximumCount=50&loopId={definition.Id}", token)).Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions);
-            var quotaAfterDeletion = await (await SendAsync(client, "/api/loop-runs/quota", token)).Content.ReadFromJsonAsync<LoopTraceQuotaSnapshot>(JsonOptions);
+            var tombstone = await tombstoneResponse.Content.ReadFromJsonAsync<LoopTraceInspectionSnapshot>(_jsonOptions);
+            var summariesAfterDeletion = await (await SendAsync(client, $"/api/loop-runs?maximumCount=50&loopId={definition.Id}", token)).Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(_jsonOptions);
+            var quotaAfterDeletion = await (await SendAsync(client, "/api/loop-runs/quota", token)).Content.ReadFromJsonAsync<LoopTraceQuotaSnapshot>(_jsonOptions);
 
             Assert.Equal("Admitted", invocation.AdmissionStatus);
             Assert.Equal("Completed", invocation.ExecutionStatus);
@@ -258,16 +356,17 @@ public sealed class LoopRunApiControllerTests
     public async Task Pause_and_cancel_routes_require_auth_and_accept_only_the_frontend_control_body()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "test-model");
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
         await app.StartAsync();
 
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
 
-            var unauthorized = await client.PostAsJsonAsync("/api/loop-runs/run-missing/pause", new { expectedLifecycleVersion = 1, operationId = "pause-unauthorized" }, JsonOptions);
+            var unauthorized = await client.PostAsJsonAsync("/api/loop-runs/run-missing/pause", new { expectedLifecycleVersion = 1, operationId = "pause-unauthorized" }, _jsonOptions);
             var pause = await SendControlAsync(client, "/api/loop-runs/run-missing/pause", token, new { expectedLifecycleVersion = 1, operationId = "pause-missing" });
             var cancel = await SendControlAsync(client, "/api/loop-runs/run-missing/cancel", token, new { expectedLifecycleVersion = 1, operationId = "cancel-missing" });
             var invalid = await SendControlAsync(client, "/api/loop-runs/run-missing/pause", token, new { expectedLifecycleVersion = 0, operationId = "pause-invalid" });
@@ -305,8 +404,8 @@ public sealed class LoopRunApiControllerTests
         Assert.True(CustomLoopRunValidator.Validate(running).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, interrupted.LifecycleVersion)).Status);
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
         await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
         await app.StartAsync();
@@ -314,7 +413,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
 
             var pause = await SendControlAsync(client, $"/api/loop-runs/{running.Id}/pause", token, new { expectedLifecycleVersion = running.LifecycleVersion, operationId = "pause-unsupported-index" });
             var cancel = await SendControlAsync(client, $"/api/loop-runs/{running.Id}/cancel", token, new { expectedLifecycleVersion = running.LifecycleVersion, operationId = "cancel-unsupported-index" });
@@ -327,7 +426,7 @@ public sealed class LoopRunApiControllerTests
             Assert.Contains("Delete `.custom-loop-run-index.json`", pauseBody, StringComparison.Ordinal);
             Assert.Contains("unsupported_loop_persistence_schema", cancelBody, StringComparison.Ordinal);
             Assert.Contains("Delete `.custom-loop-run-index.json`", cancelBody, StringComparison.Ordinal);
-            Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+            Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
         }
         finally
         {
@@ -341,11 +440,11 @@ public sealed class LoopRunApiControllerTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        const string transcriptEvidence = """
+        const string TranscriptEvidence = """
             {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","role":"user","content":"recovered user prompt"}
             {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-07-20T11:59:00+00:00","role":"assistant","content":"recovered assistant response"}
             """;
-        await File.WriteAllTextAsync(paths.CurrentConversationPath, transcriptEvidence);
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, TranscriptEvidence);
         var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
         var interrupted = await CreateInterruptedRunAsync(new CustomLoopRunStore(paths), conversationIdentity);
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
@@ -355,11 +454,11 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
 
             var response = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
-            var recovered = Assert.Single((await response.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(JsonOptions))!.Items);
-            var detail = await (await SendAsync(client, $"/api/loop-runs/{interrupted.Id}", token)).Content.ReadFromJsonAsync<LoopRunSnapshot>(JsonOptions);
+            var recovered = Assert.Single((await response.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(_jsonOptions))!.Items);
+            var detail = await (await SendAsync(client, $"/api/loop-runs/{interrupted.Id}", token)).Content.ReadFromJsonAsync<LoopRunSnapshot>(_jsonOptions);
             var transcript = await app.Services.GetRequiredService<WebAgentRuntimeHost>().GetCurrentTranscriptAsync();
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -378,7 +477,7 @@ public sealed class LoopRunApiControllerTests
                     Assert.Equal("Assistant", message.Role);
                     Assert.Equal("recovered assistant response", message.Content);
                 });
-            Assert.Equal(transcriptEvidence, await File.ReadAllTextAsync(paths.CurrentConversationPath));
+            Assert.Equal(TranscriptEvidence, await File.ReadAllTextAsync(paths.CurrentConversationPath));
             Assert.Empty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
         }
         finally
@@ -404,10 +503,10 @@ public sealed class LoopRunApiControllerTests
 
     private static async Task<CustomLoopRunRecord> CreateInterruptedRunAsync(CustomLoopRunStore store, string? invokingConversationIdentity = null)
     {
-        var definition = CustomLoopDefinition.CreateSeed("loop-web-recovery", "default-role", "step-1", "create-web-recovery", Timestamp);
+        var definition = CustomLoopDefinition.CreateSeed("loop-web-recovery", "default-role", "step-1", "create-web-recovery", _timestamp);
         var admittedEvent = RunEvent(1, "web-recovery-admitted", CustomLoopRunEventKind.Admitted);
-        var conversation = invokingConversationIdentity is null ? null : new CustomLoopConversationReference(invokingConversationIdentity, new string('c', CustomLoopLimits.Sha256HexCharacters), Timestamp);
-        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        var conversation = invokingConversationIdentity is null ? null : new CustomLoopConversationReference(invokingConversationIdentity, new string('c', CustomLoopLimits.Sha256HexCharacters), _timestamp);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
@@ -421,7 +520,7 @@ public sealed class LoopRunApiControllerTests
         return audited;
     }
 
-    private static CustomLoopRunEvent RunEvent(long sequence, string id, CustomLoopRunEventKind kind) => new(sequence, id, Timestamp, kind, null, null, null, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null);
+    private static CustomLoopRunEvent RunEvent(long sequence, string id, CustomLoopRunEventKind kind) => new(sequence, id, _timestamp, kind, null, null, null, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null);
 
     private static async Task CreateCompletedInvocationReceiptAsync(WorkspacePaths paths, CustomLoopRunRecord run)
     {
@@ -480,13 +579,37 @@ public sealed class LoopRunApiControllerTests
         })).Status);
     }
 
+    private static async Task<(CustomLoopControlOperationStore Store, CustomLoopControlOperation Operation, ICustomLoopControlOperationLease Lease)> BeginControlReceiptAsync(WorkspacePaths paths)
+    {
+        var pending = new CustomLoopControlOperation(
+            CustomLoopControlOperation.CurrentSchemaVersion,
+            "control-web",
+            CustomLoopControlRequestHash.Compute(CustomLoopControlKind.Pause, "run-web-recovery", 2, "control-web", "web"),
+            CustomLoopControlKind.Pause,
+            "run-web-recovery",
+            2,
+            "web",
+            _timestamp,
+            _timestamp,
+            CustomLoopControlOperationState.Pending,
+            CustomLoopControlStatus.Unknown,
+            null,
+            null,
+            false,
+            "The control operation is pending.");
+        var store = new CustomLoopControlOperationStore(paths);
+        var begun = await store.BeginAsync(pending);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, begun.Status);
+        return (store, Assert.IsType<CustomLoopControlOperation>(begun.Operation), Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(begun.Lease));
+    }
+
     private static async Task<HttpResponseMessage> SendAsync(HttpClient client, string path, string token, HttpMethod? method = null)
     {
         var request = new HttpRequestMessage(method ?? HttpMethod.Get, path);
         request.Headers.Add(WebSessionSecurity.HeaderName, token);
         if (method == HttpMethod.Post)
         {
-            request.Content = JsonContent.Create(new { }, options: JsonOptions);
+            request.Content = JsonContent.Create(new { }, options: _jsonOptions);
         }
 
         return await client.SendAsync(request);
@@ -494,7 +617,14 @@ public sealed class LoopRunApiControllerTests
 
     private static async Task<HttpResponseMessage> SendControlAsync(HttpClient client, string path, string token, object body)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create(body, options: JsonOptions) };
+        var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create(body, options: _jsonOptions) };
+        request.Headers.Add(WebSessionSecurity.HeaderName, token);
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> SendJsonNullAsync(HttpClient client, string path, string token)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create<object?>(null, options: _jsonOptions) };
         request.Headers.Add(WebSessionSecurity.HeaderName, token);
         return await client.SendAsync(request);
     }
@@ -538,6 +668,11 @@ public sealed class LoopRunApiControllerTests
         var scriptPath = workspace.File("fake-loop-run-api-codex.ps1");
         var commandPath = workspace.File("fake-loop-run-api-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, """
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
 
             function Write-ProtocolJson($value) {
@@ -550,6 +685,7 @@ public sealed class LoopRunApiControllerTests
                 switch ($message.method) {
                     "initialize" { Write-ProtocolJson @{ id = $message.id; result = @{} } }
                     "initialized" { }
+                    "model/list" { Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } } }
                     "thread/start" { Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } } }
                     "turn/start" {
                         $turnId = "turn-test"

@@ -1,3 +1,4 @@
+using EmbodySense.Web.Models;
 using Microsoft.AspNetCore.Authentication;
 using System.Reflection;
 using System.Text.Json;
@@ -89,7 +90,7 @@ public static class Program
 
         app.Use(async (context, next) =>
         {
-            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* ws://[::1]:*; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
+            context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
             context.Response.Headers["X-Content-Type-Options"] = "nosniff";
             context.Response.Headers["Referrer-Policy"] = "no-referrer";
             await next();

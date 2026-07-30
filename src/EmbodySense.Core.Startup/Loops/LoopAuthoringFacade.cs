@@ -1,3 +1,7 @@
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -10,7 +14,7 @@ using EmbodySense.Core.Startup.Loops.Execution;
 using ApplicationContextInput = EmbodySense.Core.Common.Loops.Models.Custom.CustomLoopContextInputPolicy;
 using ApplicationContextOutput = EmbodySense.Core.Common.Loops.Models.Custom.CustomLoopContextOutputPolicy;
 using ApplicationContextPolicy = EmbodySense.Core.Common.Loops.Models.Custom.CustomLoopContextPolicy;
-using ApplicationNodeContext = EmbodySense.Core.Common.Loops.Models.Custom.CustomLoopNodeContextPolicy;
+using ApplicationNodeContext = EmbodySense.Core.Common.Loops.Custom.CustomLoopNodeContextPolicy;
 
 namespace EmbodySense.Core.Startup.Loops;
 

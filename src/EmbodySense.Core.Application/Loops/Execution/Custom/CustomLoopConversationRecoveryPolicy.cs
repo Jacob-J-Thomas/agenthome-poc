@@ -1,10 +1,21 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Provides operations for custom loop conversation recovery policy.
+/// </summary>
 public static class CustomLoopConversationRecoveryPolicy
 {
+    /// <summary>
+    /// Determines whether the requires current conversation condition holds.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <param name="currentConversationIdentity">The current conversation identity.</param>
+    /// <returns><see langword="true"/> when requires current conversation; otherwise, <see langword="false"/>.</returns>
     public static bool RequiresCurrentConversation(CustomLoopRunRecord? run, string? currentConversationIdentity)
     {
         if (run is not { Status: CustomLoopRunStatus.Paused, InvokingConversation: not null })

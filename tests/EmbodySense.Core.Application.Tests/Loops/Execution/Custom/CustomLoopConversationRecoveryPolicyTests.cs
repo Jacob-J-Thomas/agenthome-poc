@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -7,7 +9,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
 public sealed class CustomLoopConversationRecoveryPolicyTests
 {
-    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-23T12:00:00+00:00");
+    private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-23T12:00:00+00:00");
     private const string CurrentConversationIdentity = "conversation-current";
 
     [Fact]
@@ -113,7 +115,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
 
     private static CustomLoopDefinition Definition(CustomLoopInferenceStep[] steps, bool exitPublishes, int maxAdditionalIterations)
     {
-        var seed = CustomLoopDefinition.CreateSeed("loop-recovery-chat", "role-workspace", steps[0].Id, "create-loop", Timestamp);
+        var seed = CustomLoopDefinition.CreateSeed("loop-recovery-chat", "role-workspace", steps[0].Id, "create-loop", _timestamp);
         var definition = seed with
         {
             InferenceSteps = steps,
@@ -138,7 +140,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
     private static CustomLoopRunRecord Run(CustomLoopDefinition definition, int nextStepIndex, bool bindConversation = true)
     {
         var conversation = bindConversation
-            ? new CustomLoopConversationReference(CurrentConversationIdentity, new string('b', 64), Timestamp)
+            ? new CustomLoopConversationReference(CurrentConversationIdentity, new string('b', 64), _timestamp)
             : null;
         return new CustomLoopRunRecord(
             CustomLoopRunRecord.CurrentSchemaVersion,
@@ -146,8 +148,8 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
             definition.Id,
             1,
             CustomLoopRunStatus.Paused,
-            Timestamp,
-            Timestamp,
+            _timestamp,
+            _timestamp,
             null,
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
@@ -157,7 +159,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
             definition,
             "prompt",
             conversation,
-            CustomLoopContextSnapshot.CreateEmpty(Timestamp),
+            CustomLoopContextSnapshot.CreateEmpty(_timestamp),
             CustomLoopExecutionClock.NotStarted(),
             CustomLoopRunCheckpoint.Start() with { NextStepIndex = nextStepIndex },
             [],
@@ -177,7 +179,7 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
         return new CustomLoopRunEvent(
             sequence,
             $"event-{sequence}",
-            Timestamp,
+            _timestamp,
             kind,
             iteration,
             stepId,

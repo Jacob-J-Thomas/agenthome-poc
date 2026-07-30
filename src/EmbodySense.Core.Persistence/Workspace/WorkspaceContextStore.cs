@@ -1,12 +1,13 @@
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Common.Context;
+using EmbodySense.Core.Common.Context.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Workspace;
 
 public sealed class WorkspaceContextStore : IWorkspaceContextStore
 {
-    private static readonly (string SourceId, string FileName, WorkspaceContextDocumentKind Kind)[] AgentContextFiles =
+    private static readonly (string SourceId, string FileName, WorkspaceContextDocumentKind Kind)[] _agentContextFiles =
     [
         ("role", "ROLE.md", WorkspaceContextDocumentKind.RoleInstruction),
         ("soul", "SOUL.md", WorkspaceContextDocumentKind.AgentIdentity),
@@ -30,7 +31,7 @@ public sealed class WorkspaceContextStore : IWorkspaceContextStore
             WorkspaceContextDocumentKind.RoleInstruction,
             cancellationToken));
 
-        foreach (var (sourceId, fileName, kind) in AgentContextFiles)
+        foreach (var (sourceId, fileName, kind) in _agentContextFiles)
         {
             var path = paths.AgentFile(fileName);
             documents.Add(await ReadDocumentAsync(sourceId, $".agent/{fileName}", path, kind, cancellationToken));

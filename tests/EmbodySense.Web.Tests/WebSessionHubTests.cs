@@ -1,5 +1,7 @@
-using System.Security.Claims;
+using EmbodySense.Web;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
+using System.Security.Claims;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Hubs;
@@ -92,8 +94,10 @@ public sealed class WebSessionHubTests
     public async Task SetVerboseMode_streams_system_status_to_caller()
     {
         using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace);
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        await using var host = new WebAgentRuntimeHost(options, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
         _ = await hub.InitializeWorkspace();
@@ -245,15 +249,15 @@ public sealed class WebSessionHubTests
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
         await using var host = CreateHost(workspace.RootPath, approvals);
-        const string guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
-        var hub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(guidance));
+        const string Guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
+        var hub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(Guidance));
 
         var exception = resume
             ? await Assert.ThrowsAsync<HubException>(() => hub.ResumeLoop(new LoopRunControlInput("run-one", 1, "resume-unsupported-schema")))
             : await Assert.ThrowsAsync<HubException>(() => hub.InvokeLoop(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-unsupported-schema", "prompt")));
 
         Assert.Contains("unsupported_loop_persistence_schema", exception.Message, StringComparison.Ordinal);
-        Assert.Contains(guidance, exception.Message, StringComparison.Ordinal);
+        Assert.Contains(Guidance, exception.Message, StringComparison.Ordinal);
     }
 
     private static WebAgentRuntimeHost CreateHost(string rootPath, WebApprovalCoordinator approvals)

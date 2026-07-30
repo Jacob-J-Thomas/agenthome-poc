@@ -1,12 +1,12 @@
-using EmbodySense.Cli.Command.Models;
 using EmbodySense.Core.Startup.Audit;
+using EmbodySense.Cli.Command;
 
 namespace EmbodySense.Cli.Command;
 
 public static class AuditCommand
 {
-    private static readonly IReadOnlySet<string> IgnoredRootTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tail" };
-    private static readonly IReadOnlySet<string> OptionsWithValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--limit", "-n" };
+    private static readonly IReadOnlySet<string> _ignoredRootTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "tail" };
+    private static readonly IReadOnlySet<string> _optionsWithValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--limit", "-n" };
 
     public static async Task<int> RunAsync(CliArguments arguments)
     {
@@ -84,7 +84,7 @@ public static class AuditCommand
 
     private static string GetRoot(CliArguments arguments)
     {
-        return arguments.FirstOperand(1, IgnoredRootTokens, OptionsWithValues) ?? Directory.GetCurrentDirectory();
+        return arguments.FirstOperand(1, _ignoredRootTokens, _optionsWithValues) ?? Directory.GetCurrentDirectory();
     }
 
     private static int GetLimit(CliArguments arguments)

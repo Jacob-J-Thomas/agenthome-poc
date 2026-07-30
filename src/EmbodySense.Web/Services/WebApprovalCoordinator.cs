@@ -1,14 +1,15 @@
-using System.Collections.Concurrent;
+using EmbodySense.Web;
 using EmbodySense.Core.Startup.Governance;
+using System.Collections.Concurrent;
 using EmbodySense.Web.Models;
 
 namespace EmbodySense.Web.Services;
 
 public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
 {
-    private static readonly (bool Approved, string DecisionBy, string Detail) OwnerDisconnected = (false, "system.web", "owner_disconnected");
-    private static readonly (bool Approved, string DecisionBy, string Detail) OwnerUnavailable = (false, "system.web", "approval_owner_unavailable");
-    private static readonly (bool Approved, string DecisionBy, string Detail) TimedOut = (false, "system.web", "approval_timeout");
+    private static readonly (bool Approved, string DecisionBy, string Detail) _ownerDisconnected = (false, "system.web", "owner_disconnected");
+    private static readonly (bool Approved, string DecisionBy, string Detail) _ownerUnavailable = (false, "system.web", "approval_owner_unavailable");
+    private static readonly (bool Approved, string DecisionBy, string Detail) _timedOut = (false, "system.web", "approval_timeout");
     private readonly ConcurrentDictionary<string, PendingApproval> _pending = new(StringComparer.Ordinal);
     private readonly HashSet<string> _liveOwnerConnections = new(StringComparer.Ordinal);
     private readonly object _ownerGate = new();
@@ -42,7 +43,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         {
             if (string.IsNullOrWhiteSpace(ownerConnectionId) || !_liveOwnerConnections.Contains(ownerConnectionId))
             {
-                return OwnerUnavailable;
+                return _ownerUnavailable;
             }
 
             pending = new PendingApproval(request, Interlocked.Increment(ref _lastSequence), _timeProvider.GetUtcNow(), ownerConnectionId);
@@ -109,7 +110,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
                     continue;
                 }
 
-                pending.TrySetResult(OwnerDisconnected);
+                pending.TrySetResult(_ownerDisconnected);
                 removedAny = true;
             }
         }
@@ -124,7 +125,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
     {
         var previousOwnerConnectionId = _currentOwnerConnectionId.Value;
         _currentOwnerConnectionId.Value = ownerConnectionId;
-        return new ApprovalScope(this, previousOwnerConnectionId);
+        return new ApprovalScope(_currentOwnerConnectionId, previousOwnerConnectionId);
     }
 
     public IReadOnlyList<WebPendingApproval> GetPending(string? ownerConnectionId = null)
@@ -201,7 +202,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         {
             if (IsCurrentPending(pending))
             {
-                pending.TrySetResult(TimedOut);
+                pending.TrySetResult(_timedOut);
             }
         }
     }
@@ -229,29 +230,5 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
     private bool IsCurrentPending(PendingApproval pending)
     {
         return _pending.TryGetValue(pending.Request.RequestId, out var current) && ReferenceEquals(current, pending);
-    }
-
-    private sealed class ApprovalScope : IDisposable
-    {
-        private readonly WebApprovalCoordinator _coordinator;
-        private readonly string? _previousOwnerConnectionId;
-        private bool _disposed;
-
-        public ApprovalScope(WebApprovalCoordinator coordinator, string? previousOwnerConnectionId)
-        {
-            _coordinator = coordinator;
-            _previousOwnerConnectionId = previousOwnerConnectionId;
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _coordinator._currentOwnerConnectionId.Value = _previousOwnerConnectionId;
-            _disposed = true;
-        }
     }
 }

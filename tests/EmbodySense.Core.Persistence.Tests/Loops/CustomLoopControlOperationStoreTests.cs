@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Models;
 using System.Diagnostics;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Governance.Audit;
@@ -10,7 +11,7 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopControlOperationStoreTests
 {
-    private static readonly DateTimeOffset Timestamp = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _timestamp = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public async Task Pending_and_complete_receipts_survive_restart_replay_exact_content_and_conflict_on_changed_content()
@@ -186,18 +187,18 @@ public sealed class CustomLoopControlOperationStoreTests
     private static CustomLoopControlOperation Pending(string operationId, string actor)
     {
         var kind = CustomLoopControlKind.Pause;
-        const string runId = "run-control";
-        const int expectedVersion = 2;
+        const string RunId = "run-control";
+        const int ExpectedVersion = 2;
         return new CustomLoopControlOperation(
             CustomLoopControlOperation.CurrentSchemaVersion,
             operationId,
-            CustomLoopControlRequestHash.Compute(kind, runId, expectedVersion, operationId, actor),
+            CustomLoopControlRequestHash.Compute(kind, RunId, ExpectedVersion, operationId, actor),
             kind,
-            runId,
-            expectedVersion,
+            RunId,
+            ExpectedVersion,
             actor,
-            Timestamp,
-            Timestamp,
+            _timestamp,
+            _timestamp,
             CustomLoopControlOperationState.Pending,
             CustomLoopControlStatus.Unknown,
             null,

@@ -1,3 +1,8 @@
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
@@ -15,6 +20,7 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopRunStore _runStore;
     private readonly CustomLoopInvocationOperationStore _invocationOperationStore;
+    private readonly CustomLoopControlOperationStore _controlOperationStore;
     private readonly CustomLoopRecoveryService? _recovery;
     private readonly CustomLoopTraceRetentionService? _retention;
     private readonly string? _actor;
@@ -33,6 +39,7 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         _paths = new WorkspacePaths(workingDirectory);
         _runStore = new CustomLoopRunStore(_paths);
         _invocationOperationStore = new CustomLoopInvocationOperationStore(_paths);
+        _controlOperationStore = new CustomLoopControlOperationStore(_paths);
         _actor = authenticatedActor;
         _surface = authenticatedSurface;
         var audit = authenticatedActor is null ? null : new AuditLog(_paths);
@@ -131,6 +138,26 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
                 operation.CreatedAtUtc,
                 operation.UpdatedAtUtc,
                 operation.Detail);
+    }
+
+    public async Task<LoopControlOperationSnapshot?> GetControlOperationAsync(string operationId, CancellationToken cancellationToken = default)
+    {
+        var operation = await _controlOperationStore.GetAsync(operationId, cancellationToken);
+        return operation is null
+            ? null
+            : new LoopControlOperationSnapshot(
+                operation.OperationId,
+                operation.Kind.ToString(),
+                operation.RunId,
+                operation.ExpectedLifecycleVersion,
+                operation.State.ToString(),
+                operation.Outcome.ToString(),
+                operation.ResultLifecycleVersion,
+                operation.ResultRunStatus?.ToString(),
+                operation.OutcomeAuditRecorded,
+                operation.State == CustomLoopControlOperationState.Complete,
+                operation.CreatedAtUtc,
+                operation.UpdatedAtUtc);
     }
 
     public async Task<IReadOnlyList<LoopRunSummarySnapshot>> ListRecentAsync(int maximumCount = CustomLoopLimits.MaxRecentRunsPageSize, CancellationToken cancellationToken = default)

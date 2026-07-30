@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Application.Runtime.Commands.Models;
 using System.Globalization;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
@@ -7,12 +9,20 @@ using EmbodySense.Core.Common.Memory.Models;
 
 namespace EmbodySense.Core.Application.Runtime.Commands;
 
+/// <summary>
+/// Represents a runtime command service.
+/// </summary>
 public sealed class RuntimeCommandService
 {
     private readonly IConversationMemoryStore? _conversationMemoryStore;
     private readonly IReadOnlyList<LlmMessage> _startupMessages;
     private IReadOnlyList<ConversationTranscriptListItem>? _pendingConversationLoad;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="RuntimeCommandService"/> type.
+    /// </summary>
+    /// <param name="conversationMemoryStore">The conversation memory store.</param>
+    /// <param name="startupMessages">The startup messages.</param>
     public RuntimeCommandService(
         IConversationMemoryStore? conversationMemoryStore = null,
         IReadOnlyList<LlmMessage>? startupMessages = null)
@@ -21,6 +31,12 @@ public sealed class RuntimeCommandService
         _startupMessages = startupMessages ?? [];
     }
 
+    /// <summary>
+    /// Attempts to handle static command.
+    /// </summary>
+    /// <param name="input">The input.</param>
+    /// <param name="result">The result.</param>
+    /// <returns><see langword="true"/> when handle static command; otherwise, <see langword="false"/>.</returns>
     public static bool TryHandleStaticCommand(string input, out RuntimeCommandResult result)
     {
         if (string.IsNullOrWhiteSpace(input))
@@ -39,6 +55,14 @@ public sealed class RuntimeCommandService
         return true;
     }
 
+    /// <summary>
+    /// Attempts to handle asynchronously.
+    /// </summary>
+    /// <param name="input">The input.</param>
+    /// <param name="conversationState">The conversation state.</param>
+    /// <param name="state">The state.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the runtime command result.</returns>
     public async Task<RuntimeCommandResult> TryHandleAsync(
         string input,
         ConversationRuntimeState conversationState,
@@ -108,6 +132,10 @@ public sealed class RuntimeCommandService
         }
     }
 
+    /// <summary>
+    /// Executes the clear pending input operation.
+    /// </summary>
+    /// <returns>The operation.</returns>
     public void ClearPendingInput()
     {
         _pendingConversationLoad = null;
@@ -154,8 +182,8 @@ public sealed class RuntimeCommandService
         }
 
         _pendingConversationLoad = conversations;
-        const string prompt = "Send conversation number to load, or /cancel.";
-        return RuntimeCommandResult.HandledPrompt(RuntimeCommandOutput.FormatConversationList(conversations), prompt);
+        const string Prompt = "Send conversation number to load, or /cancel.";
+        return RuntimeCommandResult.HandledPrompt(RuntimeCommandOutput.FormatConversationList(conversations), Prompt);
     }
 
     private async Task<RuntimeCommandResult> CompleteConversationLoadAsync(

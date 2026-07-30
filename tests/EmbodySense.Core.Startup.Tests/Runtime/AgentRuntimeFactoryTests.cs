@@ -1,3 +1,10 @@
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
@@ -9,7 +16,6 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
-using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
@@ -33,6 +39,9 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(string.Empty, await File.ReadAllTextAsync(paths.CurrentConversationPath));
         Assert.NotEmpty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
         Assert.True(File.Exists(paths.ConversationTurnLockPath));
+        Assert.Equal(CodexRuntimeCompatibility.Compatible, runtime.CodexRuntimeStatus.Compatibility);
+        Assert.Equal("codex-cli 999.0.0-test", runtime.CodexRuntimeStatus.Version);
+        Assert.Equal("explicit --codex-path", runtime.CodexRuntimeStatus.Source);
     }
 
     [Fact]
@@ -69,6 +78,38 @@ public sealed class AgentRuntimeFactoryTests
             fakeCodex,
             "read-only",
             null!));
+    }
+
+    [Fact]
+    public async Task CreateAsync_rejects_pre_resolved_status_for_a_different_model_or_executable_request()
+    {
+        using var workspace = new TestWorkspace();
+        var requestedExecutable = workspace.File("requested-codex.cmd");
+        var status = new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            requestedExecutable,
+            workspace.File("resolved-codex.cmd"),
+            "codex-cli compatible-test",
+            "gpt-test",
+            "explicit --codex-path",
+            "Compatible test runtime.");
+        var factory = new AgentRuntimeFactory(new RejectingApprovalPrompt(), status);
+
+        var modelException = await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateAsync(
+            "different-model",
+            workspace.RootPath,
+            requestedExecutable,
+            "read-only",
+            AgentRuntimeSurface.Cli));
+        var pathException = await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateAsync(
+            "gpt-test",
+            workspace.RootPath,
+            workspace.File("different-codex.cmd"),
+            "read-only",
+            AgentRuntimeSurface.Cli));
+
+        Assert.Contains("different configured model", modelException.Message, StringComparison.Ordinal);
+        Assert.Contains("different explicit executable", pathException.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -257,9 +298,9 @@ public sealed class AgentRuntimeFactoryTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         await PersistRunningRunAsync(runStore, RunningRun("run-unsupported-startup-recovery"));
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
         await using var runtime = await CreateRuntimeAsync(workspace);
         var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-unsupported-startup-recovery", "retry after cleanup");
 
@@ -267,7 +308,7 @@ public sealed class AgentRuntimeFactoryTests
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.InvokeCustomLoopAsync(input));
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
 
         File.Delete(indexPath);
         var retry = await runtime.InvokeCustomLoopAsync(input);
@@ -288,9 +329,9 @@ public sealed class AgentRuntimeFactoryTests
         await using var runtime = await CreateRuntimeAsync(workspace);
         var recovered = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(running.Id));
         Assert.Equal("Paused", recovered.Status);
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
         var input = new LoopRunControlInput(recovered.Id, recovered.LifecycleVersion, "cancel-after-unsupported-index");
 
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.CancelCustomLoopAsync(input));
@@ -660,6 +701,11 @@ public sealed class AgentRuntimeFactoryTests
         var scriptPath = workspace.File("fake-codex.ps1");
         var commandPath = workspace.File("fake-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, $$"""
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
             $developerInstructions = ""
             $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
@@ -678,6 +724,10 @@ public sealed class AgentRuntimeFactoryTests
                     }
 
                     "initialized" {
+                    }
+
+                    "model/list" {
+                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
                     }
 
                     "thread/start" {

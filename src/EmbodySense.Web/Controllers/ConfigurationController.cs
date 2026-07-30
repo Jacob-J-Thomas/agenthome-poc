@@ -1,3 +1,4 @@
+using EmbodySense.Core.Startup.Configuration.Models;
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;

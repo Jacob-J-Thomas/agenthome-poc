@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Loops;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -19,10 +20,10 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private const string StagingPrefix = ".staging-";
     private const string EvictionStagingPrefix = ".evicting-";
     private const string RetentionPolicy = "oldest-first within 256 artifacts and 64 MiB; full response chunks are sensitive local workspace evidence";
-    private static readonly TimeSpan LockRetryDelay = TimeSpan.FromMilliseconds(25);
-    private static readonly TimeSpan MaxLockWait = TimeSpan.FromSeconds(5);
-    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+    private static readonly TimeSpan _lockRetryDelay = TimeSpan.FromMilliseconds(25);
+    private static readonly TimeSpan _maxLockWait = TimeSpan.FromSeconds(5);
+    private static readonly UTF8Encoding _strictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
     private readonly WorkspacePaths _paths;
     private readonly TimeProvider _timeProvider;
     private readonly Dictionary<string, AccountedArtifactSnapshot> _accountedArtifacts = new(StringComparer.Ordinal);
@@ -99,9 +100,9 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             {
                 return new FileStream(_paths.ToolResponseRetentionLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.WriteThrough);
             }
-            catch (IOException exception) when (IsLockContention(exception) && wait.Elapsed < MaxLockWait)
+            catch (IOException exception) when (IsLockContention(exception) && wait.Elapsed < _maxLockWait)
             {
-                await Task.Delay(LockRetryDelay, cancellationToken);
+                await Task.Delay(_lockRetryDelay, cancellationToken);
             }
         }
     }
@@ -225,7 +226,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
         var bytes = new byte[checked((int)stream.Length)];
         await stream.ReadExactlyAsync(bytes, cancellationToken);
-        return JsonSerializer.Deserialize<ToolResultArtifactManifest>(bytes, JsonOptions)
+        return JsonSerializer.Deserialize<ToolResultArtifactManifest>(bytes, _jsonOptions)
             ?? throw new InvalidDataException("A retained tool-response manifest is empty.");
     }
 
@@ -281,7 +282,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 
             var bytes = await File.ReadAllBytesAsync(chunkPath, cancellationToken);
             if (!string.Equals(Sha256(bytes), chunk.ContentSha256, StringComparison.Ordinal)
-                || StrictUtf8.GetString(bytes).Length != chunk.CharacterCount)
+                || _strictUtf8.GetString(bytes).Length != chunk.CharacterCount)
             {
                 throw new InvalidDataException("A retained tool-response chunk does not match its exact content hash or character count.");
             }
@@ -345,7 +346,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             }
 
             var content = result.OutputText.Substring(offset, characterCount);
-            var bytes = StrictUtf8.GetBytes(content);
+            var bytes = _strictUtf8.GetBytes(content);
             var path = ChunkFileName(sequence);
             chunks.Add(new PreparedChunk(path, bytes, new ToolResultArtifactChunk(sequence, path, Sha256(bytes), content.Length, bytes.LongLength)));
             offset += characterCount;
@@ -353,7 +354,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         }
 
         var correlation = result.Request.AuditCorrelation;
-        var contentBytes = StrictUtf8.GetBytes(result.OutputText);
+        var contentBytes = _strictUtf8.GetBytes(result.OutputText);
         var manifest = new ToolResultArtifactManifest(
             CurrentSchemaVersion,
             result.RequestId,
@@ -377,7 +378,7 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
             retainedAtUtc,
             RetentionPolicy,
             chunks.Select(chunk => chunk.Manifest).ToArray());
-        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions);
+        var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, _jsonOptions);
         return new PreparedArtifact(manifest, manifestBytes, chunks, manifestBytes.LongLength + chunks.Sum(chunk => chunk.Bytes.LongLength));
     }
 

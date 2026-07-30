@@ -1,16 +1,26 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using System.Text;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Applies idempotent, version-checked pause, cancel, and explicit-resume controls to durable custom-loop runs.
+/// </summary>
+/// <remarks>
+/// Lifecycle receipts are reserved before run mutation. Resume is never automatic: it requires an available workspace host,
+/// the admitted model, an exact paused lifecycle version, and an authenticated explicit request.
+/// </remarks>
 public sealed class CustomLoopLifecycleService
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopControlOperationStore _operationStore;
@@ -21,6 +31,17 @@ public sealed class CustomLoopLifecycleService
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopLifecycleService"/> type.
+    /// </summary>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="operationStore">The operation store.</param>
+    /// <param name="resumeExecutor">The resume executor.</param>
+    /// <param name="modelAvailability">The model availability.</param>
+    /// <param name="cancellationSignal">The cancellation signal.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="executionGate">The execution gate.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopLifecycleService(
         ICustomLoopRunStore runStore,
         ICustomLoopControlOperationStore operationStore,
@@ -41,18 +62,36 @@ public sealed class CustomLoopLifecycleService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Requests a checkpoint-bound pause under optimistic lifecycle concurrency.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The durable, replayed, conflicting, or in-progress control outcome.</returns>
     public Task<CustomLoopControlResult> PauseAsync(CustomLoopPauseRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         return ExecuteAsync(CustomLoopControlKind.Pause, request.RunId, request.ExpectedLifecycleVersion, request.OperationId, request.Actor, cancellationToken);
     }
 
+    /// <summary>
+    /// Requests cancellation and signals an active provider attempt when one is locally owned.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The durable, replayed, conflicting, or in-progress control outcome.</returns>
     public Task<CustomLoopControlResult> CancelAsync(CustomLoopCancelRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         return ExecuteAsync(CustomLoopControlKind.Cancel, request.RunId, request.ExpectedLifecycleVersion, request.OperationId, request.Actor, cancellationToken);
     }
 
+    /// <summary>
+    /// Explicitly resumes a paused run only after ownership, model, and lifecycle checks succeed.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The durable, replayed, conflicting, or dispatch outcome.</returns>
     public Task<CustomLoopControlResult> ResumeAsync(CustomLoopResumeRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -80,11 +119,14 @@ public sealed class CustomLoopLifecycleService
             false,
             "The custom-loop control operation is durably pending.");
 
+        // A resume receipt must not claim ownership before this process can host the execution.
         if (kind == CustomLoopControlKind.Resume && !_executionGate.IsWorkspaceHostAvailable)
         {
             return Result(CustomLoopControlStatus.WorkspaceHostUnavailable, null, operationId, "workspace_host_unavailable: another process owns custom-loop hosting; no Resume receipt was created and the operation can be retried after hosting becomes available.");
         }
 
+        // Reserve the receipt before reading or mutating the run. Replays are then safe even when the
+        // prior caller disappeared after the lifecycle transition.
         CustomLoopControlOperationStoreResult begun;
         try
         {
@@ -280,8 +322,8 @@ public sealed class CustomLoopLifecycleService
 
         if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))
         {
-            const string detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";
-            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, detail);
+            const string Detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";
+            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
             var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
             var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
             return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
@@ -379,8 +421,8 @@ public sealed class CustomLoopLifecycleService
     {
         if (operation.Kind == CustomLoopControlKind.Resume && run.Status == CustomLoopRunStatus.Running)
         {
-            const string resumeRecoveryDetail = "Pending Resume recovery found the durable Running transition before its control receipt completed; the undispatched run was parked at its proved checkpoint boundary.";
-            var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.Paused, operation.Actor, NewEventId("resume-recovery"), resumeRecoveryDetail);
+            const string ResumeRecoveryDetail = "Pending Resume recovery found the durable Running transition before its control receipt completed; the undispatched run was parked at its proved checkpoint boundary.";
+            var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.Paused, operation.Actor, NewEventId("resume-recovery"), ResumeRecoveryDetail);
             if (parked.Run is null)
             {
                 return await CompleteAuditedOutcomeAsync(operation, parked.Status, parked.CurrentRun, parked.Detail);
@@ -419,8 +461,8 @@ public sealed class CustomLoopLifecycleService
         var current = await TryLoadAsync(resumedRun.Id, IntegrityToken()) ?? resumedRun;
         if (exception is OperationCanceledException && current.Status == CustomLoopRunStatus.CancelRequested)
         {
-            const string cancellationDetail = "The ordered resume executor observed the durable cancellation request and stopped its active attempt; cancellation was completed without another provider dispatch.";
-            var cancelled = await PersistTransitionAsync(current, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("resume-cancelled"), cancellationDetail);
+            const string CancellationDetail = "The ordered resume executor observed the durable cancellation request and stopped its active attempt; cancellation was completed without another provider dispatch.";
+            var cancelled = await PersistTransitionAsync(current, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("resume-cancelled"), CancellationDetail);
             var cancelledRun = cancelled.Run ?? cancelled.CurrentRun ?? current;
             var cancelledStatus = cancelled.Run is not null
                 ? cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning
@@ -695,7 +737,7 @@ public sealed class CustomLoopLifecycleService
 
     private static CancellationToken IntegrityToken()
     {
-        return new CancellationTokenSource(IntegrityWriteTimeout).Token;
+        return new CancellationTokenSource(_integrityWriteTimeout).Token;
     }
 
     private static string SafeExceptionClass(Exception exception)

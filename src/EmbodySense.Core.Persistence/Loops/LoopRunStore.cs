@@ -1,15 +1,16 @@
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Runtime;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models;
-using EmbodySense.Core.Common.Runtime.Models;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class LoopRunStore : ILoopRunStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
     private readonly WorkspacePaths _paths;
 
     public LoopRunStore(WorkspacePaths paths)
@@ -25,7 +26,7 @@ public sealed class LoopRunStore : ILoopRunStore
 
         var path = LoopArtifactPaths.GetRunPath(_paths, run.LoopId, run.RunId);
         Directory.CreateDirectory(Path.GetDirectoryName(path) ?? _paths.LoopRunsPath);
-        var json = JsonSerializer.Serialize(run, JsonOptions) + Environment.NewLine;
+        var json = JsonSerializer.Serialize(run, _jsonOptions) + Environment.NewLine;
         await LoopArtifactFileWriter.WriteTextAsync(path, json, cancellationToken);
     }
 
@@ -65,7 +66,7 @@ public sealed class LoopRunStore : ILoopRunStore
         try
         {
             await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            run = await JsonSerializer.DeserializeAsync<LoopRunRecord>(stream, JsonOptions, cancellationToken);
+            run = await JsonSerializer.DeserializeAsync<LoopRunRecord>(stream, _jsonOptions, cancellationToken);
         }
         catch (JsonException exception)
         {

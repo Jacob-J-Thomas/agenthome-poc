@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Inference;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -14,7 +15,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private const string ClientTitle = "EmbodySense";
     private const string ClientVersion = "0.1.0";
     private const int MaxProtocolLineCharacters = 1_000_000;
-    private static readonly TimeSpan ProtocolReadTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan _protocolReadTimeout = TimeSpan.FromMinutes(2);
     private readonly LlmInferenceClientOptions _options;
     private ICodexAppServerTransport? _transport;
     private readonly ICodexAppServerToolBridge? _toolBridge;
@@ -354,7 +355,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     {
         var transport = GetTransport();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(ProtocolReadTimeout);
+        timeout.CancelAfter(_protocolReadTimeout);
         string? line;
         try
         {
@@ -362,7 +363,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException($"Timed out waiting for Codex app-server protocol message after {ProtocolReadTimeout.TotalSeconds:N0} seconds.");
+            throw new TimeoutException($"Timed out waiting for Codex app-server protocol message after {_protocolReadTimeout.TotalSeconds:N0} seconds.");
         }
 
         if (line is null)

@@ -1,3 +1,7 @@
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Runtime;
+using EmbodySense.Core.Application.Runtime;
 using System.Globalization;
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Inference;
@@ -11,10 +15,16 @@ using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
-using EmbodySense.Core.Common.Runtime.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution;
 
+/// <summary>
+/// Serializes one interactive conversation turn through inference and projection, with optional durable transcript and run-evidence stores.
+/// </summary>
+/// <remarks>
+/// A configured conversation-memory store synchronizes and persists the durable transcript. A configured loop-run store records
+/// run evidence. When either optional store is absent, the corresponding durable behavior is not performed.
+/// </remarks>
 public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunner
 {
     private readonly ILlmInferenceClient _inferenceClient;
@@ -24,6 +34,15 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     private readonly ILoopRunStore? _loopRunStore;
     private readonly RuntimeSurfaceId _surface;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="DefaultConversationLoopRunner"/> type.
+    /// </summary>
+    /// <param name="inferenceClient">The inference client.</param>
+    /// <param name="conversationState">The conversation state.</param>
+    /// <param name="conversationMemoryStore">The conversation memory store.</param>
+    /// <param name="loopDefinition">The loop definition.</param>
+    /// <param name="loopRunStore">The loop run store.</param>
+    /// <param name="surface">The surface.</param>
     public DefaultConversationLoopRunner(
         ILlmInferenceClient inferenceClient,
         ConversationRuntimeState conversationState,
@@ -43,10 +62,17 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         _surface = surface ?? RuntimeSurfaceId.Runtime;
     }
 
+    /// <summary>
+    /// Runs one default conversation turn while holding exclusive conversation ownership.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <returns>The completed, cancelled, or failed turn and its updated runtime projection.</returns>
     public async Task<DefaultConversationLoopTurnResult> RunTurnAsync(DefaultConversationLoopTurnRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        // A turn owns transcript synchronization, inference, and projection as one serialized unit;
+        // concurrent callers wait rather than race durable and in-memory conversation state.
         IDisposable conversationLease;
         try
         {
@@ -176,10 +202,10 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         }
         catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
         {
-            const string detail = "Turn was cancelled.";
-            var saveFailure = await TrySaveRunAsync(run.Cancel(DateTimeOffset.UtcNow, detail), CancellationToken.None);
+            const string Detail = "Turn was cancelled.";
+            var saveFailure = await TrySaveRunAsync(run.Cancel(DateTimeOffset.UtcNow, Detail), CancellationToken.None);
             return DefaultConversationLoopTurnResult.Cancelled(
-                IncludeRunPersistenceFailure(detail, saveFailure),
+                IncludeRunPersistenceFailure(Detail, saveFailure),
                 acceptedTranscriptMessages.ToArray(),
                 runIdentity,
                 userMessageAccepted);

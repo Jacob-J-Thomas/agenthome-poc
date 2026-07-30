@@ -1,3 +1,4 @@
+using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Loops;
 
 namespace EmbodySense.Web.Models;

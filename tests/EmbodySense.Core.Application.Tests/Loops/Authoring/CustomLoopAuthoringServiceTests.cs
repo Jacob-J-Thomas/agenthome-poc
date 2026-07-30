@@ -1,8 +1,11 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Authoring.Models;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Common.Governance.Audit;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
@@ -10,7 +13,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Authoring;
 
 public sealed class CustomLoopAuthoringServiceTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 16, 12, 30, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _now = new(2026, 7, 16, 12, 30, 0, TimeSpan.Zero);
 
     [Fact]
     public void Constructor_requires_store_and_audit_log()
@@ -76,8 +79,8 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.Equal("role-workspace", definition.RoleId);
         Assert.Equal("op-create", definition.LastMutationOperationId);
         Assert.Equal(1, definition.DefinitionVersion);
-        Assert.Equal(Now, definition.CreatedAtUtc);
-        Assert.Equal(Now, definition.UpdatedAtUtc);
+        Assert.Equal(_now, definition.CreatedAtUtc);
+        Assert.Equal(_now, definition.UpdatedAtUtc);
         Assert.Equal(CustomLoopContextDefaults.CreatePrototypeDefaults(), definition.ContextDefaults);
         Assert.Equal("step-created", Assert.Single(definition.InferenceSteps).Id);
         Assert.True(CustomLoopDefinitionContentHash.Matches(definition));
@@ -369,7 +372,7 @@ public sealed class CustomLoopAuthoringServiceTests
         var updated = Assert.IsType<CustomLoopDefinition>(result.Definition);
         Assert.Equal(current.DefinitionVersion + 1, updated.DefinitionVersion);
         Assert.Equal("op-update", updated.LastMutationOperationId);
-        Assert.Equal(Now, updated.UpdatedAtUtc);
+        Assert.Equal(_now, updated.UpdatedAtUtc);
         Assert.Equal([current.InferenceSteps[0].Id, "step-new"], updated.InferenceSteps.Select(step => step.Id));
         Assert.Same(current.ContextDefaults, updated.ContextDefaults);
         Assert.Equal(CustomLoopContextDefaults.CreatePrototypeDefaults(), updated.ContextDefaults);
@@ -765,7 +768,7 @@ public sealed class CustomLoopAuthoringServiceTests
         Assert.Equal(1, store.DeleteCallCount);
         Assert.NotNull(store.Tombstone);
         Assert.Equal("op-delete", store.Tombstone.MutationOperationId);
-        Assert.Equal(Now, store.Tombstone.DeletedAtUtc);
+        Assert.Equal(_now, store.Tombstone.DeletedAtUtc);
         Assert.Equal(2, audit.Events.Count);
         AssertAudit(audit.Events[0], AuditSchema.Actions.LoopDefinitionMutationIntent, AuditSchema.Outcomes.Requested, "delete", current);
         AssertAudit(audit.Events[1], AuditSchema.Actions.LoopDefinitionMutationOutcome, AuditSchema.Outcomes.Succeeded, "delete", current);
@@ -774,7 +777,7 @@ public sealed class CustomLoopAuthoringServiceTests
     [Fact]
     public async Task Delete_maps_not_found_and_version_conflict_store_results()
     {
-        var deletedTombstone = new CustomLoopDefinitionTombstone(CustomLoopDefinitionTombstone.CurrentSchemaVersion, "loop-missing", 4, new string('a', CustomLoopLimits.Sha256HexCharacters), "other-role-delete", Now.AddMinutes(-5));
+        var deletedTombstone = new CustomLoopDefinitionTombstone(CustomLoopDefinitionTombstone.CurrentSchemaVersion, "loop-missing", 4, new string('a', CustomLoopLimits.Sha256HexCharacters), "other-role-delete", _now.AddMinutes(-5));
         var missingStore = new FakeStore { DeleteResult = CustomLoopDefinitionStoreResult.TombstoneConflict(deletedTombstone, expectedDefinitionVersion: 1) };
         var missing = await Service(missingStore).DeleteAsync("loop-missing", 1, "role-workspace", "op-delete", "actor-user");
 
@@ -852,13 +855,13 @@ public sealed class CustomLoopAuthoringServiceTests
 
     private static CustomLoopAuthoringService Service(FakeStore store, RecordingAuditLog? audit = null, ICustomLoopDefinitionIdentityGenerator? identity = null, ICustomLoopRunStore? runStore = null)
     {
-        return new CustomLoopAuthoringService(store, audit ?? new RecordingAuditLog(), identity ?? new QueueIdentityGenerator(["loop-created"], ["step-created", "step-new"]), new FixedTimeProvider(Now), runStore);
+        return new CustomLoopAuthoringService(store, audit ?? new RecordingAuditLog(), identity ?? new QueueIdentityGenerator(["loop-created"], ["step-created", "step-new"]), new FixedTimeProvider(_now), runStore);
     }
 
     private static CustomLoopDefinition Definition(string operationId = "op-existing", int version = 1)
     {
-        var definition = CustomLoopDefinition.CreateSeed("loop-existing", "role-workspace", "step-existing", operationId, Now.AddHours(-1));
-        return Rehash(definition with { DefinitionVersion = version, UpdatedAtUtc = Now.AddMinutes(-15), DisplayName = "Existing loop", Description = "Existing description" });
+        var definition = CustomLoopDefinition.CreateSeed("loop-existing", "role-workspace", "step-existing", operationId, _now.AddHours(-1));
+        return Rehash(definition with { DefinitionVersion = version, UpdatedAtUtc = _now.AddMinutes(-15), DisplayName = "Existing loop", Description = "Existing description" });
     }
 
     private static CustomLoopDefinitionInput Input(CustomLoopDefinition? definition = null)
@@ -983,8 +986,8 @@ public sealed class CustomLoopAuthoringServiceTests
             definition.Id,
             1,
             CustomLoopRunStatus.Running,
-            Now,
-            Now,
+            _now,
+            _now,
             null,
             "test",
             new CustomLoopModelSnapshot("test", null),
@@ -994,8 +997,8 @@ public sealed class CustomLoopAuthoringServiceTests
             definition,
             string.Empty,
             null,
-            CustomLoopContextSnapshot.CreateEmpty(Now),
-            new CustomLoopExecutionClock(0, Now),
+            CustomLoopContextSnapshot.CreateEmpty(_now),
+            new CustomLoopExecutionClock(0, _now),
             CustomLoopRunCheckpoint.Start(),
             [],
             null,

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Inference;
 using System.Text.Json;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
@@ -10,7 +11,7 @@ namespace EmbodySense.Core.Persistence.Tests.Memory;
 
 public sealed class ConversationMemoryStoreTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     [Fact]
     public async Task AppendMessageAsync_writes_current_conversation_json_lines()
@@ -56,6 +57,27 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task LoadConversationAsync_reads_current_saved_and_archived_transcripts_and_rejects_missing_ids()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("active prompt"));
+        await WriteConversationAsync(paths, "saved-conversation", Entry("saved-conversation", 1, "assistant", "saved answer"));
+        await WriteConversationAsync(paths, Path.Combine("archive", "20260618T0102030000000Z"), Entry("current", 1, "user", "archived prompt"));
+
+        var current = await store.LoadConversationAsync("current");
+        var saved = await store.LoadConversationAsync("saved-conversation");
+        var archived = await store.LoadConversationAsync("archive/20260618T0102030000000Z");
+        var missing = await Assert.ThrowsAsync<FileNotFoundException>(() => store.LoadConversationAsync("missing-conversation"));
+
+        Assert.Equal("active prompt", Assert.Single(current).Content);
+        Assert.Equal("saved answer", Assert.Single(saved).Content);
+        Assert.Equal("archived prompt", Assert.Single(archived).Content);
+        Assert.Contains("missing-conversation", missing.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Concurrent_appends_from_distinct_store_instances_commit_unique_contiguous_sequences()
     {
         using var workspace = new TestWorkspace();
@@ -68,7 +90,7 @@ public sealed class ConversationMemoryStoreTests
         var messages = await first.LoadCurrentConversationAsync();
         Assert.Equal(40, messages.Count);
         Assert.Equal(40, messages.Select(message => message.Content).Distinct(StringComparer.Ordinal).Count());
-        var entries = (await File.ReadAllLinesAsync(paths.CurrentConversationPath)).Select(line => JsonSerializer.Deserialize<ConversationMemoryEntry>(line, JsonOptions)!).ToArray();
+        var entries = (await File.ReadAllLinesAsync(paths.CurrentConversationPath)).Select(line => JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions)!).ToArray();
         Assert.Equal(Enumerable.Range(1, 40), entries.Select(entry => entry.Sequence));
     }
 
@@ -130,7 +152,7 @@ public sealed class ConversationMemoryStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.ConversationMemoryPath);
-        await File.WriteAllTextAsync(paths.CurrentConversationPath, JsonSerializer.Serialize(Entry("current", 1, "user", "seed"), JsonOptions));
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, JsonSerializer.Serialize(Entry("current", 1, "user", "seed"), _jsonOptions));
         var store = new ConversationMemoryStore(paths);
 
         await store.AppendMessageAsync(LlmMessage.Assistant("second"));
@@ -217,6 +239,90 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task LoadConversationHistorySnapshotAsync_waits_for_the_cross_process_lease_and_returns_complete_lines()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("snapshot prompt"));
+        await store.AppendMessageAsync(LlmMessage.Assistant("snapshot answer"));
+        await using var externalLease = new FileStream(paths.CurrentConversationPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var snapshotTask = store.LoadConversationHistorySnapshotAsync(50, 400, 4_000_000);
+        await Task.Delay(75);
+
+        Assert.False(snapshotTask.IsCompleted);
+        await externalLease.DisposeAsync();
+        var snapshot = await snapshotTask.WaitAsync(TimeSpan.FromSeconds(2));
+        var current = Assert.Single(snapshot.Transcripts);
+        Assert.True(current.Exists);
+        Assert.True(current.IsCurrent);
+        Assert.Equal(2, current.Lines.Count);
+        Assert.Contains("snapshot prompt", current.Lines[0], StringComparison.Ordinal);
+        Assert.Contains("snapshot answer", current.Lines[1], StringComparison.Ordinal);
+        Assert.False(current.AdditionalContentOmitted);
+        Assert.False(snapshot.AdditionalFilesOmitted);
+    }
+
+    [Theory]
+    [InlineData(0, 1, 1, "maxTranscriptFiles")]
+    [InlineData(1, 0, 1, "maxLinesPerTranscript")]
+    [InlineData(1, 1, 0, "maxTotalCharacters")]
+    public async Task LoadConversationHistorySnapshotAsync_rejects_nonpositive_bounds(int maxTranscriptFiles, int maxLinesPerTranscript, int maxTotalCharacters, string parameterName)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+
+        var exception = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.LoadConversationHistorySnapshotAsync(maxTranscriptFiles, maxLinesPerTranscript, maxTotalCharacters));
+
+        Assert.Equal(parameterName, exception.ParamName);
+    }
+
+    [Fact]
+    public async Task LoadConversationHistorySnapshotAsync_enforces_the_file_bound_and_reports_omission()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteConversationAsync(paths, "saved-a", Entry("saved-a", 1, "user", "first saved"));
+        await WriteConversationAsync(paths, "saved-b", Entry("saved-b", 1, "user", "second saved"));
+
+        var snapshot = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(2, 400, 4_000_000);
+
+        Assert.Collection(
+            snapshot.Transcripts,
+            current =>
+            {
+                Assert.True(current.IsCurrent);
+                Assert.False(current.Exists);
+            },
+            saved => Assert.Equal("saved-a", saved.ConversationId));
+        Assert.True(snapshot.AdditionalFilesOmitted);
+    }
+
+    [Fact]
+    public async Task LoadConversationHistorySnapshotAsync_bounds_retained_lines_and_aggregate_characters()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteConversationAsync(
+            paths,
+            "saved-a",
+            Entry("saved-a", 1, "user", "first"),
+            Entry("saved-a", 2, "assistant", "second"),
+            Entry("saved-a", 3, "user", "third"));
+        await WriteConversationAsync(paths, "saved-b", Entry("saved-b", 1, "user", "later"));
+
+        var lineBound = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(3, 2, 4_000);
+        var characterBound = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(3, 20, 30);
+
+        var lineBoundSaved = Assert.Single(lineBound.Transcripts, transcript => transcript.ConversationId == "saved-a");
+        Assert.Equal(2, lineBoundSaved.Lines.Count);
+        Assert.True(lineBoundSaved.AdditionalContentOmitted);
+        Assert.Contains(characterBound.Transcripts, transcript => transcript.AdditionalContentOmitted);
+        Assert.InRange(characterBound.Transcripts.Sum(transcript => transcript.Lines.Sum(line => line.Length)), 0, 30);
+    }
+
+    [Fact]
     public async Task ResumeConversationAsync_makes_selected_transcript_current_and_archives_previous_current()
     {
         using var workspace = new TestWorkspace();
@@ -295,7 +401,7 @@ public sealed class ConversationMemoryStoreTests
         Directory.CreateDirectory(paths.ConversationMemoryPath);
         var path = Path.Combine(paths.ConversationMemoryPath, conversationId + ".ndjson");
         Directory.CreateDirectory(Path.GetDirectoryName(path) ?? paths.ConversationMemoryPath);
-        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, JsonOptions));
+        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, _jsonOptions));
         await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
     }
 

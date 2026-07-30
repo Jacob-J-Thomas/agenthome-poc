@@ -1,3 +1,4 @@
+using EmbodySense.Core.Startup.Audit;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 

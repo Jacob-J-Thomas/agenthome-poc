@@ -1,6 +1,8 @@
+using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Loops;
 using System.Text.Json;
 using EmbodySense.Core.Application.Inference;
-using EmbodySense.Core.Common.Governance.Audit.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -21,7 +23,7 @@ namespace EmbodySense.IntegrationTests.CodexAppServer;
 
 public sealed class CodexAppServerInferenceTests
 {
-    private static readonly JsonSerializerOptions AuditJsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+    private static readonly JsonSerializerOptions _auditJsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     [Fact]
     public async Task GenerateAsync_streams_agent_message_deltas_and_returns_completed_message()
@@ -521,7 +523,7 @@ public sealed class CodexAppServerInferenceTests
         {
             if (!string.IsNullOrWhiteSpace(line))
             {
-                events.Add(JsonSerializer.Deserialize<AuditEvent>(line, AuditJsonOptions)!);
+                events.Add(JsonSerializer.Deserialize<AuditEvent>(line, _auditJsonOptions)!);
             }
         }
 

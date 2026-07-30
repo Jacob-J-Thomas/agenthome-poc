@@ -1,9 +1,11 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
@@ -17,8 +19,8 @@ internal static class CustomLoopRunArtifactCodec
     private const string BlockReferenceProperty = "$contextBlock";
     private const string AuthorityReferenceProperty = "$authority";
     private const string ToolRequestReferenceProperty = "$toolRequest";
-    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    internal static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -68,15 +70,15 @@ internal static class CustomLoopRunArtifactCodec
     {
         if (validateDepth)
         {
-            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom-loop run artifact", path);
+            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, _jsonOptions.MaxDepth, "Custom-loop run artifact", path);
         }
 
         JsonObject root;
         try
         {
-            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
+            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
-            root = JsonNode.Parse(utf8Json, documentOptions: new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth }) as JsonObject
+            root = JsonNode.Parse(utf8Json, documentOptions: new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth }) as JsonObject
                 ?? throw new FormatException("The custom-loop live-run envelope was empty.");
         }
         catch (JsonException exception)
@@ -117,7 +119,7 @@ internal static class CustomLoopRunArtifactCodec
         CustomLoopRunRecord run;
         try
         {
-            run = hydratedProjection.Deserialize<CustomLoopRunRecord>(JsonOptions)
+            run = hydratedProjection.Deserialize<CustomLoopRunRecord>(_jsonOptions)
                 ?? throw new FormatException("The hydrated custom-loop run was empty.");
         }
         catch (JsonException exception)
@@ -173,12 +175,12 @@ internal static class CustomLoopRunArtifactCodec
         JsonObject projection;
         try
         {
-            projection = JsonSerializer.SerializeToNode(run, JsonOptions)?.AsObject()
+            projection = JsonSerializer.SerializeToNode(run, _jsonOptions)?.AsObject()
                 ?? throw new InvalidOperationException("The custom-loop run could not be projected.");
         }
         catch (JsonException exception)
         {
-            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop run artifact", JsonOptions.MaxDepth, exception);
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop run artifact", _jsonOptions.MaxDepth, exception);
         }
 
         ProjectDefinition(RequireObject(projection, "admittedDefinition"), contents);
@@ -1056,9 +1058,9 @@ internal static class CustomLoopRunArtifactCodec
         return items;
     }
 
-    private static byte[] SerializeNode(JsonNode node)
+    internal static byte[] SerializeNode(JsonNode node)
     {
-        return CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(node, JsonOptions, "Custom-loop run artifact");
+        return CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(node, _jsonOptions, "Custom-loop run artifact");
     }
 
     private static JsonNode? Clone(JsonObject owner, string propertyName)
@@ -1163,14 +1165,14 @@ internal static class CustomLoopRunArtifactCodec
         }
     }
 
-    private static string Hash(ReadOnlySpan<byte> content)
+    internal static string Hash(ReadOnlySpan<byte> content)
     {
         return Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
     }
 
-    private static string IndexedId(string prefix, int index)
+    internal static string IndexedId(string prefix, int index)
     {
-        const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+        const string Digits = "0123456789abcdefghijklmnopqrstuvwxyz";
         if (index < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(index));
@@ -1180,210 +1182,13 @@ internal static class CustomLoopRunArtifactCodec
         var position = buffer.Length;
         do
         {
-            buffer[--position] = digits[index % 36];
+            buffer[--position] = Digits[index % 36];
             index /= 36;
         }
         while (index > 0);
 
         return prefix + new string(buffer[position..]);
     }
-
-    private sealed class ContentRegistry
-    {
-        private readonly List<ContentEntry> _entries;
-        private readonly Dictionary<string, ContentEntry> _byId = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, ContentEntry> _byHash = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, ContentEntry> _byText = new(StringComparer.Ordinal);
-        private readonly HashSet<string> _seedIds = new(StringComparer.Ordinal);
-        private readonly HashSet<string> _referencedIds = new(StringComparer.Ordinal);
-
-        public ContentRegistry(IReadOnlyList<ContentEntry> seeds)
-        {
-            _entries = new List<ContentEntry>(seeds.Count);
-            for (var index = 0; index < seeds.Count; index++)
-            {
-                var entry = seeds[index];
-                if (!string.Equals(entry.Id, IndexedId("c", index), StringComparison.Ordinal))
-                {
-                    throw new FormatException("The content table ids are not the canonical contiguous first-use base-36 sequence.");
-                }
-
-                if ((_byId.TryGetValue(entry.Id, out var sameId) && !sameId.Bytes.AsSpan().SequenceEqual(entry.Bytes))
-                    || (_byHash.TryGetValue(entry.Hash, out var sameHash) && !sameHash.Bytes.AsSpan().SequenceEqual(entry.Bytes)))
-                {
-                    throw new FormatException("The content table reuses an id or SHA-256 for different exact bytes.");
-                }
-
-                if (_byText.TryGetValue(entry.Text, out var duplicate))
-                {
-                    throw new FormatException($"The exact same content is stored under different table entries `{duplicate.Id}` and `{entry.Id}`.");
-                }
-
-                if (!_byId.TryAdd(entry.Id, entry) || !_byHash.TryAdd(entry.Hash, entry) || !_byText.TryAdd(entry.Text, entry))
-                {
-                    throw new FormatException("The content table contains duplicate ids or hashes.");
-                }
-
-                _entries.Add(entry);
-                _seedIds.Add(entry.Id);
-            }
-        }
-
-        public IReadOnlyList<ContentEntry> Entries => _entries;
-
-        public string Reference(string text)
-        {
-            byte[] bytes;
-            try
-            {
-                bytes = StrictUtf8.GetBytes(text);
-            }
-            catch (EncoderFallbackException exception)
-            {
-                throw new FormatException("Content-bearing run text is not strict UTF-8.", exception);
-            }
-
-            var hash = Hash(bytes);
-            if (_byHash.TryGetValue(hash, out var existing))
-            {
-                if (!existing.Bytes.AsSpan().SequenceEqual(bytes))
-                {
-                    throw new FormatException("A content hash collision did not compare byte-for-byte equal.");
-                }
-
-                _referencedIds.Add(existing.Id);
-                return existing.Id;
-            }
-
-            if (_byText.TryGetValue(text, out var duplicate))
-            {
-                throw new FormatException($"The exact same content would be assigned inconsistently after `{duplicate.Id}`.");
-            }
-
-            var id = IndexedId("c", _entries.Count);
-            var entry = new ContentEntry(id, hash, text.Length, bytes.Length, Convert.ToBase64String(bytes), text, bytes);
-            _entries.Add(entry);
-            _byId.Add(id, entry);
-            _byHash.Add(hash, entry);
-            _byText.Add(text, entry);
-            _referencedIds.Add(id);
-            return id;
-        }
-
-        public string Resolve(string id)
-        {
-            if (!_byId.TryGetValue(id, out var entry))
-            {
-                throw new FormatException($"Content reference `{id}` is dangling.");
-            }
-
-            _referencedIds.Add(id);
-            return entry.Text;
-        }
-
-        public void RequireEverySeedReferenced()
-        {
-            if (_seedIds.Any(id => !_referencedIds.Contains(id)))
-            {
-                throw new FormatException("The canonical content table contains an unreferenced or noncanonical entry.");
-            }
-        }
-    }
-
-    private sealed class StructuralRegistry
-    {
-        private readonly string _prefix;
-        private readonly string _description;
-        private readonly List<StructuralEntry> _entries;
-        private readonly Dictionary<string, StructuralEntry> _byId = new(StringComparer.Ordinal);
-        private readonly Dictionary<string, StructuralEntry> _byHash = new(StringComparer.Ordinal);
-        private readonly HashSet<string> _seedIds = new(StringComparer.Ordinal);
-        private readonly HashSet<string> _referencedIds = new(StringComparer.Ordinal);
-
-        public StructuralRegistry(string prefix, string description, IReadOnlyList<StructuralEntry> seeds)
-        {
-            _prefix = prefix;
-            _description = description;
-            _entries = new List<StructuralEntry>(seeds.Count);
-            for (var index = 0; index < seeds.Count; index++)
-            {
-                var entry = seeds[index];
-                if (!string.Equals(entry.Id, IndexedId(_prefix, index), StringComparison.Ordinal))
-                {
-                    throw new FormatException($"The {_description} table ids are not the canonical contiguous first-use base-36 sequence.");
-                }
-
-                var bytes = SerializeNode(entry.Value);
-                var hash = Hash(bytes);
-                if (_byHash.TryGetValue(hash, out var duplicate))
-                {
-                    if (!SerializeNode(duplicate.Value).AsSpan().SequenceEqual(bytes))
-                    {
-                        throw new FormatException($"The {_description} table has a SHA-256 collision with unequal exact bytes.");
-                    }
-
-                    throw new FormatException($"The exact same {_description} structure is stored under different ids `{duplicate.Id}` and `{entry.Id}`.");
-                }
-
-                if (!_byId.TryAdd(entry.Id, entry) || !_byHash.TryAdd(hash, entry))
-                {
-                    throw new FormatException($"The {_description} table contains duplicate ids or hashes.");
-                }
-
-                _entries.Add(entry);
-                _seedIds.Add(entry.Id);
-            }
-        }
-
-        public IReadOnlyList<StructuralEntry> Entries => _entries;
-
-        public string Reference(JsonObject value)
-        {
-            var bytes = SerializeNode(value);
-            var hash = Hash(bytes);
-            if (_byHash.TryGetValue(hash, out var existing))
-            {
-                if (!SerializeNode(existing.Value).AsSpan().SequenceEqual(bytes))
-                {
-                    throw new FormatException($"A {_description} hash collision did not compare byte-for-byte equal.");
-                }
-
-                _referencedIds.Add(existing.Id);
-                return existing.Id;
-            }
-
-            var id = IndexedId(_prefix, _entries.Count);
-            var entry = new StructuralEntry(id, value.DeepClone().AsObject());
-            _entries.Add(entry);
-            _byId.Add(id, entry);
-            _byHash.Add(hash, entry);
-            _referencedIds.Add(id);
-            return id;
-        }
-
-        public JsonObject Resolve(string id)
-        {
-            if (!_byId.TryGetValue(id, out var entry))
-            {
-                throw new FormatException($"{_description} reference `{id}` is dangling.");
-            }
-
-            _referencedIds.Add(id);
-            return entry.Value.DeepClone().AsObject();
-        }
-
-        public void RequireEverySeedReferenced()
-        {
-            if (_seedIds.Any(id => !_referencedIds.Contains(id)))
-            {
-                throw new FormatException($"The canonical {_description} table contains an unreferenced or noncanonical entry.");
-            }
-        }
-    }
-
-    private sealed record ContentEntry(string Id, string Hash, int Utf16Characters, int Utf8Bytes, string Base64, string Text, byte[] Bytes);
-
-    private sealed record StructuralEntry(string Id, JsonObject Value);
 
     private sealed record ParsedEnvelope(
         CustomLoopRunRecord Run,

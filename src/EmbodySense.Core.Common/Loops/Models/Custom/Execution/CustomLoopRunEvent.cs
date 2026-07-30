@@ -1,5 +1,32 @@
+using EmbodySense.Core.Common.Loops.Custom.Execution;
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
+/// <summary>
+/// Represents a custom loop run event.
+/// </summary>
+/// <param name="Sequence">The sequence.</param>
+/// <param name="EventId">The event ID.</param>
+/// <param name="TimestampUtc">The UTC event time.</param>
+/// <param name="Kind">The kind.</param>
+/// <param name="Iteration">The iteration.</param>
+/// <param name="StepId">The step ID.</param>
+/// <param name="Attempt">The attempt.</param>
+/// <param name="Detail">The detail.</param>
+/// <param name="ContextBlocks">The context blocks.</param>
+/// <param name="CanonicalOutput">The canonical output.</param>
+/// <param name="OriginalOutputCharacterCount">The original output character count.</param>
+/// <param name="CanonicalOutputTruncated">The canonical output truncated.</param>
+/// <param name="RetainedForLoopReasoning">The retained for loop reasoning.</param>
+/// <param name="PublishedToInvokingConversation">The published to invoking conversation.</param>
+/// <param name="ConversationPublicationId">The conversation publication ID.</param>
+/// <param name="Provider">The provider.</param>
+/// <param name="Model">The model.</param>
+/// <param name="ProviderResponseId">The provider response ID.</param>
+/// <param name="ExitDecision">The exit decision.</param>
+/// <param name="ToolAuthority">The tool authority.</param>
+/// <param name="ToolEvidence">The tool evidence.</param>
+/// <param name="TraceReservationUtf8Bytes">The trace reservation UTF-8 bytes.</param>
+/// <param name="ControlExpectedLifecycleVersion">The control expected lifecycle version.</param>
 public sealed record CustomLoopRunEvent(
     long Sequence,
     string EventId,
