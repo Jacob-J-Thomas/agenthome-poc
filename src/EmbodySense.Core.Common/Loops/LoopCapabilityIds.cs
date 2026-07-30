@@ -9,9 +9,9 @@ namespace EmbodySense.Core.Common.Loops;
 /// </summary>
 public static class LoopCapabilityIds
 {
-    // TODO(loop-capability-registry): Raw capability ids are enough for the default workspace-command loop gate, but skills,
-    // hooks, cron jobs, wake commands, subagents, and editable loops need a real registry with implemented/planned status,
-    // authority metadata, and validation before user-authored loop definitions can safely reference broader capabilities.
+    // The first-wave runtime uses a closed set of flat canonical IDs. Unimplemented skills, hooks,
+    // schedules, wake commands, subagents, and broader editable-loop capabilities are not registered
+    // or authorable merely because a caller supplies a matching-looking string.
     /// <summary>
     /// Identifies the conversation turn capability ID.
     /// </summary>

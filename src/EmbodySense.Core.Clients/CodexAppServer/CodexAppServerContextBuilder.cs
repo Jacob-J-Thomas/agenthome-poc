@@ -15,7 +15,9 @@ namespace EmbodySense.Core.Clients.CodexAppServer;
 /// </remarks>
 internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuilder
 {
-    private const int MaxRestoredContextCharacters = 24_000; // TODO: revisit what an appropriate figures should actually be.
+    // Bound only lower-authority restored messages; the current user turn remains intact. Change this
+    // budget only with the newest-first selection, omission-marker, and hostile-transcript coverage.
+    private const int MaxRestoredContextCharacters = 24_000;
     private readonly IReadOnlyList<ToolCommand> _availableToolCommands;
 
     /// <summary>

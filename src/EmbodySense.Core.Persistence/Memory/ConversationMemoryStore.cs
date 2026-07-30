@@ -146,6 +146,8 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         try
         {
             await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            // Current is always represented first, even when its file is absent. That stable slot lets
+            // configuration clients distinguish a fresh conversation from a truncated file inventory.
             var candidates = new List<(string ConversationId, string Path, bool IsCurrent)>
             {
                 (CurrentConversationId, _paths.CurrentConversationPath, true)
@@ -244,10 +246,15 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
     }
 
     /// <summary>
-    /// Archives the current transcript when nonempty and atomically establishes a fresh current identity.
+    /// Archives the current transcript when nonempty, atomically replaces its identity metadata, and clears the current transcript.
     /// </summary>
+    /// <remarks>
+    /// Archive copy, identity replacement, and transcript clearing are separate file commits under one
+    /// cross-process lease. Cancellation or I/O failure may leave an archive copy or new identity in place;
+    /// the operation does not claim a multi-file transaction.
+    /// </remarks>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
-    /// <returns>A task that represents the asynchronous operation.</returns>
+    /// <returns>A task that completes after the fresh identity and empty current transcript have been written.</returns>
     public async Task StartFreshConversationAsync(CancellationToken cancellationToken = default)
     {
         await _currentConversationGate.WaitAsync(cancellationToken);
@@ -294,11 +301,15 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
     }
 
     /// <summary>
-    /// Archives any nonempty current transcript, copies an archived transcript into the current file, and assigns a fresh current identity.
+    /// Archives any nonempty current transcript, atomically replaces its identity metadata, and copies an archived transcript into the current file.
     /// </summary>
+    /// <remarks>
+    /// Archive copy, identity replacement, and current-transcript replacement are separate file commits
+    /// under one cross-process lease. Cancellation or I/O failure can leave earlier commits in place.
+    /// </remarks>
     /// <param name="conversationId">The conversation ID.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
-    /// <returns>A task that completes after the new identity and copied current transcript are durable.</returns>
+    /// <returns>A task that completes after the new identity and copied current transcript have been written.</returns>
     public async Task ResumeConversationAsync(string conversationId, CancellationToken cancellationToken = default)
     {
         var normalizedConversationId = NormalizeConversationId(conversationId);
@@ -383,6 +394,8 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         {
             Directory.CreateDirectory(_paths.ConversationMemoryPath);
             await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            // FileShare.None makes the prefix comparison and append one file-level critical section;
+            // the outer lease extends that ownership to cooperating writers in other processes.
             await using var stream = OpenCurrentConversationForAtomicAppend();
             var currentEntries = await LoadEntriesAsync(stream, _paths.CurrentConversationPath, cancellationToken);
             var identity = await LoadOrCreateCurrentConversationIdentityAsync(cancellationToken);
@@ -420,6 +433,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
 
     private async Task<FileStream> AcquireCurrentConversationLeaseAsync(CancellationToken cancellationToken)
     {
+        // A lock file is retained between owners; exclusive sharing, not file existence, represents ownership.
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -557,6 +571,8 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         var temporaryPath = CurrentConversationIdentityPath + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
         try
         {
+            // Publish complete JSON through one same-directory rename so readers never observe a partially
+            // written identity file. This does not make the separate transcript update transactional.
             await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(identity, _jsonOptions), cancellationToken);
             File.Move(temporaryPath, CurrentConversationIdentityPath, overwrite: true);
         }
@@ -611,6 +627,8 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         while (lines.Count < maxLines && charactersRead < maxCharacters)
         {
             var allowed = maxCharacters - charactersRead;
+            // Read one character beyond the remaining budget when the buffer permits. That probe
+            // distinguishes exact exhaustion from a complete file without retaining over-budget text.
             var requested = allowed >= buffer.Length ? buffer.Length : allowed + 1;
             var count = await reader.ReadAsync(buffer.AsMemory(0, requested), cancellationToken);
             if (count == 0)
@@ -703,6 +721,8 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
     {
         Directory.CreateDirectory(_paths.ArchivedConversationMemoryPath);
         var archivePath = GetArchiveConversationPath();
+        // Copy before replacing current so an interrupted rotation preserves the source transcript.
+        // A duplicate archive is preferable to losing accepted conversation evidence.
         await CopyFileAsync(_paths.CurrentConversationPath, archivePath, overwrite: false, cancellationToken);
     }
 

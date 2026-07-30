@@ -25,7 +25,7 @@ Production projects emit XML documentation files. Add accurate XML documentation
 
 Use ordinary comments for non-obvious algorithms, state transitions, failure handling, and protocol mappings. Comments must explain verified intent; they must not restate syntax or describe aspirational behavior as implemented.
 
-The repository is completing its existing documentation baseline in issue #83. CS1591 remains explicitly suppressed only while that inventory is completed. A pull request must not claim the missing-documentation gate is enabled until the suppression is removed and the complete production baseline is verified.
+CS1591 is unsuppressed for every production project and fails the warning-as-error build when a public or protected contract is undocumented. Do not add a broad `NoWarn`, authored-source exclusion, or replacement suppression. A genuinely necessary generated-code exclusion must identify the generator and explain why its emitted API is outside the authored contract.
 
 ## Pull requests
 
