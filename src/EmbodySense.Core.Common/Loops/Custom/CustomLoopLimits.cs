@@ -3,82 +3,303 @@ using EmbodySense.Core.Common.Governance.Tools;
 
 namespace EmbodySense.Core.Common.Loops.Custom;
 
+/// <summary>
+/// Defines the supported custom loop limits.
+/// </summary>
 public static class CustomLoopLimits
 {
+    /// <summary>
+    /// Maximum definitions per workspace.
+    /// </summary>
     public const int MaxDefinitionsPerWorkspace = 50;
+    /// <summary>
+    /// Minimum inference steps.
+    /// </summary>
     public const int MinInferenceSteps = 1;
+    /// <summary>
+    /// Maximum inference steps.
+    /// </summary>
     public const int MaxInferenceSteps = 5;
+    /// <summary>
+    /// Minimum additional iterations.
+    /// </summary>
     public const int MinAdditionalIterations = 0;
+    /// <summary>
+    /// Maximum additional iterations.
+    /// </summary>
     public const int MaxAdditionalIterations = 10;
+    /// <summary>
+    /// Maximum conversation publication effects per run.
+    /// </summary>
     public const int MaxConversationPublicationEffectsPerRun = (MaxInferenceSteps + 1) * (MaxAdditionalIterations + 1);
+    /// <summary>
+    /// Maximum model attempts per run.
+    /// </summary>
     public const int MaxModelAttemptsPerRun = 65;
+    /// <summary>
+    /// Maximum name characters.
+    /// </summary>
     public const int MaxNameCharacters = 120;
+    /// <summary>
+    /// Maximum description characters.
+    /// </summary>
     public const int MaxDescriptionCharacters = 2_000;
+    /// <summary>
+    /// Maximum instruction characters.
+    /// </summary>
     public const int MaxInstructionCharacters = 12_000;
+    /// <summary>
+    /// Maximum preset prompt characters.
+    /// </summary>
     public const int MaxPresetPromptCharacters = 24_000;
+    /// <summary>
+    /// Maximum invoking conversation characters.
+    /// </summary>
     public const int MaxInvokingConversationCharacters = 24_000;
+    /// <summary>
+    /// Maximum invoking conversation entries.
+    /// </summary>
     public const int MaxInvokingConversationEntries = 384;
+    /// <summary>
+    /// Number of lowercase hexadecimal characters in a SHA-256 digest.
+    /// </summary>
     public const int Sha256HexCharacters = 64;
+    /// <summary>
+    /// Maximum artifact ID characters.
+    /// </summary>
     public const int MaxArtifactIdCharacters = 120;
+    /// <summary>
+    /// Maximum mutation operation ID characters.
+    /// </summary>
     public const int MaxMutationOperationIdCharacters = 120;
+    /// <summary>
+    /// Maximum run traces per workspace.
+    /// </summary>
     public const int MaxRunTracesPerWorkspace = 250;
+    /// <summary>
+    /// Maximum run trace tombstones per workspace.
+    /// </summary>
     public const int MaxRunTraceTombstonesPerWorkspace = 10_000;
+    /// <summary>
+    /// Maximum run trace deletion operations per workspace.
+    /// </summary>
     public const int MaxRunTraceDeletionOperationsPerWorkspace = 20_000;
+    /// <summary>
+    /// Number of run trace deletion operations for tombstones reserved for integrity-preserving state.
+    /// </summary>
     public const int ReservedRunTraceDeletionOperationsForTombstones = MaxRunTraceTombstonesPerWorkspace;
+    /// <summary>
+    /// Maximum invocation operation receipts per workspace.
+    /// </summary>
     public const int MaxInvocationOperationReceiptsPerWorkspace = 10_000;
+    /// <summary>
+    /// Maximum invocation operation UTF-8 bytes.
+    /// </summary>
     public const int MaxInvocationOperationUtf8Bytes = 512 * 1024;
+    /// <summary>
+    /// Maximum invocation operation workspace UTF-8 bytes.
+    /// </summary>
     public const long MaxInvocationOperationWorkspaceUtf8Bytes = 128L * 1024 * 1024;
+    /// <summary>
+    /// Maximum invocation receipt retention operation UTF-8 bytes.
+    /// </summary>
     public const int MaxInvocationReceiptRetentionOperationUtf8Bytes = 4 * 1024 * 1024;
+    /// <summary>
+    /// Maximum invocation validation errors.
+    /// </summary>
     public const int MaxInvocationValidationErrors = 24;
+    /// <summary>
+    /// Maximum invocation validation error code characters.
+    /// </summary>
     public const int MaxInvocationValidationErrorCodeCharacters = 64;
+    /// <summary>
+    /// Maximum invocation validation error field characters.
+    /// </summary>
     public const int MaxInvocationValidationErrorFieldCharacters = 128;
+    /// <summary>
+    /// Maximum invocation validation error message characters.
+    /// </summary>
     public const int MaxInvocationValidationErrorMessageCharacters = 512;
+    /// <summary>
+    /// Maximum recent runs page size.
+    /// </summary>
     public const int MaxRecentRunsPageSize = 50;
+    /// <summary>
+    /// Maximum run page cursor characters.
+    /// </summary>
     public const int MaxRunPageCursorCharacters = 1_024;
+    /// <summary>
+    /// Maximum run discovery index UTF-8 bytes.
+    /// </summary>
     public const int MaxRunDiscoveryIndexUtf8Bytes = 16 * 1024 * 1024;
+    /// <summary>
+    /// Maximum run trace UTF-8 bytes.
+    /// </summary>
     public const int MaxRunTraceUtf8Bytes = 16 * 1024 * 1024;
+    /// <summary>
+    /// Maximum run trace tombstone UTF-8 bytes.
+    /// </summary>
     public const int MaxRunTraceTombstoneUtf8Bytes = 16 * 1024;
+    /// <summary>
+    /// Maximum run trace deletion operation UTF-8 bytes.
+    /// </summary>
     public const int MaxRunTraceDeletionOperationUtf8Bytes = 32 * 1024;
+    /// <summary>
+    /// Maximum run trace workspace UTF-8 bytes.
+    /// </summary>
     public const long MaxRunTraceWorkspaceUtf8Bytes = 1024L * 1024 * 1024;
+    /// <summary>
+    /// Maximum canonical model output characters.
+    /// </summary>
     public const int MaxCanonicalModelOutputCharacters = 8_000;
+    /// <summary>
+    /// Maximum logical provider request characters.
+    /// </summary>
     public const int MaxLogicalProviderRequestCharacters = 256_000;
+    /// <summary>
+    /// Maximum run detail characters.
+    /// </summary>
     public const int MaxRunDetailCharacters = 64_000;
+    /// <summary>
+    /// Maximum trace reference characters.
+    /// </summary>
     public const int MaxTraceReferenceCharacters = 512;
+    /// <summary>
+    /// Maximum run execution milliseconds.
+    /// </summary>
     public const long MaxRunExecutionMilliseconds = 30 * 60 * 1_000;
+    /// <summary>
+    /// Maximum governed tool requests per run.
+    /// </summary>
     public const int MaxGovernedToolRequestsPerRun = 30;
+    /// <summary>
+    /// Maximum governed tool requests per attempt.
+    /// </summary>
     public const int MaxGovernedToolRequestsPerAttempt = 5;
+    /// <summary>
+    /// Maximum model visible governed tool requests per run.
+    /// </summary>
     public const int MaxModelVisibleGovernedToolRequestsPerRun = MaxGovernedToolRequestsPerRun + 1;
+    /// <summary>
+    /// Maximum model visible governed tool requests per attempt.
+    /// </summary>
     public const int MaxModelVisibleGovernedToolRequestsPerAttempt = MaxGovernedToolRequestsPerAttempt + 1;
+    /// <summary>
+    /// Maximum recorded governed tool requests per run.
+    /// </summary>
     public const int MaxRecordedGovernedToolRequestsPerRun = MaxModelVisibleGovernedToolRequestsPerRun + 1;
+    /// <summary>
+    /// Maximum recorded governed tool requests per attempt.
+    /// </summary>
     public const int MaxRecordedGovernedToolRequestsPerAttempt = MaxModelVisibleGovernedToolRequestsPerAttempt + 1;
+    /// <summary>
+    /// Maximum governed tool target characters.
+    /// </summary>
     public const int MaxGovernedToolTargetCharacters = 1_024;
+    /// <summary>
+    /// Maximum governed tool argument characters.
+    /// </summary>
     public const int MaxGovernedToolArgumentCharacters = 1_024;
+    /// <summary>
+    /// Maximum lifecycle control events per run.
+    /// </summary>
     public const int MaxLifecycleControlEventsPerRun = 64;
+    /// <summary>
+    /// Number of terminal lifecycle changed events per run reserved for integrity-preserving state.
+    /// </summary>
     public const int ReservedTerminalLifecycleChangedEventsPerRun = 1;
+    /// <summary>
+    /// Number of post terminal integrity warning events per run reserved for integrity-preserving state.
+    /// </summary>
     public const int ReservedPostTerminalIntegrityWarningEventsPerRun = 1;
+    /// <summary>
+    /// Maximum nonterminal lifecycle control events per run.
+    /// </summary>
     public const int MaxNonterminalLifecycleControlEventsPerRun = MaxLifecycleControlEventsPerRun - ReservedTerminalLifecycleChangedEventsPerRun - ReservedPostTerminalIntegrityWarningEventsPerRun;
+    /// <summary>
+    /// Maximum terminal lifecycle control events before integrity warning.
+    /// </summary>
     public const int MaxTerminalLifecycleControlEventsBeforeIntegrityWarning = MaxLifecycleControlEventsPerRun - ReservedPostTerminalIntegrityWarningEventsPerRun;
+    /// <summary>
+    /// Maximum trace events per run.
+    /// </summary>
     public const int MaxTraceEventsPerRun = 768;
+    /// <summary>
+    /// Maximum lifecycle control detail characters.
+    /// </summary>
     public const int MaxLifecycleControlDetailCharacters = 1_024;
+    /// <summary>
+    /// Maximum attempt start evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxAttemptStartEvidenceUtf8Bytes = 45_000;
+    /// <summary>
+    /// Maximum first attempt start evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxFirstAttemptStartEvidenceUtf8Bytes = 265 * 1_024;
+    /// <summary>
+    /// Maximum first distinct node attempt start evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxFirstDistinctNodeAttemptStartEvidenceUtf8Bytes = 128 * 1_024;
     private const int MaxJsonEscapedUtf8BytesPerCharacter = 6;
     private const int MaxAttemptOutcomeMetadataUtf8Bytes = 32 * 1_024;
     // The observed and completed events both retain canonical output; six bytes covers the default JSON encoder's worst-case UTF-16 escape.
+    /// <summary>
+    /// Maximum attempt evidence reservation UTF-8 bytes.
+    /// </summary>
     public const int MaxAttemptEvidenceReservationUtf8Bytes = (2 * MaxCanonicalModelOutputCharacters * MaxJsonEscapedUtf8BytesPerCharacter) + MaxAttemptOutcomeMetadataUtf8Bytes;
+    /// <summary>
+    /// Maximum governed tool request evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxGovernedToolRequestEvidenceUtf8Bytes = 18 * 1_024;
+    /// <summary>
+    /// Maximum governed tool governance evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxGovernedToolGovernanceEvidenceUtf8Bytes = 20 * 1_024;
+    /// <summary>
+    /// Maximum governed tool outcome evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxGovernedToolOutcomeEvidenceUtf8Bytes = 251 * 1_024;
+    /// <summary>
+    /// Maximum governed tool return evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxGovernedToolReturnEvidenceUtf8Bytes = 8 * 1_024;
+    /// <summary>
+    /// Maximum repeated governed tool request integrity evidence UTF-8 bytes.
+    /// </summary>
     public const int MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes = MaxGovernedToolRequestEvidenceUtf8Bytes;
+    /// <summary>
+    /// Maximum governed tool evidence reservation UTF-8 bytes.
+    /// </summary>
     public const int MaxGovernedToolEvidenceReservationUtf8Bytes = MaxGovernedToolRequestEvidenceUtf8Bytes + MaxGovernedToolGovernanceEvidenceUtf8Bytes + MaxGovernedToolOutcomeEvidenceUtf8Bytes + MaxGovernedToolReturnEvidenceUtf8Bytes;
+    /// <summary>
+    /// Maximum trace control reserve UTF-8 bytes.
+    /// </summary>
     public const int MaxTraceControlReserveUtf8Bytes = 512 * 1_024;
+    /// <summary>
+    /// Maximum trace control event UTF-8 bytes.
+    /// </summary>
     public const int MaxTraceControlEventUtf8Bytes = 8 * 1_024;
+    /// <summary>
+    /// Maximum permanent terminal integrity reserve UTF-8 bytes.
+    /// </summary>
     public const int MaxPermanentTerminalIntegrityReserveUtf8Bytes = (128 * 1_024) + MaxRepeatedGovernedToolRequestIntegrityEvidenceUtf8Bytes;
+    /// <summary>
+    /// Maximum tool governance detail characters.
+    /// </summary>
     public const int MaxToolGovernanceDetailCharacters = 512;
+    /// <summary>
+    /// Maximum canonical tool result characters.
+    /// </summary>
     public const int MaxCanonicalToolResultCharacters = ToolResultFormatter.MaxFormattedCharacters;
 
+    /// <summary>
+    /// Calculates the total provider-attempt ceiling for the configured loop shape.
+    /// </summary>
+    /// <param name="inferenceStepCount">The number of inference steps executed in every iteration.</param>
+    /// <param name="maxAdditionalIterations">The maximum iterations accepted after the first.</param>
+    /// <returns>The inference attempts across all possible iterations plus one exit-decision attempt for each possible repeat.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when either argument falls outside the corresponding configured minimum and maximum.</exception>
+    /// <exception cref="OverflowException">Thrown when checked attempt arithmetic overflows.</exception>
     public static int GetMaximumModelAttempts(int inferenceStepCount, int maxAdditionalIterations)
     {
         if (inferenceStepCount < MinInferenceSteps || inferenceStepCount > MaxInferenceSteps)

@@ -11,6 +11,13 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Freezes a validated definition, current role authority, model, trigger, and context into an auditable run snapshot.
+/// </summary>
+/// <remarks>
+/// Admission never invokes a model. The run becomes dispatchable only after its canonical snapshot and admission audit-completion
+/// marker are durable, and an operation identifier can replay only the same canonical invocation.
+/// </remarks>
 public sealed class CustomLoopAdmissionService
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
@@ -21,6 +28,15 @@ public sealed class CustomLoopAdmissionService
     private readonly TimeProvider _timeProvider;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopAdmissionService"/> type.
+    /// </summary>
+    /// <param name="definitionStore">The definition store.</param>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="identityGenerator">The identity generator.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopAdmissionService(ICustomLoopDefinitionStore definitionStore, ICustomLoopRunStore runStore, IAuditLog auditLog, ICustomLoopToolAuthorityProvider authorityProvider, ICustomLoopRunIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null)
     {
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
@@ -31,6 +47,12 @@ public sealed class CustomLoopAdmissionService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Admits an idempotent invocation without dispatching a provider request.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The admitted or replayed run, or a bounded validation, conflict, quota, or integrity result.</returns>
     public async Task<CustomLoopAdmissionResult> AdmitAsync(CustomLoopAdmissionRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -74,6 +96,8 @@ public sealed class CustomLoopAdmissionService
             return await AuditOutcomeAsync(request, result, useIntegrityWindow: false, cancellationToken);
         }
 
+        // Tool authority is captured from current server-owned role policy, never trusted from the
+        // caller or stale definition snapshot.
         CustomLoopToolAuthoritySnapshot authority;
         try
         {
@@ -146,6 +170,8 @@ public sealed class CustomLoopAdmissionService
             return await AuditOutcomeAsync(request, CustomLoopAdmissionResult.Invalid(validation.Errors), useIntegrityWindow: false, cancellationToken);
         }
 
+        // The store owns the atomic one-nonterminal-run and operation-id constraints. A competing
+        // admission therefore becomes a replay or explicit conflict, never a duplicate run.
         CustomLoopRunStoreResult stored;
         try
         {

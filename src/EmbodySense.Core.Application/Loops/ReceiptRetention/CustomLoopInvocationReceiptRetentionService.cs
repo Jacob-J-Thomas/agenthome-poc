@@ -6,6 +6,9 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 
 namespace EmbodySense.Core.Application.Loops.ReceiptRetention;
 
+/// <summary>
+/// Reclaims expired completed invocation receipts through a bounded, recoverable, and audited retention journal.
+/// </summary>
 public sealed class CustomLoopInvocationReceiptRetentionService
 {
     private const int MaxCandidateReselections = 1;
@@ -13,6 +16,12 @@ public sealed class CustomLoopInvocationReceiptRetentionService
     private readonly IAuditLog _auditLog;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopInvocationReceiptRetentionService"/> type.
+    /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopInvocationReceiptRetentionService(ICustomLoopInvocationOperationStore store, IAuditLog auditLog, TimeProvider? timeProvider = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -20,6 +29,13 @@ public sealed class CustomLoopInvocationReceiptRetentionService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Deletes one eligible receipt batch while preserving the minimum replay window.
+    /// </summary>
+    /// <param name="actor">The actor.</param>
+    /// <param name="surface">The surface.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The committed, replayed, in-progress, audit-unavailable, or nothing-eligible result.</returns>
     public Task<CustomLoopInvocationReceiptRetentionResult> PruneForCapacityAsync(string actor, string surface, CancellationToken cancellationToken = default)
     {
         return PruneForCapacityAsync(actor, surface, MaxCandidateReselections, cancellationToken);
@@ -39,6 +55,8 @@ public sealed class CustomLoopInvocationReceiptRetentionService
             surface,
             now,
             now - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration);
+        // Reservation selects only expired completed receipts and establishes a bounded owner. Pending
+        // operations and receipts inside the replay window are never candidates.
         CustomLoopInvocationReceiptRetentionReservationResult reserved;
         try
         {

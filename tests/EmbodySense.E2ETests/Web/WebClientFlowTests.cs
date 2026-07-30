@@ -8,6 +8,8 @@ using System.Net.WebSockets;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web;
@@ -71,6 +73,7 @@ public sealed class WebClientFlowTests
             Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
 
             await WriteCurrentTranscriptAsync(workspace, "e2e restored prompt", "e2e restored answer");
+            await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).StartFreshConversationAsync();
 
             var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history");
             var historyEvent = Assert.Single(GetStreamEvents(historyMessages));
