@@ -21,8 +21,13 @@ public interface ICustomLoopWorkspaceExecutionGate : IAsyncDisposable
     CustomLoopExecutionLeaseResult TryAcquire(string operationId, string requestHash);
 
     /// <summary>
-    /// Reserves a durable busy outcome when the host is unavailable.
+    /// Reserves an in-memory busy-outcome lease while this process owns the host and another operation owns execution.
     /// </summary>
+    /// <remarks>
+    /// A missing workspace host produces <see cref="CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable"/>
+    /// without a reservation. The caller establishes durability later through the invocation-operation store while
+    /// holding the returned reservation lease.
+    /// </remarks>
     /// <param name="operationId">The operation ID.</param>
     /// <param name="requestHash">The request hash.</param>
     /// <returns>The custom loop execution lease result.</returns>

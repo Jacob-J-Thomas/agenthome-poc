@@ -5,7 +5,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 namespace EmbodySense.Core.Application.Loops;
 
 /// <summary>
-/// Persists versioned custom-loop definitions and idempotent authoring-operation receipts.
+/// Persists versioned custom-loop definitions and exposes optional receipt-aware authoring operations.
 /// </summary>
 public interface ICustomLoopDefinitionStore
 {
@@ -18,8 +18,13 @@ public interface ICustomLoopDefinitionStore
     Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Creates a definition and atomically records the supplied idempotent mutation receipt.
+    /// Creates a definition and, when overridden by the adapter, atomically records the supplied idempotent mutation receipt.
     /// </summary>
+    /// <remarks>
+    /// The compatibility implementation delegates to <see cref="CreateAsync(CustomLoopDefinition, CancellationToken)"/>
+    /// and does not persist <paramref name="mutation"/>. Adapters that advertise durable idempotent authoring
+    /// receipts must override this member.
+    /// </remarks>
     /// <param name="definition">The definition.</param>
     /// <param name="mutation">The mutation.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
@@ -67,8 +72,13 @@ public interface ICustomLoopDefinitionStore
     Task<CustomLoopDefinitionStoreResult> UpdateAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Performs a version-checked update and atomically records its idempotent mutation receipt.
+    /// Performs a version-checked update and, when overridden by the adapter, atomically records its idempotent mutation receipt.
     /// </summary>
+    /// <remarks>
+    /// The compatibility implementation delegates to
+    /// <see cref="UpdateAsync(CustomLoopDefinition, int, CancellationToken)"/> and does not persist
+    /// <paramref name="mutation"/>. Adapters that advertise durable idempotent authoring receipts must override this member.
+    /// </remarks>
     /// <param name="definition">The definition.</param>
     /// <param name="expectedDefinitionVersion">The expected definition version.</param>
     /// <param name="mutation">The mutation.</param>
@@ -88,8 +98,13 @@ public interface ICustomLoopDefinitionStore
     Task<CustomLoopDefinitionStoreResult> DeleteAsync(string loopId, int expectedDefinitionVersion, string mutationOperationId, DateTimeOffset deletedAtUtc, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Performs a version-checked tombstone and atomically records its idempotent mutation receipt.
+    /// Performs a version-checked tombstone and, when overridden by the adapter, atomically records its idempotent mutation receipt.
     /// </summary>
+    /// <remarks>
+    /// The compatibility implementation delegates to
+    /// <see cref="DeleteAsync(string, int, string, DateTimeOffset, CancellationToken)"/> and does not persist
+    /// <paramref name="mutation"/>. Adapters that advertise durable idempotent authoring receipts must override this member.
+    /// </remarks>
     /// <param name="loopId">The loop ID.</param>
     /// <param name="expectedDefinitionVersion">The expected definition version.</param>
     /// <param name="mutationOperationId">The mutation operation ID.</param>

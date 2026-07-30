@@ -90,8 +90,12 @@ public interface ICustomLoopRunStore
     Task<IReadOnlyList<CustomLoopRunRecord>> ListNonterminalAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Revalidates trace capacity and lifecycle version immediately before provider dispatch.
+    /// Allows a store to revalidate trace capacity and lifecycle version immediately before provider dispatch.
     /// </summary>
+    /// <remarks>
+    /// The compatibility implementation only observes cancellation and returns <see langword="true"/>.
+    /// Stores that enforce trace capacity or lifecycle concurrency at dispatch time must override this member.
+    /// </remarks>
     /// <param name="candidate">The candidate.</param>
     /// <param name="expectedLifecycleVersion">The expected lifecycle version.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
