@@ -3,8 +3,16 @@ using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Cli.Command;
 
+/// <summary>
+/// Implements the CLI workspace-status projection.
+/// </summary>
 public static class StatusCommand
 {
+    /// <summary>
+    /// Prints workspace layout and permission-policy status for an explicit operand or the current directory.
+    /// </summary>
+    /// <param name="arguments">The complete CLI token sequence, including the root <c>status</c> token.</param>
+    /// <returns>Zero for an initialized workspace; two when initialization is still required.</returns>
     public static int Run(CliArguments arguments)
     {
         var root = arguments.At(1) ?? Directory.GetCurrentDirectory();

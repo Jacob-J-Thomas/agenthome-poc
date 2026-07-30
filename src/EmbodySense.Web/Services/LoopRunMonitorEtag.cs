@@ -5,8 +5,17 @@ using EmbodySense.Core.Startup.Loops.Execution;
 
 namespace EmbodySense.Web.Services;
 
+/// <summary>
+/// Creates strong monitor validators from the exact public run summary and canonical artifact hash.
+/// </summary>
 public static class LoopRunMonitorEtag
 {
+    /// <summary>
+    /// Creates a quoted SHA-256 entity tag that changes when monitor-visible run identity or state changes.
+    /// </summary>
+    /// <param name="summary">The public run summary.</param>
+    /// <param name="artifactHash">The canonical durable artifact hash associated with that summary.</param>
+    /// <returns>A quoted lowercase hexadecimal entity tag.</returns>
     public static string Create(LoopRunSummarySnapshot summary, string artifactHash)
     {
         ArgumentNullException.ThrowIfNull(summary);
