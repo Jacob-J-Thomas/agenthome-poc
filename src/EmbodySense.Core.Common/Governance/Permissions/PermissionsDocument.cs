@@ -181,6 +181,6 @@ public sealed class PermissionsDocument
     private static string ResolveRulePath(string workspaceRootPath, string rulePath)
     {
         var effectiveRulePath = Path.IsPathRooted(rulePath) ? rulePath : Path.Combine(workspaceRootPath, rulePath);
-        return Path.GetFullPath(effectiveRulePath);
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(effectiveRulePath));
     }
 }

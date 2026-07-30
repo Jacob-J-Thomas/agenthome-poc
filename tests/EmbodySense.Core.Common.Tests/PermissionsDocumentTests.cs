@@ -33,7 +33,7 @@ public sealed class PermissionsDocumentTests
             [
                 new ApprovedFileSystemPermission
                 {
-                    Path = "././.agent/logs/tool-responses",
+                    Path = $"././.agent/logs/tool-responses{Path.DirectorySeparatorChar}",
                     Operations = [FileSystemOperation.List, FileSystemOperation.Read, FileSystemOperation.Modify],
                     RequiresApproval = false
                 }
@@ -77,7 +77,7 @@ public sealed class PermissionsDocumentTests
         Assert.True(document.EnsureToolResponseInspectionApproval(paths));
 
         Assert.DoesNotContain(document.Approved, rule => IsInspectionRule(rule) && !rule.RequiresApproval && rule.Operations.Any(IsInspectionOperation));
-        var approvalOperations = document.Approved.Where(rule => IsInspectionRule(rule) && rule.RequiresApproval).SelectMany(rule => rule.Operations).ToArray();
+        var approvalOperations = document.Approved.Where(rule => rule.RequiresApproval).SelectMany(rule => rule.Operations).ToArray();
         Assert.Equal(1, approvalOperations.Count(operation => operation == FileSystemOperation.List));
         Assert.Equal(1, approvalOperations.Count(operation => operation == FileSystemOperation.Read));
     }
