@@ -99,6 +99,43 @@ public sealed class CodexRuntimeResolverTests
     }
 
     [Fact]
+    public async Task Model_unavailable_reports_the_candidate_that_supplied_the_actionable_version()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var localApplicationData = workspace.File("local-app-data");
+        _ = await CreateFakeExecutableAsync(
+            workspace,
+            Path.Combine("local-app-data", "OpenAI", "Codex", "bin", "current"),
+            "codex-cli broken-desktop-test",
+            versionExitCode: 9);
+        var pathExecutable = await CreateFakeExecutableAsync(workspace, "path", "codex-cli stale-path-test", advertisedModels: ["older-model"]);
+        var originalPath = Environment.GetEnvironmentVariable("PATH");
+        var originalLocalApplicationData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+        try
+        {
+            Environment.SetEnvironmentVariable("PATH", Path.GetDirectoryName(pathExecutable));
+            Environment.SetEnvironmentVariable("LOCALAPPDATA", localApplicationData);
+
+            var result = await new CodexRuntimeResolver().ResolveAsync(null, "gpt-test");
+
+            Assert.Equal(CodexRuntimeResolutionStatus.ModelUnavailable, result.Status);
+            Assert.Equal(Path.GetFullPath(pathExecutable), result.ExecutablePath);
+            Assert.Equal("codex-cli stale-path-test", result.Version);
+            Assert.Equal("PATH", result.Source);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PATH", originalPath);
+            Environment.SetEnvironmentVariable("LOCALAPPDATA", originalLocalApplicationData);
+        }
+    }
+
+    [Fact]
     public async Task Missing_explicit_executable_reports_actionable_status()
     {
         using var workspace = new TestWorkspace();
@@ -269,6 +306,29 @@ public sealed class CodexRuntimeResolverTests
         Assert.Equal("codex-cli server-request-test", result.Version);
     }
 
+    [Fact]
+    public async Task Candidate_probe_uses_one_deadline_across_all_protocol_stages()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var executable = await CreateFakeExecutableAsync(
+            workspace,
+            "staged-delay",
+            "codex-cli staged-delay-test",
+            stageDelaySeconds: 6,
+            advertisedModels: ["gpt-test"]);
+
+        var result = await new CodexRuntimeResolver().ResolveAsync(executable, "gpt-test");
+
+        Assert.Equal(CodexRuntimeResolutionStatus.ProbeFailed, result.Status);
+        Assert.Equal("codex-cli staged-delay-test", result.Version);
+        Assert.Contains("timed out after 15 seconds", result.Detail, StringComparison.Ordinal);
+    }
+
     private static async Task<string> CreateFakeExecutableAsync(
         TestWorkspace workspace,
         string relativeDirectory,
@@ -277,6 +337,7 @@ public sealed class CodexRuntimeResolverTests
         int versionExitCode = 0,
         bool omitModelCatalog = false,
         bool requestBeforeInitialize = false,
+        int stageDelaySeconds = 0,
         params string[] advertisedModels)
     {
         var directory = workspace.File(relativeDirectory);
@@ -286,6 +347,10 @@ public sealed class CodexRuntimeResolverTests
         var modelLiterals = string.Join(", ", advertisedModels.Select(model => "'" + model.Replace("'", "''") + "'"));
         await File.WriteAllTextAsync(scriptPath, $$"""
             if ($args -contains "--version") {
+                if ({{stageDelaySeconds}} -gt 0) {
+                    Start-Sleep -Seconds {{stageDelaySeconds}}
+                }
+
                 if ({{versionExitCode}} -ne 0) {
                     [Console]::Error.WriteLine("simulated version failure")
                     exit {{versionExitCode}}
@@ -298,6 +363,7 @@ public sealed class CodexRuntimeResolverTests
             $failAppServer = ${{failAppServer.ToString().ToLowerInvariant()}}
             $omitModelCatalog = ${{omitModelCatalog.ToString().ToLowerInvariant()}}
             $requestBeforeInitialize = ${{requestBeforeInitialize.ToString().ToLowerInvariant()}}
+            $stageDelaySeconds = {{stageDelaySeconds}}
             if ($failAppServer) {
                 [Console]::Error.WriteLine("simulated app-server startup failure")
                 exit 7
@@ -314,6 +380,10 @@ public sealed class CodexRuntimeResolverTests
                 $message = $line | ConvertFrom-Json
                 switch ($message.method) {
                     "initialize" {
+                        if ($stageDelaySeconds -gt 0) {
+                            Start-Sleep -Seconds $stageDelaySeconds
+                        }
+
                         if ($requestBeforeInitialize) {
                             Write-ProtocolJson @{ id = 99; method = "unsupported/probe"; params = @{} }
                             $clientResponse = [Console]::In.ReadLine() | ConvertFrom-Json
@@ -330,6 +400,10 @@ public sealed class CodexRuntimeResolverTests
                     }
 
                     "model/list" {
+                        if ($stageDelaySeconds -gt 0) {
+                            Start-Sleep -Seconds $stageDelaySeconds
+                        }
+
                         $models = @($advertisedModels | ForEach-Object { @{ id = $_; model = $_ } })
                         if ($omitModelCatalog) {
                             Write-ProtocolJson @{ id = $message.id; result = @{} }

@@ -38,12 +38,13 @@ public sealed class CodexRuntimeResolver
         }
 
         var failures = new List<string>();
-        var unavailableModel = false;
-        CodexRuntimeProbeResult? firstProbe = null;
+        CodexRuntimeCandidate? firstFailedCandidate = null;
+        CodexRuntimeProbeResult? firstFailedProbe = null;
+        CodexRuntimeCandidate? modelUnavailableCandidate = null;
+        CodexRuntimeProbeResult? modelUnavailableProbe = null;
         foreach (var candidate in candidates)
         {
             var probe = await ProbeAsync(candidate.ExecutablePath, configuredModel, cancellationToken);
-            firstProbe ??= probe;
             if (probe.IsUsable)
             {
                 return new CodexRuntimeResolution(
@@ -55,15 +56,24 @@ public sealed class CodexRuntimeResolver
                     probe.Detail);
             }
 
-            unavailableModel |= probe.Detail.StartsWith("Configured model ", StringComparison.Ordinal);
+            firstFailedCandidate ??= candidate;
+            firstFailedProbe ??= probe;
+            if (probe.Detail.StartsWith("Configured model ", StringComparison.Ordinal))
+            {
+                modelUnavailableCandidate ??= candidate;
+                modelUnavailableProbe ??= probe;
+            }
+
             failures.Add($"{candidate.ExecutablePath}: {probe.Detail}");
         }
 
-        var status = unavailableModel ? CodexRuntimeResolutionStatus.ModelUnavailable : CodexRuntimeResolutionStatus.ProbeFailed;
+        var status = modelUnavailableCandidate is null ? CodexRuntimeResolutionStatus.ProbeFailed : CodexRuntimeResolutionStatus.ModelUnavailable;
         var detail = status == CodexRuntimeResolutionStatus.ModelUnavailable
             ? $"No discovered Codex executable advertises model `{configuredModel}`. Update Codex or pass a compatible executable with `--codex-path`. Attempts: {string.Join(" | ", failures)}"
             : $"No discovered Codex executable passed the runtime probe. Update Codex or pass a compatible executable with `--codex-path`. Attempts: {string.Join(" | ", failures)}";
-        return new CodexRuntimeResolution(status, candidates[0].ExecutablePath, firstProbe?.Version, configuredModel, candidates[0].Source, LimitDiagnostic(detail));
+        var relevantCandidate = modelUnavailableCandidate ?? firstFailedCandidate ?? candidates[0];
+        var relevantProbe = modelUnavailableProbe ?? firstFailedProbe;
+        return new CodexRuntimeResolution(status, relevantCandidate.ExecutablePath, relevantProbe?.Version, configuredModel, relevantCandidate.Source, LimitDiagnostic(detail));
     }
 
     private static IReadOnlyList<CodexRuntimeCandidate> GetCandidates(string? explicitExecutablePath)
@@ -179,10 +189,13 @@ public sealed class CodexRuntimeResolver
 
     private static async Task<CodexRuntimeProbeResult> ProbeAsync(string executablePath, string? configuredModel, CancellationToken cancellationToken)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(_probeTimeout);
+        var probeCancellationToken = deadline.Token;
         string? version;
         try
         {
-            version = await ReadVersionAsync(executablePath, cancellationToken);
+            version = await ReadVersionAsync(executablePath, probeCancellationToken);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -195,7 +208,7 @@ public sealed class CodexRuntimeResolver
 
         try
         {
-            var advertisedModels = await ReadAdvertisedModelsAsync(executablePath, cancellationToken);
+            var advertisedModels = await ReadAdvertisedModelsAsync(executablePath, probeCancellationToken);
             if (string.IsNullOrWhiteSpace(configuredModel))
             {
                 return new CodexRuntimeProbeResult(true, version, "Codex app-server started successfully; model selection is externally configured.");
@@ -220,8 +233,6 @@ public sealed class CodexRuntimeResolver
 
     private static async Task<string?> ReadVersionAsync(string executablePath, CancellationToken cancellationToken)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_probeTimeout);
         var startInfo = new ProcessStartInfo
         {
             FileName = executablePath,
@@ -234,9 +245,9 @@ public sealed class CodexRuntimeResolver
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Codex version probe did not start.");
         try
         {
-            var standardOutput = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            var standardError = process.StandardError.ReadToEndAsync(timeout.Token);
-            await process.WaitForExitAsync(timeout.Token);
+            var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
             var output = (await standardOutput).Trim();
             var error = (await standardError).Trim();
             if (process.ExitCode != 0)
@@ -316,11 +327,9 @@ public sealed class CodexRuntimeResolver
 
     private static async Task<JsonElement> ReadResponseAsync(ICodexAppServerTransport transport, int requestId, CancellationToken cancellationToken)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_probeTimeout);
         while (true)
         {
-            var line = await transport.ReadLineAsync(timeout.Token);
+            var line = await transport.ReadLineAsync(cancellationToken);
             if (line is null)
             {
                 var detail = string.IsNullOrWhiteSpace(transport.ErrorOutput) ? "Codex app-server closed its output stream." : transport.ErrorOutput.Trim();
@@ -350,7 +359,7 @@ public sealed class CodexRuntimeResolver
                         ["code"] = -32601,
                         ["message"] = "Runtime compatibility probing does not handle server requests."
                     }
-                }.ToJsonString(), timeout.Token);
+                }.ToJsonString(), cancellationToken);
             }
         }
     }
