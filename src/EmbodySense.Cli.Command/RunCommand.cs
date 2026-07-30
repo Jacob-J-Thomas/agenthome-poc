@@ -16,7 +16,9 @@ public static class RunCommand
     /// </summary>
     /// <param name="arguments">The complete CLI token sequence, including the root <c>run</c> token.</param>
     /// <returns>Zero after an orderly session exit; one when the user declines required workspace initialization.</returns>
-    /// <exception cref="CodexRuntimeUnavailableException">No selected executable advertises the requested model.</exception>
+    /// <exception cref="CodexRuntimeUnavailableException">
+    /// Runtime resolution is not compatible because the executable is unavailable, its compatibility probe failed, or it does not advertise the requested model.
+    /// </exception>
     public static async Task<int> RunAsync(CliArguments arguments)
     {
         var options = RunOptions.FromArguments(arguments);

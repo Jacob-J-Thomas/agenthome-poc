@@ -8,7 +8,7 @@ namespace EmbodySense.Web.Services;
 /// <remarks>
 /// The policy accepts loopback host spellings only. Requests without an <c>Origin</c> header remain
 /// eligible for token authentication; requests with an origin must use a loopback host and the
-/// request port. Ordinary HTTP endpoints accept the token only in the session header, while the
+/// request port when the request host specifies one. Ordinary HTTP endpoints accept the token only in the session header, while the
 /// SignalR hub also accepts its standard <c>access_token</c> query parameter.
 /// </remarks>
 public sealed class WebSessionSecurity
@@ -60,7 +60,7 @@ public sealed class WebSessionSecurity
     /// <param name="request">The HTTP request to inspect.</param>
     /// <returns>
     /// <see langword="true"/> when no origin is supplied or an absolute loopback origin uses the
-    /// request port; otherwise <see langword="false"/>.
+    /// request port when that port is explicit; otherwise <see langword="false"/>.
     /// </returns>
     public bool IsOriginAllowed(HttpRequest request)
     {

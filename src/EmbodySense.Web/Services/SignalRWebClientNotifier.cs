@@ -36,6 +36,7 @@ public sealed class SignalRWebClientNotifier : IWebClientNotifier
     {
         ArgumentNullException.ThrowIfNull(approvals);
 
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/164): Prevent an ownerless caller from broadcasting a nonempty approval projection.
         return string.IsNullOrWhiteSpace(ownerConnectionId)
             ? _hubContext.Clients.All.ApprovalsChanged(approvals)
             : _hubContext.Clients.Client(ownerConnectionId).ApprovalsChanged(approvals);
