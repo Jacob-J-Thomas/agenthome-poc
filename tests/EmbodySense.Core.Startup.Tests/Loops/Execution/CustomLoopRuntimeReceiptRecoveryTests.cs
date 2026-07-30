@@ -350,6 +350,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             new CodexRuntimeStatus(
                 CodexRuntimeCompatibility.Compatible,
                 workspace.File("unused-codex.cmd"),
+                workspace.File("unused-codex.cmd"),
                 "codex-cli test",
                 "test-model",
                 "controlled test",

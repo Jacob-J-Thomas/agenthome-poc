@@ -11,6 +11,7 @@ public sealed class CodexRuntimeStatusReader
         var resolution = await new CodexRuntimeResolver().ResolveAsync(explicitExecutablePath, configuredModel, cancellationToken);
         return new CodexRuntimeStatus(
             MapCompatibility(resolution.Status),
+            explicitExecutablePath,
             resolution.ExecutablePath,
             resolution.Version,
             resolution.ConfiguredModel,

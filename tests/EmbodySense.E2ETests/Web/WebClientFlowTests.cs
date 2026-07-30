@@ -55,7 +55,8 @@ public sealed class WebClientFlowTests
     public async Task Signalr_browser_flow_initializes_workspace_and_loads_history_without_model_inference()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexExecutablePath: codexExecutable);
         await app.StartAsync();
 
         try
@@ -176,13 +177,23 @@ public sealed class WebClientFlowTests
         }
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, Action<IServiceCollection>? configureServices = null)
+    private static WebApplication CreateApp(
+        string rootPath,
+        out WebRunOptions options,
+        Action<IServiceCollection>? configureServices = null,
+        string? codexExecutablePath = null)
     {
         var port = GetFreePort();
         var portText = port.ToString(CultureInfo.InvariantCulture);
-        var args = new[] { "--workdir", rootPath, "--port", portText };
-        options = WebRunOptions.FromArguments(args);
-        var builder = Program.CreateBuilder(args, options);
+        var args = new List<string> { "--workdir", rootPath, "--port", portText };
+        if (!string.IsNullOrWhiteSpace(codexExecutablePath))
+        {
+            args.AddRange(["--model", "gpt-test", "--codex-path", codexExecutablePath]);
+        }
+
+        var arguments = args.ToArray();
+        options = WebRunOptions.FromArguments(arguments);
+        var builder = Program.CreateBuilder(arguments, options);
         configureServices?.Invoke(builder.Services);
         var app = builder.Build();
         Program.ConfigurePipeline(app);

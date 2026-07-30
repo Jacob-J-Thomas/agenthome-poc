@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
+// TODO(#83): Add the repository-standard XML contract documentation to this resolver and its public runtime status types.
 public sealed class CodexRuntimeResolver
 {
     private const int MaxDiagnosticCharacters = 2_000;
@@ -38,9 +39,11 @@ public sealed class CodexRuntimeResolver
 
         var failures = new List<string>();
         var unavailableModel = false;
+        CodexRuntimeProbeResult? firstProbe = null;
         foreach (var candidate in candidates)
         {
             var probe = await ProbeAsync(candidate.ExecutablePath, configuredModel, cancellationToken);
+            firstProbe ??= probe;
             if (probe.IsUsable)
             {
                 return new CodexRuntimeResolution(
@@ -60,7 +63,7 @@ public sealed class CodexRuntimeResolver
         var detail = status == CodexRuntimeResolutionStatus.ModelUnavailable
             ? $"No discovered Codex executable advertises model `{configuredModel}`. Update Codex or pass a compatible executable with `--codex-path`. Attempts: {string.Join(" | ", failures)}"
             : $"No discovered Codex executable passed the runtime probe. Update Codex or pass a compatible executable with `--codex-path`. Attempts: {string.Join(" | ", failures)}";
-        return new CodexRuntimeResolution(status, candidates[0].ExecutablePath, null, configuredModel, candidates[0].Source, LimitDiagnostic(detail));
+        return new CodexRuntimeResolution(status, candidates[0].ExecutablePath, firstProbe?.Version, configuredModel, candidates[0].Source, LimitDiagnostic(detail));
     }
 
     private static IReadOnlyList<CodexRuntimeCandidate> GetCandidates(string? explicitExecutablePath)

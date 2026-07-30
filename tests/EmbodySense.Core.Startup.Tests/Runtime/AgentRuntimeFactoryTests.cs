@@ -81,6 +81,38 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task CreateAsync_rejects_pre_resolved_status_for_a_different_model_or_executable_request()
+    {
+        using var workspace = new TestWorkspace();
+        var requestedExecutable = workspace.File("requested-codex.cmd");
+        var status = new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            requestedExecutable,
+            workspace.File("resolved-codex.cmd"),
+            "codex-cli compatible-test",
+            "gpt-test",
+            "explicit --codex-path",
+            "Compatible test runtime.");
+        var factory = new AgentRuntimeFactory(new RejectingApprovalPrompt(), status);
+
+        var modelException = await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateAsync(
+            "different-model",
+            workspace.RootPath,
+            requestedExecutable,
+            "read-only",
+            AgentRuntimeSurface.Cli));
+        var pathException = await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateAsync(
+            "gpt-test",
+            workspace.RootPath,
+            workspace.File("different-codex.cmd"),
+            "read-only",
+            AgentRuntimeSurface.Cli));
+
+        Assert.Contains("different configured model", modelException.Message, StringComparison.Ordinal);
+        Assert.Contains("different explicit executable", pathException.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunTurnAsync_uses_startup_context_and_streams_response_through_public_runtime()
     {
         using var workspace = new TestWorkspace();

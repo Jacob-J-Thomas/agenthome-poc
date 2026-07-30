@@ -69,6 +69,11 @@ public sealed class AgentRuntimeFactory
             throw new ArgumentException("A pre-resolved Codex runtime status must be usable.", nameof(codexRuntimeStatus));
         }
 
+        if (codexRuntimeStatus is not null && string.IsNullOrWhiteSpace(codexRuntimeStatus.ResolvedExecutablePath))
+        {
+            throw new ArgumentException("A pre-resolved Codex runtime status must identify the compatible executable.", nameof(codexRuntimeStatus));
+        }
+
         _approvalPrompt = approvalPrompt;
         _conversationPublicationObserver = conversationPublicationObserver;
         _codexRuntimeStatus = codexRuntimeStatus;
@@ -121,7 +126,7 @@ public sealed class AgentRuntimeFactory
         ArgumentNullException.ThrowIfNull(runtimeSurface);
 
         var workingDirectory = string.IsNullOrWhiteSpace(options.WorkingDirectory) ? Directory.GetCurrentDirectory() : options.WorkingDirectory;
-        var codexRuntimeStatus = _codexRuntimeStatus ?? await new CodexRuntimeStatusReader().ReadAsync(options.CodexExecutablePath, options.Model, cancellationToken);
+        var codexRuntimeStatus = await ResolveCodexRuntimeStatusAsync(options, cancellationToken);
         if (codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
         {
             throw new CodexRuntimeUnavailableException(codexRuntimeStatus);
@@ -254,6 +259,34 @@ public sealed class AgentRuntimeFactory
             await customExecutionGate.DisposeAsync();
             throw;
         }
+    }
+
+    private async Task<CodexRuntimeStatus> ResolveCodexRuntimeStatusAsync(LlmInferenceClientOptions options, CancellationToken cancellationToken)
+    {
+        if (_codexRuntimeStatus is null)
+        {
+            return await new CodexRuntimeStatusReader().ReadAsync(options.CodexExecutablePath, options.Model, cancellationToken);
+        }
+
+        var configuredModel = NormalizeOptional(options.Model);
+        if (!string.Equals(configuredModel, NormalizeOptional(_codexRuntimeStatus.ConfiguredModel), StringComparison.Ordinal))
+        {
+            throw new ArgumentException("The pre-resolved Codex runtime status was produced for a different configured model.", nameof(options));
+        }
+
+        var requestedExecutablePath = NormalizeOptional(options.CodexExecutablePath);
+        var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!string.Equals(requestedExecutablePath, NormalizeOptional(_codexRuntimeStatus.RequestedExecutablePath), pathComparison))
+        {
+            throw new ArgumentException("The pre-resolved Codex runtime status was produced for a different explicit executable request.", nameof(options));
+        }
+
+        return _codexRuntimeStatus;
+    }
+
+    private static string? NormalizeOptional(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     private static string ResolveActor(AgentRuntimeSurface surface)

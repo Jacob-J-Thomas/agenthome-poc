@@ -21,7 +21,8 @@ public sealed class BrowserFlowTests
     public async Task Headless_browser_initializes_workspace_and_restores_history()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, codexExecutable, out var options);
         await app.StartAsync();
         await using var browser = await HeadlessBrowserSession.StartAsync(options.Url);
 
@@ -31,6 +32,7 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("!document.getElementById('initButton').disabled");
             await browser.EvaluateAsync("document.getElementById('initButton').click()");
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
             await WriteCurrentTranscriptAsync(workspace, "browser restored prompt", "browser restored answer");
 
             await SubmitMessageAsync(browser, "/history");
@@ -58,11 +60,11 @@ public sealed class BrowserFlowTests
         await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); })()");
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options)
+    private static WebApplication CreateApp(string rootPath, string codexExecutablePath, out WebRunOptions options)
     {
         var port = GetFreePort();
         var portText = port.ToString(CultureInfo.InvariantCulture);
-        var args = new[] { "--workdir", rootPath, "--port", portText };
+        var args = new[] { "--workdir", rootPath, "--port", portText, "--model", "gpt-test", "--codex-path", codexExecutablePath };
         options = WebRunOptions.FromArguments(args);
         var builder = Program.CreateBuilder(args, options);
         var app = builder.Build();

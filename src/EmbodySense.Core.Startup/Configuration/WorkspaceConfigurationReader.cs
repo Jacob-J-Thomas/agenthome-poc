@@ -390,6 +390,7 @@ public sealed class WorkspaceConfigurationReader
         var lineNumber = 0;
         var parsedMessageCount = 0;
         var omittedMessages = 0;
+        // TODO(#123): Coordinate configuration transcript snapshots with conversation rotation so concurrent reads cannot reject runtime writes.
         await foreach (var line in File.ReadLinesAsync(path, cancellationToken))
         {
             lineNumber++;

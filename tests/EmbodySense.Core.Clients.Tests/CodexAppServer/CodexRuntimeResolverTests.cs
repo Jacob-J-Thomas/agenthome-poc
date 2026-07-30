@@ -52,6 +52,7 @@ public sealed class CodexRuntimeResolverTests
 
             Assert.Equal(CodexRuntimeResolutionStatus.ModelUnavailable, result.Status);
             Assert.Equal(Path.GetFullPath(explicitExecutable), result.ExecutablePath);
+            Assert.Equal("codex-cli stale-test", result.Version);
             Assert.Contains("No discovered Codex executable advertises", result.Detail, StringComparison.Ordinal);
         }
         finally
@@ -124,6 +125,7 @@ public sealed class CodexRuntimeResolverTests
         var result = await new CodexRuntimeResolver().ResolveAsync(executable, "gpt-test");
 
         Assert.Equal(CodexRuntimeResolutionStatus.ProbeFailed, result.Status);
+        Assert.Equal("codex-cli broken-test", result.Version);
         Assert.Contains("simulated app-server startup failure", result.Detail, StringComparison.Ordinal);
     }
 
