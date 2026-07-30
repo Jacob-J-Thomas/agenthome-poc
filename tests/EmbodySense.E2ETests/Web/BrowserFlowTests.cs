@@ -6,6 +6,8 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
@@ -94,7 +96,6 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('refreshConfigButton').disabled");
             await SubmitMessageAsync(browser, "configuration-overlap-turn");
-            await browser.WaitForExpressionAsync("document.getElementById('refreshConfigButton').disabled && document.getElementById('sendButton').disabled");
             await externalLease.DisposeAsync();
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: configuration-overlap-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('refreshConfigButton').disabled && !document.getElementById('sendButton').disabled");
@@ -248,7 +249,7 @@ public sealed class BrowserFlowTests
     private static async Task SubmitMessageAsync(HeadlessBrowserSession browser, string message)
     {
         var jsonMessage = JsonSerializer.Serialize(message);
-        await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); })()");
+        await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); const send = document.getElementById('sendButton'); const cancel = document.getElementById('cancelButton'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); if (input.value !== '' || !send.disabled || cancel.disabled) throw new Error('The browser did not synchronously accept the submitted turn.'); })()");
     }
 
     private static async Task InvokeLoopAsync(HeadlessBrowserSession browser, string prompt)
@@ -290,10 +291,8 @@ public sealed class BrowserFlowTests
 
     private static async Task<string> ReadConversationEvidenceAsync(TestWorkspace workspace)
     {
-        var directory = workspace.File(".agent", "memory", "conversations");
-        var files = Directory.EnumerateFiles(directory, "*.ndjson", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).ToArray();
-        var contents = await Task.WhenAll(files.Select(path => File.ReadAllTextAsync(path)));
-        return string.Join(Environment.NewLine, contents);
+        var snapshot = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadConversationHistorySnapshotAsync(50, 400, 4_000_000);
+        return string.Join(Environment.NewLine, snapshot.Transcripts.SelectMany(transcript => transcript.Lines));
     }
 
     private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app)
