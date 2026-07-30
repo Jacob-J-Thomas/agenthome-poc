@@ -40,9 +40,9 @@ public sealed class BrowserFlowTests
             await Task.Delay(TimeSpan.FromMilliseconds(1250));
 
             app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
-            browser.EndExpectedServerRestart();
             await browser.ReloadAsync();
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            browser.EndExpectedServerRestart();
             // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/125): Require the first turn to be restored after the Web process restarts.
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
             await SubmitMessageAsync(browser, "browser-second-turn");
