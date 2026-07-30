@@ -67,6 +67,9 @@ try {
     Invoke-CheckedNative "dotnet" $buildArguments
 
     if (-not $BrowserE2EOnly) {
+        Invoke-CheckedNative "dotnet" @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal")
+        Invoke-CheckedNative "dotnet" @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal")
+
         $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
         $npm = if ($runningOnWindows) { "npm.cmd" } else { "npm" }
         Invoke-CheckedNative $npm @("ci", "--include=dev")

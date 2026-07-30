@@ -2,7 +2,22 @@
 
 ## Code style
 
+Use `PascalCase` for public types and members, positional-record properties, and compile-time constants. Use `camelCase` for ordinary parameters and local variables, `_camelCase` for private instance, static, and readonly fields, `ITypeName` for interfaces, and `TName` for type parameters.
+
 Use `_` for intentionally unused lambda and anonymous-method parameters, including when the anonymous function has only one parameter. C# keeps a lone `_` addressable rather than treating it as a compiler discard, but the repository uses it as an explicit unused-value convention. If the value is read, give it a descriptive `camelCase` name instead.
+
+The root `.editorconfig` is the reviewed C# naming policy. Positional-record parameters and the unused `_` convention are checked by the syntax-aware integration gate because EditorConfig cannot distinguish those cases from ordinary parameters. Generated compiler output remains outside the gate through the solution/project boundary; do not add blanket IDE1006 suppressions for authored source.
+
+Run the same deterministic checks used by pull-request verification:
+
+```powershell
+dotnet format whitespace EmbodySense.sln --verify-no-changes --no-restore
+dotnet format style EmbodySense.sln --verify-no-changes --no-restore --severity warn --diagnostics IDE1006
+npm run lint
+npm run format:check
+```
+
+Remove `--verify-no-changes` from the whitespace command to apply whitespace fixes. IDE1006 renames should be made deliberately so call sites and serialized or reflection-sensitive names can be reviewed.
 
 ## Documentation
 

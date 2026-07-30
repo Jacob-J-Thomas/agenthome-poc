@@ -4,7 +4,22 @@ root = true
 csharp_preserve_single_line_blocks = true
 csharp_preserve_single_line_statements = true
 
-dotnet_naming_rule.private_fields_use_underscore_camel_case.severity = warning
+dotnet_diagnostic.IDE1006.severity = error
+
+dotnet_naming_rule.private_constants_use_pascal_case.severity = error
+dotnet_naming_rule.private_constants_use_pascal_case.symbols = private_constants
+dotnet_naming_rule.private_constants_use_pascal_case.style = pascal_case
+dotnet_naming_symbols.private_constants.applicable_kinds = field
+dotnet_naming_symbols.private_constants.applicable_accessibilities = private
+dotnet_naming_symbols.private_constants.required_modifiers = const
+
+dotnet_naming_rule.constants_use_pascal_case.severity = error
+dotnet_naming_rule.constants_use_pascal_case.symbols = constants
+dotnet_naming_rule.constants_use_pascal_case.style = pascal_case
+dotnet_naming_symbols.constants.applicable_kinds = field, local
+dotnet_naming_symbols.constants.required_modifiers = const
+
+dotnet_naming_rule.private_fields_use_underscore_camel_case.severity = error
 dotnet_naming_rule.private_fields_use_underscore_camel_case.symbols = private_fields
 dotnet_naming_rule.private_fields_use_underscore_camel_case.style = underscore_camel_case
 dotnet_naming_symbols.private_fields.applicable_kinds = field
@@ -12,14 +27,41 @@ dotnet_naming_symbols.private_fields.applicable_accessibilities = private
 dotnet_naming_style.underscore_camel_case.required_prefix = _
 dotnet_naming_style.underscore_camel_case.capitalization = camel_case
 
+dotnet_naming_rule.locals_use_camel_case.severity = error
+dotnet_naming_rule.locals_use_camel_case.symbols = locals
+dotnet_naming_rule.locals_use_camel_case.style = camel_case
+dotnet_naming_symbols.locals.applicable_kinds = local
+dotnet_naming_style.camel_case.capitalization = camel_case
+
 # Parameter casing is enforced by the syntax-aware CSharpParameterNamingTests gate because EditorConfig groups positional-record properties with ordinary parameters.
 # That gate accepts `_` for intentionally unused lambda and anonymous-method parameters, including the lone addressable form.
 
-dotnet_naming_rule.public_types_use_pascal_case.severity = warning
+dotnet_naming_rule.interfaces_use_i_pascal_case.severity = error
+dotnet_naming_rule.interfaces_use_i_pascal_case.symbols = interfaces
+dotnet_naming_rule.interfaces_use_i_pascal_case.style = i_pascal_case
+dotnet_naming_symbols.interfaces.applicable_kinds = interface
+dotnet_naming_style.i_pascal_case.required_prefix = I
+dotnet_naming_style.i_pascal_case.capitalization = pascal_case
+
+dotnet_naming_rule.type_parameters_use_t_pascal_case.severity = error
+dotnet_naming_rule.type_parameters_use_t_pascal_case.symbols = type_parameters
+dotnet_naming_rule.type_parameters_use_t_pascal_case.style = t_pascal_case
+dotnet_naming_symbols.type_parameters.applicable_kinds = type_parameter
+dotnet_naming_style.t_pascal_case.required_prefix = T
+dotnet_naming_style.t_pascal_case.capitalization = pascal_case
+
+dotnet_naming_rule.public_types_use_pascal_case.severity = error
 dotnet_naming_rule.public_types_use_pascal_case.symbols = public_types
 dotnet_naming_rule.public_types_use_pascal_case.style = pascal_case
 dotnet_naming_symbols.public_types.applicable_kinds = class, struct, interface, enum, delegate
 dotnet_naming_symbols.public_types.applicable_accessibilities = public
+
+dotnet_naming_rule.public_members_use_pascal_case.severity = error
+dotnet_naming_rule.public_members_use_pascal_case.symbols = public_members
+dotnet_naming_rule.public_members_use_pascal_case.style = pascal_case
+dotnet_naming_symbols.public_members.applicable_kinds = property, method, field, event
+dotnet_naming_symbols.public_members.applicable_accessibilities = public
+
 dotnet_naming_style.pascal_case.capitalization = pascal_case
 
 # Project preference: keep method calls and argument lists on one line when readable.
