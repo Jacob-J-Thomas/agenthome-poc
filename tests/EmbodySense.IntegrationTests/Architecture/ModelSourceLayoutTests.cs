@@ -160,9 +160,19 @@ public sealed class ModelSourceLayoutTests
 
                 public string Value { get; init; }
             }
+
+            internal sealed record StaticMutationState
+            {
+                public StaticMutationState(string value)
+                {
+                    LastSeen = value;
+                }
+
+                private static string LastSeen { get; set; } = string.Empty;
+            }
             """;
 
-        Assert.Equal(["EventfulState", "NestedValidatorState", "NormalizedState"], FindTopLevelBehaviorBearingTypeNames(source));
+        Assert.Equal(["EventfulState", "NestedValidatorState", "NormalizedState", "StaticMutationState"], FindTopLevelBehaviorBearingTypeNames(source));
     }
 
     private static bool IsModelFile(string sourceRoot, string file)
@@ -225,23 +235,42 @@ public sealed class ModelSourceLayoutTests
         }
 
         var parameterNames = constructor.ParameterList.Parameters.Select(parameter => parameter.Identifier.ValueText).ToHashSet(StringComparer.Ordinal);
+        var instanceStorageNames = constructor.Parent is TypeDeclarationSyntax containingType
+            ? FindInstanceStorageNames(containingType)
+            : new HashSet<string>(StringComparer.Ordinal);
         if (constructor.ExpressionBody is not null)
         {
-            return !IsStorageAssignment(constructor.ExpressionBody.Expression, parameterNames);
+            return !IsStorageAssignment(constructor.ExpressionBody.Expression, parameterNames, instanceStorageNames);
         }
 
-        return constructor.Body?.Statements.Any(statement => statement is not ExpressionStatementSyntax expressionStatement || !IsStorageAssignment(expressionStatement.Expression, parameterNames)) == true;
+        return constructor.Body?.Statements.Any(statement => statement is not ExpressionStatementSyntax expressionStatement || !IsStorageAssignment(expressionStatement.Expression, parameterNames, instanceStorageNames)) == true;
     }
 
-    private static bool IsStorageAssignment(ExpressionSyntax expression, IReadOnlySet<string> parameterNames)
+    private static IReadOnlySet<string> FindInstanceStorageNames(TypeDeclarationSyntax containingType)
+    {
+        return containingType.Members
+            .SelectMany(member => member switch
+            {
+                PropertyDeclarationSyntax property when !property.Modifiers.Any(modifier => modifier.RawKind == (int)SyntaxKind.StaticKeyword) => [property.Identifier.ValueText],
+                FieldDeclarationSyntax field when !field.Modifiers.Any(modifier => modifier.RawKind == (int)SyntaxKind.StaticKeyword) => field.Declaration.Variables.Select(variable => variable.Identifier.ValueText),
+                _ => []
+            })
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static bool IsStorageAssignment(ExpressionSyntax expression, IReadOnlySet<string> parameterNames, IReadOnlySet<string> instanceStorageNames)
     {
         if (expression is not AssignmentExpressionSyntax assignment || assignment.RawKind != (int)SyntaxKind.SimpleAssignmentExpression)
         {
             return false;
         }
 
-        var targetIsStoredMember = assignment.Left is IdentifierNameSyntax
-            || assignment.Left is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax };
+        var targetIsStoredMember = assignment.Left switch
+        {
+            IdentifierNameSyntax identifier => instanceStorageNames.Contains(identifier.Identifier.ValueText),
+            MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax, Name: IdentifierNameSyntax member } => instanceStorageNames.Contains(member.Identifier.ValueText),
+            _ => false
+        };
         return targetIsStoredMember && assignment.Right is IdentifierNameSyntax value && parameterNames.Contains(value.Identifier.ValueText);
     }
 
