@@ -19,8 +19,10 @@ namespace EmbodySense.Core.Startup.Runtime;
 /// </summary>
 /// <remarks>
 /// The runtime owns its inference client and custom-loop facade. Callers must dispose the instance to release the app-server
-/// process, cancellation host, and workspace execution-gate resources. Turn cancellation is reported as a turn result when
-/// accepted by the default loop; validation, persistence, and transport failures otherwise propagate.
+/// process, cancellation host, and workspace execution-gate resources. Once the default loop accepts a model turn, cancellation,
+/// provider transport, streamed-callback, audit, and persistence failures are normally projected through
+/// <see cref="AgentRuntimeTurnResult"/> rather than thrown. Input validation, command handling, and failures before loop admission
+/// can still propagate to the caller.
 /// </remarks>
 public sealed class AgentRuntime : IAsyncDisposable
 {
@@ -102,6 +104,11 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <summary>
     /// Handles a runtime command or executes one default-conversation model turn.
     /// </summary>
+    /// <remarks>
+    /// The owning host must serialize calls to this member. Runtime commands retain session-scoped pending-history interaction
+    /// state that is not protected by the durable model-turn conversation lease, so interleaved command and model calls can
+    /// otherwise consume or clear another call's pending interaction.
+    /// </remarks>
     /// <param name="input">The command or user message to process.</param>
     /// <param name="responseChunkHandler">An optional callback for streamed assistant-message deltas.</param>
     /// <param name="verboseContextHandler">An optional callback for verbose context diagnostics when verbose mode is enabled.</param>
