@@ -3,11 +3,23 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Common.Governance.Tools;
 
+/// <summary>
+/// Formats tool results.
+/// </summary>
 public static class ToolResultFormatter
 {
+    /// <summary>
+    /// Maximum characters exposed to the model in one formatted tool-result block.
+    /// </summary>
     public const int MaxFormattedCharacters = 64_000;
     private static readonly string _finalTruncationMarker = $"[formatted tool results truncated to the {MaxFormattedCharacters}-character limit]";
 
+    /// <summary>
+    /// Formats governed tool results for model-visible continuation context.
+    /// </summary>
+    /// <param name="results">The ordered governed tool results to project.</param>
+    /// <returns>A bounded prefix of the ordered projection. Global truncation can omit some or all fields for later results.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="results"/> is <see langword="null"/>.</exception>
     public static string FormatResults(IReadOnlyList<ToolResult> results)
     {
         ArgumentNullException.ThrowIfNull(results);
@@ -28,6 +40,7 @@ public static class ToolResultFormatter
         }
 
         builder.AppendLine("Use these results to continue the task. Request another dynamic tool only if needed.");
+        // TODO(#143): Reserve essential identity, outcome, path, and retention evidence for every result before allocating output text.
         return ApplyFinalLimit(builder.ToString().TrimEnd());
     }
 
