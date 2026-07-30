@@ -218,6 +218,65 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task LoadConversationHistorySnapshotAsync_waits_for_the_cross_process_lease_and_returns_complete_lines()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("snapshot prompt"));
+        await store.AppendMessageAsync(LlmMessage.Assistant("snapshot answer"));
+        await using var externalLease = new FileStream(paths.CurrentConversationPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var snapshotTask = store.LoadConversationHistorySnapshotAsync(50);
+        await Task.Delay(75);
+
+        Assert.False(snapshotTask.IsCompleted);
+        await externalLease.DisposeAsync();
+        var snapshot = await snapshotTask.WaitAsync(TimeSpan.FromSeconds(2));
+        var current = Assert.Single(snapshot.Transcripts);
+        Assert.True(current.Exists);
+        Assert.True(current.IsCurrent);
+        Assert.Equal(2, current.Lines.Count);
+        Assert.Contains("snapshot prompt", current.Lines[0], StringComparison.Ordinal);
+        Assert.Contains("snapshot answer", current.Lines[1], StringComparison.Ordinal);
+        Assert.False(snapshot.AdditionalFilesOmitted);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task LoadConversationHistorySnapshotAsync_rejects_nonpositive_file_bounds(int maxTranscriptFiles)
+    {
+        using var workspace = new TestWorkspace();
+        var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
+
+        var exception = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.LoadConversationHistorySnapshotAsync(maxTranscriptFiles));
+
+        Assert.Equal("maxTranscriptFiles", exception.ParamName);
+    }
+
+    [Fact]
+    public async Task LoadConversationHistorySnapshotAsync_enforces_the_file_bound_and_reports_omission()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteConversationAsync(paths, "saved-a", Entry("saved-a", 1, "user", "first saved"));
+        await WriteConversationAsync(paths, "saved-b", Entry("saved-b", 1, "user", "second saved"));
+
+        var snapshot = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(2);
+
+        Assert.Collection(
+            snapshot.Transcripts,
+            current =>
+            {
+                Assert.True(current.IsCurrent);
+                Assert.False(current.Exists);
+            },
+            saved => Assert.Equal("saved-a", saved.ConversationId));
+        Assert.True(snapshot.AdditionalFilesOmitted);
+    }
+
+    [Fact]
     public async Task ResumeConversationAsync_makes_selected_transcript_current_and_archives_previous_current()
     {
         using var workspace = new TestWorkspace();

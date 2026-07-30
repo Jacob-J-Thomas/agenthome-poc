@@ -6,6 +6,8 @@ using System.Text;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Persistence.Memory.Models;
 using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Core.Startup.Configuration;
@@ -329,36 +331,15 @@ public sealed class WorkspaceConfigurationReader
     {
         var transcripts = new List<WorkspaceConversationTranscript>();
         var problems = new List<string>();
-
-        transcripts.Add(await ReadTranscriptAsync(paths.CurrentConversationPath, "current", true, cancellationToken, problems));
-        if (Directory.Exists(paths.ConversationMemoryPath))
+        var snapshot = await new ConversationMemoryStore(paths).LoadConversationHistorySnapshotAsync(MaxConversationFiles, cancellationToken);
+        foreach (var transcript in snapshot.Transcripts)
         {
-            foreach (var path in Directory.EnumerateFiles(paths.ConversationMemoryPath, "*.ndjson", SearchOption.TopDirectoryOnly).Where(path => !SamePath(path, paths.CurrentConversationPath)).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
-            {
-                if (transcripts.Count >= MaxConversationFiles)
-                {
-                    AddProblem(problems, $"Conversation snapshot includes {MaxConversationFiles} transcript files and omits additional files.");
-                    break;
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                transcripts.Add(await ReadTranscriptAsync(path, Path.GetFileNameWithoutExtension(path), false, cancellationToken, problems));
-            }
+            transcripts.Add(ReadTranscript(transcript, cancellationToken, problems));
         }
 
-        if (Directory.Exists(paths.ArchivedConversationMemoryPath))
+        if (snapshot.AdditionalFilesOmitted)
         {
-            foreach (var path in Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson", SearchOption.TopDirectoryOnly).OrderByDescending(File.GetLastWriteTimeUtc))
-            {
-                if (transcripts.Count >= MaxConversationFiles)
-                {
-                    AddProblem(problems, $"Conversation snapshot includes {MaxConversationFiles} transcript files and omits additional files.");
-                    break;
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                transcripts.Add(await ReadTranscriptAsync(path, "archive/" + Path.GetFileNameWithoutExtension(path), false, cancellationToken, problems));
-            }
+            AddProblem(problems, $"Conversation snapshot includes {MaxConversationFiles} transcript files and omits additional files.");
         }
 
         return new WorkspaceConversationHistoryConfiguration(
@@ -370,15 +351,15 @@ public sealed class WorkspaceConfigurationReader
             problems);
     }
 
-    private static async Task<WorkspaceConversationTranscript> ReadTranscriptAsync(string path, string conversationId, bool isCurrent, CancellationToken cancellationToken, List<string> problems)
+    private static WorkspaceConversationTranscript ReadTranscript(ConversationTranscriptFileSnapshot transcript, CancellationToken cancellationToken, List<string> problems)
     {
-        if (!File.Exists(path))
+        if (!transcript.Exists)
         {
             return new WorkspaceConversationTranscript(
-                conversationId,
-                path,
+                transcript.ConversationId,
+                transcript.Path,
                 false,
-                isCurrent,
+                transcript.IsCurrent,
                 0,
                 null,
                 null,
@@ -390,9 +371,9 @@ public sealed class WorkspaceConfigurationReader
         var lineNumber = 0;
         var parsedMessageCount = 0;
         var omittedMessages = 0;
-        // TODO(#123): Coordinate configuration transcript snapshots with conversation rotation so concurrent reads cannot reject runtime writes.
-        await foreach (var line in File.ReadLinesAsync(path, cancellationToken))
+        foreach (var line in transcript.Lines)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             lineNumber++;
             if (string.IsNullOrWhiteSpace(line))
             {
@@ -404,7 +385,7 @@ public sealed class WorkspaceConfigurationReader
                 var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions);
                 if (entry is null)
                 {
-                    AddProblem(problems, $"{conversationId} line {lineNumber} was empty after parsing.");
+                    AddProblem(problems, $"{transcript.ConversationId} line {lineNumber} was empty after parsing.");
                     continue;
                 }
 
@@ -424,13 +405,13 @@ public sealed class WorkspaceConfigurationReader
             }
             catch (JsonException exception)
             {
-                AddProblem(problems, $"{conversationId} line {lineNumber}: {exception.Message}");
+                AddProblem(problems, $"{transcript.ConversationId} line {lineNumber}: {exception.Message}");
             }
         }
 
         if (omittedMessages > 0)
         {
-            AddProblem(problems, $"{conversationId} snapshot includes the first {MaxConversationMessagesPerTranscript} messages and omits {omittedMessages} later messages.");
+            AddProblem(problems, $"{transcript.ConversationId} snapshot includes the first {MaxConversationMessagesPerTranscript} messages and omits {omittedMessages} later messages.");
         }
 
         var orderedMessages = messages.OrderBy(message => message.Sequence).ThenBy(message => message.TimestampUtc).ToArray();
@@ -438,20 +419,15 @@ public sealed class WorkspaceConfigurationReader
         var firstTimestamp = orderedMessages.Length == 0 ? (DateTimeOffset?)null : orderedMessages[0].TimestampUtc;
         var lastTimestamp = orderedMessages.Length == 0 ? (DateTimeOffset?)null : orderedMessages[^1].TimestampUtc;
         return new WorkspaceConversationTranscript(
-            conversationId,
-            path,
+            transcript.ConversationId,
+            transcript.Path,
             true,
-            isCurrent,
+            transcript.IsCurrent,
             parsedMessageCount,
             firstTimestamp,
             lastTimestamp,
             firstPrompt,
             orderedMessages);
-    }
-
-    private static bool SamePath(string left, string right)
-    {
-        return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<(string Text, bool Truncated)> ReadCappedTextAsync(string path, int maxCharacters, CancellationToken cancellationToken)

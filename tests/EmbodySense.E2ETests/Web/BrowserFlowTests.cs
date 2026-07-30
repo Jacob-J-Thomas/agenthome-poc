@@ -77,6 +77,42 @@ public sealed class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
+    public async Task First_chat_turn_overlaps_configuration_refresh_without_sharing_violation_or_transcript_loss()
+    {
+        using var workspace = new TestWorkspace();
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
+        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+        var currentTranscriptPath = workspace.File(".agent", "memory", "conversations", "current.ndjson");
+
+        try
+        {
+            await InitializeWorkspaceAsync(browser);
+            await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
+            await using var externalLease = new FileStream(currentTranscriptPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+            await ClickAsync(browser, "#refreshConfigButton");
+            await SubmitMessageAsync(browser, "configuration-overlap-turn");
+            await browser.WaitForExpressionAsync("document.getElementById('refreshConfigButton').disabled && document.getElementById('sendButton').disabled");
+            await externalLease.DisposeAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: configuration-overlap-turn')");
+            await browser.WaitForExpressionAsync("!document.getElementById('refreshConfigButton').disabled && !document.getElementById('sendButton').disabled");
+
+            var conversationEvidence = await ReadConversationEvidenceAsync(workspace);
+            Assert.Contains("configuration overlap seed", conversationEvidence, StringComparison.Ordinal);
+            Assert.Contains("configuration-overlap-turn", conversationEvidence, StringComparison.Ordinal);
+            Assert.Contains("browser response: configuration-overlap-turn", conversationEvidence, StringComparison.Ordinal);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(First_chat_turn_overlaps_configuration_refresh_without_sharing_violation_or_transcript_loss), browser, app);
+            throw;
+        }
+    }
+
+    [InstalledBrowserFact]
     public async Task Browser_authors_runs_inspects_and_deletes_a_governed_custom_loop()
     {
         using var workspace = new TestWorkspace();
