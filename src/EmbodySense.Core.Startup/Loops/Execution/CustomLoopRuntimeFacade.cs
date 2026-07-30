@@ -21,6 +21,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 {
     private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly CustomExecutionAvailability AvailableCustomExecution = new(true, "Available", "Custom-loop hosting is available and interrupted-run recovery is complete.");
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopInvocationOperationStore _invocationOperationStore;
@@ -521,7 +522,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     {
         if (Volatile.Read(ref _customExecutionAvailable))
         {
-            return CustomExecutionAvailability.AvailableNow;
+            return AvailableCustomExecution;
         }
 
         await _executionAvailabilityGate.WaitAsync(cancellationToken);
@@ -529,7 +530,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         {
             if (_customExecutionAvailable)
             {
-                return CustomExecutionAvailability.AvailableNow;
+                return AvailableCustomExecution;
             }
 
             if (!_customExecutionReacquisitionAllowed)
@@ -597,7 +598,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
             Volatile.Write(ref _customExecutionAvailable, true);
             Volatile.Write(ref _customRecoveryRequired, false);
-            return CustomExecutionAvailability.AvailableNow;
+            return AvailableCustomExecution;
         }
         finally
         {
@@ -1485,11 +1486,6 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             block.CharacterCount,
             block.Truncated,
             block.SourceVersion);
-    }
-
-    private sealed record CustomExecutionAvailability(bool Available, string Status, string Detail)
-    {
-        public static CustomExecutionAvailability AvailableNow { get; } = new(true, "Available", "Custom-loop hosting is available and interrupted-run recovery is complete.");
     }
 
     private static string ToRole(LlmMessageRole role) => role.ToString().ToLowerInvariant();
