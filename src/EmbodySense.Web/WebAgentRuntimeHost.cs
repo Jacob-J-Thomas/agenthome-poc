@@ -21,15 +21,17 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
+    private readonly object _codexRuntimeStatusGate = new();
     private readonly object _turnCancellationGate = new();
     private readonly CancellationTokenSource _hostLifetimeCancellation = new();
+    private Task<CodexRuntimeStatus>? _codexRuntimeStatusTask;
     private CancellationTokenSource? _turnCancellation;
     private AgentRuntime? _runtime;
     private TaskCompletionSource<bool>? _runtimeDiscardCompletion;
     private int _activeCustomRuntimeOperations;
     private bool _discardRuntimeWhenCustomOperationsComplete;
     private bool _loopRecoveryCompleted;
-    private bool _preserveCurrentConversationAfterRecovery;
+    private bool _preserveCurrentConversationOnNextRuntimeCreation = true;
     private int _disposed;
 
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
@@ -94,9 +96,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                     else
                     {
                         await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
-                        if (_runtime is null && _loopRecoveryCompleted && _preserveCurrentConversationAfterRecovery)
+                        if (_runtime is null && _preserveCurrentConversationOnNextRuntimeCreation)
                         {
-                            await GetOrCreateRuntimeUnderGateAsync(cancellationToken);
+                            var persistedTranscript = await new ConversationTranscriptReader().ReadCurrentAsync(_options.WorkingDirectory, cancellationToken);
+                            return persistedTranscript.Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
                         }
 
                         return _runtime?.GetActiveConversationTranscript().Select(message => new WebTranscriptMessage(message.Role, message.Content)).ToArray();
@@ -134,7 +137,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
     public async Task<WorkspaceConfigurationSnapshot> GetConfigurationAsync(CancellationToken cancellationToken = default)
     {
-        return await _configurationReader.ReadAsync(_options.WorkingDirectory, CreateRuntimeConfiguration(), cancellationToken);
+        var codexRuntimeStatus = await GetCodexRuntimeStatusAsync(cancellationToken);
+        return await _configurationReader.ReadAsync(_options.WorkingDirectory, CreateRuntimeConfiguration(codexRuntimeStatus), cancellationToken);
     }
 
     public async Task<LoopRunSummaryPageSnapshot> GetLoopRunsAsync(int maximumCount = 50, string? loopId = null, string? cursor = null, CancellationToken cancellationToken = default)
@@ -299,6 +303,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             discardRuntime = true;
             await writeEventAsync(WebStreamEvent.Cancelled("Message cancelled."), cancellationToken);
         }
+        catch (CodexRuntimeUnavailableException exception)
+        {
+            await writeEventAsync(WebStreamEvent.Failure(exception.Message), cancellationToken);
+        }
         finally
         {
             ClearTurnCancellation(turnCancellation);
@@ -435,10 +443,16 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         if (_runtime is null)
         {
+            var codexRuntimeStatus = await GetCodexRuntimeStatusAsync(cancellationToken);
+            if (codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
+            {
+                throw new CodexRuntimeUnavailableException(codexRuntimeStatus);
+            }
+
             var factory = _conversationPublicationObserver is null
-                ? new AgentRuntimeFactory(_approvalCoordinator)
-                : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver);
-            var preserveCurrentConversation = _preserveCurrentConversationAfterRecovery;
+                ? new AgentRuntimeFactory(_approvalCoordinator, codexRuntimeStatus)
+                : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver, codexRuntimeStatus);
+            var preserveCurrentConversation = _preserveCurrentConversationOnNextRuntimeCreation;
             _runtime = await factory.CreateAsync(
                 _options.Model,
                 _options.WorkingDirectory,
@@ -448,7 +462,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 preserveCurrentConversation,
                 cancellationToken);
             _loopRecoveryCompleted = !_runtime.CustomLoopRecoveryRequired;
-            _preserveCurrentConversationAfterRecovery = false;
+            _preserveCurrentConversationOnNextRuntimeCreation = false;
         }
 
         return _runtime;
@@ -495,7 +509,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
         var recovery = await _loopRuns.RecoverInterruptedRunsAsync(cancellationToken);
         _loopRecoveryCompleted = recovery.Completed;
-        _preserveCurrentConversationAfterRecovery |= recovery.PreserveCurrentConversation;
+        _preserveCurrentConversationOnNextRuntimeCreation |= recovery.PreserveCurrentConversation;
     }
 
     private void EnsureWorkspaceInitialized(string operation)
@@ -538,7 +552,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         var runtime = _runtime;
         var discardCompletion = _runtimeDiscardCompletion;
-        _preserveCurrentConversationAfterRecovery |= runtime is not null;
+        _preserveCurrentConversationOnNextRuntimeCreation |= runtime is not null;
         _runtime = null;
         _runtimeDiscardCompletion = null;
         _discardRuntimeWhenCustomOperationsComplete = false;
@@ -558,17 +572,32 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
-    private WorkspaceRuntimeConfiguration CreateRuntimeConfiguration()
+    private Task<CodexRuntimeStatus> GetCodexRuntimeStatusAsync(CancellationToken cancellationToken)
+    {
+        Task<CodexRuntimeStatus> statusTask;
+        lock (_codexRuntimeStatusGate)
+        {
+            _codexRuntimeStatusTask ??= new CodexRuntimeStatusReader().ReadAsync(_options.CodexExecutablePath, _options.Model);
+            statusTask = _codexRuntimeStatusTask;
+        }
+
+        return statusTask.WaitAsync(cancellationToken);
+    }
+
+    private WorkspaceRuntimeConfiguration CreateRuntimeConfiguration(CodexRuntimeStatus codexRuntimeStatus)
     {
         var model = string.IsNullOrWhiteSpace(_options.Model) ? "configured externally" : _options.Model;
-        var codexPath = string.IsNullOrWhiteSpace(_options.CodexExecutablePath) ? "codex from PATH" : _options.CodexExecutablePath;
+        var codexPath = codexRuntimeStatus.ResolvedExecutablePath ?? "not found";
         return new WorkspaceRuntimeConfiguration(
             AgentRuntimeSurface.Web.Id,
             _options.Url,
             model,
             codexPath,
             _options.CodexSandbox,
-            "Localhost web client is the primary browser surface; CLI remains available for verification.");
+            "Localhost web client is the primary browser surface; CLI remains available for verification.")
+        {
+            CodexRuntime = codexRuntimeStatus
+        };
     }
 
     private static async Task WriteTurnResultAsync(

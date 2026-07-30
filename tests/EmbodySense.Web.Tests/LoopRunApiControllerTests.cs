@@ -189,6 +189,56 @@ public sealed class LoopRunApiControllerTests
     }
 
     [Fact]
+    public async Task Run_evidence_and_mutation_routes_preserve_initialization_missing_resource_and_missing_body_boundaries()
+    {
+        using var workspace = new TestWorkspace();
+        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var monitorBeforeInitialization = await SendAsync(client, "/api/loop-runs/run-missing/monitor", token);
+            var invocationBeforeInitialization = await SendAsync(client, "/api/loop-runs/invocations/invoke-missing", token);
+            var quotaBeforeInitialization = await SendAsync(client, "/api/loop-runs/quota", token);
+            var traceBeforeInitialization = await SendAsync(client, "/api/loop-runs/run-missing/trace", token);
+            var deletionBeforeInitialization = await SendControlAsync(client, "/api/loop-runs/run-missing/trace/delete", token, new { expectedTraceHash = new string('0', 64), operationId = "delete-before-init" });
+            var pauseBeforeInitialization = await SendControlAsync(client, "/api/loop-runs/run-missing/pause", token, new { expectedLifecycleVersion = 1, operationId = "pause-before-init" });
+            var cancelBeforeInitialization = await SendControlAsync(client, "/api/loop-runs/run-missing/cancel", token, new { expectedLifecycleVersion = 1, operationId = "cancel-before-init" });
+
+            Assert.Equal(HttpStatusCode.Conflict, monitorBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, invocationBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, quotaBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, traceBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, deletionBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, pauseBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, cancelBeforeInitialization.StatusCode);
+
+            Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
+            var missingMonitor = await SendAsync(client, "/api/loop-runs/run-missing/monitor", token);
+            var missingInvocation = await SendAsync(client, "/api/loop-runs/invocations/invoke-missing", token);
+            var quota = await SendAsync(client, "/api/loop-runs/quota", token);
+            var missingTrace = await SendAsync(client, "/api/loop-runs/run-missing/trace", token);
+            var missingDeletionBody = await SendJsonNullAsync(client, "/api/loop-runs/run-missing/trace/delete", token);
+            var missingPauseBody = await SendJsonNullAsync(client, "/api/loop-runs/run-missing/pause", token);
+            var missingCancelBody = await SendJsonNullAsync(client, "/api/loop-runs/run-missing/cancel", token);
+
+            Assert.Equal(HttpStatusCode.NotFound, missingMonitor.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, missingInvocation.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, quota.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, missingTrace.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missingDeletionBody.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missingPauseBody.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missingCancelBody.StatusCode);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Run_evidence_api_surfaces_unsupported_discovery_index_cleanup_without_rewriting_the_index()
     {
         using var workspace = new TestWorkspace();
@@ -306,7 +356,8 @@ public sealed class LoopRunApiControllerTests
     public async Task Pause_and_cancel_routes_require_auth_and_accept_only_the_frontend_control_body()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "test-model");
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
         await app.StartAsync();
 
         try
@@ -571,6 +622,13 @@ public sealed class LoopRunApiControllerTests
         return await client.SendAsync(request);
     }
 
+    private static async Task<HttpResponseMessage> SendJsonNullAsync(HttpClient client, string path, string token)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = JsonContent.Create<object?>(null, options: _jsonOptions) };
+        request.Headers.Add(WebSessionSecurity.HeaderName, token);
+        return await client.SendAsync(request);
+    }
+
     private static WebApplication CreateApp(string rootPath, string? codexPath, out WebRunOptions options)
     {
         var port = GetFreePort();
@@ -610,6 +668,11 @@ public sealed class LoopRunApiControllerTests
         var scriptPath = workspace.File("fake-loop-run-api-codex.ps1");
         var commandPath = workspace.File("fake-loop-run-api-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, """
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
 
             function Write-ProtocolJson($value) {
@@ -622,6 +685,7 @@ public sealed class LoopRunApiControllerTests
                 switch ($message.method) {
                     "initialize" { Write-ProtocolJson @{ id = $message.id; result = @{} } }
                     "initialized" { }
+                    "model/list" { Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } } }
                     "thread/start" { Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } } }
                     "turn/start" {
                         $turnId = "turn-test"

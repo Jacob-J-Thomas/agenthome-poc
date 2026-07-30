@@ -43,9 +43,9 @@ The CLI `run` path remains supported as a verification and conformance client. I
 3. `Startup.Inference.LlmInferenceClient` selects `Clients.CodexAppServer.CodexAppServerInferenceClient` for the OpenAI Codex surface.
 4. `WorkspaceContextStore` reads the nearest `AGENTS.md` found by walking upward from `--workdir` and `.agent/ROLE.md` as trusted contextual role instructions, `.agent/SOUL.md` and `.agent/PERSONALITY.md` as trusted durable agent identity, and `.agent/CONTEXT.md`, `.agent/MEMORY.md`, and `.agent/models.json` as lower-authority contextual state under `--workdir` when those files exist and are non-empty. `AgentContextProvider` returns separate classified startup messages; `DefaultConversationLoopRunner` promotes only trusted system-classified startup messages into the provider instruction context and leaves contextual state in the lower-authority message channel.
 5. `CodexAppServerInferenceClient` owns the Codex app-server JSON-RPC flow. `CodexAppServerContextBuilder` builds thread developer instructions from restored runtime context, `CodexAppServerRequestHandler` declines and audits unsupported native app-server requests, and `CodexAppServerToolBridge` exposes the `embodysense.command` dynamic tool.
-6. `Persistence.Memory.ConversationMemoryStore` normally starts each run with a fresh active transcript by moving any non-empty `conversations/current.ndjson` into `conversations/archive/` before the loop accepts prompts. Startup preserves the current transcript instead when custom-loop hosting is unavailable or restart recovery cannot prove that every paused run is independent of it. A paused run still depends on the exact current conversation only when its admitted conversation identity still matches and a remaining inference node, Exit output, or accepted repeat can publish there; recovery never continues the run automatically.
+6. `Persistence.Memory.ConversationMemoryStore` normally starts each CLI run with a fresh active transcript by moving any non-empty `conversations/current.ndjson` into `conversations/archive/` before the loop accepts prompts. The Web host instead restores the current transcript when its process restarts so a freshly authenticated page can continue the same logical conversation. Startup also preserves the current transcript when custom-loop hosting is unavailable or restart recovery cannot prove that every paused run is independent of it. A paused run still depends on the exact current conversation only when its admitted conversation identity still matches and a remaining inference node, Exit output, or accepted repeat can publish there; recovery never continues the run automatically.
 7. `Core.Application.Loops.Execution.DefaultConversationLoopRunner` owns the ordinary model-turn transaction: request assembly, inference invocation, transcript persistence, default-loop run persistence, visible diagnostics, and outcome classification. `Core.Startup.Runtime.AgentRuntime.RunTurnAsync` handles shared runtime commands before delegating model turns to that runner. `Cli.Command.AgentRuntimeConsoleHost` owns console prompting and streaming projection, while `WebSessionHub` and `WebAgentRuntimeHost` own browser projection.
-8. `ConversationRuntimeState` starts with seeded runtime context and normally a fresh transcript, with the custom-loop recovery exceptions described above. A user can explicitly load an old transcript with `/history`, `/conversations`, or `/load` before the first model turn, or start another fresh transcript in-place with `/new`.
+8. `ConversationRuntimeState` starts with seeded runtime context and the surface-specific transcript lifecycle described above, including custom-loop recovery preservation. A user can explicitly load an old transcript with `/history`, `/conversations`, or `/load` before the first model turn, or start another fresh transcript in-place with `/new`.
 9. Codex app-server `item/agentMessage/delta` notifications are written to the console as they arrive, and `turn/completed` supplies the final assistant message retained by the session and inference audit metadata.
 10. Codex app-server `item/tool/call` requests for `embodysense.command` route through `Application.Governance.Tools.ToolBroker`. File-system commands resolve targets against `--workdir`, reject paths outside the workspace root, reject paths that pass through reparse points, evaluate `.agent/permissions.json`, prompt for human approval when required, delegate allowed filesystem work to `Clients.LocalWorkspace.LocalWorkspaceClient`, retain the complete bounded governed response before model-facing formatting, and append audit events for permission checks, approval requests/decisions, response retention, and execution outcomes. Correlation values are bounded before actuation, and post-actuation retention, observation, and execution audit use a bounded integrity token independent of caller cancellation. If that integrity window expires after the workspace operation finishes, the broker returns the actual operation outcome with an explicit retention/audit-gap warning that tells the caller not to retry blindly. CLI approvals use `ConsoleToolApprovalPrompt`; browser approvals use `WebApprovalCoordinator`.
 
@@ -148,11 +148,13 @@ From the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. Pull requests also run the installed-browser smoke on a Windows runner; it remains opt-in locally because local Edge/Chrome GPU startup is host-specific:
+The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. Pull requests also run the required `browser-e2e` check on a Windows runner. That deterministic suite starts the Web host and controlled Codex app-server fixture as external processes, then exercises default chat, active-transcript restoration across a server-process restart, reconnect behavior through a fresh authenticated page, system-loop locking, custom-loop authoring and evidence, governed approval decisions, provider/runtime failures, and diagnostic capture through installed Edge or Chrome. It remains opt-in locally because local browser GPU startup is host-specific:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -RunBrowserE2E
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Configuration Release -RunBrowserE2E -BrowserE2EOnly
 ```
+
+The browser-only command fails if the installed-browser scenarios are skipped or the browser prerequisite is missing. Unexpected page, console, network, and server failures also fail the suite; the existing CSP and favicon baseline noise is narrowly excepted pending [#126](https://github.com/Jacob-J-Thomas/agenthome-poc/issues/126). On failure the suite writes the TRX plus browser screenshot, DOM, console/network diagnostics, process output, and Web-server output under `tests\EmbodySense.E2ETests\TestResults\BrowserE2E`; the pull-request workflow uploads that directory as `browser-e2e-diagnostics`.
 
 The lower-level coverage verifier, `scripts\verify-coverage.ps1`, expects Cobertura files from the current run. Prefer `verify.ps1` so stale `TestResults` are cleared and coverage timestamps are bounded automatically. The real `codex app-server` process launcher is treated as an external process adapter; app-server protocol behavior is covered through the `Clients.CodexAppServer.ICodexAppServerTransport` seam.
 
@@ -204,6 +206,8 @@ The default conversation loop reads the seeded `.agent/` documents when the runt
 
 The Web UI routes inference through the same local `codex app-server --stdio` path as CLI `run`, but exposes the interactive session through a token-guarded SignalR hub, supporting REST endpoints, and a static UI.
 
+Before either surface creates a runtime, the shared process boundary resolves and probes Codex. An explicit `--codex-path` is authoritative and never falls back. Without it, Windows discovery prefers current Codex Desktop-managed binaries under `%LOCALAPPDATA%\OpenAI\Codex\bin\` before considering PATH candidates. The probe records the resolved executable and `--version` output; when `--model` is supplied, it initializes app-server and requires `model/list` to advertise that exact model. It never silently substitutes another model. The Web Configuration overview shows this structured status, while CLI `run` prints it before workspace initialization. An unusable executable/model combination fails with the attempted path, version when available, model, and remediation before a conversation turn is accepted.
+
 From `scratch/`:
 
 ```powershell
@@ -214,7 +218,7 @@ Available Web options:
 
 - `--model <model>` or `-m <model>`: choose the Codex model.
 - `--workdir <path>` or `--working-directory <path>`: set the EmbodySense workspace root for governed tools, permissions, and audit.
-- `--codex-path <path>`: use a specific Codex executable.
+- `--codex-path <path>`: use exactly this Codex executable. An incompatible explicit executable fails instead of falling back to another installation.
 - `--sandbox <mode>`: set the Codex app-server sandbox mode for the inert runtime directory, such as `read-only` or `workspace-write`. Workspace file access is still governed by EmbodySense dynamic tools and `.agent/permissions.json`.
 - `--host <host>`: bind the Web host to `127.0.0.1`, `localhost`, or `::1`. Remote bind hosts are rejected.
 - `--port <port>`: set the localhost port. The default is `4378`.
@@ -222,6 +226,8 @@ Available Web options:
 ## Harness Run Options
 
 The `run` command routes inference through local `codex app-server --stdio` and streams Codex app-server `item/agentMessage/delta` events into the console loop.
+
+Runtime selection follows the same explicit-path, Codex Desktop, then PATH policy described above. If a stale PATH installation cannot advertise the requested model but a current Codex Desktop installation can, the compatible Desktop binary is selected and reported. Restart the Web or CLI process after installing or updating Codex so its runtime status is probed again.
 
 The default-conversation and custom-loop implementation flows are documented in the draw.io-compatible source diagram at [`docs/AGENT_LOOP.drawio`](docs/AGENT_LOOP.drawio). Keep both pages aligned with implemented inference, lifecycle, context, workspace, permission, audit, and trace behavior. The diagram is also a status artifact, not scope authority.
 
@@ -235,7 +241,7 @@ Available `run` options:
 
 - `--model <model>` or `-m <model>`: choose the Codex model.
 - `--workdir <path>` or `--working-directory <path>`: set the EmbodySense workspace root for governed tools, permissions, and audit.
-- `--codex-path <path>`: use a specific Codex executable.
+- `--codex-path <path>`: use exactly this Codex executable. An incompatible explicit executable fails instead of falling back to another installation.
 - `--sandbox <mode>`: set the Codex app-server sandbox mode for the inert runtime directory, such as `read-only` or `workspace-write`. Workspace file access is still governed by EmbodySense dynamic tools and `.agent/permissions.json`.
 
 Before running real inference, make sure Codex is installed and authenticated:

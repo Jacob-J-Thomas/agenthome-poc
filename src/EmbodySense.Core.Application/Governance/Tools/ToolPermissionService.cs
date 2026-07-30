@@ -11,12 +11,20 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Governance.Tools;
 
+/// <summary>
+/// Resolves tool targets and evaluates workspace containment, reparse-point safety, and directory policy.
+/// </summary>
 public sealed class ToolPermissionService : IToolPermissionService
 {
     private readonly IDirectoryPermissionPolicy _policy;
     private readonly string _workspaceRootPath;
     private readonly string _policyHash;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ToolPermissionService"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="policy">The policy.</param>
     public ToolPermissionService(WorkspacePaths paths, IDirectoryPermissionPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -27,6 +35,11 @@ public sealed class ToolPermissionService : IToolPermissionService
         _policyHash = ComputePolicyHash(policy);
     }
 
+    /// <summary>
+    /// Canonicalizes a request target and computes its effective permission decision.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <returns>The resolved target, policy target, mapped operation, decision, and deterministic policy hash.</returns>
     public ToolPermissionCheck Evaluate(ToolRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);

@@ -47,6 +47,19 @@ test("shared-shell navigation switches views and keeps the refresh route aligned
   assert.match(app.context.window.location.href, /\?view=chat$/);
 });
 
+test("inherited object property names cannot select a configuration renderer", async () => {
+  const app = await loadApp({
+    locationHref: "http://127.0.0.1:4378/?view=constructor",
+  });
+
+  assert.equal(app.elements.chatView.hidden, false);
+  assert.equal(app.elements.configurationView.hidden, true);
+  assert.equal(
+    configTab(app, "overview").attributes.get("aria-selected"),
+    "false",
+  );
+});
+
 test("workspace initialization wakes an activated loop builder", async () => {
   let refreshes = 0;
   const loopBuilder = {
@@ -332,12 +345,25 @@ test("assistant deltas update one active message and final text resets the activ
   assert.equal(messageContent(app.elements.transcript.children[1]), "Next");
 });
 
-test("configuration tabs render permission details without creating markup from raw JSON", async () => {
+test("configuration overview reports Codex compatibility and tabs keep raw JSON inert", async () => {
   const rawJson = '{"note":"<script>bad()</script>"}';
   const app = await loadApp({
     configuration: {
       status: { initialized: true },
-      runtime: { surface: "web", model: "gpt-test", codexSandbox: "read-only" },
+      runtime: {
+        surface: "web",
+        model: "gpt-test",
+        codexExecutablePath: "C:/codex.exe",
+        codexSandbox: "read-only",
+        codexRuntime: {
+          compatibility: "model-unavailable",
+          resolvedExecutablePath: "C:/codex.exe",
+          version: "codex-cli old",
+          configuredModel: "gpt-test",
+          source: "explicit --codex-path",
+          detail: "Update Codex before starting a turn.",
+        },
+      },
       audit: {
         path: "audit/events.ndjson",
         exists: true,
@@ -375,6 +401,14 @@ test("configuration tabs render permission details without creating markup from 
       },
     },
   });
+
+  assert.match(app.elements.configContent.textContent, /model-unavailable/);
+  assert.match(app.elements.configContent.textContent, /codex-cli old/);
+  assert.match(app.elements.configContent.textContent, /C:\/codex\.exe/);
+  assert.match(
+    app.elements.configContent.textContent,
+    /Update Codex before starting a turn\./,
+  );
 
   await configTab(app, "permissions").click();
 
@@ -564,7 +598,9 @@ async function loadApp(overrides = {}) {
   FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
   FakeWebSocket.transcriptError = overrides.transcriptError ?? null;
   const document = new FakeDocument(indexSource);
-  const location = { href: "http://127.0.0.1:4378/" };
+  const location = {
+    href: overrides.locationHref ?? "http://127.0.0.1:4378/",
+  };
   const context = {
     URL,
     console,

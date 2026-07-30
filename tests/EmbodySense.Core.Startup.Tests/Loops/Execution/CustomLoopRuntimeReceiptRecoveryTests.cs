@@ -34,7 +34,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        await using var runtime = await CreateRuntimeFactory(workspace).CreateAsync(
             "test-model",
             workspace.RootPath,
             workspace.File("unused-codex.cmd"),
@@ -138,7 +138,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        await using var runtime = await CreateRuntimeFactory(workspace).CreateAsync(
             "test-model",
             workspace.RootPath,
             workspace.File("unused-codex.cmd"),
@@ -221,7 +221,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        await using var runtime = await CreateRuntimeFactory(workspace).CreateAsync(
             "test-model",
             workspace.RootPath,
             workspace.File("unused-codex.cmd"),
@@ -268,7 +268,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         const string OperationId = "invoke-unreadable-receipt";
         Directory.CreateDirectory(paths.CustomLoopInvocationOperationsPath);
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, OperationId + ".json"), "{");
-        await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        await using var runtime = await CreateRuntimeFactory(workspace).CreateAsync(
             "test-model",
             workspace.RootPath,
             workspace.File("unused-codex.cmd"),
@@ -341,6 +341,20 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 context));
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, admission.Status);
         return (Assert.IsType<CustomLoopRunRecord>(admission.Run), receiptStore);
+    }
+
+    private static AgentRuntimeFactory CreateRuntimeFactory(TestWorkspace workspace)
+    {
+        return new AgentRuntimeFactory(
+            new RejectingApprovalPrompt(),
+            new CodexRuntimeStatus(
+                CodexRuntimeCompatibility.Compatible,
+                workspace.File("unused-codex.cmd"),
+                workspace.File("unused-codex.cmd"),
+                "codex-cli test",
+                "test-model",
+                "controlled test",
+                "The provider process is not started by these receipt-recovery scenarios."));
     }
 
     private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace)

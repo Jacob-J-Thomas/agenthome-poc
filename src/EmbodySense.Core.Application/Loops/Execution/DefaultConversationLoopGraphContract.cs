@@ -3,6 +3,9 @@ using EmbodySense.Core.Common.Loops.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution;
 
+/// <summary>
+/// Provides operations for default conversation loop graph contract.
+/// </summary>
 internal static class DefaultConversationLoopGraphContract
 {
     private static readonly string[] _requiredNodeIds =
@@ -31,6 +34,11 @@ internal static class DefaultConversationLoopGraphContract
         new("transcript-to-complete-run", DefaultConversationLoopGraphIds.PersistTranscript, DefaultConversationLoopGraphIds.CompleteRun, LoopGraphEdgeCondition.Success)
     ];
 
+    /// <summary>
+    /// Gets the execution blocker.
+    /// </summary>
+    /// <param name="loopDefinition">The loop definition.</param>
+    /// <returns>The text value.</returns>
     public static string? GetExecutionBlocker(LoopDefinition loopDefinition)
     {
         ArgumentNullException.ThrowIfNull(loopDefinition);

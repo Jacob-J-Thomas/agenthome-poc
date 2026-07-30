@@ -62,6 +62,17 @@ const configurationViewCopy = {
     "Current and archived logical conversation transcripts.",
   ],
 };
+const configurationTabNames = [
+  "overview",
+  "permissions",
+  "agent",
+  "audit",
+  "history",
+];
+
+function isConfigurationTabName(value) {
+  return configurationTabNames.includes(value);
+}
 
 function selectAppView(view, sourceTab = null) {
   const previousAppView = activeAppView;
@@ -92,8 +103,9 @@ function selectAppView(view, sourceTab = null) {
   }
 
   if (activeAppView === "configuration") {
-    const [title, subtitle] =
-      configurationViewCopy[activeConfigTab] ?? configurationViewCopy.overview;
+    const [title, subtitle] = isConfigurationTabName(activeConfigTab)
+      ? configurationViewCopy[activeConfigTab]
+      : configurationViewCopy.overview;
     elements.configurationTitle.textContent = title;
     elements.configurationSubtitle.textContent = subtitle;
     elements.surfaceTitle.textContent = title;
@@ -353,16 +365,24 @@ function renderConfiguration() {
     tab.setAttribute("aria-selected", selected ? "true" : "false");
   }
 
-  const renderers = {
-    overview: renderOverviewTab,
-    permissions: renderPermissionsTab,
-    agent: renderAgentTab,
-    audit: renderAuditTab,
-    history: renderHistoryTab,
-  };
   elements.configContent.replaceChildren(
-    renderers[activeConfigTab]?.() ?? renderOverviewTab(),
+    renderConfigurationTab(activeConfigTab),
   );
+}
+
+function renderConfigurationTab(tabName) {
+  switch (tabName) {
+    case "permissions":
+      return renderPermissionsTab();
+    case "agent":
+      return renderAgentTab();
+    case "audit":
+      return renderAuditTab();
+    case "history":
+      return renderHistoryTab();
+    default:
+      return renderOverviewTab();
+  }
 }
 
 function renderOverviewTab() {
@@ -377,6 +397,19 @@ function renderOverviewTab() {
       ],
       ["Surface", configuration.runtime.surface],
       ["Model", configuration.runtime.model],
+      [
+        "Codex runtime",
+        configuration.runtime.codexRuntime?.compatibility ?? "unknown",
+      ],
+      [
+        "Codex version",
+        configuration.runtime.codexRuntime?.version ?? "unknown",
+      ],
+      [
+        "Codex executable",
+        configuration.runtime.codexRuntime?.resolvedExecutablePath ??
+          configuration.runtime.codexExecutablePath,
+      ],
       ["Sandbox", configuration.runtime.codexSandbox],
       ["Audit events", String(configuration.audit.events.length)],
       [
@@ -386,6 +419,14 @@ function renderOverviewTab() {
     ]),
   );
   fragment.append(renderPathGroup(configuration.paths));
+  if (
+    configuration.runtime.codexRuntime &&
+    configuration.runtime.codexRuntime.compatibility !== "compatible"
+  ) {
+    fragment.append(
+      renderProblems([configuration.runtime.codexRuntime.detail]),
+    );
+  }
   fragment.append(renderConcepts(configuration.concepts));
   return fragment;
 }
@@ -944,7 +985,8 @@ elements.verboseToggle.addEventListener("change", async () => {
 
 for (const tab of elements.appTabs) {
   tab.addEventListener("click", () => {
-    if (tab.dataset.configTab) activeConfigTab = tab.dataset.configTab;
+    if (isConfigurationTabName(tab.dataset.configTab))
+      activeConfigTab = tab.dataset.configTab;
     selectAppView(tab.dataset.appView ?? "chat", tab);
   });
   tab.addEventListener("keydown", (event) => moveAppTabFocus(event, tab));
@@ -1168,13 +1210,13 @@ elements.cancelButton.disabled = true;
 elements.refreshConfigButton.disabled = true;
 renderConfigLoading();
 const requestedView = new URL(window.location.href).searchParams.get("view");
-activeConfigTab = configurationViewCopy[requestedView]
+activeConfigTab = isConfigurationTabName(requestedView)
   ? requestedView
   : "overview";
 selectAppView(
   requestedView === "loops"
     ? "loops"
-    : configurationViewCopy[requestedView]
+    : isConfigurationTabName(requestedView)
       ? "configuration"
       : "chat",
 );

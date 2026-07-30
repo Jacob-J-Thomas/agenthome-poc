@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
@@ -17,7 +18,7 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class WebApiControllerTests
 {
-    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
 
     [Fact]
     public async Task Configured_app_serves_status_init_and_approval_endpoints()
@@ -32,6 +33,9 @@ public sealed class WebApiControllerTests
             var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
             using var beforeResponse = await client.GetAsync("/api/status");
             var before = await beforeResponse.Content.ReadFromJsonAsync<WebStatus>(_jsonOptions);
+            using var indexResponse = await client.GetAsync("/");
+            var index = await indexResponse.Content.ReadAsStringAsync();
+            using var faviconResponse = await client.GetAsync("/favicon.svg");
             var rejectedInit = await client.PostAsJsonAsync("/api/workspace/init", new { }, _jsonOptions);
             var rejectedQueryTokenConfiguration = await client.GetAsync($"/api/configuration?access_token={Uri.EscapeDataString(session!.Token)}");
             var initRequest = new HttpRequestMessage(HttpMethod.Post, "/api/workspace/init");
@@ -55,11 +59,16 @@ public sealed class WebApiControllerTests
 
             Assert.False(before!.Initialized);
             Assert.True(beforeResponse.Headers.TryGetValues("Content-Security-Policy", out var csp));
-            Assert.Contains("frame-ancestors 'none'", csp.Single());
+            Assert.Equal("default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'", csp.Single());
+            Assert.DoesNotContain("ws://", csp.Single(), StringComparison.Ordinal);
             Assert.True(beforeResponse.Headers.TryGetValues("X-Content-Type-Options", out var contentTypeOptions));
             Assert.Equal("nosniff", contentTypeOptions.Single());
             Assert.True(beforeResponse.Headers.TryGetValues("Referrer-Policy", out var referrerPolicy));
             Assert.Equal("no-referrer", referrerPolicy.Single());
+            Assert.True(indexResponse.IsSuccessStatusCode);
+            Assert.Contains("<link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\" />", index, StringComparison.Ordinal);
+            Assert.True(faviconResponse.IsSuccessStatusCode);
+            Assert.Equal("image/svg+xml", faviconResponse.Content.Headers.ContentType?.MediaType);
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedInit.StatusCode);
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedQueryTokenConfiguration.StatusCode);
             Assert.True(initialized.IsSuccessStatusCode);
@@ -175,6 +184,13 @@ public sealed class WebApiControllerTests
         options = WebRunOptions.FromArguments(["--workdir", rootPath, "--port", port.ToString()]);
         var builder = Program.CreateBuilder(["--workdir", rootPath, "--port", port.ToString()], options);
         return BuildApp(builder);
+    }
+
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+        return options;
     }
 
     private static WebApplication BuildApp(WebApplicationBuilder builder)

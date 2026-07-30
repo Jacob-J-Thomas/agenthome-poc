@@ -94,8 +94,10 @@ public sealed class WebSessionHubTests
     public async Task SetVerboseMode_streams_system_status_to_caller()
     {
         using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace);
         var approvals = new WebApprovalCoordinator();
-        await using var host = CreateHost(workspace.RootPath, approvals);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        await using var host = new WebAgentRuntimeHost(options, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
         _ = await hub.InitializeWorkspace();

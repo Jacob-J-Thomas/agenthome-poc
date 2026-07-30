@@ -46,6 +46,11 @@ public sealed class ConsoleAgentRuntimeHostTests
         var scriptPath = workspace.File("fake-codex.ps1");
         var commandPath = workspace.File("fake-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, """
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
             $developerInstructions = ""
 
@@ -63,6 +68,10 @@ public sealed class ConsoleAgentRuntimeHostTests
                     }
 
                     "initialized" {
+                    }
+
+                    "model/list" {
+                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
                     }
 
                     "thread/start" {

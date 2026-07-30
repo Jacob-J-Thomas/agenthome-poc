@@ -7,6 +7,9 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Governance.Tools;
 
+/// <summary>
+/// Creates canonical, correlation-rich metadata shared by tool governance audit events.
+/// </summary>
 internal sealed class ToolAuditMetadataFactory
 {
     private const string RequestId = "request_id";
@@ -45,6 +48,12 @@ internal sealed class ToolAuditMetadataFactory
     private readonly LoopDefinition _loopDefinition;
     private readonly IReadOnlyList<ToolCommand> _availableCommands;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ToolAuditMetadataFactory"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="loopDefinition">The loop definition.</param>
+    /// <param name="availableCommands">The available commands.</param>
     public ToolAuditMetadataFactory(WorkspacePaths paths, LoopDefinition loopDefinition, IReadOnlyList<ToolCommand> availableCommands)
     {
         _paths = paths;
@@ -52,6 +61,13 @@ internal sealed class ToolAuditMetadataFactory
         _availableCommands = availableCommands;
     }
 
+    /// <summary>
+    /// Creates base audit metadata from a resolved permission check.
+    /// </summary>
+    /// <param name="requestId">The request ID.</param>
+    /// <param name="request">The request.</param>
+    /// <param name="check">The check.</param>
+    /// <returns>Canonical request, path, loop, permission-policy, and correlation metadata.</returns>
     public Dictionary<string, object?> CreateBase(string requestId, ToolRequest request, ToolPermissionCheck check)
     {
         var metadata = CreateBase(requestId, request, check.ResolvedPath, check.Operation, check.Evaluation.MatchedPath);
@@ -59,6 +75,15 @@ internal sealed class ToolAuditMetadataFactory
         return metadata;
     }
 
+    /// <summary>
+    /// Creates base audit metadata from explicit path and operation evidence.
+    /// </summary>
+    /// <param name="requestId">The request ID.</param>
+    /// <param name="request">The request.</param>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="operation">The operation.</param>
+    /// <param name="matchedPath">The matched path.</param>
+    /// <returns>Canonical request, path, loop, and correlation metadata.</returns>
     public Dictionary<string, object?> CreateBase(string requestId, ToolRequest request, string resolvedPath, FileSystemOperation operation, string matchedPath)
     {
         var metadata = new Dictionary<string, object?>
@@ -78,6 +103,13 @@ internal sealed class ToolAuditMetadataFactory
         return metadata;
     }
 
+    /// <summary>
+    /// Creates metadata for a loop-capability authority decision.
+    /// </summary>
+    /// <param name="requestId">The request ID.</param>
+    /// <param name="request">The request.</param>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <returns>The required capabilities, active loop authority, and request correlation.</returns>
     public Dictionary<string, object?> CreateLoopAuthority(string requestId, ToolRequest request, string resolvedPath)
     {
         var metadata = new Dictionary<string, object?>
@@ -98,27 +130,53 @@ internal sealed class ToolAuditMetadataFactory
         return metadata;
     }
 
+    /// <summary>
+    /// Creates non-sensitive failure metadata from an exception.
+    /// </summary>
+    /// <param name="exception">The exception that caused the failure.</param>
+    /// <returns>Metadata containing the exception type.</returns>
     public static Dictionary<string, object?> ForError(Exception exception)
     {
         return new Dictionary<string, object?> { [ErrorType] = exception.GetType().Name };
     }
 
+    /// <summary>
+    /// Records whether the request crossed an explicit human approval boundary.
+    /// </summary>
+    /// <param name="metadata">The metadata.</param>
+    /// <param name="approvedByHuman">Whether a human explicitly approved the operation.</param>
     public static void AddApprovedByHuman(Dictionary<string, object?> metadata, bool approvedByHuman)
     {
         metadata[ApprovedByHuman] = approvedByHuman;
     }
 
+    /// <summary>
+    /// Adds the deterministic permission-policy evidence hash.
+    /// </summary>
+    /// <param name="metadata">The metadata.</param>
+    /// <param name="policyHash">The hash of the policy used for the decision.</param>
     public static void AddPermissionPolicyHash(Dictionary<string, object?> metadata, string? policyHash)
     {
         metadata[PermissionPolicyHash] = policyHash;
     }
 
+    /// <summary>
+    /// Adds decision provenance and its permission-policy evidence hash.
+    /// </summary>
+    /// <param name="metadata">The metadata.</param>
+    /// <param name="decisionBy">The actor or mechanism that made the decision.</param>
+    /// <param name="policyHash">The hash of the policy used for the decision.</param>
     public static void AddDecision(Dictionary<string, object?> metadata, string decisionBy, string? policyHash)
     {
         metadata[DecisionBy] = decisionBy;
         AddPermissionPolicyHash(metadata, policyHash);
     }
 
+    /// <summary>
+    /// Merges executor-supplied evidence into canonical audit metadata.
+    /// </summary>
+    /// <param name="metadata">The metadata.</param>
+    /// <param name="executionMetadata">The execution evidence to merge; matching keys replace earlier values.</param>
     public static void MergeExecution(Dictionary<string, object?> metadata, IReadOnlyDictionary<string, object?> executionMetadata)
     {
         foreach (var item in executionMetadata)

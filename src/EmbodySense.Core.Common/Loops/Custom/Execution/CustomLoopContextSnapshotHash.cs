@@ -8,13 +8,28 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
+/// <summary>
+/// Computes, applies, and verifies the canonical custom loop context snapshot hash.
+/// </summary>
 public static class CustomLoopContextSnapshotHash
 {
+    /// <summary>
+    /// Computes the lowercase SHA-256 digest of the full canonical context snapshot, including capture times.
+    /// </summary>
+    /// <param name="snapshot">The context snapshot to serialize canonically.</param>
+    /// <returns>A 64-character lowercase hexadecimal digest that binds content and capture time.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="snapshot"/> is <see langword="null"/>.</exception>
     public static string Compute(CustomLoopContextSnapshot snapshot)
     {
         return Compute(snapshot, includeCapturedAtUtc: true);
     }
 
+    /// <summary>
+    /// Computes the stable identity digest of a context snapshot without capture times.
+    /// </summary>
+    /// <param name="snapshot">The context snapshot to serialize canonically.</param>
+    /// <returns>A 64-character lowercase hexadecimal digest suitable for comparing logically identical context captured at different times.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="snapshot"/> is <see langword="null"/>.</exception>
     public static string ComputeIdentity(CustomLoopContextSnapshot snapshot)
     {
         return Compute(snapshot, includeCapturedAtUtc: false);
@@ -55,12 +70,24 @@ public static class CustomLoopContextSnapshotHash
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Returns a copy of a snapshot with its full canonical manifest hash applied.
+    /// </summary>
+    /// <param name="snapshot">The snapshot to hash.</param>
+    /// <returns>A copy whose manifest hash matches <see cref="Compute(CustomLoopContextSnapshot)"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="snapshot"/> is <see langword="null"/>.</exception>
     public static CustomLoopContextSnapshot Apply(CustomLoopContextSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         return snapshot with { ManifestHash = Compute(snapshot) };
     }
 
+    /// <summary>
+    /// Determines whether a snapshot retains its exact full canonical manifest hash.
+    /// </summary>
+    /// <param name="snapshot">The snapshot to verify.</param>
+    /// <returns><see langword="true"/> when stored and recomputed ASCII digests have equal length and fixed-time equality; otherwise, <see langword="false"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="snapshot"/> is <see langword="null"/>.</exception>
     public static bool Matches(CustomLoopContextSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);

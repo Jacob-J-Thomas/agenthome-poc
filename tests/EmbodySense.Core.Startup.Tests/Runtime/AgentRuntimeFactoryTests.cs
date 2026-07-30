@@ -39,6 +39,9 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(string.Empty, await File.ReadAllTextAsync(paths.CurrentConversationPath));
         Assert.NotEmpty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
         Assert.True(File.Exists(paths.ConversationTurnLockPath));
+        Assert.Equal(CodexRuntimeCompatibility.Compatible, runtime.CodexRuntimeStatus.Compatibility);
+        Assert.Equal("codex-cli 999.0.0-test", runtime.CodexRuntimeStatus.Version);
+        Assert.Equal("explicit --codex-path", runtime.CodexRuntimeStatus.Source);
     }
 
     [Fact]
@@ -75,6 +78,38 @@ public sealed class AgentRuntimeFactoryTests
             fakeCodex,
             "read-only",
             null!));
+    }
+
+    [Fact]
+    public async Task CreateAsync_rejects_pre_resolved_status_for_a_different_model_or_executable_request()
+    {
+        using var workspace = new TestWorkspace();
+        var requestedExecutable = workspace.File("requested-codex.cmd");
+        var status = new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            requestedExecutable,
+            workspace.File("resolved-codex.cmd"),
+            "codex-cli compatible-test",
+            "gpt-test",
+            "explicit --codex-path",
+            "Compatible test runtime.");
+        var factory = new AgentRuntimeFactory(new RejectingApprovalPrompt(), status);
+
+        var modelException = await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateAsync(
+            "different-model",
+            workspace.RootPath,
+            requestedExecutable,
+            "read-only",
+            AgentRuntimeSurface.Cli));
+        var pathException = await Assert.ThrowsAsync<ArgumentException>(() => factory.CreateAsync(
+            "gpt-test",
+            workspace.RootPath,
+            workspace.File("different-codex.cmd"),
+            "read-only",
+            AgentRuntimeSurface.Cli));
+
+        Assert.Contains("different configured model", modelException.Message, StringComparison.Ordinal);
+        Assert.Contains("different explicit executable", pathException.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -666,6 +701,11 @@ public sealed class AgentRuntimeFactoryTests
         var scriptPath = workspace.File("fake-codex.ps1");
         var commandPath = workspace.File("fake-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, $$"""
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
             $developerInstructions = ""
             $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
@@ -684,6 +724,10 @@ public sealed class AgentRuntimeFactoryTests
                     }
 
                     "initialized" {
+                    }
+
+                    "model/list" {
+                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
                     }
 
                     "thread/start" {

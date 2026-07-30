@@ -61,11 +61,16 @@ public sealed class CliBehaviorTests
     public async Task Run_command_accepts_app_server_options_and_exits_without_inference()
     {
         using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("y" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", "unused", "--sandbox", "workspace-write");
+        var result = await RunCliWithInputAsync("y" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath, "--sandbox", "workspace-write");
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Initialize this workspace now?", result.Output);
+        Assert.Contains($"Codex executable: {Path.GetFullPath(codexPath)}", result.Output);
+        Assert.Contains("Codex version: codex-cli integration-test", result.Output);
+        Assert.Contains("Codex model: gpt-test", result.Output);
+        Assert.Contains("Codex compatibility: Compatible", result.Output);
         Assert.Contains("EMBODYSENSE HARNESS", result.Output);
         Assert.Equal("", result.Error);
         Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
@@ -80,8 +85,9 @@ public sealed class CliBehaviorTests
     public async Task Run_command_aborts_uninitialized_workspace_when_initialization_is_not_confirmed()
     {
         using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("n" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+        var result = await RunCliWithInputAsync("n" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("Warning: this EmbodySense workspace is not initialized.", result.Output);
@@ -92,14 +98,32 @@ public sealed class CliBehaviorTests
     }
 
     [Fact]
+    public async Task Run_command_reports_incompatible_executable_model_before_initialization()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, advertiseConfiguredModel: false);
+
+        var result = await RunCliWithInputAsync("", "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal("", result.Output);
+        Assert.Contains(Path.GetFullPath(codexPath), result.Error);
+        Assert.Contains("codex-cli integration-test", result.Error);
+        Assert.Contains("gpt-test", result.Error);
+        Assert.Contains("Update Codex", result.Error);
+        Assert.False(Directory.Exists(workspace.File(".agent")));
+    }
+
+    [Fact]
     public async Task Run_command_does_not_reinitialize_initialized_workspace()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var auditPath = workspace.File(".agent", "audit", "events.ndjson");
         var beforeInitEventCount = CountOccurrences(await File.ReadAllTextAsync(auditPath), "workspace.init");
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.DoesNotContain("Initialize this workspace now?", result.Output);
@@ -114,8 +138,9 @@ public sealed class CliBehaviorTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("old prompt"));
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Equal("", await File.ReadAllTextAsync(paths.CurrentConversationPath));
@@ -135,8 +160,9 @@ public sealed class CliBehaviorTests
             "saved-conversation",
             Entry("saved-conversation", 1, "user", longPrompt),
             Entry("saved-conversation", 2, "assistant", "saved answer"));
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Stored conversations:", result.Output);
@@ -167,8 +193,9 @@ public sealed class CliBehaviorTests
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/help" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+        var result = await RunCliWithInputAsync("/help" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Runtime commands:", result.Output);
@@ -188,8 +215,9 @@ public sealed class CliBehaviorTests
             "saved-conversation",
             Entry("saved-conversation", 1, "user", "saved prompt"),
             Entry("saved-conversation", 2, "assistant", "saved answer"));
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/new" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath);
+        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/new" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Loaded conversation `saved-conversation` (2 messages).", result.Output);
@@ -276,6 +304,50 @@ public sealed class CliBehaviorTests
     private static int CountOccurrences(string text, string value)
     {
         return text.Split(value, StringSplitOptions.None).Length - 1;
+    }
+
+    private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, bool advertiseConfiguredModel = true)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("The controlled Codex process fixture is currently implemented as a Windows command script.");
+        }
+
+        var scriptPath = workspace.File("fake-cli-codex.ps1");
+        var commandPath = workspace.File("fake-cli-codex.cmd");
+        var advertisedModel = advertiseConfiguredModel ? "gpt-test" : "older-model";
+        await File.WriteAllTextAsync(scriptPath, $$"""
+            if ($args -contains "--version") {
+                Write-Output "codex-cli integration-test"
+                exit 0
+            }
+
+            function Write-ProtocolJson($value) {
+                $value | ConvertTo-Json -Compress -Depth 20
+                [Console]::Out.Flush()
+            }
+
+            while (($line = [Console]::In.ReadLine()) -ne $null) {
+                $message = $line | ConvertFrom-Json
+                switch ($message.method) {
+                    "initialize" {
+                        Write-ProtocolJson @{ id = $message.id; result = @{} }
+                    }
+
+                    "initialized" {
+                    }
+
+                    "model/list" {
+                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "{{advertisedModel}}"; model = "{{advertisedModel}}" }) } }
+                    }
+                }
+            }
+            """);
+        await File.WriteAllTextAsync(commandPath, """
+            @echo off
+            "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-cli-codex.ps1" %*
+            """);
+        return commandPath;
     }
 
     private static async Task WriteConversationAsync(
