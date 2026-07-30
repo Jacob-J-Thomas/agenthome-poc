@@ -34,6 +34,7 @@ public sealed class ProductionSourceLayoutTests
             new SourceFile("ConstMemberHost.cs", "namespace Example; internal sealed class ConstMemberHost { private sealed class Constants { public const string Value = \"value\"; } }"),
             new SourceFile("VolatileMemberHost.cs", "namespace Example; internal sealed class VolatileMemberHost { private sealed class State { public volatile int Value; } }"),
             new SourceFile("DefaultInitializerHost.cs", "namespace Example; internal sealed class DefaultInitializerHost { private sealed class Snapshot(object value = StartWorker()) { public object Value { get; } = value; } }"),
+            new SourceFile("ConversionInitializerHost.cs", "namespace Example; internal sealed class ConversionInitializerHost { private sealed class Snapshot(string value) { public Worker Value { get; } = value; } }"),
             new SourceFile("InterfaceHost.cs", "namespace Example; internal sealed class InterfaceHost { private interface Snapshot { } }"),
             new SourceFile("StaticMemberHost.cs", "namespace Example; internal sealed class StaticMemberHost { private sealed record Snapshot(string Value) { public static Snapshot Empty { get; } = new(\"\"); } }"),
             new SourceFile("PublicHost.cs", "namespace Example; internal sealed class PublicHost { public sealed class Visible { } }"),
@@ -54,6 +55,7 @@ public sealed class ProductionSourceLayoutTests
         Assert.Contains(violations, violation => violation.StartsWith("ConstMemberHost.cs:", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.StartsWith("VolatileMemberHost.cs:", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.StartsWith("DefaultInitializerHost.cs:", StringComparison.Ordinal));
+        Assert.Contains(violations, violation => violation.StartsWith("ConversionInitializerHost.cs:", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.StartsWith("InterfaceHost.cs:", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.StartsWith("StaticMemberHost.cs:", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.StartsWith("PublicHost.cs:", StringComparison.Ordinal));
@@ -207,7 +209,7 @@ public sealed class ProductionSourceLayoutTests
         }
 
         var parameterList = PrimaryConstructorParameterList(typeDeclaration);
-        if (parameterList?.Parameters.Any(parameter => parameter.Modifiers.Count != 0 || !IsDataOnlyInitializer(parameter.Default, null)) == true)
+        if (parameterList?.Parameters.Any(parameter => parameter.Modifiers.Count != 0 || !IsDataOnlyInitializer(parameter.Default, parameter.Type, null)) == true)
         {
             return false;
         }
@@ -232,24 +234,24 @@ public sealed class ProductionSourceLayoutTests
         };
     }
 
-    private static IReadOnlySet<string> PrimaryConstructorParameters(TypeDeclarationSyntax declaration)
+    private static IReadOnlyDictionary<string, string> PrimaryConstructorParameters(TypeDeclarationSyntax declaration)
     {
         var parameterList = PrimaryConstructorParameterList(declaration);
-        return parameterList?.Parameters.Select(parameter => parameter.Identifier.ValueText).ToHashSet(StringComparer.Ordinal)
-            ?? new HashSet<string>(StringComparer.Ordinal);
+        return parameterList?.Parameters.ToDictionary(parameter => parameter.Identifier.ValueText, parameter => TypeIdentity(parameter.Type), StringComparer.Ordinal)
+            ?? new Dictionary<string, string>(StringComparer.Ordinal);
     }
 
-    private static bool IsDataOnlyField(FieldDeclarationSyntax field, IReadOnlySet<string> primaryConstructorParameters)
+    private static bool IsDataOnlyField(FieldDeclarationSyntax field, IReadOnlyDictionary<string, string> primaryConstructorParameters)
     {
         var hasBehaviorModifier = field.Modifiers.Any(modifier => modifier.RawKind is
             (int)SyntaxKind.ConstKeyword
             or (int)SyntaxKind.StaticKeyword
             or (int)SyntaxKind.VolatileKeyword);
         return !hasBehaviorModifier
-            && field.Declaration.Variables.All(variable => IsDataOnlyInitializer(variable.Initializer, primaryConstructorParameters));
+            && field.Declaration.Variables.All(variable => IsDataOnlyInitializer(variable.Initializer, field.Declaration.Type, primaryConstructorParameters));
     }
 
-    private static bool IsDataOnlyProperty(PropertyDeclarationSyntax property, IReadOnlySet<string> primaryConstructorParameters)
+    private static bool IsDataOnlyProperty(PropertyDeclarationSyntax property, IReadOnlyDictionary<string, string> primaryConstructorParameters)
     {
         if (property.ExpressionBody is not null
             || property.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true
@@ -263,29 +265,41 @@ public sealed class ProductionSourceLayoutTests
             return false;
         }
 
-        return IsDataOnlyInitializer(property.Initializer, primaryConstructorParameters);
+        return IsDataOnlyInitializer(property.Initializer, property.Type, primaryConstructorParameters);
     }
 
-    private static bool IsDataOnlyInitializer(EqualsValueClauseSyntax? initializer, IReadOnlySet<string>? allowedIdentifiers)
+    private static bool IsDataOnlyInitializer(EqualsValueClauseSyntax? initializer, TypeSyntax? targetType, IReadOnlyDictionary<string, string>? allowedParameters)
     {
-        return initializer is null || IsDataOnlyInitializerExpression(initializer.Value, allowedIdentifiers);
+        return initializer is null || IsDataOnlyInitializerExpression(initializer.Value, targetType, allowedParameters);
     }
 
-    private static bool IsDataOnlyInitializerExpression(ExpressionSyntax expression, IReadOnlySet<string>? allowedIdentifiers)
+    private static bool IsDataOnlyInitializerExpression(ExpressionSyntax expression, TypeSyntax? targetType, IReadOnlyDictionary<string, string>? allowedParameters)
     {
         return expression switch
         {
             LiteralExpressionSyntax => true,
             DefaultExpressionSyntax => true,
-            IdentifierNameSyntax identifier => allowedIdentifiers?.Contains(identifier.Identifier.ValueText) == true,
-            ParenthesizedExpressionSyntax parenthesized => IsDataOnlyInitializerExpression(parenthesized.Expression, allowedIdentifiers),
+            IdentifierNameSyntax identifier => IsExactParameterStorage(identifier, targetType, allowedParameters),
+            ParenthesizedExpressionSyntax parenthesized => IsDataOnlyInitializerExpression(parenthesized.Expression, targetType, allowedParameters),
             PrefixUnaryExpressionSyntax unary when unary.RawKind is
                 (int)SyntaxKind.UnaryPlusExpression
                 or (int)SyntaxKind.UnaryMinusExpression
                 or (int)SyntaxKind.LogicalNotExpression
-                or (int)SyntaxKind.BitwiseNotExpression => IsDataOnlyInitializerExpression(unary.Operand, allowedIdentifiers),
+                or (int)SyntaxKind.BitwiseNotExpression => IsDataOnlyInitializerExpression(unary.Operand, targetType, allowedParameters),
             _ => false
         };
+    }
+
+    private static bool IsExactParameterStorage(IdentifierNameSyntax identifier, TypeSyntax? targetType, IReadOnlyDictionary<string, string>? allowedParameters)
+    {
+        return targetType is not null
+            && allowedParameters?.TryGetValue(identifier.Identifier.ValueText, out var parameterType) == true
+            && string.Equals(TypeIdentity(targetType), parameterType, StringComparison.Ordinal);
+    }
+
+    private static string TypeIdentity(TypeSyntax? type)
+    {
+        return type is null ? string.Empty : string.Concat(type.DescendantTokens().Select(token => token.Text));
     }
 
     private static IReadOnlyList<string> ProductionProjectRoots(string sourceRoot)
