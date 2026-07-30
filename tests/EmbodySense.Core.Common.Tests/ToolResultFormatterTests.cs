@@ -63,14 +63,14 @@ public sealed class ToolResultFormatterTests
     [Fact]
     public void FormatResults_backs_off_instead_of_splitting_a_surrogate_pair_at_the_final_boundary()
     {
-        const string outputMarker = "    [tool output truncated to preserve all result evidence]";
+        const string OutputMarker = "    [tool output truncated to preserve all result evidence]";
         var baselineResult = CreateResult(new string('a', ToolResultFormatter.MaxFormattedCharacters * 2)) with
         {
             Retention = CreateRetention(characterCount: 0, utf8ByteCount: 0)
         };
         var baseline = ToolResultFormatter.FormatResults([baselineResult]);
         var outputTextStart = baseline.IndexOf("  output:" + Environment.NewLine + "    ", StringComparison.Ordinal) + ("  output:" + Environment.NewLine + "    ").Length;
-        var outputMarkerStart = baseline.IndexOf(Environment.NewLine + outputMarker, outputTextStart, StringComparison.Ordinal);
+        var outputMarkerStart = baseline.IndexOf(Environment.NewLine + OutputMarker, outputTextStart, StringComparison.Ordinal);
         var retainedOutputCharacterCount = outputMarkerStart - outputTextStart;
         var output = new string('a', retainedOutputCharacterCount - 1) + "\U0001F600" + new string('b', 1_000);
         var result = baselineResult with { OutputText = output };
