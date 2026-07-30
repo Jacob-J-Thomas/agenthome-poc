@@ -47,6 +47,19 @@ test("shared-shell navigation switches views and keeps the refresh route aligned
   assert.match(app.context.window.location.href, /\?view=chat$/);
 });
 
+test("inherited object property names cannot select a configuration renderer", async () => {
+  const app = await loadApp({
+    locationHref: "http://127.0.0.1:4378/?view=constructor",
+  });
+
+  assert.equal(app.elements.chatView.hidden, false);
+  assert.equal(app.elements.configurationView.hidden, true);
+  assert.equal(
+    configTab(app, "overview").attributes.get("aria-selected"),
+    "false",
+  );
+});
+
 test("workspace initialization wakes an activated loop builder", async () => {
   let refreshes = 0;
   const loopBuilder = {
@@ -585,7 +598,9 @@ async function loadApp(overrides = {}) {
   FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
   FakeWebSocket.transcriptError = overrides.transcriptError ?? null;
   const document = new FakeDocument(indexSource);
-  const location = { href: "http://127.0.0.1:4378/" };
+  const location = {
+    href: overrides.locationHref ?? "http://127.0.0.1:4378/",
+  };
   const context = {
     URL,
     console,
