@@ -285,6 +285,28 @@ public sealed class CodexRuntimeResolverTests
     }
 
     [Fact]
+    public async Task Compatible_model_on_a_later_catalog_page_is_accepted()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var executable = await CreateFakeExecutableAsync(
+            workspace,
+            "paginated",
+            "codex-cli paginated-test",
+            modelPageSize: 1,
+            advertisedModels: ["older-model", "gpt-test"]);
+
+        var result = await new CodexRuntimeResolver().ResolveAsync(executable, "gpt-test");
+
+        Assert.Equal(CodexRuntimeResolutionStatus.Compatible, result.Status);
+        Assert.Equal("codex-cli paginated-test", result.Version);
+    }
+
+    [Fact]
     public async Task Server_request_during_probe_is_declined_without_aborting_compatibility_check()
     {
         if (!OperatingSystem.IsWindows())
@@ -338,6 +360,7 @@ public sealed class CodexRuntimeResolverTests
         bool omitModelCatalog = false,
         bool requestBeforeInitialize = false,
         int stageDelaySeconds = 0,
+        int modelPageSize = int.MaxValue,
         params string[] advertisedModels)
     {
         var directory = workspace.File(relativeDirectory);
@@ -364,6 +387,7 @@ public sealed class CodexRuntimeResolverTests
             $omitModelCatalog = ${{omitModelCatalog.ToString().ToLowerInvariant()}}
             $requestBeforeInitialize = ${{requestBeforeInitialize.ToString().ToLowerInvariant()}}
             $stageDelaySeconds = {{stageDelaySeconds}}
+            $modelPageSize = {{modelPageSize}}
             if ($failAppServer) {
                 [Console]::Error.WriteLine("simulated app-server startup failure")
                 exit 7
@@ -404,11 +428,15 @@ public sealed class CodexRuntimeResolverTests
                             Start-Sleep -Seconds $stageDelaySeconds
                         }
 
-                        $models = @($advertisedModels | ForEach-Object { @{ id = $_; model = $_ } })
+                        $offset = if ($null -eq $message.params.cursor) { 0 } else { [int]$message.params.cursor }
+                        $page = @($advertisedModels | Select-Object -Skip $offset -First $modelPageSize)
+                        $models = @($page | ForEach-Object { @{ id = $_; model = $_ } })
                         if ($omitModelCatalog) {
                             Write-ProtocolJson @{ id = $message.id; result = @{} }
                         } else {
-                            Write-ProtocolJson @{ id = $message.id; result = @{ data = $models } }
+                            $nextOffset = $offset + $page.Count
+                            $nextCursor = if ($nextOffset -lt $advertisedModels.Count) { "$nextOffset" } else { $null }
+                            Write-ProtocolJson @{ id = $message.id; result = @{ data = $models; nextCursor = $nextCursor } }
                         }
                     }
                 }

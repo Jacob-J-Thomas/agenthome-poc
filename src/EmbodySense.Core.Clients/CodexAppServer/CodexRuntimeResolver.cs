@@ -208,7 +208,7 @@ public sealed class CodexRuntimeResolver
 
         try
         {
-            var advertisedModels = await ReadAdvertisedModelsAsync(executablePath, probeCancellationToken);
+            var advertisedModels = await ReadAdvertisedModelsAsync(executablePath, configuredModel, probeCancellationToken);
             if (string.IsNullOrWhiteSpace(configuredModel))
             {
                 return new CodexRuntimeProbeResult(true, version, "Codex app-server started successfully; model selection is externally configured.");
@@ -264,7 +264,7 @@ public sealed class CodexRuntimeResolver
         }
     }
 
-    private static async Task<IReadOnlyList<string>> ReadAdvertisedModelsAsync(string executablePath, CancellationToken cancellationToken)
+    private static async Task<IReadOnlyList<string>> ReadAdvertisedModelsAsync(string executablePath, string? configuredModel, CancellationToken cancellationToken)
     {
         var workingDirectory = Path.Combine(Path.GetTempPath(), "embodysense-codex-probe", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workingDirectory);
@@ -300,18 +300,45 @@ public sealed class CodexRuntimeResolver
                 ["method"] = "initialized",
                 ["params"] = new JsonObject()
             }.ToJsonString(), cancellationToken);
-            await transport.WriteLineAsync(new JsonObject
+            var models = new HashSet<string>(StringComparer.Ordinal);
+            var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+            string? cursor = null;
+            var requestId = 2;
+            do
             {
-                ["id"] = 2,
-                ["method"] = "model/list",
-                ["params"] = new JsonObject
+                var parameters = new JsonObject
                 {
                     ["includeHidden"] = true,
                     ["limit"] = 1_000
+                };
+                if (cursor is not null)
+                {
+                    parameters["cursor"] = cursor;
                 }
-            }.ToJsonString(), cancellationToken);
-            var response = await ReadResponseAsync(transport, 2, cancellationToken);
-            return GetAdvertisedModels(response);
+
+                await transport.WriteLineAsync(new JsonObject
+                {
+                    ["id"] = requestId,
+                    ["method"] = "model/list",
+                    ["params"] = parameters
+                }.ToJsonString(), cancellationToken);
+                var response = await ReadResponseAsync(transport, requestId, cancellationToken);
+                cursor = AddAdvertisedModels(response, models);
+                if (string.IsNullOrWhiteSpace(configuredModel) || models.Contains(configuredModel))
+                {
+                    return models.ToArray();
+                }
+
+                if (cursor is not null && !seenCursors.Add(cursor))
+                {
+                    throw new InvalidOperationException("Codex app-server model/list response repeated a continuation cursor.");
+                }
+
+                requestId++;
+            }
+            while (cursor is not null);
+
+            return models.ToArray();
         }
         finally
         {
@@ -364,21 +391,30 @@ public sealed class CodexRuntimeResolver
         }
     }
 
-    private static IReadOnlyList<string> GetAdvertisedModels(JsonElement response)
+    private static string? AddAdvertisedModels(JsonElement response, HashSet<string> models)
     {
         if (!response.TryGetProperty("result", out var result) || !result.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
         {
             throw new InvalidOperationException("Codex app-server model/list response did not contain a model catalog.");
         }
 
-        var models = new HashSet<string>(StringComparer.Ordinal);
         foreach (var item in data.EnumerateArray())
         {
             AddString(item, "model", models);
             AddString(item, "id", models);
         }
 
-        return models.ToArray();
+        if (!result.TryGetProperty("nextCursor", out var nextCursor) || nextCursor.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        if (nextCursor.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(nextCursor.GetString()))
+        {
+            throw new InvalidOperationException("Codex app-server model/list response contained an invalid continuation cursor.");
+        }
+
+        return nextCursor.GetString();
     }
 
     private static void AddString(JsonElement item, string propertyName, HashSet<string> values)
