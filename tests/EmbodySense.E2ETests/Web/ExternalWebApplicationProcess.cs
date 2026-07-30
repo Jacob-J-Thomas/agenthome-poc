@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
-using System.Text;
 using System.Text.Json;
 using EmbodySense.Web.Models;
 
@@ -129,39 +128,5 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         }
 
         throw new TimeoutException($"External Web process did not serve /api/status.{Environment.NewLine}{FormatOutput()}", lastException);
-    }
-
-    private sealed class ProcessOutputBuffer
-    {
-        private const int MaxCharacters = 64_000;
-        private readonly StringBuilder _builder = new();
-
-        public string Text
-        {
-            get
-            {
-                lock (_builder)
-                {
-                    return _builder.ToString();
-                }
-            }
-        }
-
-        public void Append(string? line)
-        {
-            if (line is null)
-            {
-                return;
-            }
-
-            lock (_builder)
-            {
-                _builder.AppendLine(line);
-                if (_builder.Length > MaxCharacters)
-                {
-                    _builder.Remove(0, _builder.Length - MaxCharacters);
-                }
-            }
-        }
     }
 }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -20,10 +21,11 @@ public sealed class BrowserFlowTests
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var port = GetFreePort();
         ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
-        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+        HeadlessBrowserSession? browser = null;
 
         try
         {
+            browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
             await InitializeWorkspaceAsync(browser);
             await SubmitMessageAsync(browser, "browser-first-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
@@ -39,7 +41,6 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/125): Require the first turn to be restored after the Web process restarts.
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
-            browser.ClearDiagnostics();
             await SubmitMessageAsync(browser, "browser-second-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-second-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
@@ -50,7 +51,7 @@ public sealed class BrowserFlowTests
             Assert.Contains("browser-second-turn", conversationEvidence, StringComparison.Ordinal);
             Assert.Contains("browser response: browser-second-turn", conversationEvidence, StringComparison.Ordinal);
             app.AssertHealthy();
-            browser.AssertHealthy();
+            await browser.AssertHealthyAsync();
         }
         catch
         {
@@ -59,6 +60,11 @@ public sealed class BrowserFlowTests
         }
         finally
         {
+            if (browser is not null)
+            {
+                await browser.DisposeAsync();
+            }
+
             if (app is not null)
             {
                 await app.DisposeAsync();
@@ -107,7 +113,6 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Browser governed loop'))");
-            browser.ClearDiagnostics();
             await ClickLoopByNameAsync(browser, LoopName);
             Assert.Equal(LoopName, await browser.EvaluateStringAsync("document.getElementById('loopName').value"));
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
@@ -139,7 +144,7 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('loopList').textContent.includes('System loop')");
             Assert.False(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Browser governed loop'))"));
             app.AssertHealthy();
-            browser.AssertHealthy();
+            await browser.AssertHealthyAsync();
         }
         catch
         {
@@ -167,7 +172,7 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('Codex runtime is not usable')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
             app.AssertHealthy();
-            browser.AssertHealthy();
+            await browser.AssertHealthyAsync();
         }
         catch
         {
@@ -245,7 +250,7 @@ public sealed class BrowserFlowTests
         return string.Join(Environment.NewLine, contents);
     }
 
-    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession browser, ExternalWebApplicationProcess? app)
+    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app)
     {
         var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
         var root = string.IsNullOrWhiteSpace(configuredRoot)
@@ -253,7 +258,11 @@ public sealed class BrowserFlowTests
             : Path.GetFullPath(configuredRoot);
         var directory = Path.Combine(root, scenario);
         Directory.CreateDirectory(directory);
-        await browser.WriteDiagnosticsAsync(directory);
+        if (browser is not null)
+        {
+            await browser.WriteDiagnosticsAsync(directory);
+        }
+
         if (app is not null)
         {
             await app.WriteDiagnosticsAsync(directory);
@@ -278,9 +287,15 @@ public sealed class BrowserFlowTests
         private readonly string _userDataDirectory;
         private readonly BoundedProcessOutput _output;
         private readonly BoundedProcessOutput _error;
+        private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pendingCommands = new();
+        private readonly SemaphoreSlim _sendGate = new(1, 1);
+        private readonly object _diagnosticsGate = new();
         private readonly List<string> _diagnostics = [];
         private readonly byte[] _buffer = new byte[65536];
+        private readonly Task _readerTask;
+        private Exception? _readerFailure;
         private int _nextCommandId;
+        private int _disposed;
 
         private HeadlessBrowserSession(Process process, ClientWebSocket socket, string userDataDirectory, BoundedProcessOutput output, BoundedProcessOutput error)
         {
@@ -289,6 +304,7 @@ public sealed class BrowserFlowTests
             _userDataDirectory = userDataDirectory;
             _output = output;
             _error = error;
+            _readerTask = ReceiveLoopAsync();
         }
 
         public static async Task<HeadlessBrowserSession> StartAsync(string targetUrl)
@@ -348,12 +364,13 @@ public sealed class BrowserFlowTests
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
+            HeadlessBrowserSession? session = null;
             try
             {
                 var websocketUrl = await GetInitialPageWebSocketUrlAsync(debugPort);
                 var socket = new ClientWebSocket();
                 await socket.ConnectAsync(new Uri(websocketUrl), CancellationToken.None);
-                var session = new HeadlessBrowserSession(process, socket, userDataDirectory, output, error);
+                session = new HeadlessBrowserSession(process, socket, userDataDirectory, output, error);
                 await session.SendCommandAsync("Page.enable");
                 await session.SendCommandAsync("Runtime.enable");
                 await session.SendCommandAsync("Log.enable");
@@ -363,8 +380,16 @@ public sealed class BrowserFlowTests
             }
             catch (Exception exception)
             {
-                await StopProcessAsync(process);
-                TryDeleteDirectory(userDataDirectory);
+                if (session is not null)
+                {
+                    await session.DisposeAsync();
+                }
+                else
+                {
+                    await StopProcessAsync(process);
+                    TryDeleteDirectory(userDataDirectory);
+                }
+
                 throw new InvalidOperationException("Headless browser startup failed." + Environment.NewLine + FormatOutput(output, error), exception);
             }
         }
@@ -372,23 +397,34 @@ public sealed class BrowserFlowTests
         public async Task WaitForExpressionAsync(string expression)
         {
             Exception? lastException = null;
-            var startedAt = Stopwatch.GetTimestamp();
-            while (Stopwatch.GetElapsedTime(startedAt) < TimeSpan.FromSeconds(30))
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            while (!timeout.IsCancellationRequested)
             {
                 try
                 {
-                    var value = await EvaluateAsync($"Boolean({expression})", CancellationToken.None);
+                    var value = await EvaluateAsync($"Boolean({expression})", timeout.Token);
                     if (value.ValueKind == JsonValueKind.True)
                     {
                         return;
                     }
+                }
+                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+                {
+                    break;
                 }
                 catch (Exception exception) when (exception is InvalidOperationException or WebSocketException or JsonException)
                 {
                     lastException = exception;
                 }
 
-                await Task.Delay(100, CancellationToken.None);
+                try
+                {
+                    await Task.Delay(100, timeout.Token);
+                }
+                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+                {
+                    break;
+                }
             }
 
             throw new TimeoutException($"Browser expression did not become true: {expression}", lastException);
@@ -422,48 +458,70 @@ public sealed class BrowserFlowTests
             _ = await SendCommandAsync("Page.reload", new { ignoreCache = true });
         }
 
-        public void ClearDiagnostics()
+        public async Task AssertHealthyAsync()
         {
-            _diagnostics.Clear();
-        }
-
-        public void AssertHealthy()
-        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            _ = await EvaluateAsync("true", timeout.Token);
             Assert.False(_process.HasExited, $"Browser process exited unexpectedly.{Environment.NewLine}{FormatOutput()}");
-            Assert.Empty(_diagnostics);
+            Assert.Null(_readerFailure);
+            Assert.Empty(GetDiagnosticsSnapshot());
         }
 
         public async Task WriteDiagnosticsAsync(string directory)
         {
             Directory.CreateDirectory(directory);
             await File.WriteAllTextAsync(Path.Combine(directory, "browser-process.txt"), FormatOutput());
-            await File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), _diagnostics);
             try
             {
-                var screenshot = await SendCommandAsync("Page.captureScreenshot", new { format = "png", captureBeyondViewport = true });
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                var screenshot = await SendCommandAsync("Page.captureScreenshot", new { format = "png", captureBeyondViewport = true }, timeout.Token);
                 var base64 = screenshot.GetProperty("result").GetProperty("data").GetString();
                 if (!string.IsNullOrWhiteSpace(base64))
                 {
                     await File.WriteAllBytesAsync(Path.Combine(directory, "page.png"), Convert.FromBase64String(base64));
                 }
 
-                var html = await EvaluateStringAsync("document.documentElement.outerHTML");
+                var html = (await EvaluateAsync("document.documentElement.outerHTML", timeout.Token)).GetString() ?? "";
                 await File.WriteAllTextAsync(Path.Combine(directory, "page.html"), html);
             }
             catch (Exception exception)
             {
                 await File.WriteAllTextAsync(Path.Combine(directory, "capture-error.txt"), exception.ToString());
             }
+
+            await File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), GetDiagnosticsSnapshot());
         }
 
         public async ValueTask DisposeAsync()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
             if (_socket.State == WebSocketState.Open)
             {
-                await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", CancellationToken.None);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                try
+                {
+                    await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test complete", timeout.Token);
+                }
+                catch (Exception exception) when (exception is OperationCanceledException or WebSocketException)
+                {
+                    _socket.Abort();
+                }
             }
 
             _socket.Dispose();
+            try
+            {
+                await _readerTask;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or WebSocketException or ObjectDisposedException)
+            {
+            }
+
+            _sendGate.Dispose();
             await StopProcessAsync(_process);
             TryDeleteDirectory(_userDataDirectory);
         }
@@ -487,28 +545,95 @@ public sealed class BrowserFlowTests
 
         private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfReaderFailed();
             var commandId = Interlocked.Increment(ref _nextCommandId);
             var payload = parameters is null
                 ? JsonSerializer.Serialize(new { id = commandId, method }, _jsonOptions)
                 : JsonSerializer.Serialize(new { id = commandId, method, @params = parameters }, _jsonOptions);
             var bytes = Encoding.UTF8.GetBytes(payload);
+            var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_pendingCommands.TryAdd(commandId, completion))
+            {
+                throw new InvalidOperationException($"Browser DevTools command id {commandId} was already pending.");
+            }
+
             try
             {
-                await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
+                await _sendGate.WaitAsync(cancellationToken);
+                try
+                {
+                    ThrowIfReaderFailed();
+                    await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+                }
+                finally
+                {
+                    _sendGate.Release();
+                }
             }
-            catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException)
+            catch (OperationCanceledException)
             {
+                _pendingCommands.TryRemove(commandId, out _);
+                throw;
+            }
+            catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
+            {
+                _pendingCommands.TryRemove(commandId, out _);
                 throw new InvalidOperationException("Browser DevTools command send failed." + Environment.NewLine + FormatOutput(), exception);
             }
 
-            while (true)
+            try
             {
-                using var document = await ReadMessageAsync(cancellationToken);
-                var root = document.RootElement;
-                RecordDiagnosticEvent(root);
-                if (root.TryGetProperty("id", out var id) && id.GetInt32() == commandId)
+                return await completion.Task.WaitAsync(cancellationToken);
+            }
+            catch
+            {
+                _pendingCommands.TryRemove(commandId, out _);
+                throw;
+            }
+        }
+
+        private async Task ReceiveLoopAsync()
+        {
+            Exception? failure = null;
+            try
+            {
+                while (Volatile.Read(ref _disposed) == 0 && _socket.State == WebSocketState.Open)
                 {
-                    return root.Clone();
+                    using var document = await ReadMessageAsync(CancellationToken.None);
+                    var root = document.RootElement;
+                    if (root.TryGetProperty("id", out var id) && id.TryGetInt32(out var commandId))
+                    {
+                        if (_pendingCommands.TryRemove(commandId, out var completion))
+                        {
+                            completion.TrySetResult(root.Clone());
+                        }
+
+                        continue;
+                    }
+
+                    RecordDiagnosticEvent(root);
+                }
+            }
+            catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
+            {
+                failure = exception;
+                if (Volatile.Read(ref _disposed) == 0)
+                {
+                    _readerFailure = exception;
+                }
+            }
+            finally
+            {
+                var completionFailure = _readerFailure
+                    ?? failure
+                    ?? new ObjectDisposedException(nameof(HeadlessBrowserSession));
+                foreach (var pending in _pendingCommands.ToArray())
+                {
+                    if (_pendingCommands.TryRemove(pending.Key, out var completion))
+                    {
+                        completion.TrySetException(completionFailure);
+                    }
                 }
             }
         }
@@ -559,7 +684,7 @@ public sealed class BrowserFlowTests
 
             if (method == "Runtime.exceptionThrown")
             {
-                _diagnostics.Add("page exception: " + parameters.GetRawText());
+                AddDiagnostic("page exception: " + parameters.GetRawText());
                 return;
             }
 
@@ -567,7 +692,7 @@ public sealed class BrowserFlowTests
                 && parameters.TryGetProperty("type", out var consoleType)
                 && string.Equals(consoleType.GetString(), "error", StringComparison.OrdinalIgnoreCase))
             {
-                _diagnostics.Add("console error: " + parameters.GetRawText());
+                AddDiagnostic("console error: " + parameters.GetRawText());
                 return;
             }
 
@@ -581,7 +706,7 @@ public sealed class BrowserFlowTests
                     return;
                 }
 
-                _diagnostics.Add("browser log error: " + entry.GetRawText());
+                AddDiagnostic("browser log error: " + entry.GetRawText());
                 return;
             }
 
@@ -591,14 +716,38 @@ public sealed class BrowserFlowTests
                 && status.TryGetDouble(out var statusCode)
                 && statusCode >= 500)
             {
-                _diagnostics.Add("critical HTTP response: " + response.GetRawText());
+                AddDiagnostic("critical HTTP response: " + response.GetRawText());
                 return;
             }
 
             if (method == "Network.loadingFailed"
                 && (!parameters.TryGetProperty("canceled", out var cancelled) || cancelled.ValueKind != JsonValueKind.True))
             {
-                _diagnostics.Add("network load failed: " + parameters.GetRawText());
+                AddDiagnostic("network load failed: " + parameters.GetRawText());
+            }
+        }
+
+        private void AddDiagnostic(string diagnostic)
+        {
+            lock (_diagnosticsGate)
+            {
+                _diagnostics.Add(diagnostic);
+            }
+        }
+
+        private IReadOnlyList<string> GetDiagnosticsSnapshot()
+        {
+            lock (_diagnosticsGate)
+            {
+                return _diagnostics.ToArray();
+            }
+        }
+
+        private void ThrowIfReaderFailed()
+        {
+            if (_readerFailure is not null)
+            {
+                throw new InvalidOperationException("Browser DevTools reader failed." + Environment.NewLine + FormatOutput(), _readerFailure);
             }
         }
 
