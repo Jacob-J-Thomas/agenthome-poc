@@ -8,43 +8,39 @@ public static class FakeCodexExecutable
         var directory = workspace.File("fake-codex");
         Directory.CreateDirectory(directory);
         var commandPath = Path.Combine(directory, "codex.cmd");
-        var scriptPath = Path.Combine(directory, "codex.ps1");
-        var modelLiterals = string.Join(", ", advertisedModels.Select(model => "'" + model.Replace("'", "''") + "'"));
+        var scriptPath = Path.Combine(directory, "codex.js");
+        var modelsJson = System.Text.Json.JsonSerializer.Serialize(advertisedModels);
         await File.WriteAllTextAsync(scriptPath, $$"""
-            param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-
-            if ($Arguments -contains "--version") {
-                Write-Output "codex-cli compatible-test"
-                exit 0
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli compatible-test\n");
+              process.exit(0);
             }
 
-            $advertisedModels = @({{modelLiterals}})
+            const readline = require("node:readline");
+            const advertisedModels = {{modelsJson}};
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
             }
 
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
-                switch ($message.method) {
-                    "initialize" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
-                    }
-
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        $models = @($advertisedModels | ForEach-Object { @{ id = $_; model = $_ } })
-                        Write-ProtocolJson @{ id = $message.id; result = @{ data = $models } }
-                    }
+            input.on("line", (line) => {
+              const message = JSON.parse(line);
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "model/list":
+                  write({ id: message.id, result: { data: advertisedModels.map((model) => ({ id: model, model })) } });
+                  break;
+                default:
+                  break;
                 }
-            }
+            });
             """);
         await File.WriteAllTextAsync(commandPath, """
             @echo off
-            "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0codex.ps1" %*
+            node "%~dp0codex.js" %*
             """);
         return commandPath;
     }
