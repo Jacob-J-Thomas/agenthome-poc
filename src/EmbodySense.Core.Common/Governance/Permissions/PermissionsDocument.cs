@@ -4,19 +4,50 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Common.Governance.Permissions;
 
+/// <summary>
+/// Defines the version-1 workspace file-system permission policy consumed by governed tool evaluation.
+/// </summary>
 public sealed class PermissionsDocument
 {
+    /// <summary>
+    /// Only permissions-document version accepted by the current runtime.
+    /// </summary>
     public const int CurrentVersion = 1;
+    /// <summary>
+    /// Workspace-relative retained-tool-response path that requires explicit read/list approval.
+    /// </summary>
     public const string ToolResponseInspectionPath = ".agent/logs/tool-responses";
 
+    /// <summary>
+    /// Gets the persisted schema version.
+    /// </summary>
+    /// <value>The version.</value>
     public int Version { get; init; } = CurrentVersion;
 
+    /// <summary>
+    /// Gets the policy scope identifier.
+    /// </summary>
+    /// <value>The scope.</value>
     public string Scope { get; init; } = "single-file-system-directory-level";
 
+    /// <summary>
+    /// Gets the approved file system permissions.
+    /// </summary>
+    /// <value>The approved file system permissions.</value>
     public List<ApprovedFileSystemPermission> Approved { get; init; } = [];
 
+    /// <summary>
+    /// Gets the denied file system permissions.
+    /// </summary>
+    /// <value>The denied file system permissions.</value>
     public List<DeniedFileSystemPermission> Denied { get; init; } = [];
 
+    /// <summary>
+    /// Creates the default least-authority workspace permission policy.
+    /// </summary>
+    /// <param name="paths">The canonical workspace paths used to anchor the policy.</param>
+    /// <returns>A version-1 document that denies private, audit, log, and hook mutation; permits the standard writable surfaces; and requires approval to inspect retained tool responses.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="paths"/> is <see langword="null"/>.</exception>
     public static PermissionsDocument CreateDefault(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -49,16 +80,32 @@ public sealed class PermissionsDocument
         return document;
     }
 
+    /// <summary>
+    /// Deserializes a permissions document when its effective version is current; an omitted version defaults to <see cref="CurrentVersion"/>.
+    /// </summary>
+    /// <param name="json">The JSON document.</param>
+    /// <returns>The deserialized current-version document, including an unversioned document that receives the property default, or <see langword="null"/> when an explicit version is unsupported.</returns>
+    /// <exception cref="JsonException">Thrown when <paramref name="json"/> is not valid for the permissions schema.</exception>
     public static PermissionsDocument? FromJson(string json)
     {
+        // TODO(#142): Require persisted permissions JSON to declare CurrentVersion explicitly.
         var document = JsonSerializer.Deserialize<PermissionsDocument>(json, PermissionsJson.Options);
         return document is { Version: CurrentVersion } ? document : null;
     }
 
+    /// <summary>
+    /// Serializes this document with the canonical permissions JSON options.
+    /// </summary>
+    /// <returns>The JSON representation.</returns>
     public string ToJson() => JsonSerializer.Serialize(this, PermissionsJson.Options);
 
+    /// <summary>
+    /// Adds a human-approval rule for retained tool-response read and list operations that are not already covered by an approved-path entry.
+    /// </summary>
+    /// <returns><see langword="true"/> when a missing-operation rule was appended; <see langword="false"/> when existing approved-path entries already cover both operations, regardless of their approval requirement.</returns>
     public bool EnsureToolResponseInspectionApproval()
     {
+        // TODO(#139): Treat operations covered only by non-approval rules as missing so retained-response inspection remains approval-gated.
         var coveredOperations = Approved
             .Where(entry => PathEquals(entry.Path, ToolResponseInspectionPath))
             .SelectMany(entry => entry.Operations)

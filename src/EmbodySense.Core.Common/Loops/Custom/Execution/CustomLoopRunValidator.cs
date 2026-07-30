@@ -9,8 +9,16 @@ using static EmbodySense.Core.Common.Loops.Custom.Execution.CustomLoopRunValidat
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
+/// <summary>
+/// Validates custom loop runs.
+/// </summary>
 public static class CustomLoopRunValidator
 {
+    /// <summary>
+    /// Validates the complete persisted shape and cross-field invariants of a custom-loop run.
+    /// </summary>
+    /// <param name="run">The run to validate, or <see langword="null"/> to produce a required-value error.</param>
+    /// <returns>All structural, identity, admission, context, clock, event, checkpoint, and outcome errors discovered in the run.</returns>
     public static CustomLoopValidationResult Validate(CustomLoopRunRecord? run)
     {
         var errors = new List<CustomLoopValidationError>();
@@ -31,6 +39,11 @@ public static class CustomLoopRunValidator
         return new CustomLoopValidationResult(errors);
     }
 
+    /// <summary>
+    /// Validates a run for provider dispatch, including the durable admission-audit completion boundary.
+    /// </summary>
+    /// <param name="run">The run proposed for dispatch.</param>
+    /// <returns>The complete run-validation result plus an error when the admission audit has not durably completed.</returns>
     public static CustomLoopValidationResult ValidateForDispatch(CustomLoopRunRecord? run)
     {
         var errors = Validate(run).Errors.ToList();
@@ -42,6 +55,11 @@ public static class CustomLoopRunValidator
         return new CustomLoopValidationResult(errors);
     }
 
+    /// <summary>
+    /// Determines whether the event stream begins with an admission event followed by a unique admission-audit completion event.
+    /// </summary>
+    /// <param name="run">The run whose append-only event prefix is inspected.</param>
+    /// <returns><see langword="true"/> when the required sequence-1 admission and sequence-2 audit-completion markers are present and the completion marker is unique; otherwise, <see langword="false"/>.</returns>
     public static bool HasCompleteAdmissionAudit(CustomLoopRunRecord? run)
     {
         if (run?.Events is not { Length: >= 2 } events)
@@ -49,11 +67,18 @@ public static class CustomLoopRunValidator
             return false;
         }
 
+        // TODO(#140): Reject later duplicate admission markers before treating the admission-audit prefix as complete.
         return events[0] is { Sequence: 1, Kind: CustomLoopRunEventKind.Admitted }
             && events[1] is { Sequence: 2, Kind: CustomLoopRunEventKind.AdmissionAuditCompleted }
             && events.Count(item => item is { Kind: CustomLoopRunEventKind.AdmissionAuditCompleted }) == 1;
     }
 
+    /// <summary>
+    /// Validates a proposed lifecycle update against the currently persisted run.
+    /// </summary>
+    /// <param name="current">The currently persisted run.</param>
+    /// <param name="candidate">The proposed exact successor.</param>
+    /// <returns>Errors for the candidate shape plus any terminal immutability, version, admission, lifecycle, append-only, ownership, checkpoint, clock, or timestamp regression.</returns>
     public static CustomLoopValidationResult ValidateUpdate(CustomLoopRunRecord? current, CustomLoopRunRecord? candidate)
     {
         var errors = Validate(candidate).Errors.ToList();
@@ -92,6 +117,12 @@ public static class CustomLoopRunValidator
         return new CustomLoopValidationResult(errors);
     }
 
+    /// <summary>
+    /// Validates the one narrowly permitted post-terminal integrity-warning append.
+    /// </summary>
+    /// <param name="current">The terminal persisted run.</param>
+    /// <param name="warning">The next contiguous integrity-warning event.</param>
+    /// <returns>Errors when the run is nonterminal, already has the warning, lacks the terminal lifecycle boundary, or the event carries data outside the allowed warning envelope.</returns>
     public static CustomLoopValidationResult ValidateTerminalIntegrityWarningAppend(CustomLoopRunRecord? current, CustomLoopRunEvent? warning)
     {
         var errors = Validate(current).Errors.ToList();
@@ -150,6 +181,12 @@ public static class CustomLoopRunValidator
         return new CustomLoopValidationResult(errors);
     }
 
+    /// <summary>
+    /// Determines whether a custom-loop lifecycle status may transition directly to another status.
+    /// </summary>
+    /// <param name="current">The persisted status.</param>
+    /// <param name="next">The proposed successor status.</param>
+    /// <returns><see langword="true"/> for idempotent status retention or an explicitly allowed lifecycle edge; otherwise, <see langword="false"/>.</returns>
     public static bool IsAllowedLifecycleTransition(CustomLoopRunStatus current, CustomLoopRunStatus next)
     {
         if (current == next)

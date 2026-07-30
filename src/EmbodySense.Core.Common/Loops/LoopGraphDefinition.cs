@@ -1,12 +1,23 @@
 using EmbodySense.Core.Common.Loops.Models;
 namespace EmbodySense.Core.Common.Loops;
 
+/// <summary>
+/// Defines the immutable nodes, edges, entry point, and terminal set of a governed loop graph.
+/// </summary>
+/// <param name="EntryNodeId">The entry node ID.</param>
+/// <param name="TerminalNodeIds">The terminal node IDs.</param>
+/// <param name="Nodes">The nodes.</param>
+/// <param name="Edges">The edges.</param>
 public sealed record LoopGraphDefinition(
     string EntryNodeId,
     string[] TerminalNodeIds,
     LoopGraphNodeDefinition[] Nodes,
     LoopGraphEdgeDefinition[] Edges)
 {
+    /// <summary>
+    /// Creates the system-locked graph for the built-in conversation loop.
+    /// </summary>
+    /// <returns>A linear trigger-to-context-to-inference-to-transcript-to-finalization graph with canonical node and capability identities.</returns>
     public static LoopGraphDefinition CreateDefaultConversation()
     {
         return new LoopGraphDefinition(
@@ -77,6 +88,10 @@ public sealed record LoopGraphDefinition(
             ]);
     }
 
+    /// <summary>
+    /// Returns the first structural or reachability failure in deterministic validation order.
+    /// </summary>
+    /// <returns>A human-readable validation failure, or <see langword="null"/> when entry, terminal, node, edge, and reachability invariants hold.</returns>
     public string? GetValidationFailure()
     {
         if (string.IsNullOrWhiteSpace(EntryNodeId))

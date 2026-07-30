@@ -57,6 +57,27 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task LoadConversationAsync_reads_current_saved_and_archived_transcripts_and_rejects_missing_ids()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("active prompt"));
+        await WriteConversationAsync(paths, "saved-conversation", Entry("saved-conversation", 1, "assistant", "saved answer"));
+        await WriteConversationAsync(paths, Path.Combine("archive", "20260618T0102030000000Z"), Entry("current", 1, "user", "archived prompt"));
+
+        var current = await store.LoadConversationAsync("current");
+        var saved = await store.LoadConversationAsync("saved-conversation");
+        var archived = await store.LoadConversationAsync("archive/20260618T0102030000000Z");
+        var missing = await Assert.ThrowsAsync<FileNotFoundException>(() => store.LoadConversationAsync("missing-conversation"));
+
+        Assert.Equal("active prompt", Assert.Single(current).Content);
+        Assert.Equal("saved answer", Assert.Single(saved).Content);
+        Assert.Equal("archived prompt", Assert.Single(archived).Content);
+        Assert.Contains("missing-conversation", missing.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Concurrent_appends_from_distinct_store_instances_commit_unique_contiguous_sequences()
     {
         using var workspace = new TestWorkspace();

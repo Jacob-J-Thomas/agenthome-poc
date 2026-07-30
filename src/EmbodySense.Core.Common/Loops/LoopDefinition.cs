@@ -1,6 +1,20 @@
 using EmbodySense.Core.Common.Loops.Models;
 namespace EmbodySense.Core.Common.Loops;
 
+/// <summary>
+/// Defines the persisted metadata, authority policy, and executable graph for a governed loop.
+/// </summary>
+/// <param name="SchemaVersion">The persisted schema version.</param>
+/// <param name="Id">The stable artifact identifier.</param>
+/// <param name="DisplayName">The human-readable display name.</param>
+/// <param name="Description">The human-readable description.</param>
+/// <param name="RoleId">The workspace role identifier.</param>
+/// <param name="Trigger">The trigger.</param>
+/// <param name="MemoryScope">The memory scope.</param>
+/// <param name="CapabilityIds">The capability IDs.</param>
+/// <param name="ReviewPolicy">The review policy.</param>
+/// <param name="FailurePolicy">The failure policy.</param>
+/// <param name="State">The state.</param>
 public sealed record LoopDefinition(
     int SchemaVersion,
     string Id,
@@ -14,12 +28,27 @@ public sealed record LoopDefinition(
     LoopFailurePolicy FailurePolicy,
     LoopState State)
 {
+    /// <summary>
+    /// Schema version required by the current built-in loop-definition contract.
+    /// </summary>
     public const int CurrentSchemaVersion = 1;
 
+    /// <summary>
+    /// Gets the loop edit mode.
+    /// </summary>
+    /// <value>The loop edit mode.</value>
     public LoopEditMode EditMode { get; init; }
 
+    /// <summary>
+    /// Gets the loop graph definition.
+    /// </summary>
+    /// <value>The loop graph definition.</value>
     public LoopGraphDefinition Graph { get; init; } = null!;
 
+    /// <summary>
+    /// Creates the system-locked built-in conversation-loop definition.
+    /// </summary>
+    /// <returns>A version-1 enabled definition with the default assistant role, workspace startup memory, governed capabilities, authority-boundary review policy, failure recording, and canonical graph.</returns>
     public static LoopDefinition CreateDefaultConversation()
     {
         return new LoopDefinition(
