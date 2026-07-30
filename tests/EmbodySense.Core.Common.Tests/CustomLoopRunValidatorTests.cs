@@ -43,6 +43,27 @@ public sealed class CustomLoopRunValidatorTests
         AssertCodes(CustomLoopRunValidator.Validate(duplicate), "duplicate_admission_audit_marker");
         var secretBearing = complete with { Events = [complete.Events[0], marker with { Provider = "must-not-be-here" }] };
         AssertCodes(CustomLoopRunValidator.Validate(secretBearing), "invalid_admission_audit_marker");
+
+        var duplicateAdmissionBeforeAudit = complete with
+        {
+            LifecycleVersion = 3,
+            Events =
+            [
+                complete.Events[0],
+                Event(2, "event-admitted-duplicate-before-audit", CustomLoopRunEventKind.Admitted),
+                marker with { Sequence = 3 }
+            ]
+        };
+        AssertCodes(CustomLoopRunValidator.ValidateForDispatch(duplicateAdmissionBeforeAudit), "duplicate_admission_event", "misordered_admission_audit_marker", "admission_audit_incomplete");
+        Assert.False(CustomLoopRunValidator.HasCompleteAdmissionAudit(duplicateAdmissionBeforeAudit));
+
+        var duplicateAdmissionAfterAudit = complete with
+        {
+            LifecycleVersion = 3,
+            Events = [.. complete.Events, Event(3, "event-admitted-duplicate-after-audit", CustomLoopRunEventKind.Admitted)]
+        };
+        AssertCodes(CustomLoopRunValidator.ValidateForDispatch(duplicateAdmissionAfterAudit), "duplicate_admission_event", "admission_audit_incomplete");
+        Assert.False(CustomLoopRunValidator.HasCompleteAdmissionAudit(duplicateAdmissionAfterAudit));
     }
 
     [Fact]

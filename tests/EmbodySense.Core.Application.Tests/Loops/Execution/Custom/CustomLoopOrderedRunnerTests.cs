@@ -772,6 +772,29 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Duplicate_admission_evidence_is_rejected_before_dispatch()
+    {
+        var admitted = Run(Definition());
+        var malformed = admitted with
+        {
+            LifecycleVersion = 3,
+            Events =
+            [
+                .. admitted.Events,
+                new CustomLoopRunEvent(3, "event-admitted-duplicate", admitted.UpdatedAtUtc, CustomLoopRunEventKind.Admitted, null, null, null, "Duplicate admission.", [], null, null, null, null, null, null, null, null, null, null)
+            ]
+        };
+        var store = new FakeRunStore(malformed, validateSeed: false);
+        var executor = new QueueExecutor(Result("must not run"));
+
+        var result = await Runner(store, executor).RunAsync(new CustomLoopOrderedRunRequest(malformed.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, result.Status);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(malformed, store.Current);
+    }
+
+    [Fact]
     public async Task Public_execution_rejects_a_Running_run_even_at_a_safe_boundary()
     {
         var admitted = Run(Definition());
