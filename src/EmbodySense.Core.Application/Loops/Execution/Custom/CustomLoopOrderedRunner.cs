@@ -17,8 +17,10 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 /// Executes admitted custom-loop steps in order with durable checkpoints, bounded attempts, authority revalidation, and fail-closed recovery evidence.
 /// </summary>
 /// <remarks>
-/// Provider dispatch occurs only after admission integrity, lifecycle, trace-capacity, and current tool-authority checks. A provider
-/// outcome is never silently retried when persistence is uncertain; durable trace evidence instead stops the run for review.
+/// Provider dispatch occurs only after admission integrity, lifecycle, the run store's pre-dispatch hook, and current
+/// tool-authority checks. Trace-capacity and lifecycle revalidation at that boundary depend on the store overriding the
+/// compatibility hook, whose default only observes cancellation. A provider outcome is never silently retried when
+/// persistence is uncertain; durable trace evidence instead stops the run for review.
 /// </remarks>
 public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustomLoopExecutionCancellationSignal
 {

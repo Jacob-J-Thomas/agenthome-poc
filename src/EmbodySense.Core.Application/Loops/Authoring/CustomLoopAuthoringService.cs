@@ -12,11 +12,12 @@ using System.Text.Json;
 namespace EmbodySense.Core.Application.Loops.Authoring;
 
 /// <summary>
-/// Authors role-scoped custom-loop definitions with validation, optimistic concurrency, idempotent receipts, and audit integrity.
+/// Authors role-scoped custom-loop definitions with validation, optimistic concurrency, store-provided receipts, and audit integrity.
 /// </summary>
 /// <remarks>
-/// Operation identifiers bind the canonical request and may only replay that request. Mutations record intent before persistence,
-/// preserve version conflicts, and keep committed outcomes visible when terminal audit completion is uncertain.
+/// Idempotent replay depends on a definition-store adapter that implements the receipt-aware mutation overloads and lookup.
+/// With that support, operation identifiers bind the canonical request and may only replay that request. Mutations record
+/// intent before persistence, preserve version conflicts, and keep committed outcomes visible when terminal audit completion is uncertain.
 /// </remarks>
 public sealed class CustomLoopAuthoringService
 {
