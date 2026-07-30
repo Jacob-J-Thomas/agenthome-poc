@@ -11,12 +11,29 @@ using EmbodySense.Core.Persistence.Audit;
 
 namespace EmbodySense.Core.Startup.Inference;
 
+/// <summary>
+/// Provides the startup-owned, audited inference facade over the provider selected by
+/// <see cref="LlmInferenceClientOptions"/>.
+/// </summary>
+/// <remarks>
+/// When the working directory is already an initialized workspace, each non-canceled request is
+/// audited with model, surface, path, timing, and character-count metadata. Prompt and response
+/// text are not written to those audit events. Provider, callback, and audit failures propagate.
+/// Dispose this instance to dispose the selected provider client.
+/// </remarks>
 public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
 {
     private readonly LlmInferenceClientOptions _options;
     private readonly ILlmInferenceClient _innerClient;
     private readonly IAuditLog? _auditLog;
 
+    /// <summary>
+    /// Selects and owns the configured provider client.
+    /// </summary>
+    /// <param name="options">The validated provider, model, surface, and workspace configuration.</param>
+    /// <param name="toolBroker">The optional governed tool broker exposed to a compatible provider.</param>
+    /// <param name="codexAppServerTransport">An optional transport override used by the Codex app-server provider.</param>
+    /// <param name="providerRequestStarted">An optional callback invoked when the selected provider starts a request.</param>
     public LlmInferenceClient(LlmInferenceClientOptions options, IToolBroker? toolBroker = null, ICodexAppServerTransport? codexAppServerTransport = null, Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -26,6 +43,17 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
         _innerClient = LlmInferenceClientFactory.CreateProvider(options, toolBroker, codexAppServerTransport, _auditLog, providerRequestStarted);
     }
 
+    /// <summary>
+    /// Generates one provider response and records the audited request lifecycle when auditing is available.
+    /// </summary>
+    /// <param name="request">The messages and trusted instruction context sent to the provider.</param>
+    /// <param name="responseChunkHandler">An optional asynchronous callback for streamed response text.</param>
+    /// <param name="cancellationToken">The token used to cancel provider work and audit writes.</param>
+    /// <returns>A task whose result is the provider response.</returns>
+    /// <remarks>
+    /// Cancellation propagates and is not recorded as a failed inference. Other provider failures
+    /// are audited before being rethrown; an audit-write failure can therefore become the observed failure.
+    /// </remarks>
     public async Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
@@ -53,6 +81,10 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
         }
     }
 
+    /// <summary>
+    /// Disposes the owned provider client when it implements synchronous or asynchronous disposal.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
         if (_innerClient is IAsyncDisposable asyncDisposable)
@@ -65,6 +97,10 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
         }
     }
 
+    /// <summary>
+    /// Resets provider conversation state when the selected provider supports reset semantics.
+    /// </summary>
+    /// <remarks>Calling this method is a no-op for a provider that is not resettable.</remarks>
     public void ResetConversation()
     {
         if (_innerClient is IResettableInferenceClient resettableClient)

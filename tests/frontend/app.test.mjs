@@ -285,6 +285,7 @@ test("verified custom-loop publication rehydrates once per operation without app
   );
 });
 
+// TODO(#148): Synchronize on the scheduled hydration retry instead of incidental timer draining.
 test("publication synchronization retries after deferred runtime disposal returns no transcript", async () => {
   const app = await loadApp({
     activeTranscript: [{ role: "user", content: "Original prompt" }],
