@@ -284,8 +284,9 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             ["ephemeral"] = true,
             ["approvalPolicy"] = CreateGranularApprovalPolicy(),
             ["sandbox"] = NormalizeSandboxMode(_options.CodexSandbox),
-            // Native command, file-change, MCP, and subagent surfaces stay disabled. The dynamic
-            // embodysense.command bridge below is the governed, audited workspace-action boundary.
+            // Native command, file-change, permission, MCP-elicitation, and subagent request surfaces
+            // stay disabled or are declined. The dynamic embodysense.command bridge below is
+            // EmbodySense's governed, audited workspace-action boundary.
             ["config"] = CreateRestrictedConfig()
         };
 
