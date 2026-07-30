@@ -10,8 +10,9 @@ namespace EmbodySense.Core.Persistence.Workspace;
 /// </summary>
 /// <remarks>
 /// Documents are returned in deterministic authority order: nearest <c>AGENTS.md</c>, role, identity, contextual state,
-/// memory, and model configuration. Missing files are represented by the document reader's omission state; cancellation and
-/// file I/O failures propagate rather than silently changing source authority.
+/// memory, and model configuration. Missing sources and sources for which existence probes return <see langword="false"/>,
+/// including some inaccessible paths, are represented by omission state. An inaccessible <c>AGENTS.md</c> can therefore be
+/// skipped during ancestor discovery; cancellation and read failures propagate only after an existing source is opened.
 /// </remarks>
 public sealed class WorkspaceContextStore : IWorkspaceContextStore
 {

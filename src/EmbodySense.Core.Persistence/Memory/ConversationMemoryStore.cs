@@ -368,8 +368,8 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
     /// <param name="message">The message.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>
-    /// <see langword="true"/> after the append and identity-version update succeed; <see langword="false"/> when any expected
-    /// identity, version, or message-prefix value is stale.
+    /// <see langword="true"/> after the append succeeds; <see langword="false"/> when any expected identity, version, or
+    /// message-prefix value is stale. A successful append does not change the conversation-generation identity.
     /// </returns>
     public async Task<bool> TryAppendMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
     {

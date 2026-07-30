@@ -12,7 +12,8 @@ namespace EmbodySense.Core.Persistence.Audit;
 /// </summary>
 /// <remarks>
 /// Appends targeting the same file are serialized across instances in this process. The store does not claim a cross-process
-/// transaction. Tail reads preserve file order, ignore blank or malformed lines, and propagate cancellation and file I/O failures.
+/// transaction. Tail reads preserve file order and ignore blank or malformed lines. A missing path, or one for which the
+/// existence probe returns <see langword="false"/>, produces an empty result; cancellation and read failures after open propagate.
 /// </remarks>
 public sealed class AuditLog : IAuditLog
 {
