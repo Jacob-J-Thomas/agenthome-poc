@@ -34,7 +34,7 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 public sealed class CustomLoopRuntimeTests
 {
-    private static readonly TimeSpan ProviderAttemptStartTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _providerAttemptStartTimeout = TimeSpan.FromSeconds(30);
 
     [Fact]
     public async Task Context_capture_truncates_role_and_conversation_sources_only_at_valid_utf16_boundaries()
@@ -53,10 +53,10 @@ public sealed class CustomLoopRuntimeTests
         var conversationTailCharacters = availableConversationCharacters - conversationHeadCharacters;
         var formattedPrefix = $"[EmbodySense untrusted logical conversation assistant source: message 2]{Environment.NewLine}fake response: ";
         var promptPrefixCharacters = conversationHeadCharacters - formattedPrefix.Length - 1;
-        const int tailBoundaryOffset = 100;
+        const int TailBoundaryOffset = 100;
         var oversizedPrompt = new string('p', promptPrefixCharacters)
             + "😀"
-            + new string('p', tailBoundaryOffset - 2)
+            + new string('p', TailBoundaryOffset - 2)
             + "😀"
             + new string('p', conversationTailCharacters - 1);
         _ = await runtime.RunTurnAsync(oversizedPrompt);
@@ -125,16 +125,16 @@ public sealed class CustomLoopRuntimeTests
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-unsupported-index", "update-unsupported-index");
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
         Directory.CreateDirectory(paths.CustomLoopRunsPath);
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-unsupported-index", "surface cleanup guidance");
 
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.InvokeCustomLoopAsync(input));
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
 
         File.Delete(indexPath);
         var retry = await runtime.InvokeCustomLoopAsync(input);
@@ -149,17 +149,17 @@ public sealed class CustomLoopRuntimeTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
         Directory.CreateDirectory(paths.CustomLoopRunsPath);
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
 
         var recentException = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.ListCustomLoopRunsAsync());
         var pageException = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.ListCustomLoopRunPageAsync());
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", recentException.Message, StringComparison.Ordinal);
         Assert.Contains("Delete `.custom-loop-run-index.json`", pageException.Message, StringComparison.Ordinal);
-        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
     }
 
     [Fact]
@@ -293,9 +293,9 @@ public sealed class CustomLoopRuntimeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var conflictingDefinition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(conflictingDefinitionSnapshot.Id));
         var runStore = new CustomLoopRunStore(paths);
-        const string operationId = "invoke-audit-conflict-replay";
-        var referencedRun = await CreateReferencedRunAsync(runStore, conflictingDefinition, "run-audit-conflict", operationId);
-        var input = new LoopRunInvocationInput(requestedDefinition.Id, requestedDefinition.DefinitionVersion, requestedDefinition.ContentHash, operationId, "audit conflict replay");
+        const string OperationId = "invoke-audit-conflict-replay";
+        var referencedRun = await CreateReferencedRunAsync(runStore, conflictingDefinition, "run-audit-conflict", OperationId);
+        var input = new LoopRunInvocationInput(requestedDefinition.Id, requestedDefinition.DefinitionVersion, requestedDefinition.ContentHash, OperationId, "audit conflict replay");
         await PersistRejectedReceiptAsync(paths, input, requestedDefinition.RoleId, referencedRun.Id, CustomLoopAdmissionStatus.AuditUnavailable);
 
         var replay = await runtime.InvokeCustomLoopAsync(input);
@@ -800,10 +800,10 @@ public sealed class CustomLoopRuntimeTests
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-idempotent-publish", "update-runtime-idempotent-publish");
-        const string prompt = "delayed idempotent task";
-        var expectedOutput = "fake response: [EmbodySense untrusted trigger prompt data]" + Environment.NewLine + prompt;
+        const string Prompt = "delayed idempotent task";
+        var expectedOutput = "fake response: [EmbodySense untrusted trigger prompt data]" + Environment.NewLine + Prompt;
         await using var runtime = await CreateRuntimeAsync(workspace);
-        var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-idempotent-publish", prompt));
+        var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-idempotent-publish", Prompt));
         await WaitForAttemptStartAsync(workspace);
         await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).AppendMessageAsync(LlmMessage.Assistant(expectedOutput));
 
@@ -1332,13 +1332,13 @@ public sealed class CustomLoopRuntimeTests
     private static async Task WaitForAttemptStartAsync(TestWorkspace workspace)
     {
         var markerPath = workspace.File("custom-attempt-started.marker");
-        var deadline = DateTime.UtcNow.Add(ProviderAttemptStartTimeout);
+        var deadline = DateTime.UtcNow.Add(_providerAttemptStartTimeout);
         while (!File.Exists(markerPath) && DateTime.UtcNow < deadline)
         {
             await Task.Delay(50);
         }
 
-        Assert.True(File.Exists(markerPath), $"The custom-loop provider attempt did not start within {ProviderAttemptStartTimeout.TotalSeconds:0} seconds.");
+        Assert.True(File.Exists(markerPath), $"The custom-loop provider attempt did not start within {_providerAttemptStartTimeout.TotalSeconds:0} seconds.");
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)

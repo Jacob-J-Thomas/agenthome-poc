@@ -6,7 +6,7 @@ namespace EmbodySense.Core.Common.Tests;
 
 public sealed class ToolResultFormatterTests
 {
-    private static readonly string ExpectedTruncationMarker = $"[formatted tool results truncated to the {ToolResultFormatter.MaxFormattedCharacters}-character limit]";
+    private static readonly string _expectedTruncationMarker = $"[formatted tool results truncated to the {ToolResultFormatter.MaxFormattedCharacters}-character limit]";
 
     [Fact]
     public void FormatResults_preserves_the_exact_ordinary_format_when_it_fits()
@@ -43,7 +43,7 @@ public sealed class ToolResultFormatterTests
         var formatted = ToolResultFormatter.FormatResults([CreateResult(newlineHeavyOutput)]);
 
         Assert.Equal(ToolResultFormatter.MaxFormattedCharacters, formatted.Length);
-        Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
+        Assert.EndsWith(_expectedTruncationMarker, formatted, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -63,7 +63,7 @@ public sealed class ToolResultFormatterTests
     [Fact]
     public void FormatResults_backs_off_instead_of_splitting_a_surrogate_pair_at_the_final_boundary()
     {
-        var marker = Environment.NewLine + ExpectedTruncationMarker;
+        var marker = Environment.NewLine + _expectedTruncationMarker;
         var retainedCharacterCount = ToolResultFormatter.MaxFormattedCharacters - marker.Length;
         var outputPrefix = string.Join(Environment.NewLine,
         [
@@ -90,7 +90,7 @@ public sealed class ToolResultFormatterTests
         var formatted = ToolResultFormatter.FormatResults([result]);
 
         Assert.Equal(ToolResultFormatter.MaxFormattedCharacters - 1, formatted.Length);
-        Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
+        Assert.EndsWith(_expectedTruncationMarker, formatted, StringComparison.Ordinal);
         _ = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true).GetBytes(formatted);
     }
 
@@ -106,7 +106,7 @@ public sealed class ToolResultFormatterTests
 
         Assert.Contains("full_response_manifest: unavailable", formatted, StringComparison.Ordinal);
         Assert.Contains("retention failed closed", formatted, StringComparison.Ordinal);
-        Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
+        Assert.EndsWith(_expectedTruncationMarker, formatted, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -122,7 +122,7 @@ public sealed class ToolResultFormatterTests
 
         Assert.Contains("full_response_manifest: .agent/logs/tool-responses/request-1/manifest.json", formatted, StringComparison.Ordinal);
         Assert.Contains("full_response_sha256: " + new string('a', 64), formatted, StringComparison.Ordinal);
-        Assert.EndsWith(ExpectedTruncationMarker, formatted, StringComparison.Ordinal);
+        Assert.EndsWith(_expectedTruncationMarker, formatted, StringComparison.Ordinal);
     }
 
     private static ToolResult CreateResult(string output)

@@ -15,7 +15,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
 public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustomLoopExecutionCancellationSignal
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly CustomLoopContextResolver _contextResolver;
@@ -57,7 +57,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopRunRecord? run;
         try
         {
-            using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+            using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
             run = await _runStore.GetAsync(request.RunId, integrity.Token);
         }
         catch (Exception exception)
@@ -954,7 +954,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopConversationPublicationResult publication;
         var publicationDispatched = false;
         ICustomLoopAttemptCancellationRegistration? cancellationRegistration = null;
-        using var publicationBoundaryToken = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var publicationBoundaryToken = new CancellationTokenSource(_integrityWriteTimeout);
         using var publicationToken = CancellationTokenSource.CreateLinkedTokenSource(publicationBoundaryToken.Token);
         if (!_activeAttemptCancellations.TryAdd(run.Id, publicationToken))
         {
@@ -1025,13 +1025,13 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var eventDetail = !publicationIdMatches
             ? "Conversation publisher returned an operation ID that did not match the durable publication intent."
             : publication.Outcome switch
-        {
-            CustomLoopConversationPublicationOutcome.Published => "Canonical output was published to the invoking conversation.",
-            CustomLoopConversationPublicationOutcome.AlreadyPublished => "Idempotent conversation publication was already committed.",
-            CustomLoopConversationPublicationOutcome.DefinitelyFailed => "Conversation publication definitely failed; no success is reported.",
-            CustomLoopConversationPublicationOutcome.Uncertain => "Conversation publication outcome is uncertain and requires review.",
-            _ => "Conversation publisher returned an unsupported outcome that requires review."
-        };
+            {
+                CustomLoopConversationPublicationOutcome.Published => "Canonical output was published to the invoking conversation.",
+                CustomLoopConversationPublicationOutcome.AlreadyPublished => "Idempotent conversation publication was already committed.",
+                CustomLoopConversationPublicationOutcome.DefinitelyFailed => "Conversation publication definitely failed; no success is reported.",
+                CustomLoopConversationPublicationOutcome.Uncertain => "Conversation publication outcome is uncertain and requires review.",
+                _ => "Conversation publisher returned an unsupported outcome that requires review."
+            };
         var publicationEvent = Event(run, Now(run), CustomLoopRunEventKind.ConversationPublished, eventDetail, run.Checkpoint.Iteration, stepId, output: isPublished ? output.Content : null, originalOutputCharacters: isPublished ? output.Content.Length : null, truncated: isPublished ? false : null, published: isPublished, publicationId: publicationId);
         var persisted = await PersistAsync(run, Append(run, publicationEvent.TimestampUtc, [publicationEvent]), IntegrityToken(), outcomeMayExist: publication.Outcome != CustomLoopConversationPublicationOutcome.DefinitelyFailed);
         if (persisted.Terminal is not null)
@@ -1411,7 +1411,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private async Task<RunAdvance> EscalatePostOutcomePersistenceUncertaintyAsync(CustomLoopRunRecord current, string detail)
     {
-        const string failureCode = "post_outcome_persistence_conflict";
+        const string FailureCode = "post_outcome_persistence_conflict";
         try
         {
             for (var attempt = 0; attempt < 2; attempt++)
@@ -1449,7 +1449,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                     ExecutionClock = AdvanceClock(latest.ExecutionClock, now, terminal: true),
                     Events = [.. latest.Events, lifecycle],
                     FinalOutput = null,
-                    FailureCode = failureCode,
+                    FailureCode = FailureCode,
                     FailureDetail = detail
                 };
                 var persisted = await _runStore.UpdateAsync(needsReview, latest.LifecycleVersion, IntegrityToken());
@@ -1960,7 +1960,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
     private static CancellationToken IntegrityToken()
     {
-        return new CancellationTokenSource(IntegrityWriteTimeout).Token;
+        return new CancellationTokenSource(_integrityWriteTimeout).Token;
     }
 
     private static string SafeExceptionClass(Exception exception)

@@ -11,7 +11,7 @@ namespace EmbodySense.Core.Persistence.Tests.Memory;
 
 public sealed class ConversationMemoryStoreTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     [Fact]
     public async Task AppendMessageAsync_writes_current_conversation_json_lines()
@@ -69,7 +69,7 @@ public sealed class ConversationMemoryStoreTests
         var messages = await first.LoadCurrentConversationAsync();
         Assert.Equal(40, messages.Count);
         Assert.Equal(40, messages.Select(message => message.Content).Distinct(StringComparer.Ordinal).Count());
-        var entries = (await File.ReadAllLinesAsync(paths.CurrentConversationPath)).Select(line => JsonSerializer.Deserialize<ConversationMemoryEntry>(line, JsonOptions)!).ToArray();
+        var entries = (await File.ReadAllLinesAsync(paths.CurrentConversationPath)).Select(line => JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions)!).ToArray();
         Assert.Equal(Enumerable.Range(1, 40), entries.Select(entry => entry.Sequence));
     }
 
@@ -131,7 +131,7 @@ public sealed class ConversationMemoryStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.ConversationMemoryPath);
-        await File.WriteAllTextAsync(paths.CurrentConversationPath, JsonSerializer.Serialize(Entry("current", 1, "user", "seed"), JsonOptions));
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, JsonSerializer.Serialize(Entry("current", 1, "user", "seed"), _jsonOptions));
         var store = new ConversationMemoryStore(paths);
 
         await store.AppendMessageAsync(LlmMessage.Assistant("second"));
@@ -296,7 +296,7 @@ public sealed class ConversationMemoryStoreTests
         Directory.CreateDirectory(paths.ConversationMemoryPath);
         var path = Path.Combine(paths.ConversationMemoryPath, conversationId + ".ndjson");
         Directory.CreateDirectory(Path.GetDirectoryName(path) ?? paths.ConversationMemoryPath);
-        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, JsonOptions));
+        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, _jsonOptions));
         await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
     }
 

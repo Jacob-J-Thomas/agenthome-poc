@@ -247,15 +247,15 @@ public sealed class WebSessionHubTests
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
         await using var host = CreateHost(workspace.RootPath, approvals);
-        const string guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
-        var hub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(guidance));
+        const string Guidance = "Delete `.custom-loop-run-index.json` and retry the operation.";
+        var hub = CreateHub(host, approvals, new RecordingHubClients(), new UnsupportedSchemaLoopRuntimeInvoker(Guidance));
 
         var exception = resume
             ? await Assert.ThrowsAsync<HubException>(() => hub.ResumeLoop(new LoopRunControlInput("run-one", 1, "resume-unsupported-schema")))
             : await Assert.ThrowsAsync<HubException>(() => hub.InvokeLoop(new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-unsupported-schema", "prompt")));
 
         Assert.Contains("unsupported_loop_persistence_schema", exception.Message, StringComparison.Ordinal);
-        Assert.Contains(guidance, exception.Message, StringComparison.Ordinal);
+        Assert.Contains(Guidance, exception.Message, StringComparison.Ordinal);
     }
 
     private static WebAgentRuntimeHost CreateHost(string rootPath, WebApprovalCoordinator approvals)

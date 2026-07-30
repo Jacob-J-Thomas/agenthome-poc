@@ -20,8 +20,8 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
-    private static readonly CustomExecutionAvailability AvailableCustomExecution = new(true, "Available", "Custom-loop hosting is available and interrupted-run recovery is complete.");
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly CustomExecutionAvailability _availableCustomExecution = new(true, "Available", "Custom-loop hosting is available and interrupted-run recovery is complete.");
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopInvocationOperationStore _invocationOperationStore;
@@ -306,7 +306,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
                 if (definition is null)
                 {
-                    const string detail = "The custom-loop definition does not exist.";
+                    const string Detail = "The custom-loop definition does not exist.";
                     var bindingState = operation.BindingState == CustomLoopInvocationBindingState.CapturedContext
                         ? CustomLoopInvocationBindingState.CapturedContextNotFound
                         : CustomLoopInvocationBindingState.ConversationNotFound;
@@ -317,7 +317,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
                     }
 
                     var conversationId = identity.ConversationId!;
-                    var conversationBinding = await BindOperationAsync(operation, conversationId, bindingState, operation.ContextIdentityHash, detail, cancellationToken);
+                    var conversationBinding = await BindOperationAsync(operation, conversationId, bindingState, operation.ContextIdentityHash, Detail, cancellationToken);
                     if (conversationBinding.Failure is not null)
                     {
                         return conversationBinding.Failure;
@@ -398,7 +398,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             var executionDetail = execution.Detail;
             if (executedRun is null)
             {
-                using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+                using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
                 try
                 {
                     executedRun = await _runStore.GetAsync(admission.Run.Id, integrity.Token);
@@ -522,7 +522,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     {
         if (Volatile.Read(ref _customExecutionAvailable))
         {
-            return AvailableCustomExecution;
+            return _availableCustomExecution;
         }
 
         await _executionAvailabilityGate.WaitAsync(cancellationToken);
@@ -530,7 +530,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
         {
             if (_customExecutionAvailable)
             {
-                return AvailableCustomExecution;
+                return _availableCustomExecution;
             }
 
             if (!_customExecutionReacquisitionAllowed)
@@ -598,7 +598,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
             Volatile.Write(ref _customExecutionAvailable, true);
             Volatile.Write(ref _customRecoveryRequired, false);
-            return AvailableCustomExecution;
+            return _availableCustomExecution;
         }
         finally
         {
@@ -925,7 +925,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     private async Task<UndispatchedParkingResult> ParkUndispatchedAdmissionAsync(CustomLoopRunRecord run)
     {
-        using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             var recovery = await _recoveryService.RecoverAsync(_actor, integrity.Token);
@@ -1003,7 +1003,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
     {
         try
         {
-            using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+            using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
             return await _runStore.GetAsync(runId, integrity.Token);
         }
         catch
@@ -1100,7 +1100,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
 
     private async Task<bool> CompleteReceiptAsync(CustomLoopInvocationOperation completed)
     {
-        using var integrity = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             var result = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.CompleteAsync(completed, token), integrity.Token);

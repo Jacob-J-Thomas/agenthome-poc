@@ -20,7 +20,7 @@ namespace EmbodySense.E2ETests.Web;
 
 public sealed class WebClientFlowTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     [Fact]
     public async Task Localhost_web_client_serves_assets_and_bootstrap_endpoints()
@@ -34,8 +34,8 @@ public sealed class WebClientFlowTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var index = await client.GetStringAsync("/");
             var script = await client.GetStringAsync("/app.js");
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
-            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", JsonOptions);
+            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
+            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
             var rejectedConfig = await client.GetAsync("/api/configuration");
 
             Assert.Contains("EmbodySense", index);
@@ -61,7 +61,7 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
+            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
             await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
 
             var initializeMessages = await signalr.InvokeAndCollectAsync("InitializeWorkspace");
@@ -118,7 +118,7 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions);
+            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
             await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
             var input = new LoopRunInvocationInput("loop-approval", 1, new string('a', 64), "invoke-concurrent-approval", "prompt");
 
@@ -241,7 +241,7 @@ public sealed class WebClientFlowTests
         {
             try
             {
-                var status = await client.GetFromJsonAsync<WebStatus>("/api/status", JsonOptions);
+                var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
                 return status ?? throw new InvalidOperationException("Status response was empty.");
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
@@ -271,7 +271,7 @@ public sealed class WebClientFlowTests
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "user", prompt);
         var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "assistant", answer);
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, JsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, JsonOptions) + Environment.NewLine);
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, _jsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, _jsonOptions) + Environment.NewLine);
     }
 
     private static IReadOnlyList<JsonElement> GetStreamEvents(IReadOnlyList<JsonElement> messages)
@@ -291,7 +291,7 @@ public sealed class WebClientFlowTests
 
     private static T Deserialize<T>(JsonElement element)
     {
-        return JsonSerializer.Deserialize<T>(element.GetRawText(), JsonOptions) ?? throw new InvalidOperationException($"Could not deserialize {typeof(T).Name}.");
+        return JsonSerializer.Deserialize<T>(element.GetRawText(), _jsonOptions) ?? throw new InvalidOperationException($"Could not deserialize {typeof(T).Name}.");
     }
 
     private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
@@ -476,7 +476,7 @@ public sealed class WebClientFlowTests
 
         private async Task SendRawAsync(object payload, CancellationToken cancellationToken)
         {
-            var text = JsonSerializer.Serialize(payload, JsonOptions) + RecordSeparator;
+            var text = JsonSerializer.Serialize(payload, _jsonOptions) + RecordSeparator;
             var bytes = Encoding.UTF8.GetBytes(text);
             await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
         }

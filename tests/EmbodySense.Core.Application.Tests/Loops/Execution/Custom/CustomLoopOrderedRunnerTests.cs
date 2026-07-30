@@ -20,8 +20,8 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
 public sealed class CustomLoopOrderedRunnerTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
-    private static readonly JsonSerializerOptions RawTraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly DateTimeOffset _now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+    private static readonly JsonSerializerOptions _rawTraceSizingJsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
@@ -32,8 +32,8 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         var output = new string('\uffff', CustomLoopLimits.MaxCanonicalModelOutputCharacters);
         var reference = new string('\uffff', CustomLoopLimits.MaxTraceReferenceCharacters);
-        var observed = new CustomLoopRunEvent(1, "observed", Now, CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-1", 1, "Inference provider outcome was observed and retained as local evidence.", [], output, int.MaxValue, true, false, true, "publish", reference, reference, reference, null);
-        var completed = new CustomLoopRunEvent(2, "completed", Now, CustomLoopRunEventKind.NodeAttemptCompleted, 1, "step-1", 1, "Inference attempt completed without an automatic retry.", [], output, int.MaxValue, true, false, true, "publish", reference, reference, reference, null);
+        var observed = new CustomLoopRunEvent(1, "observed", _now, CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-1", 1, "Inference provider outcome was observed and retained as local evidence.", [], output, int.MaxValue, true, false, true, "publish", reference, reference, reference, null);
+        var completed = new CustomLoopRunEvent(2, "completed", _now, CustomLoopRunEventKind.NodeAttemptCompleted, 1, "step-1", 1, "Inference attempt completed without an automatic retry.", [], output, int.MaxValue, true, false, true, "publish", reference, reference, reference, null);
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
             WriteIndented = true,
@@ -394,7 +394,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do the work", outputPolicy)],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now));
         var store = new FakeRunStore(run);
         var audit = new RecordingAuditLog();
         var publisher = new RecordingPublisher();
@@ -432,7 +432,7 @@ public sealed class CustomLoopOrderedRunnerTests
             ],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: true)));
-        var conversation = new CustomLoopConversationReference("conversation-one", "immutable-admission-version", Now);
+        var conversation = new CustomLoopConversationReference("conversation-one", "immutable-admission-version", _now);
         var store = new FakeRunStore(Run(definition, conversation: conversation));
         var publisher = new RecordingPublisher();
 
@@ -462,7 +462,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("exit", "User-authored exit", "Do the work", publish)],
             maxAdditionalIterations: 1,
             exitPolicy: Policy(publish));
-        var conversation = new CustomLoopConversationReference("conversation-one", "immutable-admission-version", Now);
+        var conversation = new CustomLoopConversationReference("conversation-one", "immutable-admission-version", _now);
         var store = new FakeRunStore(Run(definition, conversation: conversation));
         var publisher = new RecordingPublisher();
 
@@ -504,7 +504,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now));
         var store = new FakeRunStore(run);
         var publisher = new RecordingPublisher { NextResult = new CustomLoopConversationPublicationResult(outcome, null, "safe publication detail") };
 
@@ -523,7 +523,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now));
         var store = new FakeRunStore(run);
         CustomLoopOrderedRunner? runner = null;
         var publisher = new RecordingPublisher
@@ -550,7 +550,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now));
         var store = new FakeRunStore(run);
         var broker = new RecordingAttemptCancellationBroker();
         CustomLoopOrderedRunner? runner = null;
@@ -570,7 +570,7 @@ public sealed class CustomLoopOrderedRunnerTests
             publisher,
             new RecordingAuditLog(),
             new TestAuthorityProvider(),
-            new FixedTimeProvider(Now),
+            new FixedTimeProvider(_now),
             broker);
 
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
@@ -604,7 +604,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do", Output(false, true))],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(false, false)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)));
         var publisher = new RecordingPublisher();
         var audit = new RecordingAuditLog { FailPredicate = item => item.Action == AuditSchema.Actions.LoopNodeAttempt && item.Outcome == AuditSchema.Outcomes.Succeeded };
 
@@ -622,7 +622,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var definition = Definition(
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)))
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)))
         {
             ConflictOnPublicationWrite = true
         };
@@ -643,7 +643,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now));
+        var run = Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now));
         var store = new FakeRunStore(run);
         var publisher = new RecordingPublisher { ReturnNull = true };
 
@@ -665,7 +665,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)));
         var publisher = new RecordingPublisher { NextResult = new CustomLoopConversationPublicationResult(outcome, "publish-unrelated", "Mismatched operation.") };
 
         var result = await Runner(store, new QueueExecutor(Result("evidence")), publisher).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
@@ -688,7 +688,7 @@ public sealed class CustomLoopOrderedRunnerTests
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             maxAdditionalIterations: 0,
             exitPolicy: Policy(Output(retain: false, publish: false)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)));
         var publisher = new RecordingPublisher { NextResult = new CustomLoopConversationPublicationResult(outcome, null, "Missing operation ID.") };
 
         var result = await Runner(store, new QueueExecutor(Result("evidence")), publisher).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
@@ -775,12 +775,12 @@ public sealed class CustomLoopOrderedRunnerTests
     public async Task Public_execution_rejects_a_Running_run_even_at_a_safe_boundary()
     {
         var admitted = Run(Definition());
-        var lifecycle = new CustomLoopRunEvent(3, "event-running", Now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered Running.", [], null, null, null, null, null, null, null, null, null, null);
+        var lifecycle = new CustomLoopRunEvent(3, "event-running", _now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered Running.", [], null, null, null, null, null, null, null, null, null, null);
         var running = admitted with
         {
             LifecycleVersion = 3,
             Status = CustomLoopRunStatus.Running,
-            ExecutionClock = new CustomLoopExecutionClock(0, Now),
+            ExecutionClock = new CustomLoopExecutionClock(0, _now),
             Events = [.. admitted.Events, lifecycle]
         };
         var store = new FakeRunStore(running);
@@ -797,12 +797,12 @@ public sealed class CustomLoopOrderedRunnerTests
     public async Task Resume_and_load_boundaries_reject_missing_mismatched_and_failed_reads_without_dispatch()
     {
         var admitted = Run(Definition());
-        var lifecycle = new CustomLoopRunEvent(3, "event-running", Now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered Running.", [], null, null, null, null, null, null, null, null, null, null);
+        var lifecycle = new CustomLoopRunEvent(3, "event-running", _now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered Running.", [], null, null, null, null, null, null, null, null, null, null);
         var running = admitted with
         {
             LifecycleVersion = 3,
             Status = CustomLoopRunStatus.Running,
-            ExecutionClock = new CustomLoopExecutionClock(0, Now),
+            ExecutionClock = new CustomLoopExecutionClock(0, _now),
             Events = [.. admitted.Events, lifecycle]
         };
         var executor = new QueueExecutor(Result("must not run"));
@@ -862,7 +862,7 @@ public sealed class CustomLoopOrderedRunnerTests
             new RecordingPublisher(),
             new RecordingAuditLog(),
             new TestAuthorityProvider(),
-            new FixedTimeProvider(Now),
+            new FixedTimeProvider(_now),
             broker);
         var execution = runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
         await executor.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -888,7 +888,7 @@ public sealed class CustomLoopOrderedRunnerTests
             new RecordingPublisher(),
             new RecordingAuditLog(),
             new TestAuthorityProvider(),
-            new FixedTimeProvider(Now),
+            new FixedTimeProvider(_now),
             broker);
         using var callerCancellation = new CancellationTokenSource();
         var execution = runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), callerCancellation.Token);
@@ -1287,7 +1287,7 @@ public sealed class CustomLoopOrderedRunnerTests
     [Fact]
     public async Task Deadline_expiring_during_pre_dispatch_audit_prevents_the_provider_request()
     {
-        var time = new MutableTimeProvider(Now);
+        var time = new MutableTimeProvider(_now);
         var audit = new RecordingAuditLog
         {
             BeforeAppend = (auditEvent, _) =>
@@ -1330,7 +1330,7 @@ public sealed class CustomLoopOrderedRunnerTests
         using var cancellation = new CancellationTokenSource();
         var store = new FakeRunStore(Run(Definition()));
         var executor = new QueueExecutor(Result("must not run"));
-        var time = new FinalDispatchBoundaryCancellingTimeProvider(Now, store, cancellation);
+        var time = new FinalDispatchBoundaryCancellingTimeProvider(_now, store, cancellation);
 
         var result = await Runner(store, executor, timeProvider: time).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), cancellation.Token);
 
@@ -1347,7 +1347,7 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         var store = new FakeRunStore(Run(Definition()));
         var executor = new QueueExecutor(Result("must not run"));
-        var time = new FinalDispatchDeadlineTimeProvider(Now, store, reportDeadlineReached);
+        var time = new FinalDispatchDeadlineTimeProvider(_now, store, reportDeadlineReached);
 
         var result = await Runner(store, executor, timeProvider: time).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
@@ -1362,10 +1362,10 @@ public sealed class CustomLoopOrderedRunnerTests
     {
         var store = new FakeRunStore(Run(Definition()));
         var executor = new QueueExecutor(Result("must not run"));
-        var time = new FinalDispatchActionTimeProvider(Now, store);
+        var time = new FinalDispatchActionTimeProvider(_now, store);
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, audit: audit, timeProvider: time);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? cancel = null;
         time.AtFinalBoundary = () => cancel = lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-at-final-boundary", AuditSchema.Actors.Web)).GetAwaiter().GetResult();
 
@@ -1402,7 +1402,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var executor = new QueueExecutor(Result("resumed outcome"));
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, audit: audit);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? pause = null;
         audit.AfterAppend = async auditEvent =>
         {
@@ -1435,7 +1435,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var executor = new QueueExecutor(Result("must not run"));
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, audit: audit);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? cancel = null;
         audit.AfterAppend = async auditEvent =>
         {
@@ -1459,12 +1459,12 @@ public sealed class CustomLoopOrderedRunnerTests
         var definition = Definition(
             steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
             exitPolicy: Policy(Output(false, false)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)));
         var executor = new QueueExecutor(Result("observed outcome"));
         var publisher = new RecordingPublisher();
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, publisher, audit);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? cancel = null;
         audit.AfterAppend = async auditEvent =>
         {
@@ -1487,12 +1487,12 @@ public sealed class CustomLoopOrderedRunnerTests
     public async Task Durable_pause_after_committed_Exit_completion_resumes_without_redispatching_Exit()
     {
         var definition = Definition(maxAdditionalIterations: 1, exitPolicy: Policy(Output(false, true)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)));
         var executor = new QueueExecutor(Result("iteration outcome"), Result("Complete"));
         var publisher = new RecordingPublisher();
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, publisher, audit);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? pause = null;
         audit.AfterAppend = async auditEvent =>
         {
@@ -1526,7 +1526,7 @@ public sealed class CustomLoopOrderedRunnerTests
             exitPolicy: Policy(Output(false, false)));
         CustomLoopLifecycleService? lifecycle = null;
         CustomLoopControlResult? cancel = null;
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)))
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)))
         {
             AfterUpdate = async updated =>
             {
@@ -1540,7 +1540,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var publisher = new RecordingPublisher();
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, publisher, audit);
-        lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
 
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
 
@@ -1555,11 +1555,11 @@ public sealed class CustomLoopOrderedRunnerTests
     public async Task Durable_cancel_after_deterministic_Exit_audit_prevents_publication_and_cancels_at_the_checkpoint()
     {
         var definition = Definition(exitPolicy: Policy(Output(false, true)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", Now)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "version-one", _now)));
         var publisher = new RecordingPublisher();
         var audit = new RecordingAuditLog();
         var runner = Runner(store, new QueueExecutor(Result("iteration outcome")), publisher, audit);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? cancel = null;
         audit.AfterAppend = async auditEvent =>
         {
@@ -1800,7 +1800,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var executor = new QueueExecutor(Result("first outcome"), Result("must not dispatch"));
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, audit: audit);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? pause = null;
         executor.BeforeExecute = async _ => pause = await lifecycle.PauseAsync(new CustomLoopPauseRequest(store.Current.Id, store.Current.LifecycleVersion, "pause-open-attempt", AuditSchema.Actors.Web));
 
@@ -1829,7 +1829,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var executor = new QueueExecutor(Result("must be cancelled"), Result("must not dispatch"));
         var audit = new RecordingAuditLog();
         var runner = Runner(store, executor, audit: audit);
-        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, new FakeControlOperationStore(), runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         CustomLoopControlResult? cancel = null;
         executor.BeforeExecute = async _ => cancel = await lifecycle.CancelAsync(new CustomLoopCancelRequest(store.Current.Id, store.Current.LifecycleVersion, "cancel-open-attempt", AuditSchema.Actors.Web));
 
@@ -1850,13 +1850,13 @@ public sealed class CustomLoopOrderedRunnerTests
             Step("step-first", "First", "First instruction", Output(retain: true, publish: true)),
             Step("step-second", "Second", "Second instruction", Output(retain: false, publish: true))
         ], exitPolicy: Policy(Output(false, false)));
-        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "immutable-admission-version", Now)));
+        var store = new FakeRunStore(Run(definition, conversation: new CustomLoopConversationReference("conversation-one", "immutable-admission-version", _now)));
         var executor = new QueueExecutor(Result("first outcome"), Result("second outcome"));
         var audit = new RecordingAuditLog();
         var firstPublisher = new RecordingPublisher();
         var runner = Runner(store, executor, firstPublisher, audit);
         var operations = new FakeControlOperationStore();
-        var lifecycle = new CustomLoopLifecycleService(store, operations, runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var lifecycle = new CustomLoopLifecycleService(store, operations, runner, new AvailableModel(), runner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         var pauseRequest = new CustomLoopPauseRequest(store.Current.Id, 4, "pause-for-resume", AuditSchema.Actors.Web);
         executor.BeforeExecute = async _ =>
         {
@@ -1873,7 +1873,7 @@ public sealed class CustomLoopOrderedRunnerTests
         executor.BeforeExecute = null;
         var resumedPublisher = new RecordingPublisher();
         var resumedRunner = Runner(store, executor, resumedPublisher, audit);
-        var resumedLifecycle = new CustomLoopLifecycleService(store, operations, resumedRunner, new AvailableModel(), resumedRunner, audit, new TestExecutionGate(), new FixedTimeProvider(Now));
+        var resumedLifecycle = new CustomLoopLifecycleService(store, operations, resumedRunner, new AvailableModel(), resumedRunner, audit, new TestExecutionGate(), new FixedTimeProvider(_now));
         var resumed = await resumedLifecycle.ResumeAsync(new CustomLoopResumeRequest(store.Current.Id, store.Current.LifecycleVersion, "resume-paused-run", AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Paused, paused.Status);
@@ -1900,7 +1900,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var completedStore = new FakeRunStore(seed with
         {
             Status = CustomLoopRunStatus.Completed,
-            CompletedAtUtc = Now,
+            CompletedAtUtc = _now,
             FinalOutput = "done",
             ExecutionClock = CustomLoopExecutionClock.NotStarted()
         }, validateSeed: false);
@@ -1960,7 +1960,7 @@ public sealed class CustomLoopOrderedRunnerTests
 
     private static CustomLoopOrderedRunner Runner(FakeRunStore store, QueueExecutor executor, RecordingPublisher? publisher = null, RecordingAuditLog? audit = null, ICustomLoopToolAuthorityProvider? authorityProvider = null, TimeProvider? timeProvider = null)
     {
-        return new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), timeProvider ?? new FixedTimeProvider(Now));
+        return new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), timeProvider ?? new FixedTimeProvider(_now));
     }
 
     private static CustomLoopDefinition Definition(
@@ -1969,7 +1969,7 @@ public sealed class CustomLoopOrderedRunnerTests
         CustomLoopContextPolicy? exitPolicy = null,
         CustomLoopToolAssignment[]? tools = null)
     {
-        var seed = CustomLoopDefinition.CreateSeed("loop-ordered", "role-workspace", "step-only", "create-loop", Now);
+        var seed = CustomLoopDefinition.CreateSeed("loop-ordered", "role-workspace", "step-only", "create-loop", _now);
         var definition = seed with
         {
             InferenceSteps = steps ?? [Step("step-only", "Only", "Do the work", Output(retain: false, publish: false))],
@@ -1996,17 +1996,17 @@ public sealed class CustomLoopOrderedRunnerTests
 
     private static CustomLoopRunRecord Run(CustomLoopDefinition definition, CustomLoopConversationReference? conversation = null)
     {
-        var admission = new CustomLoopRunEvent(1, "event-admitted", Now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
-        var auditCompleted = new CustomLoopRunEvent(2, "event-admission-audit-complete", Now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
-        var context = CustomLoopContextSnapshot.CreateEmpty(Now);
+        var admission = new CustomLoopRunEvent(1, "event-admitted", _now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
+        var auditCompleted = new CustomLoopRunEvent(2, "event-admission-audit-complete", _now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
+        var context = CustomLoopContextSnapshot.CreateEmpty(_now);
         var run = new CustomLoopRunRecord(
             CustomLoopRunRecord.CurrentSchemaVersion,
             "run-ordered",
             definition.Id,
             2,
             CustomLoopRunStatus.Admitted,
-            Now,
-            Now,
+            _now,
+            _now,
             null,
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
@@ -2116,7 +2116,7 @@ public sealed class CustomLoopOrderedRunnerTests
     private static CustomLoopRunEvent ToolEvent(long sequence, CustomLoopRunEventKind kind, CustomLoopInferenceAttemptRequest request, CustomLoopToolTraceEvidence evidence)
     {
         var returnMarker = evidence.ReturnedToModel ? "-returned" : string.Empty;
-        return new CustomLoopRunEvent(sequence, $"event-{evidence.RequestCorrelationId}-{evidence.Phase.ToString().ToLowerInvariant()}{returnMarker}", Now, kind, request.Iteration, request.StepId, request.Attempt, $"Durable {evidence.Phase} test evidence.", [], null, null, null, null, null, null, null, null, null, null, evidence.Authority, evidence);
+        return new CustomLoopRunEvent(sequence, $"event-{evidence.RequestCorrelationId}-{evidence.Phase.ToString().ToLowerInvariant()}{returnMarker}", _now, kind, request.Iteration, request.StepId, request.Attempt, $"Durable {evidence.Phase} test evidence.", [], null, null, null, null, null, null, null, null, null, null, evidence.Authority, evidence);
     }
 
     private static CustomLoopInferenceAttemptResult Result(string output, int toolCalls = 0)
@@ -2134,7 +2134,7 @@ public sealed class CustomLoopOrderedRunnerTests
         var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
         var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', admitted.OrderBy(value => value)));
         var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
-        return new CustomLoopToolAuthoritySnapshot(roleId, admitted, admitted, catalog, effective, roleHash, catalogHash, Now, true, "Test authority snapshot.");
+        return new CustomLoopToolAuthoritySnapshot(roleId, admitted, admitted, catalog, effective, roleHash, catalogHash, _now, true, "Test authority snapshot.");
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
@@ -2241,7 +2241,7 @@ public sealed class CustomLoopOrderedRunnerTests
                 return Task.FromResult(true);
             }
 
-            var candidateBytes = JsonSerializer.SerializeToUtf8Bytes(candidate, RawTraceSizingJsonOptions).LongLength;
+            var candidateBytes = JsonSerializer.SerializeToUtf8Bytes(candidate, _rawTraceSizingJsonOptions).LongLength;
             var requiredReserve = CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + CustomLoopLimits.MaxTraceControlReserveUtf8Bytes + CustomLoopLimits.MaxPermanentTerminalIntegrityReserveUtf8Bytes;
             return Task.FromResult(candidateBytes + requiredReserve <= CustomLoopLimits.MaxRunTraceUtf8Bytes);
         }
@@ -2286,14 +2286,14 @@ public sealed class CustomLoopOrderedRunnerTests
                 var concurrentDetail = ConcurrentNeedsReviewOnOutcomeConflict
                     ? "A concurrent controller required review after provider dispatch."
                     : "A concurrent controller requested pause after provider dispatch.";
-                var concurrentEvent = new CustomLoopRunEvent(Current.Events.Length + 1, "event-concurrent-control", Now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, concurrentDetail, [], null, null, null, null, null, null, null, null, null, null);
+                var concurrentEvent = new CustomLoopRunEvent(Current.Events.Length + 1, "event-concurrent-control", _now, CustomLoopRunEventKind.LifecycleChanged, null, null, null, concurrentDetail, [], null, null, null, null, null, null, null, null, null, null);
                 var concurrent = ConcurrentNeedsReviewOnOutcomeConflict
                     ? Current with
                     {
                         LifecycleVersion = Current.LifecycleVersion + 1,
                         Status = CustomLoopRunStatus.NeedsReview,
-                        UpdatedAtUtc = Now,
-                        CompletedAtUtc = Now,
+                        UpdatedAtUtc = _now,
+                        CompletedAtUtc = _now,
                         ExecutionClock = new CustomLoopExecutionClock(Current.ExecutionClock.AccumulatedRunningMilliseconds, null),
                         Events = [.. Current.Events, concurrentEvent],
                         FailureCode = "concurrent_review",
@@ -2303,7 +2303,7 @@ public sealed class CustomLoopOrderedRunnerTests
                     {
                         LifecycleVersion = Current.LifecycleVersion + 1,
                         Status = CustomLoopRunStatus.PauseRequested,
-                        UpdatedAtUtc = Now,
+                        UpdatedAtUtc = _now,
                         Events = [.. Current.Events, concurrentEvent]
                     };
                 var concurrentValidation = CustomLoopRunValidator.ValidateUpdate(Current, concurrent);
@@ -2532,7 +2532,7 @@ public sealed class CustomLoopOrderedRunnerTests
             var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
             var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', admitted.OrderBy(value => value)));
             var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
-            return Task.FromResult(new CustomLoopToolAuthoritySnapshot(roleId, admitted, admitted, catalog, admitted, roleHash, catalogHash, Now, true, "Test authority snapshot."));
+            return Task.FromResult(new CustomLoopToolAuthoritySnapshot(roleId, admitted, admitted, catalog, admitted, roleHash, catalogHash, _now, true, "Test authority snapshot."));
         }
     }
 

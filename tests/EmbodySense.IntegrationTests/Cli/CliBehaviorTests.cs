@@ -16,7 +16,7 @@ namespace EmbodySense.IntegrationTests.Cli;
 
 public sealed class CliBehaviorTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     [Theory]
     [InlineData("--help")]
@@ -285,7 +285,7 @@ public sealed class CliBehaviorTests
     {
         Directory.CreateDirectory(paths.ConversationMemoryPath);
         var path = Path.Combine(paths.ConversationMemoryPath, conversationId + ".ndjson");
-        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, JsonOptions));
+        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, _jsonOptions));
         await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
     }
 

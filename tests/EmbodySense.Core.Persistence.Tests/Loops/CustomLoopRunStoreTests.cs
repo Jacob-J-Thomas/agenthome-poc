@@ -25,8 +25,8 @@ public sealed class CustomLoopRunStoreTests
     private const string CrossProcessReadyPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_READY_PATH";
     private const string CrossProcessReleasePathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_RELEASE_PATH";
     private const string CrossProcessStagingPathVariable = "EMBODYSENSE_TEST_CUSTOM_LOOP_STAGING_PATH";
-    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
-    private static readonly JsonSerializerOptions ArtifactJsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+    private static readonly JsonSerializerOptions _artifactJsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -277,7 +277,7 @@ public sealed class CustomLoopRunStoreTests
         var run = CreateRun();
 
         await Assert.ThrowsAsync<ArgumentException>(() => store.CreateAsync(run with { LifecycleVersion = 2 }));
-        var running = run with { Status = CustomLoopRunStatus.Running, ExecutionClock = new CustomLoopExecutionClock(0, Timestamp) };
+        var running = run with { Status = CustomLoopRunStatus.Running, ExecutionClock = new CustomLoopExecutionClock(0, _timestamp) };
         await Assert.ThrowsAsync<ArgumentException>(() => store.CreateAsync(running));
     }
 
@@ -646,8 +646,8 @@ public sealed class CustomLoopRunStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         await WriteDirectAsync(paths, CreateRun("loop-alpha", "run-alpha", "invoke-alpha"));
-        var recent = CreateRun("loop-beta", "run-beta", "invoke-beta") with { CreatedAtUtc = Timestamp.AddMinutes(1), UpdatedAtUtc = Timestamp.AddMinutes(2) };
-        recent = recent with { ContextSnapshot = CustomLoopContextSnapshot.CreateEmpty(Timestamp.AddMinutes(1)), Events = [recent.Events[0] with { TimestampUtc = Timestamp.AddMinutes(1) }] };
+        var recent = CreateRun("loop-beta", "run-beta", "invoke-beta") with { CreatedAtUtc = _timestamp.AddMinutes(1), UpdatedAtUtc = _timestamp.AddMinutes(2) };
+        recent = recent with { ContextSnapshot = CustomLoopContextSnapshot.CreateEmpty(_timestamp.AddMinutes(1)), Events = [recent.Events[0] with { TimestampUtc = _timestamp.AddMinutes(1) }] };
         recent = CustomLoopAdmissionRequestHash.Apply(recent);
         await WriteDirectAsync(paths, recent);
         var store = new CustomLoopRunStore(paths);
@@ -699,7 +699,7 @@ public sealed class CustomLoopRunStoreTests
         var impossibleCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, createdAtUtcTicks = DateTimeOffset.MinValue.UtcTicks, runId = "run-impossible-cursor", loopId = (string?)null });
         var impossibleCursor = Convert.ToBase64String(impossibleCursorJson).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: impossibleCursor)));
-        var obsoleteCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, createdAtUtcTicks = Timestamp.UtcTicks, runId = "run-obsolete-cursor", loopId = (string?)null });
+        var obsoleteCursorJson = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, createdAtUtcTicks = _timestamp.UtcTicks, runId = "run-obsolete-cursor", loopId = (string?)null });
         var obsoleteCursor = Convert.ToBase64String(obsoleteCursorJson).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         await Assert.ThrowsAsync<ArgumentException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(2, Cursor: obsoleteCursor)));
     }
@@ -747,7 +747,7 @@ public sealed class CustomLoopRunStoreTests
         var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         index["schemaVersion"] = 2;
         index["unsupportedV2Field"] = "requires-cleanup";
-        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
 
         var exception = await Assert.ThrowsAnyAsync<FormatException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(50)));
 
@@ -766,7 +766,7 @@ public sealed class CustomLoopRunStoreTests
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
         var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         index["schemaVersion"] = 2;
-        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending"), "pending\n");
 
         await Assert.ThrowsAnyAsync<FormatException>(() => store.ListPageAsync(new CustomLoopRunPageRequest(50)));
@@ -812,7 +812,7 @@ public sealed class CustomLoopRunStoreTests
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
         var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         index["entries"]![0]!["summary"]!["status"] = "failed";
-        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
 
         var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
 
@@ -834,13 +834,13 @@ public sealed class CustomLoopRunStoreTests
         var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         var entry = index["entries"]![0]!.AsObject();
         entry["summary"]!["status"] = "failed";
-        var modifiedSummary = entry["summary"]!.Deserialize<CustomLoopRunSummary>(ArtifactJsonOptions)!;
+        var modifiedSummary = entry["summary"]!.Deserialize<CustomLoopRunSummary>(_artifactJsonOptions)!;
         var artifactHash = entry["artifactHash"]!.GetValue<string>();
         using var bindingHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         bindingHash.AppendData(Convert.FromHexString(artifactHash));
-        bindingHash.AppendData(JsonSerializer.SerializeToUtf8Bytes(modifiedSummary, ArtifactJsonOptions));
+        bindingHash.AppendData(JsonSerializer.SerializeToUtf8Bytes(modifiedSummary, _artifactJsonOptions));
         entry["summaryBindingHash"] = Convert.ToHexString(bindingHash.GetHashAndReset()).ToLowerInvariant();
-        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
 
         var repaired = await store.ListPageAsync(new CustomLoopRunPageRequest(50));
 
@@ -861,13 +861,13 @@ public sealed class CustomLoopRunStoreTests
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
         var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         index["entries"]![0]!["summary"]!["id"] = "../unsafe";
-        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
 
         Assert.Equal(run.Id, Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
 
         index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
         index["entries"]![0]!["summary"]!["admissionOperationId"] = "../unsafe";
-        await File.WriteAllTextAsync(indexPath, index.ToJsonString(ArtifactJsonOptions) + "\n");
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
         var updated = Advance(run, CustomLoopRunStatus.Running);
 
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(updated, run.LifecycleVersion)).Status);
@@ -1124,9 +1124,9 @@ public sealed class CustomLoopRunStoreTests
             using var workspace = new TestWorkspace();
             var paths = new WorkspacePaths(workspace.RootPath);
             var run = CreateRun();
-            var root = JsonNode.Parse(JsonSerializer.Serialize(run, ArtifactJsonOptions))!.AsObject();
+            var root = JsonNode.Parse(JsonSerializer.Serialize(run, _artifactJsonOptions))!.AsObject();
             mutate(root);
-            await WriteRawAsync(paths, run.LoopId, run.Id, root.ToJsonString(ArtifactJsonOptions));
+            await WriteRawAsync(paths, run.LoopId, run.Id, root.ToJsonString(_artifactJsonOptions));
 
             await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id));
         }
@@ -1138,7 +1138,7 @@ public sealed class CustomLoopRunStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var run = CreateRun();
-        var json = JsonSerializer.Serialize(run, ArtifactJsonOptions);
+        var json = JsonSerializer.Serialize(run, _artifactJsonOptions);
         var schemaProperty = $"\"schemaVersion\": {CustomLoopRunRecord.CurrentSchemaVersion}";
         var duplicate = json.Replace(schemaProperty, schemaProperty + ",\n  " + schemaProperty, StringComparison.Ordinal);
         await WriteRawAsync(paths, run.LoopId, run.Id, duplicate);
@@ -1158,7 +1158,7 @@ public sealed class CustomLoopRunStoreTests
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
 
         File.Delete(oversizedPath);
-        await WriteRawAsync(paths, "loop-other", "run-alpha", JsonSerializer.Serialize(CreateRun(), ArtifactJsonOptions));
+        await WriteRawAsync(paths, "loop-other", "run-alpha", JsonSerializer.Serialize(CreateRun(), _artifactJsonOptions));
         await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
 
         Directory.Delete(Path.Combine(paths.CustomLoopRunsPath, "loop-other"), recursive: true);
@@ -1389,16 +1389,16 @@ public sealed class CustomLoopRunStoreTests
 
     private static CustomLoopRunRecord CreateRun(string loopId = "loop-alpha", string runId = "run-alpha", string operationId = "invoke-alpha")
     {
-        var definition = CustomLoopDefinition.CreateSeed(loopId, "default-role", "step-1", "create-loop", Timestamp);
-        var context = CustomLoopContextSnapshot.CreateEmpty(Timestamp);
-        var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, Timestamp);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var definition = CustomLoopDefinition.CreateSeed(loopId, "default-role", "step-1", "create-loop", _timestamp);
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, _timestamp);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
     private static CustomLoopRunRecord At(CustomLoopRunRecord run, int minutes)
     {
-        var timestamp = Timestamp.AddMinutes(minutes);
+        var timestamp = _timestamp.AddMinutes(minutes);
         run = run with
         {
             CreatedAtUtc = timestamp,

@@ -20,7 +20,7 @@ public sealed class WorkspaceConfigurationReader
     private const int MaxConversationFiles = 50;
     private const int MaxConversationMessagesPerTranscript = 200;
     private const int MaxConversationMessageCharacters = 4_000;
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     public async Task<WorkspaceConfigurationSnapshot> ReadAsync(string rootPath, WorkspaceRuntimeConfiguration runtime, CancellationToken cancellationToken = default)
     {
@@ -260,7 +260,7 @@ public sealed class WorkspaceConfigurationReader
 
             try
             {
-                var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, JsonOptions);
+                var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, _jsonOptions);
                 if (auditEvent is null)
                 {
                     AddProblem(problems, $"Audit line {lineNumber} was empty after parsing.");
@@ -400,7 +400,7 @@ public sealed class WorkspaceConfigurationReader
 
             try
             {
-                var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, JsonOptions);
+                var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions);
                 if (entry is null)
                 {
                     AddProblem(problems, $"{conversationId} line {lineNumber} was empty after parsing.");

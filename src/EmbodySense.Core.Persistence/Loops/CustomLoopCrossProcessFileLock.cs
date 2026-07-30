@@ -16,9 +16,9 @@ internal static class CustomLoopCrossProcessFileLock
 
         if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
         {
-            const int exclusiveNonblocking = 2 | 4;
+            const int ExclusiveNonblocking = 2 | 4;
             var descriptor = ownership.SafeFileHandle.DangerousGetHandle().ToInt32();
-            return Flock(descriptor, exclusiveNonblocking) == 0;
+            return Flock(descriptor, ExclusiveNonblocking) == 0;
         }
 
         return false;

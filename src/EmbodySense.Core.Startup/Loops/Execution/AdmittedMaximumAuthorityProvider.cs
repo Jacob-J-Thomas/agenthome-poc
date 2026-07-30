@@ -23,7 +23,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class AdmittedMaximumAuthorityProvider : ICustomLoopToolAuthorityProvider
 {
-    private static readonly CustomLoopToolAssignment[] Catalog = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search];
+    private static readonly CustomLoopToolAssignment[] _catalog = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search];
 
     public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
     {
@@ -32,7 +32,7 @@ internal sealed class AdmittedMaximumAuthorityProvider : ICustomLoopToolAuthorit
             roleId,
             admitted,
             admitted,
-            Catalog,
+            _catalog,
             admitted,
             CustomLoopToolAuthorityProvider.ComputeRoleCeilingHash(roleId, admitted),
             CustomLoopToolAuthorityProvider.ComputeCatalogHash(),

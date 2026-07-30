@@ -13,9 +13,9 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 {
-    private static readonly TimeSpan AcknowledgementTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan ConnectionIoTimeout = TimeSpan.FromSeconds(1);
-    private static readonly JsonSerializerOptions WireJsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan _acknowledgementTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan _connectionIoTimeout = TimeSpan.FromSeconds(1);
+    private static readonly JsonSerializerOptions _wireJsonOptions = new(JsonSerializerDefaults.Web);
     private const int MaxWireUtf8Bytes = 4 * 1024;
 
     private readonly WorkspacePaths _paths;
@@ -79,7 +79,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         try
         {
-            var result = await attempt.Completion.Task.WaitAsync(AcknowledgementTimeout, cancellationToken);
+            var result = await attempt.Completion.Task.WaitAsync(_acknowledgementTimeout, cancellationToken);
             return result with { OwnerId = _ownerId, OwnerProcessId = Environment.ProcessId };
         }
         catch (TimeoutException)
@@ -106,7 +106,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         {
             using var client = new NamedPipeClientStream(".", descriptor.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(AcknowledgementTimeout + TimeSpan.FromSeconds(1));
+            timeout.CancelAfter(_acknowledgementTimeout + TimeSpan.FromSeconds(1));
             await client.ConnectAsync(timeout.Token);
             await WriteFrameAsync(client, request, timeout.Token);
             var response = await ReadFrameAsync<CancellationWireResponse>(client, timeout.Token);
@@ -220,13 +220,13 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private async Task HandleConnectionAsync(Stream stream, CancellationToken cancellationToken)
     {
         using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        readTimeout.CancelAfter(ConnectionIoTimeout);
+        readTimeout.CancelAfter(_connectionIoTimeout);
         var request = await ReadFrameAsync<CancellationWireRequest>(stream, readTimeout.Token);
         var result = !IsAuthenticated(request)
             ? new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.Invalid, "The cancellation request did not authenticate to the current workspace-host generation.")
             : await RequestCancellationAsync(request.RunId, cancellationToken);
         using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        writeTimeout.CancelAfter(ConnectionIoTimeout);
+        writeTimeout.CancelAfter(_connectionIoTimeout);
         await WriteFrameAsync(stream, new CancellationWireResponse(1, result.Status, result.Detail, _ownerId, Environment.ProcessId), writeTimeout.Token);
     }
 
@@ -256,7 +256,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         pathGuard.PrepareRoot(_paths.LoopRunsPath);
         var path = pathGuard.GetFilePath(_paths.LoopRunsPath, Path.GetFileName(_paths.CustomLoopCancellationOwnerPath));
         var descriptor = new CancellationOwnerDescriptor(1, _ownerId, _pipeName, _encodedSecret, Environment.ProcessId, DateTimeOffset.UtcNow.ToUniversalTime());
-        var payload = JsonSerializer.SerializeToUtf8Bytes(descriptor, WireJsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(descriptor, _wireJsonOptions);
         if (payload.Length > MaxWireUtf8Bytes)
         {
             throw new FormatException("The workspace-host owner descriptor exceeds its bounded size.");
@@ -310,7 +310,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             }
 
             var payload = File.ReadAllBytes(path);
-            var descriptor = payload.Length <= MaxWireUtf8Bytes ? JsonSerializer.Deserialize<CancellationOwnerDescriptor>(payload, WireJsonOptions) : null;
+            var descriptor = payload.Length <= MaxWireUtf8Bytes ? JsonSerializer.Deserialize<CancellationOwnerDescriptor>(payload, _wireJsonOptions) : null;
             if (string.Equals(descriptor?.OwnerId, _ownerId, StringComparison.Ordinal))
             {
                 File.Delete(path);
@@ -334,7 +334,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         var bytes = new byte[(int)stream.Length];
         await stream.ReadExactlyAsync(bytes, cancellationToken);
-        var descriptor = JsonSerializer.Deserialize<CancellationOwnerDescriptor>(bytes, WireJsonOptions) ?? throw new FormatException("The workspace-host owner descriptor is empty.");
+        var descriptor = JsonSerializer.Deserialize<CancellationOwnerDescriptor>(bytes, _wireJsonOptions) ?? throw new FormatException("The workspace-host owner descriptor is empty.");
         ValidateOwnerDescriptor(descriptor);
         return descriptor;
     }
@@ -399,7 +399,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
     private static async Task WriteFrameAsync<T>(Stream stream, T value, CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(value, WireJsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(value, _wireJsonOptions);
         if (payload.Length <= 0 || payload.Length > MaxWireUtf8Bytes)
         {
             throw new FormatException("The cancellation IPC payload is outside its bounded size.");
@@ -424,7 +424,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         var payload = new byte[payloadLength];
         await stream.ReadExactlyAsync(payload, cancellationToken);
-        return JsonSerializer.Deserialize<T>(payload, WireJsonOptions) ?? throw new FormatException("The cancellation IPC payload is empty.");
+        return JsonSerializer.Deserialize<T>(payload, _wireJsonOptions) ?? throw new FormatException("The cancellation IPC payload is empty.");
     }
 
     private sealed record CancellationOwnerDescriptor(int SchemaVersion, string OwnerId, string PipeName, string Secret, int ProcessId, DateTimeOffset StartedAtUtc);

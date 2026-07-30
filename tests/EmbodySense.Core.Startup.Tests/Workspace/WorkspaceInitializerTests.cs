@@ -119,12 +119,12 @@ public sealed class WorkspaceInitializerTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.AgentPath);
-        const string unsupported = "{\"version\": 2}";
-        await File.WriteAllTextAsync(paths.PermissionsPath, unsupported);
+        const string Unsupported = "{\"version\": 2}";
+        await File.WriteAllTextAsync(paths.PermissionsPath, Unsupported);
 
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
 
-        Assert.Equal(unsupported, await File.ReadAllTextAsync(paths.PermissionsPath));
+        Assert.Equal(Unsupported, await File.ReadAllTextAsync(paths.PermissionsPath));
         var evaluation = new PermissionPolicyStore().Load(paths).EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
         Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
     }

@@ -97,10 +97,10 @@ internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
                 _errorOutput.AppendLine(line);
                 if (_errorOutput.Length > MaxErrorOutputCharacters)
                 {
-                    const string marker = "[stderr truncated]";
-                    var keepCharacters = MaxErrorOutputCharacters - marker.Length - Environment.NewLine.Length;
+                    const string Marker = "[stderr truncated]";
+                    var keepCharacters = MaxErrorOutputCharacters - Marker.Length - Environment.NewLine.Length;
                     _errorOutput.Remove(0, _errorOutput.Length - keepCharacters);
-                    _errorOutput.Insert(0, marker + Environment.NewLine);
+                    _errorOutput.Insert(0, Marker + Environment.NewLine);
                 }
             }
         }

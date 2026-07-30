@@ -9,7 +9,7 @@ namespace EmbodySense.Core.Common.Tests;
 
 public sealed class CustomLoopRunValidatorTests
 {
-    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+    private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
 
     [Fact]
     public void Validate_accepts_a_complete_admitted_trace_and_hashes_exact_content()
@@ -52,7 +52,7 @@ public sealed class CustomLoopRunValidatorTests
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ModelSnapshot = null! }), "model_snapshot_required", "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { AdmissionRequestHash = new string('0', 64) }), "admission_request_hash_mismatch");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = null! }), "execution_clock_required");
-        AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = new CustomLoopExecutionClock(-1, Timestamp) }), "execution_clock_out_of_range", "unexpected_active_execution_clock");
+        AssertCodes(CustomLoopRunValidator.Validate(seed with { ExecutionClock = new CustomLoopExecutionClock(-1, _timestamp) }), "execution_clock_out_of_range", "unexpected_active_execution_clock");
         var running = Advance(seed, CustomLoopRunStatus.Running) with { ExecutionClock = CustomLoopExecutionClock.NotStarted() };
         AssertCodes(CustomLoopRunValidator.Validate(running), "active_execution_clock_required");
     }
@@ -118,22 +118,22 @@ public sealed class CustomLoopRunValidatorTests
     [Fact]
     public void Evidence_hashes_and_validation_preserve_exact_non_normalized_unicode()
     {
-        const string decomposed = "e\u0301";
-        const string composed = "é";
+        const string Decomposed = "e\u0301";
+        const string Composed = "é";
         var seed = CreateRun();
-        var decomposedSource = WithContent(seed.ContextSnapshot.SourceManifest[0], decomposed);
+        var decomposedSource = WithContent(seed.ContextSnapshot.SourceManifest[0], Decomposed);
         var snapshot = CustomLoopContextSnapshotHash.Apply(seed.ContextSnapshot with { SourceManifest = [decomposedSource, .. seed.ContextSnapshot.SourceManifest.Skip(1)] });
         var run = CustomLoopAdmissionRequestHash.Apply(seed with { ContextSnapshot = snapshot });
-        var observed = new CustomLoopRunEvent(2, "event-2", Timestamp, CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-1", 1, "Observed", [], decomposed, decomposed.Length, false, true, false, null, "openai", "gpt-5", "response-1", null);
+        var observed = new CustomLoopRunEvent(2, "event-2", _timestamp, CustomLoopRunEventKind.NodeOutcomeObserved, 1, "step-1", 1, "Observed", [], Decomposed, Decomposed.Length, false, true, false, null, "openai", "gpt-5", "response-1", null);
         run = run with { Events = [.. run.Events, observed] };
-        var completed = Advance(Advance(run, CustomLoopRunStatus.Running), CustomLoopRunStatus.Completed) with { FinalOutput = decomposed };
+        var completed = Advance(Advance(run, CustomLoopRunStatus.Running), CustomLoopRunStatus.Completed) with { FinalOutput = Decomposed };
 
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid);
         Assert.True(CustomLoopRunValidator.Validate(completed).IsValid);
         Assert.True(CustomLoopContextSnapshotHash.Matches(snapshot));
-        var composedSource = WithContent(snapshot.SourceManifest[0], composed);
+        var composedSource = WithContent(snapshot.SourceManifest[0], Composed);
         Assert.NotEqual(CustomLoopContextSnapshotHash.Compute(snapshot), CustomLoopContextSnapshotHash.Compute(snapshot with { SourceManifest = [composedSource, .. snapshot.SourceManifest.Skip(1)] }));
-        Assert.NotEqual(CustomLoopTraceContentHash.Compute(decomposed), CustomLoopTraceContentHash.Compute(composed));
+        Assert.NotEqual(CustomLoopTraceContentHash.Compute(Decomposed), CustomLoopTraceContentHash.Compute(Composed));
     }
 
     [Fact]
@@ -158,14 +158,14 @@ public sealed class CustomLoopRunValidatorTests
             LoopId = "other-loop",
             LifecycleVersion = 0,
             Status = CustomLoopRunStatus.Unknown,
-            CreatedAtUtc = Timestamp.AddMinutes(2).ToOffset(TimeSpan.FromHours(1)),
-            UpdatedAtUtc = Timestamp,
-            CompletedAtUtc = Timestamp,
+            CreatedAtUtc = _timestamp.AddMinutes(2).ToOffset(TimeSpan.FromHours(1)),
+            UpdatedAtUtc = _timestamp,
+            CompletedAtUtc = _timestamp,
             Surface = "Web/UI",
             AdmissionOperationId = "bad operation",
             AdmittedDefinition = invalidDefinition,
             TriggerPrompt = new string('x', CustomLoopLimits.MaxPresetPromptCharacters + 1),
-            InvokingConversation = new CustomLoopConversationReference("../conversation", "", Timestamp.AddDays(1))
+            InvokingConversation = new CustomLoopConversationReference("../conversation", "", _timestamp.AddDays(1))
         };
 
         var validation = CustomLoopRunValidator.Validate(invalid);
@@ -190,7 +190,7 @@ public sealed class CustomLoopRunValidatorTests
         };
         var snapshot = new CustomLoopContextSnapshot(
             99,
-            Timestamp.AddDays(1),
+            _timestamp.AddDays(1),
             [invalidSource, null!],
             "not-a-hash");
 
@@ -259,7 +259,7 @@ public sealed class CustomLoopRunValidatorTests
         var badEvent = new CustomLoopRunEvent(
             3,
             seed.Events[0].EventId,
-            Timestamp.AddMinutes(-1),
+            _timestamp.AddMinutes(-1),
             CustomLoopRunEventKind.NodeOutcomeObserved,
             Iteration: 0,
             StepId: null,
@@ -288,11 +288,11 @@ public sealed class CustomLoopRunValidatorTests
         var seed = CreateRun();
         var attemptAuthority = Authority([CustomLoopToolAssignment.Read]);
         var widenedAuthority = Authority([CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search]);
-        var started = new CustomLoopRunEvent(2, "attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, attemptAuthority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        var started = new CustomLoopRunEvent(2, "attempt-start", _timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, attemptAuthority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
         var widenedEvidence = ToolEvidence(widenedAuthority, ToolCommand.Search);
-        var widenedEvent = new CustomLoopRunEvent(3, "tool-widened", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, widenedAuthority, widenedEvidence);
+        var widenedEvent = new CustomLoopRunEvent(3, "tool-widened", _timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, widenedAuthority, widenedEvidence);
         var unauthorizedEvidence = ToolEvidence(attemptAuthority, ToolCommand.Search);
-        var unauthorizedEvent = new CustomLoopRunEvent(3, "tool-unauthorized", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, attemptAuthority, unauthorizedEvidence);
+        var unauthorizedEvent = new CustomLoopRunEvent(3, "tool-unauthorized", _timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, attemptAuthority, unauthorizedEvidence);
 
         AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, widenedEvent] }), "tool_authority_not_attempt_bound", "tool_command_not_attempt_authorized");
         AssertCodes(CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, unauthorizedEvent] }), "tool_command_not_attempt_authorized");
@@ -310,9 +310,9 @@ public sealed class CustomLoopRunValidatorTests
             RoleCeilingHash = new string('c', CustomLoopLimits.Sha256HexCharacters),
             Detail = "Read authority was revoked before actuation."
         };
-        var started = new CustomLoopRunEvent(2, "attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, attemptAuthority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        var started = new CustomLoopRunEvent(2, "attempt-start", _timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, attemptAuthority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
         var evidence = ToolEvidence(revokedAuthority, ToolCommand.Read);
-        var reserved = new CustomLoopRunEvent(3, "tool-revoked", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, revokedAuthority, evidence);
+        var reserved = new CustomLoopRunEvent(3, "tool-revoked", _timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, revokedAuthority, evidence);
 
         var validation = CustomLoopRunValidator.Validate(seed with { Events = [seed.Events[0], started, reserved] });
 
@@ -322,18 +322,18 @@ public sealed class CustomLoopRunValidatorTests
     [Fact]
     public void Tool_evidence_preserves_exact_well_formed_unicode_paths_without_requiring_normalization()
     {
-        const string decomposedPath = "shared/cafe\u0301.txt";
+        const string DecomposedPath = "shared/cafe\u0301.txt";
         var seed = CreateRun();
         var authority = Authority([CustomLoopToolAssignment.Read]);
-        var started = new CustomLoopRunEvent(2, "attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, authority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
-        var evidence = ToolEvidence(authority, ToolCommand.Read, decomposedPath);
-        var reserved = new CustomLoopRunEvent(3, "tool-decomposed-path", Timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, authority, evidence);
+        var started = new CustomLoopRunEvent(2, "attempt-start", _timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "attempt-1", null, authority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes);
+        var evidence = ToolEvidence(authority, ToolCommand.Read, DecomposedPath);
+        var reserved = new CustomLoopRunEvent(3, "tool-decomposed-path", _timestamp, CustomLoopRunEventKind.ToolRequestReserved, 1, "step-1", 1, "Tool request reserved.", [], null, null, null, null, null, null, null, null, null, null, authority, evidence);
         var run = seed with { Events = [seed.Events[0], started, reserved] };
 
         var validation = CustomLoopRunValidator.Validate(run);
 
         Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors.Select(error => $"{error.Code}: {error.Message}")));
-        Assert.Equal(decomposedPath, run.Events[^1].ToolEvidence!.TargetPath);
+        Assert.Equal(DecomposedPath, run.Events[^1].ToolEvidence!.TargetPath);
         var unsafeRun = run with { Events = [run.Events[0], started, reserved with { ToolEvidence = evidence with { TargetPath = "shared/\0.txt" } }] };
         AssertCodes(CustomLoopRunValidator.Validate(unsafeRun), "unsafe_text");
     }
@@ -524,10 +524,10 @@ public sealed class CustomLoopRunValidatorTests
 
     private static CustomLoopRunRecord CreateRun(string loopId = "loop-alpha", string runId = "run-alpha", string operationId = "invoke-alpha")
     {
-        var definition = CustomLoopDefinition.CreateSeed(loopId, "default-role", "step-1", "create-loop", Timestamp);
+        var definition = CustomLoopDefinition.CreateSeed(loopId, "default-role", "step-1", "create-loop", _timestamp);
         var snapshot = CustomLoopContextSnapshotHash.Apply(new CustomLoopContextSnapshot(
             CustomLoopContextSnapshot.CurrentSchemaVersion,
-            Timestamp,
+            _timestamp,
             CreateManifest("Role context"),
             string.Empty));
         var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted);
@@ -537,8 +537,8 @@ public sealed class CustomLoopRunValidatorTests
             loopId,
             1,
             CustomLoopRunStatus.Admitted,
-            Timestamp,
-            Timestamp,
+            _timestamp,
+            _timestamp,
             null,
             "web",
             new CustomLoopModelSnapshot("openai", "gpt-5"),
@@ -561,7 +561,7 @@ public sealed class CustomLoopRunValidatorTests
     private static CustomLoopToolAuthoritySnapshot Authority(CustomLoopToolAssignment[] effectiveAssignments)
     {
         var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
-        return new CustomLoopToolAuthoritySnapshot("default-role", effectiveAssignments, effectiveAssignments, catalog, effectiveAssignments, new string('a', CustomLoopLimits.Sha256HexCharacters), new string('b', CustomLoopLimits.Sha256HexCharacters), Timestamp, true, "Test authority snapshot.");
+        return new CustomLoopToolAuthoritySnapshot("default-role", effectiveAssignments, effectiveAssignments, catalog, effectiveAssignments, new string('a', CustomLoopLimits.Sha256HexCharacters), new string('b', CustomLoopLimits.Sha256HexCharacters), _timestamp, true, "Test authority snapshot.");
     }
 
     private static CustomLoopToolTraceEvidence ToolEvidence(CustomLoopToolAuthoritySnapshot authority, ToolCommand command, string targetPath = "shared/file.txt")
@@ -592,7 +592,7 @@ public sealed class CustomLoopRunValidatorTests
 
     private static CustomLoopRunEvent Event(long sequence, string id, CustomLoopRunEventKind kind, int? iteration = null, int? attempt = null, DateTimeOffset? timestamp = null)
     {
-        return new CustomLoopRunEvent(sequence, id, timestamp ?? Timestamp, kind, iteration, null, attempt, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null);
+        return new CustomLoopRunEvent(sequence, id, timestamp ?? _timestamp, kind, iteration, null, attempt, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null);
     }
 
     private static CustomLoopRunRecord WithLifecycleControlEvents(CustomLoopRunRecord run, int eventCount)
@@ -633,7 +633,7 @@ public sealed class CustomLoopRunValidatorTests
         LlmMessageRole role,
         string content)
     {
-        return new CustomLoopContextManifestSource(order, sourceType, sourceId, sourcePath, provenance, trustClass, role, content, CustomLoopTraceContentHash.Compute(content), content.Length, content.Length, false, null, null, Timestamp);
+        return new CustomLoopContextManifestSource(order, sourceType, sourceId, sourcePath, provenance, trustClass, role, content, CustomLoopTraceContentHash.Compute(content), content.Length, content.Length, false, null, null, _timestamp);
     }
 
     private static CustomLoopContextManifestSource OmittedSource(
@@ -645,7 +645,7 @@ public sealed class CustomLoopRunValidatorTests
         CustomLoopContextTrustClass trustClass,
         LlmMessageRole role)
     {
-        return new CustomLoopContextManifestSource(order, sourceType, sourceId, sourcePath, provenance, trustClass, role, string.Empty, CustomLoopTraceContentHash.Compute(string.Empty), 0, 0, false, null, "Source absent in test fixture.", Timestamp);
+        return new CustomLoopContextManifestSource(order, sourceType, sourceId, sourcePath, provenance, trustClass, role, string.Empty, CustomLoopTraceContentHash.Compute(string.Empty), 0, 0, false, null, "Source absent in test fixture.", _timestamp);
     }
 
     private static CustomLoopContextManifestSource WithContent(CustomLoopContextManifestSource source, string content)

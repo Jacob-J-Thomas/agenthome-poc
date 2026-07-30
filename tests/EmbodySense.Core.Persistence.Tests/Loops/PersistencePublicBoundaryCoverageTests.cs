@@ -24,7 +24,7 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class PersistencePublicBoundaryCoverageTests
 {
-    private static readonly DateTimeOffset Timestamp = new(2026, 7, 17, 12, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _timestamp = new(2026, 7, 17, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public async Task Workspace_scaffolder_creates_directories_seeds_files_preserves_user_content_and_audits()
@@ -414,13 +414,13 @@ public sealed class PersistencePublicBoundaryCoverageTests
     [Fact]
     public void Tool_evidence_artifact_round_trips_decomposed_unicode_target_paths_exactly()
     {
-        const string decomposedPath = "shared/cafe\u0301.txt";
-        var run = CreateToolRun(targetPath: decomposedPath);
+        const string DecomposedPath = "shared/cafe\u0301.txt";
+        var run = CreateToolRun(targetPath: DecomposedPath);
 
         var artifact = CustomLoopRunArtifactSerializer.Serialize(run);
         var hydrated = CustomLoopRunArtifactSerializer.Deserialize(artifact);
 
-        Assert.All(hydrated.Events.Where(item => item.ToolEvidence is not null), item => Assert.Equal(decomposedPath, item.ToolEvidence!.TargetPath));
+        Assert.All(hydrated.Events.Where(item => item.ToolEvidence is not null), item => Assert.Equal(DecomposedPath, item.ToolEvidence!.TargetPath));
         Assert.Equal(artifact, CustomLoopRunArtifactSerializer.Serialize(hydrated));
     }
 
@@ -507,19 +507,19 @@ public sealed class PersistencePublicBoundaryCoverageTests
 
     private static CustomLoopControlOperation PendingControl(string operationId, string actor)
     {
-        const string runId = "run-control-boundary";
-        const int expectedVersion = 2;
-        const CustomLoopControlKind kind = CustomLoopControlKind.Pause;
+        const string RunId = "run-control-boundary";
+        const int ExpectedVersion = 2;
+        const CustomLoopControlKind Kind = CustomLoopControlKind.Pause;
         return new CustomLoopControlOperation(
             CustomLoopControlOperation.CurrentSchemaVersion,
             operationId,
-            CustomLoopControlRequestHash.Compute(kind, runId, expectedVersion, operationId, actor),
-            kind,
-            runId,
-            expectedVersion,
+            CustomLoopControlRequestHash.Compute(Kind, RunId, ExpectedVersion, operationId, actor),
+            Kind,
+            RunId,
+            ExpectedVersion,
             actor,
-            Timestamp,
-            Timestamp,
+            _timestamp,
+            _timestamp,
             CustomLoopControlOperationState.Pending,
             CustomLoopControlStatus.Unknown,
             null,
@@ -544,16 +544,16 @@ public sealed class PersistencePublicBoundaryCoverageTests
 
     private static CustomLoopRunRecord CreateRun()
     {
-        var definition = CustomLoopDefinition.CreateSeed("loop-boundary", "default-role", "step-1", "create-loop", Timestamp);
-        var context = CustomLoopContextSnapshot.CreateEmpty(Timestamp);
-        var admitted = new CustomLoopRunEvent(1, "event-1", Timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-boundary", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-boundary", "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var definition = CustomLoopDefinition.CreateSeed("loop-boundary", "default-role", "step-1", "create-loop", _timestamp);
+        var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
+        var admitted = new CustomLoopRunEvent(1, "event-1", _timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-boundary", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-boundary", "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
     private static CustomLoopRunRecord CreateToolRun(bool includeIntegrity = false, string targetPath = ".")
     {
-        var seed = CustomLoopDefinition.CreateSeed("loop-tool-boundary", "default-role", "step-1", "create-tool-loop", Timestamp);
+        var seed = CustomLoopDefinition.CreateSeed("loop-tool-boundary", "default-role", "step-1", "create-tool-loop", _timestamp);
         var definition = CustomLoopDefinitionContentHash.Apply(seed with { ToolAssignments = [CustomLoopToolAssignment.Search], ContentHash = string.Empty });
         var authority = ToolAuthority();
         var governance = new ToolGovernanceEvidence(
@@ -566,16 +566,16 @@ public sealed class PersistencePublicBoundaryCoverageTests
             ToolApprovalDecision.NotRequired,
             null,
             "Approval was not required.");
-        const string canonical = "search-result";
-        var canonicalHash = CustomLoopTraceContentHash.Compute(canonical);
+        const string Canonical = "search-result";
+        var canonicalHash = CustomLoopTraceContentHash.Compute(Canonical);
         var reservation = ToolEvidence(CustomLoopToolEvidencePhase.RequestReserved, null, null, null, null, null, null, false, authority, targetPath);
         var governed = ToolEvidence(CustomLoopToolEvidencePhase.GovernanceDecided, "broker-1", governance, null, null, null, null, false, authority, targetPath);
-        var outcome = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, false, authority, targetPath);
-        var returned = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, canonical, canonicalHash, canonical.Length, true, authority, targetPath);
+        var outcome = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, Canonical, canonicalHash, Canonical.Length, false, authority, targetPath);
+        var returned = ToolEvidence(CustomLoopToolEvidencePhase.OutcomeObserved, "broker-1", governance, ToolExecutionOutcome.Succeeded, Canonical, canonicalHash, Canonical.Length, true, authority, targetPath);
         var events = new List<CustomLoopRunEvent>
         {
-            new(1, "event-admitted", Timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null, authority),
-            new(2, "event-attempt-start", Timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Inference attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "response-1", null, authority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes),
+            new(1, "event-admitted", _timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null, authority),
+            new(2, "event-attempt-start", _timestamp, CustomLoopRunEventKind.NodeAttemptStarted, 1, "step-1", 1, "Inference attempt started.", [], null, null, null, null, null, null, "openai", "gpt-5", "response-1", null, authority, null, CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes),
             ToolEvent(3, "event-reservation", CustomLoopRunEventKind.ToolRequestReserved, reservation, authority),
             ToolEvent(4, "event-governance", CustomLoopRunEventKind.ToolGovernanceDecided, governed, authority),
             ToolEvent(5, "event-outcome", CustomLoopRunEventKind.ToolOutcomeObserved, outcome, authority),
@@ -588,7 +588,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
         }
 
         var checkpoint = CustomLoopRunCheckpoint.Start() with { ToolRequestsUsed = 1 };
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-tool-boundary", definition.Id, events.Count, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-tool-boundary", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), checkpoint, events.ToArray(), null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-tool-boundary", definition.Id, events.Count, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-tool-boundary", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), checkpoint, events.ToArray(), null, null, null);
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
@@ -630,7 +630,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
             assignments,
             CustomLoopTraceContentHash.Compute("role-ceiling"),
             CustomLoopTraceContentHash.Compute("tool-catalog"),
-            Timestamp,
+            _timestamp,
             true,
             "Current role and implemented catalog allow search.");
     }
@@ -654,7 +654,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
 
     private static CustomLoopRunEvent ToolEvent(long sequence, string eventId, CustomLoopRunEventKind kind, CustomLoopToolTraceEvidence evidence, CustomLoopToolAuthoritySnapshot authority)
     {
-        return new CustomLoopRunEvent(sequence, eventId, Timestamp, kind, 1, "step-1", 1, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null, authority, evidence);
+        return new CustomLoopRunEvent(sequence, eventId, _timestamp, kind, 1, "step-1", 1, kind.ToString(), [], null, null, null, null, null, null, null, null, null, null, authority, evidence);
     }
 
     private static CustomLoopRunRecord ReplaceEvidence(CustomLoopRunRecord run, int eventIndex, Func<CustomLoopToolTraceEvidence, CustomLoopToolTraceEvidence> mutate, CustomLoopToolAuthoritySnapshot? eventAuthority = null)
@@ -754,12 +754,12 @@ public sealed class PersistencePublicBoundaryCoverageTests
 
     private static string IndexedId(string prefix, int index)
     {
-        const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+        const string Digits = "0123456789abcdefghijklmnopqrstuvwxyz";
         Span<char> buffer = stackalloc char[16];
         var position = buffer.Length;
         do
         {
-            buffer[--position] = digits[index % 36];
+            buffer[--position] = Digits[index % 36];
             index /= 36;
         }
         while (index > 0);

@@ -44,23 +44,23 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         var runStore = new CustomLoopRunStore(paths);
         var receiptStore = new CustomLoopInvocationOperationStore(paths);
         var definition = Assert.IsType<CustomLoopDefinition>(await definitionStore.GetAsync(definitionSnapshot.Id));
-        const string operationId = "invoke-interrupted-after-admission";
-        const string prompt = "admitted before receipt completion";
+        const string OperationId = "invoke-interrupted-after-admission";
+        const string Prompt = "admitted before receipt completion";
         var now = DateTimeOffset.UtcNow;
         var requestHash = CustomLoopInvocationRequestHash.Compute(
-            operationId,
+            OperationId,
             definition.Id,
             definition.DefinitionVersion,
             definition.ContentHash,
             WorkspaceActors.Cli,
             AgentRuntimeSurface.Cli.Id,
             definition.RoleId,
-            prompt,
+            Prompt,
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model");
         var pending = new CustomLoopInvocationOperation(
             CustomLoopInvocationOperation.CurrentSchemaVersion,
-            operationId,
+            OperationId,
             requestHash,
             definition.Id,
             definition.DefinitionVersion,
@@ -68,7 +68,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             WorkspaceActors.Cli,
             AgentRuntimeSurface.Cli.Id,
             definition.RoleId,
-            CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
+            CustomLoopInvocationRequestHash.ComputePromptHash(Prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model",
             CustomLoopInvocationBindingState.Unbound,
@@ -98,11 +98,11 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
                 definition.Id,
                 definition.DefinitionVersion,
                 definition.ContentHash,
-                operationId,
+                OperationId,
                 WorkspaceActors.Cli,
                 AgentRuntimeSurface.Cli.Id,
                 definition.RoleId,
-                prompt,
+                Prompt,
                 new CustomLoopModelSnapshot(LlmInferenceSurface.OpenAiCodex.ToString(), "test-model"),
                 conversation,
                 context));
@@ -113,7 +113,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         Assert.NotNull(competing.Lease);
         using (competing.Lease)
         {
-            var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, operationId, prompt));
+            var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, OperationId, Prompt));
 
             Assert.Equal("Admitted", response.AdmissionStatus);
             Assert.False(response.WasDispatched);
@@ -121,7 +121,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             Assert.Equal(CustomLoopRunStatus.Admitted.ToString(), response.ExecutionStatus);
         }
 
-        var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(operationId));
+        var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(OperationId));
         Assert.Equal(CustomLoopInvocationOperationState.Complete, completed.State);
         Assert.Equal(CustomLoopInvocationOutcome.Admitted, completed.Outcome);
         Assert.Equal(CustomLoopInvocationBindingState.CapturedContext, completed.BindingState);
@@ -146,23 +146,23 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             AgentRuntimeSurface.Cli);
         var definition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(definitionSnapshot.Id));
         var receiptStore = new CustomLoopInvocationOperationStore(paths);
-        const string operationId = "invoke-interrupted-after-context-capture";
-        const string prompt = "captured before workspace became busy";
+        const string OperationId = "invoke-interrupted-after-context-capture";
+        const string Prompt = "captured before workspace became busy";
         var now = DateTimeOffset.UtcNow;
         var requestHash = CustomLoopInvocationRequestHash.Compute(
-            operationId,
+            OperationId,
             definition.Id,
             definition.DefinitionVersion,
             definition.ContentHash,
             WorkspaceActors.Cli,
             AgentRuntimeSurface.Cli.Id,
             definition.RoleId,
-            prompt,
+            Prompt,
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model");
         var pending = new CustomLoopInvocationOperation(
             CustomLoopInvocationOperation.CurrentSchemaVersion,
-            operationId,
+            OperationId,
             requestHash,
             definition.Id,
             definition.DefinitionVersion,
@@ -170,7 +170,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             WorkspaceActors.Cli,
             AgentRuntimeSurface.Cli.Id,
             definition.RoleId,
-            CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
+            CustomLoopInvocationRequestHash.ComputePromptHash(Prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
             "test-model",
             CustomLoopInvocationBindingState.Unbound,
@@ -197,10 +197,10 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
 
         await using var competingGate = new CustomLoopWorkspaceExecutionGate(paths);
         using var competing = competingGate.TryAcquire("competing-after-context-capture", new string('f', CustomLoopLimits.Sha256HexCharacters)).Lease!;
-        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, operationId, prompt);
+        var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, OperationId, Prompt);
         var response = await runtime.InvokeCustomLoopAsync(input);
         var replay = await runtime.InvokeCustomLoopAsync(input);
-        var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(operationId));
+        var completed = Assert.IsType<CustomLoopInvocationOperation>(await receiptStore.GetAsync(OperationId));
 
         Assert.Equal("WorkspaceExecutionBusy", response.AdmissionStatus);
         Assert.Equal("WorkspaceExecutionBusy", replay.AdmissionStatus);
@@ -227,16 +227,16 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             workspace.File("unused-codex.cmd"),
             "read-only",
             AgentRuntimeSurface.Cli);
-        const string operationId = "invoke-receipt-completion-failure";
-        const string prompt = "must never dispatch";
-        var prepared = await PrepareInterruptedAdmissionAsync(paths, definitionSnapshot, operationId, prompt);
-        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json");
+        const string OperationId = "invoke-receipt-completion-failure";
+        const string Prompt = "must never dispatch";
+        var prepared = await PrepareInterruptedAdmissionAsync(paths, definitionSnapshot, OperationId, Prompt);
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, OperationId + ".json");
         File.SetAttributes(receiptPath, FileAttributes.ReadOnly);
 
         LoopRunInvocationResponse response;
         try
         {
-            response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definitionSnapshot.Id, definitionSnapshot.DefinitionVersion, definitionSnapshot.ContentHash, operationId, prompt));
+            response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definitionSnapshot.Id, definitionSnapshot.DefinitionVersion, definitionSnapshot.ContentHash, OperationId, Prompt));
         }
         finally
         {
@@ -248,14 +248,14 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         Assert.False(response.WasDispatched);
         Assert.Equal(prepared.Run.Id, response.Run!.Id);
         Assert.DoesNotContain(response.Run.Events, item => item.Kind is nameof(CustomLoopRunEventKind.NodeAttemptStarted) or nameof(CustomLoopRunEventKind.ExitDecisionStarted));
-        Assert.Equal(CustomLoopInvocationOperationState.Pending, (await prepared.ReceiptStore.GetAsync(operationId))!.State);
+        Assert.Equal(CustomLoopInvocationOperationState.Pending, (await prepared.ReceiptStore.GetAsync(OperationId))!.State);
 
-        var replay = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definitionSnapshot.Id, definitionSnapshot.DefinitionVersion, definitionSnapshot.ContentHash, operationId, prompt));
+        var replay = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definitionSnapshot.Id, definitionSnapshot.DefinitionVersion, definitionSnapshot.ContentHash, OperationId, Prompt));
 
         Assert.Equal(CustomLoopAdmissionStatus.Admitted.ToString(), replay.AdmissionStatus);
         Assert.Equal(CustomLoopRunStatus.Paused.ToString(), replay.ExecutionStatus);
         Assert.False(replay.WasDispatched);
-        Assert.Equal(CustomLoopInvocationOperationState.Complete, (await prepared.ReceiptStore.GetAsync(operationId))!.State);
+        Assert.Equal(CustomLoopInvocationOperationState.Complete, (await prepared.ReceiptStore.GetAsync(OperationId))!.State);
     }
 
     [Fact]
@@ -265,9 +265,9 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
-        const string operationId = "invoke-unreadable-receipt";
+        const string OperationId = "invoke-unreadable-receipt";
         Directory.CreateDirectory(paths.CustomLoopInvocationOperationsPath);
-        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, operationId + ".json"), "{");
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopInvocationOperationsPath, OperationId + ".json"), "{");
         await using var runtime = await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
             "test-model",
             workspace.RootPath,
@@ -275,7 +275,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             "read-only",
             AgentRuntimeSurface.Cli);
 
-        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, operationId, "retry the unresolved operation"));
+        var response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, OperationId, "retry the unresolved operation"));
 
         Assert.Equal(CustomLoopAdmissionStatus.ReceiptUnavailable.ToString(), response.AdmissionStatus);
         Assert.False(response.WasDispatched);

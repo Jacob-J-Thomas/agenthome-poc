@@ -13,7 +13,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
 public sealed class CustomLoopAdmissionService
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
     private readonly ICustomLoopDefinitionStore _definitionStore;
     private readonly ICustomLoopRunStore _runStore;
     private readonly IAuditLog _auditLog;
@@ -182,12 +182,12 @@ public sealed class CustomLoopAdmissionService
         run = stored.Run ?? run;
         try
         {
-            using (var auditIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout))
+            using (var auditIntegrityWindow = new CancellationTokenSource(_integrityWriteTimeout))
             {
                 await _auditLog.AppendAsync(CreateAdmissionAudit(request, Result(CustomLoopAdmissionStatus.Admitted, run, "The custom-loop run was admitted and is ready for ordered execution.")), auditIntegrityWindow.Token);
             }
 
-            using var markerIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+            using var markerIntegrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
             run = await CompleteAdmissionAuditAsync(run, markerIntegrityWindow.Token);
             return Result(CustomLoopAdmissionStatus.Admitted, run, "The custom-loop run was admitted and its audit-integrity marker is durable before ordered execution.");
         }
@@ -425,7 +425,7 @@ public sealed class CustomLoopAdmissionService
 
     private async Task<CustomLoopAdmissionResult> AuditOutcomeAsync(CustomLoopAdmissionRequest request, CustomLoopAdmissionResult result, bool useIntegrityWindow, CancellationToken cancellationToken)
     {
-        using var integrityWindow = useIntegrityWindow ? new CancellationTokenSource(IntegrityWriteTimeout) : null;
+        using var integrityWindow = useIntegrityWindow ? new CancellationTokenSource(_integrityWriteTimeout) : null;
         var auditToken = integrityWindow?.Token ?? cancellationToken;
         try
         {
@@ -492,7 +492,7 @@ public sealed class CustomLoopAdmissionService
             FailureCode = "admission_audit_failed",
             FailureDetail = detail
         };
-        using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var integrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             var result = await _runStore.UpdateAsync(candidate, run.LifecycleVersion, integrityWindow.Token);

@@ -9,8 +9,8 @@ namespace EmbodySense.Core.Persistence.Loops;
 
 public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecutionGate, ICustomLoopAttemptCancellationBroker
 {
-    private static readonly object HostsSync = new();
-    private static readonly Dictionary<string, WorkspaceHost> Hosts = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private static readonly object _hostsSync = new();
+    private static readonly Dictionary<string, WorkspaceHost> _hosts = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     private readonly WorkspacePaths _paths;
     private readonly string _workspaceKey;
@@ -23,7 +23,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         _paths = paths;
         _workspaceKey = CanonicalWorkspaceKey(paths.RootPath);
 
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             _host = TryAttachOrAcquireHost();
         }
@@ -33,7 +33,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     {
         get
         {
-            lock (HostsSync)
+            lock (_hostsSync)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 return (_host ??= TryAttachOrAcquireHost()) is not null;
@@ -45,7 +45,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     {
         ValidateRequest(operationId, requestHash);
 
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var host = _host ??= TryAttachOrAcquireHost();
@@ -90,7 +90,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     {
         ValidateRequest(operationId, requestHash);
 
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var host = _host ??= TryAttachOrAcquireHost();
@@ -135,7 +135,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     {
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
         ArgumentNullException.ThrowIfNull(cancellation);
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var host = _host ??= TryAttachOrAcquireHost();
@@ -153,7 +153,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
         CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
         WorkspaceHost? localHost;
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             localHost = _host;
@@ -169,7 +169,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
     public ValueTask DisposeAsync()
     {
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             if (_disposed)
             {
@@ -188,7 +188,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
     public void RelinquishWorkspaceHost()
     {
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_host is null)
@@ -204,7 +204,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
     internal static void ReleaseLease(string workspaceKey, WorkspaceHost host, string operationId, long generation)
     {
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             if (host.Generation == generation && string.Equals(host.ActiveOperationId, operationId, StringComparison.Ordinal))
             {
@@ -218,7 +218,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
     internal static void ReleaseBusyOutcomeReservation(string workspaceKey, WorkspaceHost host, string operationId, long generation)
     {
-        lock (HostsSync)
+        lock (_hostsSync)
         {
             if (host.BusyOutcomeReservations.TryGetValue(operationId, out var reservation) && reservation.Generation == generation)
             {
@@ -237,13 +237,13 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             return;
         }
 
-        Hosts.Remove(workspaceKey);
+        _hosts.Remove(workspaceKey);
         host.Dispose();
     }
 
     private WorkspaceHost? TryAttachOrAcquireHost()
     {
-        if (Hosts.TryGetValue(_workspaceKey, out var existing))
+        if (_hosts.TryGetValue(_workspaceKey, out var existing))
         {
             existing.ReferenceCount++;
             return existing;
@@ -281,7 +281,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             throw;
         }
 
-        Hosts.Add(_workspaceKey, host);
+        _hosts.Add(_workspaceKey, host);
         return host;
     }
 

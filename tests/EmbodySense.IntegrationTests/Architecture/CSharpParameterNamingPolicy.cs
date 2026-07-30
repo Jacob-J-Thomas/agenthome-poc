@@ -6,14 +6,14 @@ namespace EmbodySense.IntegrationTests.Architecture;
 
 internal static class CSharpParameterNamingPolicy
 {
-    private static readonly CSharpParseOptions ParseOptions = new(LanguageVersion.CSharp14);
-    private static readonly CSharpCompilation BindingCompilation = CSharpCompilation.Create(nameof(CSharpParameterNamingPolicy), references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
+    private static readonly CSharpParseOptions _parseOptions = new(LanguageVersion.CSharp14);
+    private static readonly CSharpCompilation _bindingCompilation = CSharpCompilation.Create(nameof(CSharpParameterNamingPolicy), references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
 
     public static IReadOnlyList<string> FindViolations(string source, string sourcePath)
     {
-        var syntaxTree = CSharpSyntaxTree.ParseText(source, ParseOptions, sourcePath);
+        var syntaxTree = CSharpSyntaxTree.ParseText(source, _parseOptions, sourcePath);
         var root = syntaxTree.GetRoot();
-        var semanticModel = BindingCompilation.AddSyntaxTrees(syntaxTree).GetSemanticModel(syntaxTree, ignoreAccessibility: true);
+        var semanticModel = _bindingCompilation.AddSyntaxTrees(syntaxTree).GetSemanticModel(syntaxTree, ignoreAccessibility: true);
         // Destructors, accessors, and function-pointer signatures expose no authored ParameterSyntax identifier, so no naming rule applies to them.
         var parameters = GetParameterRules(root);
 

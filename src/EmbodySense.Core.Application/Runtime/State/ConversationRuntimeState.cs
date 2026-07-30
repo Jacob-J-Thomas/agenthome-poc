@@ -10,7 +10,7 @@ namespace EmbodySense.Core.Application.Runtime.State;
 
 public sealed class ConversationRuntimeState
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WorkspaceExclusiveAccess = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _workspaceExclusiveAccess = new(StringComparer.OrdinalIgnoreCase);
     private readonly IResettableInferenceClient? _resettableInferenceClient;
     private readonly List<RuntimeContextMessage> _messages;
     private readonly object _messagesSync = new();
@@ -29,7 +29,7 @@ public sealed class ConversationRuntimeState
         _messages = initialMessages?.Select(message => CreateContextMessage(message, RuntimeContextSource.StartupContext)).ToList() ?? [];
         _exclusiveAccess = string.IsNullOrWhiteSpace(exclusiveAccessScope)
             ? new SemaphoreSlim(1, 1)
-            : WorkspaceExclusiveAccess.GetOrAdd(exclusiveAccessScope.Trim(), _ => new SemaphoreSlim(1, 1));
+            : _workspaceExclusiveAccess.GetOrAdd(exclusiveAccessScope.Trim(), _ => new SemaphoreSlim(1, 1));
     }
 
     public IReadOnlyList<LlmMessage> Messages

@@ -13,7 +13,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
 public sealed class CustomLoopLifecycleService
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly ICustomLoopControlOperationStore _operationStore;
@@ -283,8 +283,8 @@ public sealed class CustomLoopLifecycleService
 
         if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(run))
         {
-            const string detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";
-            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, detail);
+            const string Detail = "Explicit Resume rejected an integrity-incomplete admission; the run requires review and no provider request was dispatched.";
+            var quarantined = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
             var quarantinedRun = quarantined.Run ?? quarantined.CurrentRun ?? run;
             var status = quarantined.Run is null ? quarantined.Status : CustomLoopControlStatus.NeedsReview;
             return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
@@ -382,8 +382,8 @@ public sealed class CustomLoopLifecycleService
     {
         if (operation.Kind == CustomLoopControlKind.Resume && run.Status == CustomLoopRunStatus.Running)
         {
-            const string resumeRecoveryDetail = "Pending Resume recovery found the durable Running transition before its control receipt completed; the undispatched run was parked at its proved checkpoint boundary.";
-            var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.Paused, operation.Actor, NewEventId("resume-recovery"), resumeRecoveryDetail);
+            const string ResumeRecoveryDetail = "Pending Resume recovery found the durable Running transition before its control receipt completed; the undispatched run was parked at its proved checkpoint boundary.";
+            var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.Paused, operation.Actor, NewEventId("resume-recovery"), ResumeRecoveryDetail);
             if (parked.Run is null)
             {
                 return await CompleteAuditedOutcomeAsync(operation, parked.Status, parked.CurrentRun, parked.Detail);
@@ -422,8 +422,8 @@ public sealed class CustomLoopLifecycleService
         var current = await TryLoadAsync(resumedRun.Id, IntegrityToken()) ?? resumedRun;
         if (exception is OperationCanceledException && current.Status == CustomLoopRunStatus.CancelRequested)
         {
-            const string cancellationDetail = "The ordered resume executor observed the durable cancellation request and stopped its active attempt; cancellation was completed without another provider dispatch.";
-            var cancelled = await PersistTransitionAsync(current, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("resume-cancelled"), cancellationDetail);
+            const string CancellationDetail = "The ordered resume executor observed the durable cancellation request and stopped its active attempt; cancellation was completed without another provider dispatch.";
+            var cancelled = await PersistTransitionAsync(current, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("resume-cancelled"), CancellationDetail);
             var cancelledRun = cancelled.Run ?? cancelled.CurrentRun ?? current;
             var cancelledStatus = cancelled.Run is not null
                 ? cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning
@@ -698,7 +698,7 @@ public sealed class CustomLoopLifecycleService
 
     private static CancellationToken IntegrityToken()
     {
-        return new CancellationTokenSource(IntegrityWriteTimeout).Token;
+        return new CancellationTokenSource(_integrityWriteTimeout).Token;
     }
 
     private static string SafeExceptionClass(Exception exception)

@@ -16,7 +16,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
 public sealed class CustomLoopAdmissionServiceTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public void Constructor_rejects_missing_dependencies()
@@ -246,9 +246,9 @@ public sealed class CustomLoopAdmissionServiceTests
         var missingRuns = new FakeRunStore();
         var missing = await Service(new FakeDefinitionStore(definition), missingRuns).AdmitAsync(Request(definition) with { InvocationPrompt = " \t" });
 
-        const string decomposed = "Cafe\u0301 request";
+        const string Decomposed = "Cafe\u0301 request";
         var acceptedRuns = new FakeRunStore();
-        var accepted = await Service(new FakeDefinitionStore(definition), acceptedRuns).AdmitAsync(Request(definition) with { InvocationPrompt = decomposed });
+        var accepted = await Service(new FakeDefinitionStore(definition), acceptedRuns).AdmitAsync(Request(definition) with { InvocationPrompt = Decomposed });
 
         Assert.Equal(CustomLoopAdmissionStatus.Invalid, missing.Status);
         Assert.Contains(missing.ValidationErrors, error => error.Code == "invocation_prompt_required");
@@ -308,9 +308,9 @@ public sealed class CustomLoopAdmissionServiceTests
     [Fact]
     public async Task Context_manifest_is_bound_to_exact_unmodified_message_content()
     {
-        const string decomposed = "role Cafe\u0301";
+        const string Decomposed = "role Cafe\u0301";
         var definition = Definition();
-        var exact = Snapshot(directoryRoleContent: decomposed);
+        var exact = Snapshot(directoryRoleContent: Decomposed);
         var exactResult = await Service(new FakeDefinitionStore(definition), new FakeRunStore()).AdmitAsync(Request(definition) with { ContextSnapshot = exact });
 
         var tampered = exact with
@@ -321,7 +321,7 @@ public sealed class CustomLoopAdmissionServiceTests
         var tamperedResult = await Service(new FakeDefinitionStore(definition), tamperedRuns).AdmitAsync(Request(definition) with { ContextSnapshot = tampered });
 
         Assert.Equal(CustomLoopAdmissionStatus.Admitted, exactResult.Status);
-        Assert.Equal(decomposed, exactResult.Run?.ContextSnapshot.WorkspaceContextMessages[0].Content);
+        Assert.Equal(Decomposed, exactResult.Run?.ContextSnapshot.WorkspaceContextMessages[0].Content);
         Assert.Equal(CustomLoopAdmissionStatus.Invalid, tamperedResult.Status);
         Assert.Contains(tamperedResult.ValidationErrors, error => error.Code == "context_manifest_mismatch");
         Assert.Equal(0, tamperedRuns.CreateCallCount);
@@ -374,11 +374,11 @@ public sealed class CustomLoopAdmissionServiceTests
     [Fact]
     public async Task Successful_admission_persists_a_valid_hash_bound_record_before_metadata_only_audit()
     {
-        const string secretPrompt = "private invocation prompt";
-        const string secretRoleContext = "private role context";
+        const string SecretPrompt = "private invocation prompt";
+        const string SecretRoleContext = "private role context";
         var definition = Rehash(Definition() with { ToolAssignments = [CustomLoopToolAssignment.Read] });
-        var context = Snapshot(secretRoleContext);
-        var request = Request(definition) with { InvocationPrompt = secretPrompt, ContextSnapshot = context };
+        var context = Snapshot(SecretRoleContext);
+        var request = Request(definition) with { InvocationPrompt = SecretPrompt, ContextSnapshot = context };
         var runs = new FakeRunStore();
         var audit = new RecordingAuditLog();
         var identity = new QueueIdentityGenerator(["run-admitted"], ["event-admitted", "event-audit-complete"]);
@@ -392,13 +392,13 @@ public sealed class CustomLoopAdmissionServiceTests
         Assert.Equal("run-admitted", run.Id);
         Assert.Equal(2, run.LifecycleVersion);
         Assert.Equal(CustomLoopRunStatus.Admitted, run.Status);
-        Assert.Equal(Now, run.CreatedAtUtc);
-        Assert.Equal(Now, run.UpdatedAtUtc);
+        Assert.Equal(_now, run.CreatedAtUtc);
+        Assert.Equal(_now, run.UpdatedAtUtc);
         Assert.Null(run.CompletedAtUtc);
         Assert.Equal(request.OperationId, run.AdmissionOperationId);
         Assert.Equal(definition, run.AdmittedDefinition);
         Assert.Equal(request.ModelSnapshot, run.ModelSnapshot);
-        Assert.Equal(secretPrompt, run.TriggerPrompt);
+        Assert.Equal(SecretPrompt, run.TriggerPrompt);
         Assert.True(CustomLoopAdmissionRequestHash.Matches(run));
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
         Assert.Equal(2, run.Events.Length);
@@ -425,8 +425,8 @@ public sealed class CustomLoopAdmissionServiceTests
         Assert.DoesNotContain(auditEvent.Metadata.Keys, key => key.Contains("context", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(auditEvent.Metadata.Keys, key => key.Contains("output", StringComparison.OrdinalIgnoreCase));
         var serializedAudit = JsonSerializer.Serialize(auditEvent);
-        Assert.DoesNotContain(secretPrompt, serializedAudit, StringComparison.Ordinal);
-        Assert.DoesNotContain(secretRoleContext, serializedAudit, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretPrompt, serializedAudit, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretRoleContext, serializedAudit, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -731,7 +731,7 @@ public sealed class CustomLoopAdmissionServiceTests
         var failed = Assert.IsType<CustomLoopRunRecord>(result.Run);
         Assert.Equal(CustomLoopRunStatus.Failed, failed.Status);
         Assert.Equal(2, failed.LifecycleVersion);
-        Assert.Equal(Now, failed.CompletedAtUtc);
+        Assert.Equal(_now, failed.CompletedAtUtc);
         Assert.Equal("admission_audit_failed", failed.FailureCode);
         Assert.Contains(nameof(IOException), failed.FailureDetail, StringComparison.Ordinal);
         Assert.Equal("event-integrity-failure", failed.Events[^1].EventId);
@@ -895,7 +895,7 @@ public sealed class CustomLoopAdmissionServiceTests
     public async Task Audit_integrity_uses_the_persisted_timestamp_and_handles_an_update_without_a_returned_record()
     {
         var definition = Definition();
-        var future = Now.AddMinutes(1);
+        var future = _now.AddMinutes(1);
         var runs = new FakeRunStore
         {
             CreateResultFactory = candidate => CustomLoopRunStoreResult.Created(candidate with { UpdatedAtUtc = future }),
@@ -974,7 +974,7 @@ public sealed class CustomLoopAdmissionServiceTests
 
     private static CustomLoopAdmissionService Service(FakeDefinitionStore definitions, FakeRunStore runs, RecordingAuditLog? audit = null, ICustomLoopRunIdentityGenerator? identity = null, ICustomLoopToolAuthorityProvider? authorityProvider = null)
     {
-        return new CustomLoopAdmissionService(definitions, runs, audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), identity ?? new QueueIdentityGenerator(["run-admitted"], ["event-admitted", "event-audit-complete", "event-integrity-failure"]), new FixedTimeProvider(Now));
+        return new CustomLoopAdmissionService(definitions, runs, audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), identity ?? new QueueIdentityGenerator(["run-admitted"], ["event-admitted", "event-audit-complete", "event-integrity-failure"]), new FixedTimeProvider(_now));
     }
 
     private static AuditEvent AssertAdmissionAudit(RecordingAuditLog audit, string status, string outcome)
@@ -991,7 +991,7 @@ public sealed class CustomLoopAdmissionServiceTests
 
     private static CustomLoopDefinition Definition(CustomLoopTriggerPromptSource promptSource = CustomLoopTriggerPromptSource.Invocation, string presetPrompt = "", bool includeInvokingConversation = false)
     {
-        var seed = CustomLoopDefinition.CreateSeed("loop-admission", "role-workspace", "step-admission", "create-loop", Now.AddHours(-1));
+        var seed = CustomLoopDefinition.CreateSeed("loop-admission", "role-workspace", "step-admission", "create-loop", _now.AddHours(-1));
         return Rehash(seed with
         {
             DisplayName = "Admission loop",
@@ -1022,7 +1022,7 @@ public sealed class CustomLoopAdmissionServiceTests
 
     private static CustomLoopContextSnapshot Snapshot(string directoryRoleContent = "Directory role context", CustomLoopMessageSnapshot[]? invokingConversationMessages = null)
     {
-        var capturedAtUtc = Now.AddMinutes(-1);
+        var capturedAtUtc = _now.AddMinutes(-1);
         var manifest = new List<CustomLoopContextManifestSource>
         {
             IncludedSource(1, CustomLoopContextSource.RoleInstruction, "nearest-agents", CustomLoopContextProvenance.WorkspaceRoleFile, CustomLoopContextTrustClass.TrustedInstruction, LlmMessageRole.System, directoryRoleContent, capturedAtUtc),
@@ -1068,7 +1068,7 @@ public sealed class CustomLoopAdmissionServiceTests
 
     private static CustomLoopConversationReference Conversation()
     {
-        return new CustomLoopConversationReference("conversation-bound", "version-1", Now.AddMinutes(-1));
+        return new CustomLoopConversationReference("conversation-bound", "version-1", _now.AddMinutes(-1));
     }
 
     private static CustomLoopRunRecord ExistingRun(CustomLoopDefinition definition, CustomLoopAdmissionRequest request)
@@ -1082,7 +1082,7 @@ public sealed class CustomLoopAdmissionServiceTests
         var admitted = new CustomLoopRunEvent(
             1,
             "event-existing",
-            Now,
+            _now,
             CustomLoopRunEventKind.Admitted,
             null,
             null,
@@ -1099,15 +1099,15 @@ public sealed class CustomLoopAdmissionServiceTests
             request.ModelSnapshot.Model,
             null,
             null);
-        var auditCompleted = new CustomLoopRunEvent(2, "event-existing-audit-complete", Now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
+        var auditCompleted = new CustomLoopRunEvent(2, "event-existing-audit-complete", _now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
         var run = new CustomLoopRunRecord(
             CustomLoopRunRecord.CurrentSchemaVersion,
             "run-existing",
             definition.Id,
             2,
             CustomLoopRunStatus.Admitted,
-            Now,
-            Now,
+            _now,
+            _now,
             null,
             request.Surface,
             request.ModelSnapshot,
@@ -1170,7 +1170,7 @@ public sealed class CustomLoopAdmissionServiceTests
             var catalog = new[] { CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search };
             var roleHash = CustomLoopTraceContentHash.Compute(roleId + "\n" + string.Join('\n', effective.OrderBy(value => value)));
             var catalogHash = CustomLoopTraceContentHash.Compute(string.Join('\n', catalog));
-            return Task.FromResult(new CustomLoopToolAuthoritySnapshot(roleId, admitted, effective, catalog, effective, roleHash, catalogHash, Now, true, "Test authority snapshot."));
+            return Task.FromResult(new CustomLoopToolAuthoritySnapshot(roleId, admitted, effective, catalog, effective, roleHash, catalogHash, _now, true, "Test authority snapshot."));
         }
     }
 

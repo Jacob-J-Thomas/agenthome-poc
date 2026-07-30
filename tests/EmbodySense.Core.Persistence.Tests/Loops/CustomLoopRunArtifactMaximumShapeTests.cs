@@ -25,8 +25,8 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopRunArtifactMaximumShapeTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 17, 12, 0, 0, TimeSpan.Zero);
-    private static readonly JsonSerializerOptions CanonicalJsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false, MaxDepth = 64 };
+    private static readonly DateTimeOffset _now = new(2026, 7, 17, 12, 0, 0, TimeSpan.Zero);
+    private static readonly JsonSerializerOptions _canonicalJsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false, MaxDepth = 64 };
     private readonly ITestOutputHelper _output;
 
     public CustomLoopRunArtifactMaximumShapeTests(ITestOutputHelper output)
@@ -253,7 +253,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
     private static CustomLoopDefinition MaximumDefinition()
     {
-        var seed = CustomLoopDefinition.CreateSeed("loop-maximum", "role-maximum", "step-1", "create-maximum", Now);
+        var seed = CustomLoopDefinition.CreateSeed("loop-maximum", "role-maximum", "step-1", "create-maximum", _now);
         var nodePolicy = new CustomLoopContextPolicy(
             new CustomLoopContextInputPolicy(true, true, true, true, true),
             new CustomLoopContextOutputPolicy(true, true));
@@ -274,7 +274,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
     private static CustomLoopRunRecord InitialRun(CustomLoopDefinition definition, CustomLoopToolAuthoritySnapshot authority)
     {
-        var admitted = new CustomLoopRunEvent(1, "event-admitted", Now, CustomLoopRunEventKind.Admitted, null, null, null, "Maximum run admitted.", [], null, null, null, null, null, null, "provider", "model", null, null, authority);
+        var admitted = new CustomLoopRunEvent(1, "event-admitted", _now, CustomLoopRunEventKind.Admitted, null, null, null, "Maximum run admitted.", [], null, null, null, null, null, null, "provider", "model", null, null, authority);
         var context = MaximumContext();
         var run = new CustomLoopRunRecord(
             CustomLoopRunRecord.CurrentSchemaVersion,
@@ -282,8 +282,8 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             definition.Id,
             1,
             CustomLoopRunStatus.Admitted,
-            Now,
-            Now,
+            _now,
+            _now,
             null,
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
@@ -292,7 +292,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             string.Empty,
             definition,
             definition.TriggerPolicy.PresetPrompt!,
-            new CustomLoopConversationReference("conversation-maximum", CustomLoopTraceContentHash.Compute("conversation-version"), Now),
+            new CustomLoopConversationReference("conversation-maximum", CustomLoopTraceContentHash.Compute("conversation-version"), _now),
             context,
             CustomLoopExecutionClock.NotStarted(),
             CustomLoopRunCheckpoint.Start(),
@@ -305,7 +305,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
     private static CustomLoopRunRecord CompleteAdmissionAudit(CustomLoopRunRecord run)
     {
-        var admissionAudit = new CustomLoopRunEvent(2, "event-admission-audit", Now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
+        var admissionAudit = new CustomLoopRunEvent(2, "event-admission-audit", _now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
         return run with { LifecycleVersion = 2, Events = [.. run.Events, admissionAudit] };
     }
 
@@ -337,13 +337,13 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             sources.Add(Source(sources.Count + 1, CustomLoopContextSource.InvokingConversation, id, $"conversation/maximum/messages/{index + 1}", CustomLoopContextProvenance.LogicalConversation, CustomLoopContextTrustClass.UntrustedData, LlmMessageRole.User, MaxText(id, characters)));
         }
 
-        var snapshot = new CustomLoopContextSnapshot(CustomLoopContextSnapshot.CurrentSchemaVersion, Now, sources.ToArray(), string.Empty);
+        var snapshot = new CustomLoopContextSnapshot(CustomLoopContextSnapshot.CurrentSchemaVersion, _now, sources.ToArray(), string.Empty);
         return CustomLoopContextSnapshotHash.Apply(snapshot);
     }
 
     private static CustomLoopContextManifestSource Source(int order, CustomLoopContextSource sourceType, string sourceId, string sourcePath, CustomLoopContextProvenance provenance, CustomLoopContextTrustClass trust, LlmMessageRole role, string content)
     {
-        return new CustomLoopContextManifestSource(order, sourceType, sourceId, sourcePath, provenance, trust, role, content, CustomLoopTraceContentHash.Compute(content), content.Length, content.Length, false, null, null, Now);
+        return new CustomLoopContextManifestSource(order, sourceType, sourceId, sourcePath, provenance, trust, role, content, CustomLoopTraceContentHash.Compute(content), content.Length, content.Length, false, null, null, _now);
     }
 
     private static CustomLoopToolAuthoritySnapshot Authority()
@@ -357,7 +357,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             assignments,
             CustomLoopTraceContentHash.Compute("role-maximum-list-read-search"),
             CustomLoopTraceContentHash.Compute("catalog-list-read-search"),
-            Now,
+            _now,
             true,
             MaxText("authority", CustomLoopLimits.MaxToolGovernanceDetailCharacters));
     }
@@ -464,7 +464,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             foreach (var item in root[table.Name]!.AsArray())
             {
                 var entry = item!.AsObject();
-                var valueBytes = JsonSerializer.SerializeToUtf8Bytes(entry[table.Value]!, CanonicalJsonOptions);
+                var valueBytes = JsonSerializer.SerializeToUtf8Bytes(entry[table.Value]!, _canonicalJsonOptions);
                 entry["sha256"] = Convert.ToHexString(SHA256.HashData(valueBytes)).ToLowerInvariant();
             }
         }
@@ -472,7 +472,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
     private static byte[] SerializeEnvelopeNode(JsonObject root)
     {
-        return Encoding.UTF8.GetBytes(root.ToJsonString(CanonicalJsonOptions) + "\n");
+        return Encoding.UTF8.GetBytes(root.ToJsonString(_canonicalJsonOptions) + "\n");
     }
 
     private static void AssertCanonicalReferences(byte[] encoded)
@@ -596,7 +596,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
                 completeResult.Length,
                 Encoding.UTF8.GetByteCount(completeResult),
                 4,
-                Now,
+                _now,
                 0,
                 "Retained under the oldest-first 256-artifact and 64 MiB sensitive local workspace evidence policy.");
             var formatted = ToolResultFormatter.FormatResults([new ToolResult(outcomeValue, completeResult, brokerId, resolved, request, governance, retention)]);
@@ -622,7 +622,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
                 var toolEvent = new CustomLoopRunEvent(
                     current.Events.Length + 1,
                     $"event-tool-{toolIndex}-{index + 1}",
-                    Now,
+                    _now,
                     kinds[index],
                     attempt.Iteration,
                     attempt.StepId,
@@ -745,6 +745,6 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
     private sealed class FixedTimeProvider : TimeProvider
     {
-        public override DateTimeOffset GetUtcNow() => Now;
+        public override DateTimeOffset GetUtcNow() => _now;
     }
 }

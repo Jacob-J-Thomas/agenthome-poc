@@ -6,7 +6,7 @@ namespace EmbodySense.IntegrationTests.Architecture;
 
 public sealed class ModelSourceLayoutTests
 {
-    private static readonly string[] ModelTypeSuffixes =
+    private static readonly string[] _modelTypeSuffixes =
     [
         "Config",
         "Configuration",
@@ -67,7 +67,7 @@ public sealed class ModelSourceLayoutTests
     [Fact]
     public void Model_candidate_classification_catches_records_enums_and_dto_suffixes()
     {
-        const string source = """
+        const string Source = """
             namespace Example;
 
             internal sealed record FeatureState(string Value);
@@ -81,7 +81,7 @@ public sealed class ModelSourceLayoutTests
             internal sealed class FeatureService { }
             """;
 
-        Assert.Equal(["FeatureState", "FeatureKind", "FeatureRequest", "FeatureDTO"], FindTopLevelModelCandidateNames(source));
+        Assert.Equal(["FeatureState", "FeatureKind", "FeatureRequest", "FeatureDTO"], FindTopLevelModelCandidateNames(Source));
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public sealed class ModelSourceLayoutTests
     [Fact]
     public void Behavior_classification_catches_behavior_without_rejecting_storage_only_constructors()
     {
-        const string source = """
+        const string Source = """
             namespace Example;
 
             internal sealed record EventfulState
@@ -172,7 +172,7 @@ public sealed class ModelSourceLayoutTests
             }
             """;
 
-        Assert.Equal(["EventfulState", "NestedValidatorState", "NormalizedState", "StaticMutationState"], FindTopLevelBehaviorBearingTypeNames(source));
+        Assert.Equal(["EventfulState", "NestedValidatorState", "NormalizedState", "StaticMutationState"], FindTopLevelBehaviorBearingTypeNames(Source));
     }
 
     private static bool IsModelFile(string sourceRoot, string file)
@@ -190,7 +190,7 @@ public sealed class ModelSourceLayoutTests
             .OfType<BaseTypeDeclarationSyntax>()
             .Where(declaration => declaration.Parent is BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)
             .Where(declaration => !OwnsBehavior(declaration))
-            .Where(declaration => declaration is RecordDeclarationSyntax or EnumDeclarationSyntax || ModelTypeSuffixes.Any(suffix => declaration.Identifier.ValueText.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+            .Where(declaration => declaration is RecordDeclarationSyntax or EnumDeclarationSyntax || _modelTypeSuffixes.Any(suffix => declaration.Identifier.ValueText.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
             .Select(declaration => declaration.Identifier.ValueText)
             .ToArray();
     }
@@ -284,7 +284,7 @@ public sealed class ModelSourceLayoutTests
 
     private static bool HasExpectedNamespace(string sourceRoot, string file)
     {
-        var match = NamespaceDeclarationPattern.Match(File.ReadAllText(file));
+        var match = _namespaceDeclarationPattern.Match(File.ReadAllText(file));
         if (!match.Success)
         {
             return false;
@@ -296,13 +296,13 @@ public sealed class ModelSourceLayoutTests
         return string.Equals(declaredNamespace, expectedNamespace, StringComparison.Ordinal);
     }
 
-    private static readonly Regex NamespaceDeclarationPattern = new(@"^\s*namespace\s+(?<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[;{]", RegexOptions.CultureInvariant | RegexOptions.Multiline);
-    private static readonly Regex TypeDeclarationWithBaseListPattern = new(@"^\s*(?:(?:public|internal|private|protected|file|abstract|sealed|static|partial|readonly|ref|unsafe|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct)\s+[A-Za-z_]\w*(?:\s*<[^>{;]+>)?(?:\s*\([^;{]*\))?\s*:\s*(?<bases>[^{]+)\{", RegexOptions.CultureInvariant | RegexOptions.Multiline);
-    private static readonly Regex ComparerBaseTypePattern = new(@"\b(?:IComparer|IEqualityComparer|Comparer)\s*<", RegexOptions.CultureInvariant);
+    private static readonly Regex _namespaceDeclarationPattern = new(@"^\s*namespace\s+(?<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[;{]", RegexOptions.CultureInvariant | RegexOptions.Multiline);
+    private static readonly Regex _typeDeclarationWithBaseListPattern = new(@"^\s*(?:(?:public|internal|private|protected|file|abstract|sealed|static|partial|readonly|ref|unsafe|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct)\s+[A-Za-z_]\w*(?:\s*<[^>{;]+>)?(?:\s*\([^;{]*\))?\s*:\s*(?<bases>[^{]+)\{", RegexOptions.CultureInvariant | RegexOptions.Multiline);
+    private static readonly Regex _comparerBaseTypePattern = new(@"\b(?:IComparer|IEqualityComparer|Comparer)\s*<", RegexOptions.CultureInvariant);
 
     private static bool DeclaresComparerType(string source)
     {
-        return TypeDeclarationWithBaseListPattern.Matches(source).Any(match => ComparerBaseTypePattern.IsMatch(match.Groups["bases"].Value));
+        return _typeDeclarationWithBaseListPattern.Matches(source).Any(match => _comparerBaseTypePattern.IsMatch(match.Groups["bases"].Value));
     }
 
     private static string FindRepositoryRoot()
