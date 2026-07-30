@@ -1268,50 +1268,6 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
-    private sealed record CustomLoopDefinitionMutationOperationRecord(
-        int SchemaVersion,
-        CustomLoopDefinitionMutationKind Kind,
-        string OperationId,
-        string RequestHash,
-        string LoopId,
-        string RoleId,
-        int? ExpectedDefinitionVersion,
-        CustomLoopDefinition? PlannedDefinition,
-        CustomLoopDefinition? PriorDefinition,
-        DateTimeOffset RequestedAtUtc,
-        DateTimeOffset UpdatedAtUtc,
-        CustomLoopDefinitionMutationState State,
-        CustomLoopDefinitionStoreStatus Outcome,
-        CustomLoopDefinition? ResultDefinition,
-        CustomLoopDefinitionConflict? ResultConflict,
-        CustomLoopDefinitionTombstone? ResultTombstone,
-        bool OutcomeAuditRecorded,
-        CustomLoopDefinition? OriginalDefinition,
-        DateTimeOffset RecordedAtUtc)
-    {
-        public CustomLoopDefinitionMutationOperation ToPublic()
-        {
-            return new CustomLoopDefinitionMutationOperation(
-                SchemaVersion,
-                Kind,
-                OperationId,
-                RequestHash,
-                LoopId,
-                RoleId,
-                ExpectedDefinitionVersion,
-                PlannedDefinition,
-                PriorDefinition,
-                RequestedAtUtc,
-                UpdatedAtUtc,
-                State,
-                Outcome,
-                ResultDefinition,
-                ResultConflict,
-                ResultTombstone,
-                OutcomeAuditRecorded);
-        }
-    }
-
     private sealed record WorkspaceState(
         IReadOnlyList<CustomLoopDefinition> Definitions,
         IReadOnlyList<CustomLoopDefinitionTombstone> Tombstones,
