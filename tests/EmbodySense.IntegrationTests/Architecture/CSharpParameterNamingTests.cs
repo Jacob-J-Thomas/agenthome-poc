@@ -51,7 +51,7 @@ public sealed class CSharpParameterNamingTests
     }
 
     [Fact]
-    public void Local_functions_and_anonymous_functions_accept_camel_case_and_temporary_underscore_placeholders()
+    public void Local_functions_and_anonymous_functions_accept_camel_case_and_unused_underscores()
     {
         const string source = """
             internal sealed class Worker
@@ -60,7 +60,11 @@ public sealed class CSharpParameterNamingTests
                 {
                     void Execute(string localValue) { }
                     Func<string, string> simple = inputValue => inputValue;
+                    Func<string, string> ignoredSimple = _ => string.Empty;
                     Func<string, string> parenthesized = (inputValue) => inputValue;
+                    Func<string, string> ignoredParenthesized = (_) => string.Empty;
+                    Func<string, string> ignoredWithUnrelatedMember = _ => holder._;
+                    Action<string> ignoredWithUnrelatedNamedArgument = _ => Consume(_: string.Empty);
                     Func<string, string, string> discarded = (_, _) => string.Empty;
                     Action<string> anonymous = delegate(string inputValue) { };
                     Action<string> anonymousPlaceholder = delegate(string _) { };
@@ -131,18 +135,21 @@ public sealed class CSharpParameterNamingTests
                     Func<string, string> parenthesized = (InputValue) => InputValue;
                     Func<string, string> invalidDiscard = (__) => string.Empty;
                     Action<string> anonymous = delegate(string InputValue) { };
+                    Func<int, int> usedUnderscore = _ => _ + 1;
+                    Func<int, Func<int, int, int>> usedThroughNestedDiscards = _ => (_, _) => _ + 1;
                 }
             }
             """;
 
         var violations = CSharpParameterNamingPolicy.FindViolations(source, "anonymous-rejected.cs");
 
-        Assert.Equal(5, violations.Count);
+        Assert.Equal(7, violations.Count);
         Assert.Contains(violations, violation => violation.Contains("local function parameter `LocalValue` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("simple lambda parameter `InputValue` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("parenthesized lambda parameter `InputValue` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("parenthesized lambda parameter `__` must use camelCase", StringComparison.Ordinal));
         Assert.Contains(violations, violation => violation.Contains("anonymous method parameter `InputValue` must use camelCase", StringComparison.Ordinal));
+        Assert.Contains(violations, violation => violation.Contains("simple lambda parameter `_` must use camelCase", StringComparison.Ordinal));
     }
 
     [Fact]

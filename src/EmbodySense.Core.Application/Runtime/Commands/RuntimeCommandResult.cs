@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Runtime.Commands.Models;
 using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Application.Runtime.Commands;

@@ -13,6 +13,7 @@ dotnet_naming_style.underscore_camel_case.required_prefix = _
 dotnet_naming_style.underscore_camel_case.capitalization = camel_case
 
 # Parameter casing is enforced by the syntax-aware CSharpParameterNamingTests gate because EditorConfig groups positional-record properties with ordinary parameters.
+# That gate accepts `_` for intentionally unused lambda and anonymous-method parameters, including the lone addressable form.
 
 dotnet_naming_rule.public_types_use_pascal_case.severity = warning
 dotnet_naming_rule.public_types_use_pascal_case.symbols = public_types

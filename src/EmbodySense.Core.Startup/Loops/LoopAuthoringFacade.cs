@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;

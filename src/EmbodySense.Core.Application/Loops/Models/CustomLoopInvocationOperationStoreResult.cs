@@ -1,0 +1,3 @@
+namespace EmbodySense.Core.Application.Loops.Models;
+
+public sealed record CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus Status, CustomLoopInvocationOperation? Operation);

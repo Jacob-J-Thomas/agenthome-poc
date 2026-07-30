@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Models;
 namespace EmbodySense.Core.Application.Loops;
 
 public interface ICustomLoopWorkspaceExecutionGate : IAsyncDisposable

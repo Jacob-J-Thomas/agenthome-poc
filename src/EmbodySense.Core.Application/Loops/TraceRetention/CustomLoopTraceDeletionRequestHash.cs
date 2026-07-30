@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using System.Security.Cryptography;
 using System.Text.Json;
 
