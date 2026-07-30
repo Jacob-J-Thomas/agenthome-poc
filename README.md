@@ -148,11 +148,13 @@ From the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. Pull requests also run the installed-browser smoke on a Windows runner; it remains opt-in locally because local Edge/Chrome GPU startup is host-specific:
+The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. Pull requests also run the required `browser-e2e` check on a Windows runner. That deterministic suite starts the Web host and controlled Codex app-server fixture as external processes, then exercises default chat and restart/reconnect behavior, system-loop locking, custom-loop authoring and evidence, governed approval decisions, provider/runtime failures, and diagnostic capture through installed Edge or Chrome. Restoring the active transcript after a process restart remains tracked in [#125](https://github.com/Jacob-J-Thomas/agenthome-poc/issues/125). It remains opt-in locally because local browser GPU startup is host-specific:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -RunBrowserE2E
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Configuration Release -RunBrowserE2E -BrowserE2EOnly
 ```
+
+The browser-only command fails if the installed-browser scenarios are skipped or the browser prerequisite is missing. Unexpected page, console, network, and server failures also fail the suite; the existing CSP and favicon baseline noise is narrowly excepted pending [#126](https://github.com/Jacob-J-Thomas/agenthome-poc/issues/126). On failure the suite writes the TRX plus browser screenshot, DOM, console/network diagnostics, process output, and Web-server output under `tests\EmbodySense.E2ETests\TestResults\BrowserE2E`; the pull-request workflow uploads that directory as `browser-e2e-diagnostics`.
 
 The lower-level coverage verifier, `scripts\verify-coverage.ps1`, expects Cobertura files from the current run. Prefer `verify.ps1` so stale `TestResults` are cleared and coverage timestamps are bounded automatically. The real `codex app-server` process launcher is treated as an external process adapter; app-server protocol behavior is covered through the `Clients.CodexAppServer.ICodexAppServerTransport` seam.
 
