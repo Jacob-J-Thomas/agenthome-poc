@@ -40,14 +40,14 @@ public sealed class ModelSourceLayoutTests
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = FoundationProjectRoots(sourceRoot)
+        var violations = MigratedProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => IsModelFile(sourceRoot, file))
             .Where(file => !HasExpectedNamespace(sourceRoot, file))
             .Select(file => Path.GetRelativePath(root, file))
             .ToArray();
 
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Application, Core.Startup, CLI, and Web as their model slices are migrated.
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/85): Add Core.Startup, CLI, and Web as their model slices are migrated.
         Assert.Empty(violations);
     }
 
@@ -56,7 +56,7 @@ public sealed class ModelSourceLayoutTests
     {
         var root = FindRepositoryRoot();
         var sourceRoot = Path.Combine(root, "src");
-        var violations = FoundationProjectRoots(sourceRoot)
+        var violations = MigratedProjectRoots(sourceRoot)
             .SelectMany(projectRoot => Directory.EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories))
             .Where(file => !IsModelFile(sourceRoot, file))
             .SelectMany(file => FindTopLevelModelCandidateNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares model candidate {name} outside Models."))
@@ -75,10 +75,29 @@ public sealed class ModelSourceLayoutTests
             internal enum FeatureKind { Unknown }
             internal sealed class FeatureRequest { }
             internal sealed class FeatureDTO { }
+            internal sealed record FeatureResult(string Value)
+            {
+                public string Format() => Value;
+            }
             internal sealed class FeatureService { }
             """;
 
         Assert.Equal(["FeatureState", "FeatureKind", "FeatureRequest", "FeatureDTO"], FindTopLevelModelCandidateNames(source));
+    }
+
+    [Fact]
+    public void CoreApplication_model_files_do_not_own_behavior()
+    {
+        var root = FindRepositoryRoot();
+        var sourceRoot = Path.Combine(root, "src");
+        var projectRoot = Path.Combine(sourceRoot, "EmbodySense.Core.Application");
+        var violations = Directory
+            .EnumerateFiles(projectRoot, "*.cs", SearchOption.AllDirectories)
+            .Where(file => IsModelFile(sourceRoot, file))
+            .SelectMany(file => FindTopLevelBehaviorBearingTypeNames(File.ReadAllText(file)).Select(name => $"{Path.GetRelativePath(root, file)} declares behavior-bearing type {name} in Models."))
+            .ToArray();
+
+        Assert.True(violations.Length == 0, string.Join(Environment.NewLine, violations));
     }
 
     [Fact]
@@ -96,6 +115,34 @@ public sealed class ModelSourceLayoutTests
         Assert.Empty(violations);
     }
 
+    [Fact]
+    public void Behavior_classification_catches_field_events_and_nested_behavior()
+    {
+        const string source = """
+            namespace Example;
+
+            internal sealed record EventfulState
+            {
+                public event EventHandler? Changed;
+            }
+
+            internal sealed record NestedValidatorState
+            {
+                private sealed class Validator
+                {
+                    public bool IsValid() => true;
+                }
+            }
+
+            internal sealed record NestedDataState
+            {
+                private sealed record Metadata(string Value);
+            }
+            """;
+
+        Assert.Equal(["EventfulState", "NestedValidatorState"], FindTopLevelBehaviorBearingTypeNames(source));
+    }
+
     private static bool IsModelFile(string sourceRoot, string file)
     {
         var relativePath = Path.GetRelativePath(sourceRoot, file);
@@ -110,16 +157,50 @@ public sealed class ModelSourceLayoutTests
             .DescendantNodes()
             .OfType<BaseTypeDeclarationSyntax>()
             .Where(declaration => declaration.Parent is BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)
+            .Where(declaration => !OwnsBehavior(declaration))
             .Where(declaration => declaration is RecordDeclarationSyntax or EnumDeclarationSyntax || ModelTypeSuffixes.Any(suffix => declaration.Identifier.ValueText.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
             .Select(declaration => declaration.Identifier.ValueText)
             .ToArray();
     }
 
-    private static IReadOnlyList<string> FoundationProjectRoots(string sourceRoot)
+    private static IReadOnlyList<string> FindTopLevelBehaviorBearingTypeNames(string source)
+    {
+        return CSharpSyntaxTree
+            .ParseText(source)
+            .GetRoot()
+            .DescendantNodes()
+            .OfType<BaseTypeDeclarationSyntax>()
+            .Where(declaration => declaration.Parent is BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)
+            .Where(OwnsBehavior)
+            .Select(declaration => declaration.Identifier.ValueText)
+            .ToArray();
+    }
+
+    private static bool OwnsBehavior(BaseTypeDeclarationSyntax declaration)
+    {
+        if (declaration is not TypeDeclarationSyntax typeDeclaration)
+        {
+            return false;
+        }
+
+        return typeDeclaration.Members.Any(member => member is MethodDeclarationSyntax
+            or ConstructorDeclarationSyntax
+            or DestructorDeclarationSyntax
+            or OperatorDeclarationSyntax
+            or ConversionOperatorDeclarationSyntax
+            or IndexerDeclarationSyntax
+            or EventFieldDeclarationSyntax
+            || member is PropertyDeclarationSyntax property && (property.ExpressionBody is not null || property.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true)
+            || member is EventDeclarationSyntax eventDeclaration && eventDeclaration.AccessorList?.Accessors.Any(accessor => accessor.Body is not null || accessor.ExpressionBody is not null) == true
+            || member is BaseTypeDeclarationSyntax nestedType && OwnsBehavior(nestedType));
+    }
+
+    private static IReadOnlyList<string> MigratedProjectRoots(string sourceRoot)
     {
         return
         [
             Path.Combine(sourceRoot, "EmbodySense.Core.Common"),
+            Path.Combine(sourceRoot, "EmbodySense.Core.Application"),
             Path.Combine(sourceRoot, "EmbodySense.Core.Clients"),
             Path.Combine(sourceRoot, "EmbodySense.Core.Persistence")
         ];
@@ -139,14 +220,14 @@ public sealed class ModelSourceLayoutTests
         return string.Equals(declaredNamespace, expectedNamespace, StringComparison.Ordinal);
     }
 
+    private static readonly Regex NamespaceDeclarationPattern = new(@"^\s*namespace\s+(?<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[;{]", RegexOptions.CultureInvariant | RegexOptions.Multiline);
+    private static readonly Regex TypeDeclarationWithBaseListPattern = new(@"^\s*(?:(?:public|internal|private|protected|file|abstract|sealed|static|partial|readonly|ref|unsafe|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct)\s+[A-Za-z_]\w*(?:\s*<[^>{;]+>)?(?:\s*\([^;{]*\))?\s*:\s*(?<bases>[^{]+)\{", RegexOptions.CultureInvariant | RegexOptions.Multiline);
+    private static readonly Regex ComparerBaseTypePattern = new(@"\b(?:IComparer|IEqualityComparer|Comparer)\s*<", RegexOptions.CultureInvariant);
+
     private static bool DeclaresComparerType(string source)
     {
         return TypeDeclarationWithBaseListPattern.Matches(source).Any(match => ComparerBaseTypePattern.IsMatch(match.Groups["bases"].Value));
     }
-
-    private static readonly Regex NamespaceDeclarationPattern = new(@"^\s*namespace\s+(?<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*[;{]", RegexOptions.CultureInvariant | RegexOptions.Multiline);
-    private static readonly Regex TypeDeclarationWithBaseListPattern = new(@"^\s*(?:(?:public|internal|private|protected|file|abstract|sealed|static|partial|readonly|ref|unsafe|new)\s+)*(?:class|record(?:\s+(?:class|struct))?|struct)\s+[A-Za-z_]\w*(?:\s*<[^>{;]+>)?(?:\s*\([^;{]*\))?\s*:\s*(?<bases>[^{]+)\{", RegexOptions.CultureInvariant | RegexOptions.Multiline);
-    private static readonly Regex ComparerBaseTypePattern = new(@"\b(?:IComparer|IEqualityComparer|Comparer)\s*<", RegexOptions.CultureInvariant);
 
     private static string FindRepositoryRoot()
     {

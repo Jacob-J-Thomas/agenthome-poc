@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;

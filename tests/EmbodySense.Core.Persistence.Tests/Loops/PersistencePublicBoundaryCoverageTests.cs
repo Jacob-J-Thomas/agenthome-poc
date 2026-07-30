@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.Models;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;

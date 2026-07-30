@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 namespace EmbodySense.Core.Application.Loops.TraceRetention;
 
 public sealed record CustomLoopTraceDeletionResult(

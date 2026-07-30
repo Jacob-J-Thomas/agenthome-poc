@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Runtime.Commands.Models;
 using System.Globalization;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;

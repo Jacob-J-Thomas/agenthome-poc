@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.Memory.Models;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Security.Cryptography;
