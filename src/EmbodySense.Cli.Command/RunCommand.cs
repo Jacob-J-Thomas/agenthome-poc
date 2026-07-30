@@ -6,8 +6,19 @@ using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Cli.Command;
 
+/// <summary>
+/// Composes and hosts the supported interactive CLI runtime.
+/// </summary>
 public static class RunCommand
 {
+    /// <summary>
+    /// Validates runtime compatibility, optionally initializes the workspace with confirmation, and starts the console host.
+    /// </summary>
+    /// <param name="arguments">The complete CLI token sequence, including the root <c>run</c> token.</param>
+    /// <returns>Zero after an orderly session exit; one when the user declines required workspace initialization.</returns>
+    /// <exception cref="CodexRuntimeUnavailableException">
+    /// Runtime resolution is not compatible because the executable is unavailable, its compatibility probe failed, or it does not advertise the requested model.
+    /// </exception>
     public static async Task<int> RunAsync(CliArguments arguments)
     {
         var options = RunOptions.FromArguments(arguments);

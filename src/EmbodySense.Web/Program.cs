@@ -12,8 +12,17 @@ using EmbodySense.Web.Services;
 
 namespace EmbodySense.Web;
 
+/// <summary>
+/// Composes and starts the localhost EmbodySense Web host.
+/// </summary>
 public static class Program
 {
+    /// <summary>
+    /// Parses Web options, prints help without starting a server, or runs the configured host until shutdown.
+    /// </summary>
+    /// <param name="args">The supported Web command-line options.</param>
+    /// <returns>Zero after help output or an orderly server shutdown.</returns>
+    /// <exception cref="ArgumentException">A host, port, sandbox, or option value is invalid.</exception>
     public static async Task<int> Main(string[] args)
     {
         var options = WebRunOptions.FromArguments(args);
@@ -33,6 +42,12 @@ public static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Creates a Web application builder with the resolved static-content root, local URL, logging, and services.
+    /// </summary>
+    /// <param name="args">The original host arguments supplied to ASP.NET.</param>
+    /// <param name="options">The validated EmbodySense Web options.</param>
+    /// <returns>An unbuilt application builder.</returns>
     public static WebApplicationBuilder CreateBuilder(string[] args, WebRunOptions options)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -46,6 +61,16 @@ public static class Program
         return builder;
     }
 
+    /// <summary>
+    /// Registers strict JSON controllers, bounded SignalR, local-session security, and singleton runtime services.
+    /// </summary>
+    /// <param name="services">The host service collection.</param>
+    /// <param name="options">The validated workspace and runtime options captured by singleton services.</param>
+    /// <remarks>
+    /// JSON rejects unmapped members and numeric enum values. SignalR limits invocation payload size and
+    /// parallel calls. The runtime host, approval coordinator, authoring facade, and session token are
+    /// process singletons and are disposed by the application container when applicable.
+    /// </remarks>
     public static void ConfigureServices(IServiceCollection services, WebRunOptions options)
     {
         ArgumentNullException.ThrowIfNull(services);
@@ -84,6 +109,14 @@ public static class Program
         services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
     }
 
+    /// <summary>
+    /// Configures security headers, static files, authentication, authorization, controllers, and the session hub.
+    /// </summary>
+    /// <param name="app">The built application.</param>
+    /// <remarks>
+    /// Authentication runs before authorization. HTTP controllers own their endpoint policies, while
+    /// <c>/hubs/session</c> explicitly requires the local-session policy.
+    /// </remarks>
     public static void ConfigurePipeline(WebApplication app)
     {
         ArgumentNullException.ThrowIfNull(app);
@@ -103,11 +136,24 @@ public static class Program
         app.MapHub<WebSessionHub>("/hubs/session").RequireAuthorization(WebAuthPolicies.LocalSession);
     }
 
+    /// <summary>
+    /// Resolves the static-content root from the application base directory and current directory.
+    /// </summary>
+    /// <returns>The first recognized Web project or fallback directory.</returns>
     public static string ResolveContentRoot()
     {
         return ResolveContentRoot(AppContext.BaseDirectory, Directory.GetCurrentDirectory());
     }
 
+    /// <summary>
+    /// Resolves a directory containing the Web static entry point across published, project, and repository layouts.
+    /// </summary>
+    /// <param name="baseDirectory">The application base directory from which ancestor discovery starts.</param>
+    /// <param name="fallbackDirectory">The directory used for repository fallback and final fallback.</param>
+    /// <returns>
+    /// The base directory when it contains static assets; otherwise the nearest project or repository-style
+    /// <c>src/EmbodySense.Web</c> directory; otherwise the fallback directory.
+    /// </returns>
     public static string ResolveContentRoot(string baseDirectory, string fallbackDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(baseDirectory);
@@ -149,6 +195,10 @@ public static class Program
         return Directory.Exists(Path.Combine(directory, "wwwroot")) && File.Exists(Path.Combine(directory, "wwwroot", "index.html"));
     }
 
+    /// <summary>
+    /// Writes usage for the implemented localhost Web host options.
+    /// </summary>
+    /// <param name="writer">The output writer.</param>
     public static void PrintHelp(TextWriter writer)
     {
         ArgumentNullException.ThrowIfNull(writer);

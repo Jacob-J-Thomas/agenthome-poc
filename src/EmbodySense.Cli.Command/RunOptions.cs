@@ -1,6 +1,14 @@
 using EmbodySense.Cli.Command;
 namespace EmbodySense.Cli.Command;
 
+/// <summary>
+/// Represents validated options for one CLI run session.
+/// </summary>
+/// <param name="Model">The explicitly selected model, or <see langword="null"/> to use external configuration.</param>
+/// <param name="WorkingDirectory">The workspace root used for runtime composition.</param>
+/// <param name="CodexExecutablePath">The authoritative Codex executable path, or <see langword="null"/> for discovery.</param>
+/// <param name="CodexSandbox">The Codex sandbox mode passed to app-server thread startup.</param>
+/// <param name="Verbose">Whether startup context should be projected before ordinary turns.</param>
 public sealed record RunOptions(
     string? Model,
     string WorkingDirectory,
@@ -8,6 +16,12 @@ public sealed record RunOptions(
     string CodexSandbox,
     bool Verbose)
 {
+    /// <summary>
+    /// Parses and validates the supported run options.
+    /// </summary>
+    /// <param name="arguments">The complete CLI token sequence.</param>
+    /// <returns>Validated run options using current-directory and read-only sandbox defaults.</returns>
+    /// <exception cref="ArgumentException">An option is missing a value, unsupported, or has an unsupported sandbox value.</exception>
     public static RunOptions FromArguments(CliArguments arguments)
     {
         ArgumentNullException.ThrowIfNull(arguments);
