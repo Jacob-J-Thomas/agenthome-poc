@@ -306,7 +306,8 @@ public sealed class LoopRunApiControllerTests
     public async Task Pause_and_cancel_routes_require_auth_and_accept_only_the_frontend_control_body()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, codexPath: null, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "test-model");
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
         await app.StartAsync();
 
         try

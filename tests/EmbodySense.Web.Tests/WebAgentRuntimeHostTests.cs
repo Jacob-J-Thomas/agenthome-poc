@@ -467,7 +467,8 @@ public sealed class WebAgentRuntimeHostTests
     public async Task Evidence_retries_recovery_after_retained_runtime_startup_schema_failure()
     {
         using var workspace = new TestWorkspace();
-        await using var host = CreateHost(workspace.RootPath);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace);
+        await using var host = CreateHost(workspace.RootPath, codexPath);
         await host.InitializeWorkspaceAsync();
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
