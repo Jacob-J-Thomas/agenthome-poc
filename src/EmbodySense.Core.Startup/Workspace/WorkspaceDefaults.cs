@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Workspace.Models;
 
 namespace EmbodySense.Core.Startup.Workspace;
 

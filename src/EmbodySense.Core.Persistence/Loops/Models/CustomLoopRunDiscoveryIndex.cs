@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Persistence.Loops;
+namespace EmbodySense.Core.Persistence.Loops.Models;
 
 internal sealed record CustomLoopRunDiscoveryIndex(int SchemaVersion, long Revision, CustomLoopRunDiscoveryIndexEntry[] Entries)
 {

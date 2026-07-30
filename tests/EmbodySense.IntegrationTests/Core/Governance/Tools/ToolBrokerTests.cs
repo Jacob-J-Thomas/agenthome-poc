@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.LocalWorkspace;
+using EmbodySense.Core.Common.LocalWorkspace.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;

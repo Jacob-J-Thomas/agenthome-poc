@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Workspace.Models;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Permissions;
