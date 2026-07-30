@@ -377,6 +377,19 @@ function renderOverviewTab() {
       ],
       ["Surface", configuration.runtime.surface],
       ["Model", configuration.runtime.model],
+      [
+        "Codex runtime",
+        configuration.runtime.codexRuntime?.compatibility ?? "unknown",
+      ],
+      [
+        "Codex version",
+        configuration.runtime.codexRuntime?.version ?? "unknown",
+      ],
+      [
+        "Codex executable",
+        configuration.runtime.codexRuntime?.resolvedExecutablePath ??
+          configuration.runtime.codexExecutablePath,
+      ],
       ["Sandbox", configuration.runtime.codexSandbox],
       ["Audit events", String(configuration.audit.events.length)],
       [
@@ -386,6 +399,14 @@ function renderOverviewTab() {
     ]),
   );
   fragment.append(renderPathGroup(configuration.paths));
+  if (
+    configuration.runtime.codexRuntime &&
+    configuration.runtime.codexRuntime.compatibility !== "compatible"
+  ) {
+    fragment.append(
+      renderProblems([configuration.runtime.codexRuntime.detail]),
+    );
+  }
   fragment.append(renderConcepts(configuration.concepts));
   return fragment;
 }

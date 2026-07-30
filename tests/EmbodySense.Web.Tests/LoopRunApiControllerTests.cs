@@ -610,6 +610,11 @@ public sealed class LoopRunApiControllerTests
         var scriptPath = workspace.File("fake-loop-run-api-codex.ps1");
         var commandPath = workspace.File("fake-loop-run-api-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, """
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
 
             function Write-ProtocolJson($value) {
@@ -622,6 +627,7 @@ public sealed class LoopRunApiControllerTests
                 switch ($message.method) {
                     "initialize" { Write-ProtocolJson @{ id = $message.id; result = @{} } }
                     "initialized" { }
+                    "model/list" { Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } } }
                     "thread/start" { Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } } }
                     "turn/start" {
                         $turnId = "turn-test"

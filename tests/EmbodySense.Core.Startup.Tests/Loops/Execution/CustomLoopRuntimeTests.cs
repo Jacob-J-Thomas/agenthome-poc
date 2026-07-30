@@ -1351,6 +1351,11 @@ public sealed class CustomLoopRuntimeTests
         var scriptPath = workspace.File("fake-custom-loop-codex.ps1");
         var commandPath = workspace.File("fake-custom-loop-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, """
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
 
             function Write-ProtocolJson($value) {
@@ -1367,6 +1372,10 @@ public sealed class CustomLoopRuntimeTests
                     }
 
                     "initialized" {
+                    }
+
+                    "model/list" {
+                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
                     }
 
                     "thread/start" {

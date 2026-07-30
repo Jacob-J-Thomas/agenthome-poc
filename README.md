@@ -204,6 +204,8 @@ The default conversation loop reads the seeded `.agent/` documents when the runt
 
 The Web UI routes inference through the same local `codex app-server --stdio` path as CLI `run`, but exposes the interactive session through a token-guarded SignalR hub, supporting REST endpoints, and a static UI.
 
+Before either surface creates a runtime, the shared process boundary resolves and probes Codex. An explicit `--codex-path` is authoritative and never falls back. Without it, Windows discovery prefers current Codex Desktop-managed binaries under `%LOCALAPPDATA%\OpenAI\Codex\bin\` before considering PATH candidates. The probe records the resolved executable and `--version` output; when `--model` is supplied, it initializes app-server and requires `model/list` to advertise that exact model. It never silently substitutes another model. The Web Configuration overview shows this structured status, while CLI `run` prints it before workspace initialization. An unusable executable/model combination fails with the attempted path, version when available, model, and remediation before a conversation turn is accepted.
+
 From `scratch/`:
 
 ```powershell
@@ -214,7 +216,7 @@ Available Web options:
 
 - `--model <model>` or `-m <model>`: choose the Codex model.
 - `--workdir <path>` or `--working-directory <path>`: set the EmbodySense workspace root for governed tools, permissions, and audit.
-- `--codex-path <path>`: use a specific Codex executable.
+- `--codex-path <path>`: use exactly this Codex executable. An incompatible explicit executable fails instead of falling back to another installation.
 - `--sandbox <mode>`: set the Codex app-server sandbox mode for the inert runtime directory, such as `read-only` or `workspace-write`. Workspace file access is still governed by EmbodySense dynamic tools and `.agent/permissions.json`.
 - `--host <host>`: bind the Web host to `127.0.0.1`, `localhost`, or `::1`. Remote bind hosts are rejected.
 - `--port <port>`: set the localhost port. The default is `4378`.
@@ -222,6 +224,8 @@ Available Web options:
 ## Harness Run Options
 
 The `run` command routes inference through local `codex app-server --stdio` and streams Codex app-server `item/agentMessage/delta` events into the console loop.
+
+Runtime selection follows the same explicit-path, Codex Desktop, then PATH policy described above. If a stale PATH installation cannot advertise the requested model but a current Codex Desktop installation can, the compatible Desktop binary is selected and reported. Restart the Web or CLI process after installing or updating Codex so its runtime status is probed again.
 
 The default-conversation and custom-loop implementation flows are documented in the draw.io-compatible source diagram at [`docs/AGENT_LOOP.drawio`](docs/AGENT_LOOP.drawio). Keep both pages aligned with implemented inference, lifecycle, context, workspace, permission, audit, and trace behavior. The diagram is also a status artifact, not scope authority.
 
@@ -235,7 +239,7 @@ Available `run` options:
 
 - `--model <model>` or `-m <model>`: choose the Codex model.
 - `--workdir <path>` or `--working-directory <path>`: set the EmbodySense workspace root for governed tools, permissions, and audit.
-- `--codex-path <path>`: use a specific Codex executable.
+- `--codex-path <path>`: use exactly this Codex executable. An incompatible explicit executable fails instead of falling back to another installation.
 - `--sandbox <mode>`: set the Codex app-server sandbox mode for the inert runtime directory, such as `read-only` or `workspace-write`. Workspace file access is still governed by EmbodySense dynamic tools and `.agent/permissions.json`.
 
 Before running real inference, make sure Codex is installed and authenticated:

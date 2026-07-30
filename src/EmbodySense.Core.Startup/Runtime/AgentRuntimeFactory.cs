@@ -34,8 +34,14 @@ public sealed class AgentRuntimeFactory
 {
     private readonly IToolApprovalPrompt _approvalPrompt;
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
+    private readonly CodexRuntimeStatus? _codexRuntimeStatus;
 
     public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt) : this(new ToolApprovalPromptAdapter(approvalPrompt), null)
+    {
+    }
+
+    public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt, CodexRuntimeStatus codexRuntimeStatus)
+        : this(new ToolApprovalPromptAdapter(approvalPrompt), null, codexRuntimeStatus)
     {
     }
 
@@ -44,12 +50,28 @@ public sealed class AgentRuntimeFactory
     {
     }
 
-    internal AgentRuntimeFactory(IToolApprovalPrompt approvalPrompt, IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null)
+    public AgentRuntimeFactory(
+        IAgentToolApprovalPrompt approvalPrompt,
+        IAgentRuntimeConversationPublicationObserver conversationPublicationObserver,
+        CodexRuntimeStatus codexRuntimeStatus)
+        : this(new ToolApprovalPromptAdapter(approvalPrompt), conversationPublicationObserver, codexRuntimeStatus)
+    {
+    }
+
+    internal AgentRuntimeFactory(
+        IToolApprovalPrompt approvalPrompt,
+        IAgentRuntimeConversationPublicationObserver? conversationPublicationObserver = null,
+        CodexRuntimeStatus? codexRuntimeStatus = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
+        if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
+        {
+            throw new ArgumentException("A pre-resolved Codex runtime status must be usable.", nameof(codexRuntimeStatus));
+        }
 
         _approvalPrompt = approvalPrompt;
         _conversationPublicationObserver = conversationPublicationObserver;
+        _codexRuntimeStatus = codexRuntimeStatus;
     }
 
     public Task<AgentRuntime> CreateAsync(
@@ -99,7 +121,13 @@ public sealed class AgentRuntimeFactory
         ArgumentNullException.ThrowIfNull(runtimeSurface);
 
         var workingDirectory = string.IsNullOrWhiteSpace(options.WorkingDirectory) ? Directory.GetCurrentDirectory() : options.WorkingDirectory;
-        var effectiveOptions = options with { WorkingDirectory = workingDirectory };
+        var codexRuntimeStatus = _codexRuntimeStatus ?? await new CodexRuntimeStatusReader().ReadAsync(options.CodexExecutablePath, options.Model, cancellationToken);
+        if (codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
+        {
+            throw new CodexRuntimeUnavailableException(codexRuntimeStatus);
+        }
+
+        var effectiveOptions = options with { WorkingDirectory = workingDirectory, CodexExecutablePath = codexRuntimeStatus.ResolvedExecutablePath };
         var paths = new WorkspacePaths(workingDirectory);
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
         try
@@ -218,7 +246,8 @@ public sealed class AgentRuntimeFactory
                 conversationState,
                 inferenceClient,
                 loopRunner,
-                customLoops);
+                customLoops,
+                codexRuntimeStatus);
         }
         catch
         {

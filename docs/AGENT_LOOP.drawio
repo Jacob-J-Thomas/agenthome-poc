@@ -64,7 +64,7 @@
         <mxCell id="codex" value="CodexAppServerInferenceClient&lt;br&gt;ContextBuilder builds turn input + assigned command guidance&lt;br&gt;ToolBridge exposes loop-assigned dynamic commands" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1240" y="1185" width="285" height="85" as="geometry" />
         </mxCell>
-        <mxCell id="process" value="Start Codex app-server process&lt;br&gt;codex[.cmd] app-server --stdio&lt;br&gt;Send JSON-RPC thread/start + turn/start&lt;br&gt;Read item/agentMessage/delta + turn/completed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
+        <mxCell id="process" value="Resolve Codex: explicit path, Desktop, then PATH&lt;br&gt;Probe --version + exact configured model via model/list&lt;br&gt;Start resolved app-server --stdio&lt;br&gt;Send JSON-RPC thread/start + turn/start&lt;br&gt;Read item/agentMessage/delta + turn/completed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF8FF;strokeColor=#3182CE;fontSize=12" vertex="1" parent="1">
           <mxGeometry x="1240" y="1310" width="285" height="125" as="geometry" />
         </mxCell>
         <mxCell id="exitCode" value="turn/completed status?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFF7E6;strokeColor=#B7791F;fontSize=12" vertex="1" parent="1">

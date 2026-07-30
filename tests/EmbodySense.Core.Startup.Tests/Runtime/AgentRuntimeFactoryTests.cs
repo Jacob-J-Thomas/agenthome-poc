@@ -39,6 +39,9 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(string.Empty, await File.ReadAllTextAsync(paths.CurrentConversationPath));
         Assert.NotEmpty(Directory.EnumerateFiles(paths.ArchivedConversationMemoryPath, "*.ndjson"));
         Assert.True(File.Exists(paths.ConversationTurnLockPath));
+        Assert.Equal(CodexRuntimeCompatibility.Compatible, runtime.CodexRuntimeStatus.Compatibility);
+        Assert.Equal("codex-cli 999.0.0-test", runtime.CodexRuntimeStatus.Version);
+        Assert.Equal("explicit --codex-path", runtime.CodexRuntimeStatus.Source);
     }
 
     [Fact]
@@ -666,6 +669,11 @@ public sealed class AgentRuntimeFactoryTests
         var scriptPath = workspace.File("fake-codex.ps1");
         var commandPath = workspace.File("fake-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, $$"""
+            if ($args -contains "--version") {
+                Write-Output "codex-cli 999.0.0-test"
+                exit 0
+            }
+
             $threadId = "thread-test"
             $developerInstructions = ""
             $turnFailureMessage = {{FormatPowerShellStringLiteral(turnFailureMessage)}}
@@ -684,6 +692,10 @@ public sealed class AgentRuntimeFactoryTests
                     }
 
                     "initialized" {
+                    }
+
+                    "model/list" {
+                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
                     }
 
                     "thread/start" {
