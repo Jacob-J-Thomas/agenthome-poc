@@ -3,11 +3,23 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Common.Governance.Tools;
 
+/// <summary>
+/// Formats tool results.
+/// </summary>
 public static class ToolResultFormatter
 {
+    /// <summary>
+    /// Maximum characters exposed to the model in one formatted tool-result block.
+    /// </summary>
     public const int MaxFormattedCharacters = 64_000;
     private static readonly string _finalTruncationMarker = $"[formatted tool results truncated to the {MaxFormattedCharacters}-character limit]";
 
+    /// <summary>
+    /// Formats governed tool results for model-visible continuation context.
+    /// </summary>
+    /// <param name="results">The ordered governed tool results to project.</param>
+    /// <returns>A bounded text projection that includes outcome, path, output, and durable-retention evidence for each result.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="results"/> is <see langword="null"/>.</exception>
     public static string FormatResults(IReadOnlyList<ToolResult> results)
     {
         ArgumentNullException.ThrowIfNull(results);

@@ -1,8 +1,16 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
 namespace EmbodySense.Core.Common.Loops.Custom;
 
+/// <summary>
+/// Validates custom loop definitions.
+/// </summary>
 public static class CustomLoopDefinitionValidator
 {
+    /// <summary>
+    /// Validates the definition.
+    /// </summary>
+    /// <param name="definition">The definition.</param>
+    /// <returns>The custom loop validation result.</returns>
     public static CustomLoopValidationResult Validate(CustomLoopDefinition? definition)
     {
         var errors = new List<CustomLoopValidationError>();
