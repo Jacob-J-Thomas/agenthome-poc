@@ -19,45 +19,49 @@ public sealed class PermissionsDocumentTests
         Assert.Contains(FileSystemOperation.List, operations);
         Assert.Contains(FileSystemOperation.Read, operations);
         Assert.DoesNotContain(inspectionRules, rule => !rule.RequiresApproval && rule.Operations.Any(IsInspectionOperation));
-        Assert.False(document.EnsureToolResponseInspectionApproval());
+        Assert.False(document.EnsureToolResponseInspectionApproval(new WorkspacePaths(workspace.RootPath)));
     }
 
     [Fact]
     public void EnsureToolResponseInspectionApproval_splits_nonapproval_coverage_without_broadening_other_operations()
     {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
         var document = new PermissionsDocument
         {
             Approved =
             [
                 new ApprovedFileSystemPermission
                 {
-                    Path = PermissionsDocument.ToolResponseInspectionPath,
+                    Path = "././.agent/logs/tool-responses",
                     Operations = [FileSystemOperation.List, FileSystemOperation.Read, FileSystemOperation.Modify],
                     RequiresApproval = false
                 }
             ]
         };
 
-        var changed = document.EnsureToolResponseInspectionApproval();
+        var changed = document.EnsureToolResponseInspectionApproval(paths);
 
         Assert.True(changed);
         var nonApproval = Assert.Single(document.Approved, rule => IsInspectionRule(rule) && !rule.RequiresApproval);
         Assert.Equal([FileSystemOperation.Modify], nonApproval.Operations);
         var approval = Assert.Single(document.Approved, rule => IsInspectionRule(rule) && rule.RequiresApproval);
         Assert.Equal([FileSystemOperation.List, FileSystemOperation.Read], approval.Operations.OrderBy(operation => operation).ToArray());
-        Assert.False(document.EnsureToolResponseInspectionApproval());
+        Assert.False(document.EnsureToolResponseInspectionApproval(paths));
     }
 
     [Fact]
     public void EnsureToolResponseInspectionApproval_adds_only_missing_approval_coverage()
     {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
         var document = new PermissionsDocument
         {
             Approved =
             [
                 new ApprovedFileSystemPermission
                 {
-                    Path = "./.agent/logs/tool-responses/",
+                    Path = ".agent/logs/other/../tool-responses/",
                     Operations = [FileSystemOperation.List],
                     RequiresApproval = true
                 },
@@ -70,7 +74,7 @@ public sealed class PermissionsDocumentTests
             ]
         };
 
-        Assert.True(document.EnsureToolResponseInspectionApproval());
+        Assert.True(document.EnsureToolResponseInspectionApproval(paths));
 
         Assert.DoesNotContain(document.Approved, rule => IsInspectionRule(rule) && !rule.RequiresApproval && rule.Operations.Any(IsInspectionOperation));
         var approvalOperations = document.Approved.Where(rule => IsInspectionRule(rule) && rule.RequiresApproval).SelectMany(rule => rule.Operations).ToArray();
@@ -81,6 +85,8 @@ public sealed class PermissionsDocumentTests
     [Fact]
     public void Json_round_trip_preserves_approval_only_inspection_coverage()
     {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
         var document = new PermissionsDocument
         {
             Approved =
@@ -93,7 +99,7 @@ public sealed class PermissionsDocumentTests
                 }
             ]
         };
-        Assert.True(document.EnsureToolResponseInspectionApproval());
+        Assert.True(document.EnsureToolResponseInspectionApproval(paths));
 
         var restored = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(document.ToJson()));
 

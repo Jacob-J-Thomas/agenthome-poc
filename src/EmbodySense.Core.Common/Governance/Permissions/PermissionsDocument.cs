@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using System.Text.Json;
 using EmbodySense.Core.Common.Workspace;
@@ -76,7 +77,7 @@ public sealed class PermissionsDocument
                 new DeniedFileSystemPermission { Path = ".agent/hooks", Operations = AllOperations() }
             ]
         };
-        document.EnsureToolResponseInspectionApproval();
+        document.EnsureToolResponseInspectionApproval(paths);
         return document;
     }
 
@@ -102,14 +103,17 @@ public sealed class PermissionsDocument
     /// <summary>
     /// Ensures retained tool-response read and list operations are covered only by exact-path rules that require human approval.
     /// </summary>
+    /// <param name="paths">The canonical workspace paths used to resolve permission-rule paths.</param>
     /// <returns><see langword="true"/> when non-approval coverage was removed or approval-required coverage was added; otherwise, <see langword="false"/>.</returns>
-    public bool EnsureToolResponseInspectionApproval()
+    public bool EnsureToolResponseInspectionApproval(WorkspacePaths paths)
     {
+        ArgumentNullException.ThrowIfNull(paths);
+
         var inspectionOperations = ReadOnlyOperations();
         var inspectionOperationSet = inspectionOperations.ToHashSet();
         var emptiedEntries = new List<ApprovedFileSystemPermission>();
         var changed = false;
-        foreach (var entry in Approved.Where(entry => !entry.RequiresApproval && PathEquals(entry.Path, ToolResponseInspectionPath)))
+        foreach (var entry in Approved.Where(entry => !entry.RequiresApproval && PathEquals(paths.RootPath, entry.Path, ToolResponseInspectionPath)))
         {
             var removedOperations = entry.Operations.RemoveAll(inspectionOperationSet.Contains);
             if (removedOperations == 0)
@@ -130,7 +134,7 @@ public sealed class PermissionsDocument
         }
 
         var approvalCoveredOperations = Approved
-            .Where(entry => entry.RequiresApproval && PathEquals(entry.Path, ToolResponseInspectionPath))
+            .Where(entry => entry.RequiresApproval && PathEquals(paths.RootPath, entry.Path, ToolResponseInspectionPath))
             .SelectMany(entry => entry.Operations)
             .ToHashSet();
         var missingOperations = inspectionOperations.Where(operation => !approvalCoveredOperations.Contains(operation)).ToList();
@@ -168,14 +172,14 @@ public sealed class PermissionsDocument
         return [FileSystemOperation.List, FileSystemOperation.Read, FileSystemOperation.Create, FileSystemOperation.Append, FileSystemOperation.Modify];
     }
 
-    private static bool PathEquals(string left, string right)
+    private static bool PathEquals(string workspaceRootPath, string left, string right)
     {
-        return string.Equals(NormalizePath(left), NormalizePath(right), StringComparison.Ordinal);
+        return string.Equals(ResolveRulePath(workspaceRootPath, left), ResolveRulePath(workspaceRootPath, right), FileSystemPathComparer.GetPathComparison());
     }
 
-    private static string NormalizePath(string value)
+    private static string ResolveRulePath(string workspaceRootPath, string rulePath)
     {
-        var normalized = value.Replace('\\', '/').TrimEnd('/');
-        return normalized.StartsWith("./", StringComparison.Ordinal) ? normalized[2..] : normalized;
+        var effectiveRulePath = Path.IsPathRooted(rulePath) ? rulePath : Path.Combine(workspaceRootPath, rulePath);
+        return Path.GetFullPath(effectiveRulePath);
     }
 }
