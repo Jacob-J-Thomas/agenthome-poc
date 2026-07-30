@@ -2,8 +2,9 @@ using EmbodySense.Cli.Command;
 namespace EmbodySense.Cli.Command;
 
 /// <summary>
-/// Provides case-insensitive token, flag, option, and operand queries over one immutable CLI argument sequence.
+/// Provides non-mutating case-insensitive token, flag, option, and operand queries over a caller-supplied CLI argument array.
 /// </summary>
+/// <remarks>The array is retained by reference, so mutations made by its owner after construction are observable.</remarks>
 public sealed class CliArguments
 {
     private readonly string[] _args;
@@ -11,7 +12,7 @@ public sealed class CliArguments
     /// <summary>
     /// Initializes an argument reader over the supplied token array.
     /// </summary>
-    /// <param name="args">The CLI tokens in their original order.</param>
+    /// <param name="args">The CLI tokens in their original order; the array is retained rather than copied.</param>
     public CliArguments(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);

@@ -47,7 +47,7 @@ public sealed class ApprovalsController : ControllerBase
     /// </summary>
     /// <param name="requestId">The pending approval request identity.</param>
     /// <param name="decision">The requested decision; a missing body defaults to rejection.</param>
-    /// <param name="cancellationToken">The token used to cancel request processing.</param>
+    /// <param name="cancellationToken">Reserved for coordinator notification implementations; the current null-owner decision path does not observe this token.</param>
     /// <returns>
     /// HTTP 204 if the coordinator accepts the decision, or HTTP 404 when the request is absent,
     /// completed, or owned by a SignalR connection. Under the current ownership contract, HTTP
