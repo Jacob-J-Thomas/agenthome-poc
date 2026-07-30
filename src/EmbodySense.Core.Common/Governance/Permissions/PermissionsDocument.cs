@@ -100,20 +100,43 @@ public sealed class PermissionsDocument
     public string ToJson() => JsonSerializer.Serialize(this, PermissionsJson.Options);
 
     /// <summary>
-    /// Adds a human-approval rule for retained tool-response read and list operations that are not already covered by an approved-path entry.
+    /// Ensures retained tool-response read and list operations are covered only by exact-path rules that require human approval.
     /// </summary>
-    /// <returns><see langword="true"/> when a missing-operation rule was appended; <see langword="false"/> when existing approved-path entries already cover both operations, regardless of their approval requirement.</returns>
+    /// <returns><see langword="true"/> when non-approval coverage was removed or approval-required coverage was added; otherwise, <see langword="false"/>.</returns>
     public bool EnsureToolResponseInspectionApproval()
     {
-        // TODO(#139): Treat operations covered only by non-approval rules as missing so retained-response inspection remains approval-gated.
-        var coveredOperations = Approved
-            .Where(entry => PathEquals(entry.Path, ToolResponseInspectionPath))
+        var inspectionOperations = ReadOnlyOperations();
+        var inspectionOperationSet = inspectionOperations.ToHashSet();
+        var emptiedEntries = new List<ApprovedFileSystemPermission>();
+        var changed = false;
+        foreach (var entry in Approved.Where(entry => !entry.RequiresApproval && PathEquals(entry.Path, ToolResponseInspectionPath)))
+        {
+            var removedOperations = entry.Operations.RemoveAll(inspectionOperationSet.Contains);
+            if (removedOperations == 0)
+            {
+                continue;
+            }
+
+            changed = true;
+            if (entry.Operations.Count == 0)
+            {
+                emptiedEntries.Add(entry);
+            }
+        }
+
+        foreach (var entry in emptiedEntries)
+        {
+            Approved.Remove(entry);
+        }
+
+        var approvalCoveredOperations = Approved
+            .Where(entry => entry.RequiresApproval && PathEquals(entry.Path, ToolResponseInspectionPath))
             .SelectMany(entry => entry.Operations)
             .ToHashSet();
-        var missingOperations = ReadOnlyOperations().Where(operation => !coveredOperations.Contains(operation)).ToList();
+        var missingOperations = inspectionOperations.Where(operation => !approvalCoveredOperations.Contains(operation)).ToList();
         if (missingOperations.Count == 0)
         {
-            return false;
+            return changed;
         }
 
         Approved.Add(new ApprovedFileSystemPermission
