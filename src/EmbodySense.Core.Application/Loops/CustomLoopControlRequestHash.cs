@@ -7,8 +7,20 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops;
 
+/// <summary>
+/// Computes, applies, and verifies the canonical custom loop control request hash.
+/// </summary>
 public static class CustomLoopControlRequestHash
 {
+    /// <summary>
+    /// Computes the custom loop control request hash.
+    /// </summary>
+    /// <param name="kind">The kind.</param>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="expectedLifecycleVersion">The expected lifecycle version.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="actor">The actor.</param>
+    /// <returns>The text value.</returns>
     public static string Compute(CustomLoopControlKind kind, string runId, int expectedLifecycleVersion, string operationId, string actor)
     {
         var buffer = new ArrayBufferWriter<byte>();
@@ -26,6 +38,11 @@ public static class CustomLoopControlRequestHash
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Determines whether the operation matches the expected custom loop control request hash.
+    /// </summary>
+    /// <param name="operation">The operation.</param>
+    /// <returns><see langword="true"/> when matches; otherwise, <see langword="false"/>.</returns>
     public static bool Matches(CustomLoopControlOperation operation)
     {
         var expected = Encoding.ASCII.GetBytes(Compute(operation.Kind, operation.RunId, operation.ExpectedLifecycleVersion, operation.OperationId, operation.Actor));

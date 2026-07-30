@@ -6,8 +6,25 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Application.Loops;
 
+/// <summary>
+/// Computes, applies, and verifies the canonical custom loop invocation request hash.
+/// </summary>
 public static class CustomLoopInvocationRequestHash
 {
+    /// <summary>
+    /// Computes the custom loop invocation request hash.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="expectedDefinitionVersion">The expected definition version.</param>
+    /// <param name="expectedDefinitionHash">The expected definition hash.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="surface">The surface.</param>
+    /// <param name="currentRoleId">The current role ID.</param>
+    /// <param name="invocationPrompt">The invocation prompt.</param>
+    /// <param name="provider">The provider.</param>
+    /// <param name="model">The model.</param>
+    /// <returns>The text value.</returns>
     public static string Compute(
         string operationId,
         string loopId,
@@ -23,6 +40,11 @@ public static class CustomLoopInvocationRequestHash
         return ComputeFromPromptHash(operationId, loopId, expectedDefinitionVersion, expectedDefinitionHash, actor, surface, currentRoleId, ComputePromptHash(invocationPrompt), provider, model);
     }
 
+    /// <summary>
+    /// Computes the prompt hash for the invocation prompt.
+    /// </summary>
+    /// <param name="invocationPrompt">The invocation prompt.</param>
+    /// <returns>The text value.</returns>
     public static string ComputePromptHash(string? invocationPrompt)
     {
         var canonical = invocationPrompt?.Normalize(NormalizationForm.FormC) ?? string.Empty;
@@ -61,6 +83,11 @@ public static class CustomLoopInvocationRequestHash
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Determines whether the operation matches the expected custom loop invocation request hash.
+    /// </summary>
+    /// <param name="operation">The operation.</param>
+    /// <returns><see langword="true"/> when matches; otherwise, <see langword="false"/>.</returns>
     public static bool Matches(CustomLoopInvocationOperation operation)
     {
         ArgumentNullException.ThrowIfNull(operation);

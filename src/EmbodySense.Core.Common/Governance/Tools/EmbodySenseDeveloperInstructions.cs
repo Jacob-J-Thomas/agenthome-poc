@@ -4,10 +4,21 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Common.Governance.Tools;
 
+/// <summary>
+/// Captures, matches, and composes EmbodySense developer instructions.
+/// </summary>
 public static class EmbodySenseDeveloperInstructions
 {
+    /// <summary>
+    /// Version identity for the fixed governed app-server instruction contract.
+    /// </summary>
     public const string CurrentVersion = "codex-app-server-governance-v1";
 
+    /// <summary>
+    /// Creates the fixed governance instructions for the commands assigned to a model turn.
+    /// </summary>
+    /// <param name="availableToolCommands">The commands admitted for the active loop turn; duplicates are removed and values are ordered canonically.</param>
+    /// <returns>Instructions that prohibit native workspace tools and expose only the admitted <c>embodysense.command</c> capabilities.</returns>
     public static string Create(IReadOnlyList<ToolCommand>? availableToolCommands = null)
     {
         var commands = (availableToolCommands ?? [])
@@ -36,12 +47,23 @@ public static class EmbodySenseDeveloperInstructions
         return builder.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// Captures the current EmbodySense developer instruction set.
+    /// </summary>
+    /// <param name="availableToolCommands">The commands admitted for the active loop turn.</param>
+    /// <returns>An immutable instruction snapshot containing version, content, and lowercase SHA-256 content hash.</returns>
     public static EmbodySenseDeveloperInstructionSet Capture(IReadOnlyList<ToolCommand>? availableToolCommands = null)
     {
         var content = Create(availableToolCommands);
         return new EmbodySenseDeveloperInstructionSet(CurrentVersion, content, ComputeHash(content));
     }
 
+    /// <summary>
+    /// Determines whether the candidate matches the expected EmbodySense developer instructions.
+    /// </summary>
+    /// <param name="candidate">The captured instruction set to verify.</param>
+    /// <param name="availableToolCommands">The commands from which the expected snapshot is reconstructed.</param>
+    /// <returns><see langword="true"/> when version, content, and content hash exactly match the reconstructed snapshot; otherwise, <see langword="false"/>.</returns>
     public static bool Matches(EmbodySenseDeveloperInstructionSet? candidate, IReadOnlyList<ToolCommand>? availableToolCommands = null)
     {
         if (candidate is null)
@@ -55,6 +77,14 @@ public static class EmbodySenseDeveloperInstructions
             && FixedTimeEquals(candidate.ContentHash, expected.ContentHash);
     }
 
+    /// <summary>
+    /// Composes the EmbodySense developer instructions.
+    /// </summary>
+    /// <param name="governance">The unaltered fixed governance snapshot that must remain first and authoritative.</param>
+    /// <param name="trustedInstructions">The ordered trusted workspace instruction blocks to append with source boundaries.</param>
+    /// <returns>The fixed governance content followed by each explicitly delimited trusted instruction block.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when either argument or an instruction element is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">Thrown when governance or trusted instruction content is incomplete, empty, or hash-mismatched.</exception>
     public static string Compose(EmbodySenseDeveloperInstructionSet governance, IReadOnlyList<EmbodySenseTrustedInstruction> trustedInstructions)
     {
         ArgumentNullException.ThrowIfNull(governance);

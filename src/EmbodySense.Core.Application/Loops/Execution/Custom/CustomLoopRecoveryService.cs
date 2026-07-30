@@ -11,6 +11,13 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Parks interrupted nonterminal runs at the last provable checkpoint without automatically dispatching work.
+/// </summary>
+/// <remarks>
+/// Recovery distinguishes a checkpointed interruption from an open provider attempt. Open or incomplete admission evidence moves
+/// the run to review; recovery never assumes an external outcome and never resumes execution automatically.
+/// </remarks>
 public sealed class CustomLoopRecoveryService
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
@@ -19,6 +26,12 @@ public sealed class CustomLoopRecoveryService
     private readonly IAuditLog _auditLog;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopRecoveryService"/> type.
+    /// </summary>
+    /// <param name="runStore">The run store.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopRecoveryService(ICustomLoopRunStore runStore, IAuditLog auditLog, TimeProvider? timeProvider = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
@@ -26,6 +39,12 @@ public sealed class CustomLoopRecoveryService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Reconciles every nonterminal run after restart.
+    /// </summary>
+    /// <param name="actor">The actor.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>One unchanged, recovered, needs-review, or failed result per discovered run.</returns>
     public async Task<IReadOnlyList<CustomLoopRecoveryResult>> RecoverAsync(string actor, CancellationToken cancellationToken = default)
     {
         ValidateActor(actor);
@@ -55,6 +74,8 @@ public sealed class CustomLoopRecoveryService
             return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run is already Paused; restart recovery never starts execution automatically.");
         }
 
+        // Open provider-attempt evidence makes the external outcome uncertain. Such a run requires
+        // review; recovery never guesses whether the provider completed or silently retries it.
         var target = !admissionAuditComplete
             ? CustomLoopRunStatus.NeedsReview
             : run.Status switch
@@ -86,6 +107,8 @@ public sealed class CustomLoopRecoveryService
         var candidate = CreateCandidate(run, target, failureCode, detail, now);
         var metadata = RecoveryMetadata(run, candidate, hasOpenAttempt, admissionAuditComplete);
 
+        // Record intent before the lifecycle mutation so a crash never produces an unexplained
+        // recovery transition.
         try
         {
             await _auditLog.AppendAsync(

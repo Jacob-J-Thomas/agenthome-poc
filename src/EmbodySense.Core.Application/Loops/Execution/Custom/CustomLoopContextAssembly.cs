@@ -7,11 +7,21 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
+/// <summary>
+/// Represents a custom loop context assembly.
+/// </summary>
+/// <param name="Request">The request.</param>
+/// <param name="Blocks">The blocks.</param>
+/// <param name="ResolvedOutputPolicy">The resolved output policy.</param>
 public sealed record CustomLoopContextAssembly(
     LlmInferenceRequest Request,
     CustomLoopContextBlock[] Blocks,
     CustomLoopContextOutputPolicy ResolvedOutputPolicy)
 {
+    /// <summary>
+    /// Gets the logical request character count.
+    /// </summary>
+    /// <value>The logical request character count.</value>
     public long LogicalRequestCharacterCount
     {
         get

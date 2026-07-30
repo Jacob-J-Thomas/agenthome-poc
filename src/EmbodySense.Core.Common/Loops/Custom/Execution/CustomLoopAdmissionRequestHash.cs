@@ -8,8 +8,17 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
+/// <summary>
+/// Computes, applies, and verifies the canonical custom loop admission request hash.
+/// </summary>
 public static class CustomLoopAdmissionRequestHash
 {
+    /// <summary>
+    /// Computes the lowercase SHA-256 digest of the immutable, behavior-affecting admission request.
+    /// </summary>
+    /// <param name="run">The run whose loop, surface, actor, model, admitted definition identity, trigger, conversation, and context snapshot identity are serialized canonically.</param>
+    /// <returns>A 64-character lowercase hexadecimal digest.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="run"/> is <see langword="null"/>.</exception>
     public static string Compute(CustomLoopRunRecord run)
     {
         ArgumentNullException.ThrowIfNull(run);
@@ -35,12 +44,24 @@ public static class CustomLoopAdmissionRequestHash
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Returns a copy of a run with its canonical admission-request hash applied.
+    /// </summary>
+    /// <param name="run">The admitted run to hash.</param>
+    /// <returns>A copy whose admission-request hash matches <see cref="Compute"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="run"/> is <see langword="null"/>.</exception>
     public static CustomLoopRunRecord Apply(CustomLoopRunRecord run)
     {
         ArgumentNullException.ThrowIfNull(run);
         return run with { AdmissionRequestHash = Compute(run) };
     }
 
+    /// <summary>
+    /// Determines whether a run retains the exact canonical admission-request hash.
+    /// </summary>
+    /// <param name="run">The run to verify.</param>
+    /// <returns><see langword="true"/> when stored and recomputed ASCII digests have equal length and fixed-time equality; otherwise, <see langword="false"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="run"/> is <see langword="null"/>.</exception>
     public static bool Matches(CustomLoopRunRecord run)
     {
         ArgumentNullException.ThrowIfNull(run);

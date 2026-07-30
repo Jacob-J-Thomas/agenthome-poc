@@ -16,6 +16,14 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Governance.Tools;
 
+/// <summary>
+/// Executes workspace commands through loop authority, permission, approval, audit, actuation, and evidence-retention gates.
+/// </summary>
+/// <remarks>
+/// A human approval does not bypass loop capability or directory policy and is revalidated immediately before actuation when
+/// dynamic authority is configured. After actuation, retention and audit failures are surfaced as integrity warnings because
+/// retrying the workspace operation under a new identifier could duplicate a mutation.
+/// </remarks>
 public sealed class ToolBroker : IToolBroker
 {
     private const int MaxCorrelationCharacters = 512;
@@ -33,6 +41,19 @@ public sealed class ToolBroker : IToolBroker
     private readonly ToolAuditMetadataFactory _auditMetadataFactory;
     private readonly TimeSpan _postActuationIntegrityTimeout;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ToolBroker"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="permissionService">The permission service.</param>
+    /// <param name="approvalPrompt">The approval prompt.</param>
+    /// <param name="workspaceToolExecutor">The workspace tool executor.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="loopDefinition">The loop definition.</param>
+    /// <param name="toolResultRetentionStore">The tool result retention store.</param>
+    /// <param name="governanceObserver">The governance observer.</param>
+    /// <param name="actuationAuthorityRevalidator">The actuation authority revalidator.</param>
+    /// <param name="postActuationIntegrityTimeout">The post actuation integrity timeout.</param>
     public ToolBroker(
         WorkspacePaths paths,
         IToolPermissionService permissionService,
@@ -71,13 +92,26 @@ public sealed class ToolBroker : IToolBroker
         }
     }
 
+    /// <summary>
+    /// Gets the commands admitted by the active loop's capabilities.
+    /// </summary>
+    /// <value>The available commands tool commands.</value>
     public IReadOnlyList<ToolCommand> AvailableCommands { get; }
 
+    /// <summary>
+    /// Governs and, when authorized, executes a workspace command.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The terminal result together with governance and retention evidence.</returns>
     public async Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         request = BoundCorrelation(request);
         var requestId = Guid.NewGuid().ToString("N");
+
+        // Loop capability is the outer authority boundary. A directory policy cannot grant a command
+        // that the active loop never admitted.
         if (!IsCommandAvailable(request.Command))
         {
             await RecordLoopAuthorityAsync(requestId, request, request.TargetPath, AuditSchema.Outcomes.Denied, cancellationToken);
@@ -90,6 +124,8 @@ public sealed class ToolBroker : IToolBroker
 
         var check = _permissionService.Evaluate(request);
 
+        // Persist both capability and policy decisions before resolving the request so denied attempts
+        // remain auditable even when no actuation follows.
         await RecordLoopAuthorityAsync(requestId, request, check.ResolvedPath, AuditSchema.Outcomes.Allowed, cancellationToken);
         await RecordPermissionAsync(requestId, request, check, cancellationToken);
 
@@ -122,6 +158,8 @@ public sealed class ToolBroker : IToolBroker
         var approvalDecision = approvedByHuman ? ToolApprovalDecision.Approved : ToolApprovalDecision.NotRequired;
         if (_actuationAuthorityRevalidator is not null)
         {
+            // Approval is evidence for one decision, not permanent authority. Revalidate mutable authority
+            // immediately before touching the workspace to close the time-of-check/time-of-use window.
             var revalidation = await _actuationAuthorityRevalidator.RevalidateAsync(request, cancellationToken);
             ArgumentNullException.ThrowIfNull(revalidation);
             ArgumentException.ThrowIfNullOrWhiteSpace(revalidation.Detail);
@@ -169,6 +207,8 @@ public sealed class ToolBroker : IToolBroker
             executionOutcome = AuditSchema.Outcomes.Failed;
         }
 
+        // The workspace operation has already completed. Finish retention, observation, and audit with a
+        // bounded independent token so caller cancellation cannot encourage an unsafe retry with a new id.
         using var integrity = new CancellationTokenSource(_postActuationIntegrityTimeout);
         try
         {

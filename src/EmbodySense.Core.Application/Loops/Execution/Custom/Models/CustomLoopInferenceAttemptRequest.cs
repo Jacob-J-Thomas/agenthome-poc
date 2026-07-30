@@ -6,6 +6,25 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 
+/// <summary>
+/// Represents a custom loop inference attempt request.
+/// </summary>
+/// <param name="RunId">The unique run identifier.</param>
+/// <param name="LoopId">The owning loop identifier.</param>
+/// <param name="RoleId">The workspace role identifier.</param>
+/// <param name="DefinitionVersion">The monotonically increasing definition version.</param>
+/// <param name="DefinitionHash">The definition hash.</param>
+/// <param name="Iteration">The iteration.</param>
+/// <param name="StepId">The step ID.</param>
+/// <param name="Attempt">The attempt.</param>
+/// <param name="AttemptCorrelationId">The attempt correlation ID.</param>
+/// <param name="IsExit">The is exit.</param>
+/// <param name="AllowTools">The allow tools.</param>
+/// <param name="ModelSnapshot">The provider and model identity admitted for the run.</param>
+/// <param name="AdmittedToolAssignments">The admitted tool assignments.</param>
+/// <param name="ToolRequestsUsedInRun">The tool requests used in run.</param>
+/// <param name="InferenceRequest">The inference request.</param>
+/// <param name="AuthoritySnapshot">The authority snapshot.</param>
 public sealed record CustomLoopInferenceAttemptRequest(
     string RunId,
     string LoopId,
