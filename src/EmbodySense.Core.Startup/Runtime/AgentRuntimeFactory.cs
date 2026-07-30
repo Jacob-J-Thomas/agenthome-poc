@@ -110,7 +110,7 @@ public sealed class AgentRuntimeFactory
     /// <summary>
     /// Creates a runtime and starts a fresh conversation unless recovery requires the current conversation to be preserved.
     /// </summary>
-    /// <param name="model">The optional configured Codex model.</param>
+    /// <param name="model">The configured Codex model. Null or blank currently skips exact model-advertisement validation; public hosts must supply a nonblank value.</param>
     /// <param name="workingDirectory">The absolute working directory.</param>
     /// <param name="codexExecutablePath">An optional explicit Codex executable path.</param>
     /// <param name="codexSandbox">The sandbox policy passed to the Codex app-server client.</param>
@@ -126,6 +126,7 @@ public sealed class AgentRuntimeFactory
         AgentRuntimeSurface runtimeSurface,
         CancellationToken cancellationToken = default)
     {
+        // TODO(#152): Enforce a nonblank model at the public runtime-composition boundary.
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
@@ -139,7 +140,7 @@ public sealed class AgentRuntimeFactory
     /// <summary>
     /// Creates a runtime with an explicit choice about preserving the current durable conversation.
     /// </summary>
-    /// <param name="model">The optional configured Codex model.</param>
+    /// <param name="model">The configured Codex model. Null or blank currently skips exact model-advertisement validation; public hosts must supply a nonblank value.</param>
     /// <param name="workingDirectory">The absolute working directory.</param>
     /// <param name="codexExecutablePath">An optional explicit Codex executable path.</param>
     /// <param name="codexSandbox">The sandbox policy passed to the Codex app-server client.</param>
@@ -157,6 +158,7 @@ public sealed class AgentRuntimeFactory
         bool preserveCurrentConversation,
         CancellationToken cancellationToken = default)
     {
+        // TODO(#152): Enforce a nonblank model at the public runtime-composition boundary.
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
