@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
@@ -17,7 +18,7 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class WebApiControllerTests
 {
-    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
 
     [Fact]
     public async Task Configured_app_serves_status_init_and_approval_endpoints()
@@ -175,6 +176,13 @@ public sealed class WebApiControllerTests
         options = WebRunOptions.FromArguments(["--workdir", rootPath, "--port", port.ToString()]);
         var builder = Program.CreateBuilder(["--workdir", rootPath, "--port", port.ToString()], options);
         return BuildApp(builder);
+    }
+
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+        return options;
     }
 
     private static WebApplication BuildApp(WebApplicationBuilder builder)

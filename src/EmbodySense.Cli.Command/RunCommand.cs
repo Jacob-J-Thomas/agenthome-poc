@@ -11,6 +11,14 @@ public static class RunCommand
     public static async Task<int> RunAsync(CliArguments arguments)
     {
         var options = RunOptions.FromArguments(arguments);
+        var codexRuntimeStatus = await new CodexRuntimeStatusReader().ReadAsync(options.CodexExecutablePath, options.Model);
+        if (codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
+        {
+            throw new CodexRuntimeUnavailableException(codexRuntimeStatus);
+        }
+
+        var client = ConsoleRuntimeTerminal.Instance;
+        WriteCodexRuntimeStatus(client, codexRuntimeStatus);
         var status = new WorkspaceStatusReader().Read(options.WorkingDirectory);
 
         if (!status.IsInitialized)
@@ -24,14 +32,21 @@ public static class RunCommand
             await WorkspaceInitializer.ForCli().InitializeAsync(options.WorkingDirectory);
         }
 
-        var client = ConsoleRuntimeTerminal.Instance;
-        await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client)).CreateAsync(
+        await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client), codexRuntimeStatus).CreateAsync(
             options.Model,
             options.WorkingDirectory,
             options.CodexExecutablePath,
             options.CodexSandbox,
             AgentRuntimeSurface.Cli);
         return await new AgentRuntimeConsoleHost(runtime, client).RunAsync(banner: Constants.Banner, verbose: options.Verbose);
+    }
+
+    private static void WriteCodexRuntimeStatus(IAgentRuntimeConsole client, CodexRuntimeStatus status)
+    {
+        client.WriteLine($"Codex executable: {status.ResolvedExecutablePath}");
+        client.WriteLine($"Codex version: {status.Version ?? "unknown"}");
+        client.WriteLine($"Codex model: {status.ConfiguredModel ?? "configured externally"}");
+        client.WriteLine($"Codex compatibility: {status.Compatibility}");
     }
 
     private static bool ConfirmWorkspaceInitialization(WorkspaceStatusSnapshot status)
