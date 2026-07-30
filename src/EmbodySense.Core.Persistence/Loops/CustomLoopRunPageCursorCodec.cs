@@ -6,6 +6,9 @@ using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Encodes and validates opaque version-1 continuation cursors for deterministic run-summary pagination.
+/// </summary>
 internal static class CustomLoopRunPageCursorCodec
 {
     private const int CurrentVersion = 1;
@@ -16,6 +19,11 @@ internal static class CustomLoopRunPageCursorCodec
         MaxDepth = 8
     };
 
+    /// <summary>
+    /// Encodes a cursor as canonical unpadded base64url JSON.
+    /// </summary>
+    /// <param name="cursor">The cursor.</param>
+    /// <returns>The opaque canonical cursor.</returns>
     public static string Encode(CustomLoopRunPageCursor cursor)
     {
         ArgumentNullException.ThrowIfNull(cursor);
@@ -23,6 +31,12 @@ internal static class CustomLoopRunPageCursorCodec
         return Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload, _jsonOptions));
     }
 
+    /// <summary>
+    /// Decodes a canonical cursor and verifies that it belongs to the active loop filter.
+    /// </summary>
+    /// <param name="encoded">The opaque cursor, or <see langword="null"/> for the first page.</param>
+    /// <param name="expectedLoopId">The exact loop filter used by the page request, or <see langword="null"/> for an unfiltered page.</param>
+    /// <returns>The decoded cursor, or <see langword="null"/> when <paramref name="encoded"/> is <see langword="null"/>.</returns>
     public static CustomLoopRunPageCursor? Decode(string? encoded, string? expectedLoopId)
     {
         if (encoded is null)

@@ -8,11 +8,23 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Persists version-1 default-loop run records as one JSON artifact per loop and run identifier.
+/// </summary>
+/// <remarks>
+/// Saves validate the complete record and atomically replace the target file through <see cref="LoopArtifactFileWriter"/>.
+/// Loads return <see langword="null"/> for missing artifacts; malformed JSON, unsupported enum values, identity mismatches,
+/// invalid lifecycle state, and file I/O failures are surfaced. Listings are ordered by newest start time and then run identity.
+/// </remarks>
 public sealed class LoopRunStore : ILoopRunStore
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
     private readonly WorkspacePaths _paths;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="LoopRunStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public LoopRunStore(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -20,6 +32,12 @@ public sealed class LoopRunStore : ILoopRunStore
         _paths = paths;
     }
 
+    /// <summary>
+    /// Validates and atomically writes the canonical run artifact.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task SaveAsync(LoopRunRecord run, CancellationToken cancellationToken = default)
     {
         ValidateRun(run);
@@ -30,6 +48,13 @@ public sealed class LoopRunStore : ILoopRunStore
         await LoopArtifactFileWriter.WriteTextAsync(path, json, cancellationToken);
     }
 
+    /// <summary>
+    /// Loads and validates one run by its canonical loop and run identifiers.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The run record, or <see langword="null"/> when its artifact does not exist.</returns>
     public async Task<LoopRunRecord?> LoadAsync(string loopId, string runId, CancellationToken cancellationToken = default)
     {
         var path = LoopArtifactPaths.GetRunPath(_paths, loopId, runId);
@@ -41,6 +66,12 @@ public sealed class LoopRunStore : ILoopRunStore
         return await ReadRunAsync(path, cancellationToken);
     }
 
+    /// <summary>
+    /// Loads every run artifact for one loop in deterministic reverse-chronological order.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>All validated run records for the loop, or an empty collection when its directory does not exist.</returns>
     public async Task<IReadOnlyList<LoopRunRecord>> ListAsync(string loopId, CancellationToken cancellationToken = default)
     {
         var safeLoopId = LoopArtifactPaths.ValidateArtifactId(loopId);

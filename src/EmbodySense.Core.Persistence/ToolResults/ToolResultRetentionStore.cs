@@ -13,6 +13,15 @@ using EmbodySense.Core.Persistence.ToolResults.Models;
 
 namespace EmbodySense.Core.Persistence.ToolResults;
 
+/// <summary>
+/// Retains governed tool results as bounded version-1 manifests and content-hashed UTF-8 chunks.
+/// </summary>
+/// <remarks>
+/// Retention validates existing manifests and chunk hashes before reuse, stages a complete artifact directory before rename,
+/// and evicts oldest validated artifacts under the workspace lock to maintain count and byte quotas. Stamps are only an
+/// accounting optimization and never replace integrity validation before reuse or deletion. Corrupt, unknown, unsafe, or
+/// unsupported artifacts fail closed; no schema migration or legacy reader is provided.
+/// </remarks>
 public sealed class ToolResultRetentionStore : IToolResultRetentionStore
 {
     private const int CurrentSchemaVersion = 1;
@@ -28,6 +37,11 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
     private readonly TimeProvider _timeProvider;
     private readonly Dictionary<string, AccountedArtifactSnapshot> _accountedArtifacts = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ToolResultRetentionStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public ToolResultRetentionStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -35,6 +49,13 @@ public sealed class ToolResultRetentionStore : IToolResultRetentionStore
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Retains the bounded response content and returns the manifest reference admitted to the transcript.
+    /// </summary>
+    /// <param name="result">The result.</param>
+    /// <param name="loopDefinition">The loop definition.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the tool result retention reference.</returns>
     public async Task<ToolResultRetentionReference> RetainAsync(ToolResult result, LoopDefinition loopDefinition, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(result);

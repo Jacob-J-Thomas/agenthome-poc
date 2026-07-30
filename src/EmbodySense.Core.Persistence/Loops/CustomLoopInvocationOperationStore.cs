@@ -13,6 +13,15 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Persists bounded version-1 invocation receipts and their receipt-retention journal.
+/// </summary>
+/// <remarks>
+/// One canonical JSON artifact is stored per operation identifier, with a separate single active retention journal. State
+/// transitions are serialized by an in-process gate and cross-process file lease and committed through write-through atomic
+/// replacement. Capacity, canonical request binding, chronology, and audit-integrity transitions are validated on every read
+/// and write. Corrupt, unknown, unsupported, or ambiguous artifacts fail with <see cref="FormatException"/>; no migrations exist.
+/// </remarks>
 public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOperationStore
 {
     private const string MutationLockFileName = ".custom-loop-mutations.lock";
@@ -33,6 +42,11 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
     private readonly SemaphoreSlim _processGate;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopInvocationOperationStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopInvocationOperationStore(WorkspacePaths paths, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -43,6 +57,14 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Creates or idempotently replays an unbound pending invocation receipt.
+    /// </summary>
+    /// <param name="operation">The canonical unbound pending operation and immutable request envelope.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// A result reporting creation, replay, request conflict, required retention, or receipt-capacity exhaustion.
+    /// </returns>
     public async Task<CustomLoopInvocationOperationStoreResult> BeginAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default)
     {
         Validate(operation, requirePending: true);
@@ -66,6 +88,8 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
             var retention = await ReadRetentionOperationAsync(cancellationToken);
             if (retention?.State is CustomLoopInvocationReceiptRetentionOperationState.Reserved or CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded)
             {
+                // Retention owns the replay boundary while its journal is nonterminal. Refuse new receipts until that
+                // durable transition is reconciled so eviction cannot race admission.
                 return new CustomLoopInvocationOperationStoreResult(CustomLoopInvocationOperationStoreStatus.RetentionRequired, null);
             }
 
@@ -84,6 +108,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
     }
 
+    /// <summary>
+    /// Persists the conversation and optional captured-context binding for an existing pending invocation.
+    /// </summary>
+    /// <param name="operation">The existing request envelope with its terminal or captured-context binding state.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result reporting the new binding, replay, absence, conflict, or receipt-capacity exhaustion.</returns>
     public async Task<CustomLoopInvocationOperationStoreResult> BindAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default)
     {
         Validate(operation, requirePending: operation.State == CustomLoopInvocationOperationState.Pending);
@@ -156,6 +186,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
     }
 
+    /// <summary>
+    /// Loads the canonical receipt for an invocation operation identifier.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated receipt, or <see langword="null"/> when no artifact exists.</returns>
     public async Task<CustomLoopInvocationOperation?> GetAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -170,6 +206,12 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
     }
 
+    /// <summary>
+    /// Commits the terminal outcome of an invocation whose request envelope and binding still match.
+    /// </summary>
+    /// <param name="operation">The completed operation, including the previously persisted binding.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result reporting completion, replay, absence, conflict, or receipt-capacity exhaustion.</returns>
     public async Task<CustomLoopInvocationOperationStoreResult> CompleteAsync(CustomLoopInvocationOperation operation, CancellationToken cancellationToken = default)
     {
         Validate(operation, requirePending: false);
@@ -222,6 +264,15 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
     }
 
+    /// <summary>
+    /// Reserves a deterministic snapshot of completed invocation receipts eligible for bounded retention.
+    /// </summary>
+    /// <param name="request">The actor, surface, operation identity, and replay cutoff governing the retention scan.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// The new or recovered journal and whether it is reserved, in progress, ready to commit, already committed, awaiting a
+    /// conflict audit, or has no eligible receipts.
+    /// </returns>
     public async Task<CustomLoopInvocationReceiptRetentionReservationResult> ReserveCompletedReceiptRetentionAsync(CustomLoopInvocationReceiptRetentionRequest request, CancellationToken cancellationToken = default)
     {
         ValidateRetentionRequest(request);
@@ -355,11 +406,25 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
     }
 
+    /// <summary>
+    /// Advances a reserved retention journal after its intent audit is durable.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionIntentAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.Reserved, CustomLoopInvocationReceiptRetentionOperationState.IntentAuditRecorded, cancellationToken);
     }
 
+    /// <summary>
+    /// Revalidates every reserved receipt and commits their deletion, or records that a candidate changed.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> CommitCompletedReceiptRetentionAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -439,31 +504,73 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
         }
     }
 
+    /// <summary>
+    /// Advances a committed retention journal after its successful outcome audit is durable.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditRecorded, cancellationToken);
     }
 
+    /// <summary>
+    /// Records that outcome-audit emission has started for a committed retention journal.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, cancellationToken);
     }
 
+    /// <summary>
+    /// Terminates a started outcome-audit transition with an explicit audit-warning state.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionOutcomeAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, cancellationToken);
     }
 
+    /// <summary>
+    /// Records that conflict-audit emission has started after a reserved candidate changed.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditStartedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted, cancellationToken);
     }
 
+    /// <summary>
+    /// Advances an abandoned retention journal after its conflict audit is durable.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditedAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditRecorded, cancellationToken);
     }
 
+    /// <summary>
+    /// Terminates a started conflict-audit transition with an explicit audit-warning state.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="updatedAtUtc">The updated at UTC.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop invocation receipt retention operation.</returns>
     public async Task<CustomLoopInvocationReceiptRetentionOperation> MarkReceiptRetentionConflictAuditWarningAsync(string operationId, DateTimeOffset updatedAtUtc, CancellationToken cancellationToken = default)
     {
         return await AdvanceRetentionOperationAsync(operationId, updatedAtUtc, CustomLoopInvocationReceiptRetentionOperationState.AbandonedConflictAuditStarted, CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, cancellationToken);

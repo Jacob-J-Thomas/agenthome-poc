@@ -11,6 +11,14 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Owns authenticated local and cross-process routing for cancellation of the active provider attempt.
+/// </summary>
+/// <remarks>
+/// The host publishes a version-1 owner descriptor containing a random secret and bounded named-pipe endpoint. Remote requests
+/// authenticate the owner, run, and operation binding; acknowledgements are bounded by time and frame size. Signaling a token
+/// is not reported as provider interruption until the registered attempt confirms that outcome.
+/// </remarks>
 internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 {
     private static readonly TimeSpan _acknowledgementTimeout = TimeSpan.FromSeconds(2);
@@ -30,6 +38,11 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private long _attemptGeneration;
     private int _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopAttemptCancellationHost"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="workspaceKey">The workspace key.</param>
     public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey)
     {
         _paths = paths;
@@ -41,6 +54,13 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         _server = Task.Run(RunServerAsync);
     }
 
+    /// <summary>
+    /// Registers the single active provider attempt for a run and returns its generation-bound lifetime handle.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellation">The cancellation.</param>
+    /// <param name="competingCancellationToken">The competing cancellation token.</param>
+    /// <returns>The custom loop attempt cancellation registration.</returns>
     public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation, CancellationToken competingCancellationToken)
     {
         lock (_gate)
@@ -57,6 +77,12 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// Signals a locally registered attempt and waits for a bounded confirmation of provider interruption.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop attempt cancellation result.</returns>
     public async Task<CustomLoopAttemptCancellationResult> RequestCancellationAsync(string runId, CancellationToken cancellationToken)
     {
         ActiveAttempt? attempt;
@@ -89,6 +115,14 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// Authenticates and sends a bounded cancellation request to the process that owns workspace hosting.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop attempt cancellation result.</returns>
     public static async Task<CustomLoopAttemptCancellationResult> RequestRemoteCancellationAsync(WorkspacePaths paths, string runId, string operationId, CancellationToken cancellationToken)
     {
         CancellationOwnerDescriptor descriptor;
@@ -132,6 +166,12 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// Completes and removes the exact generation of a registered attempt.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="generation">The generation.</param>
+    /// <param name="interrupted">Whether the provider confirmed interruption caused by the routed cancellation.</param>
     public void CompleteAttempt(string runId, long generation, bool interrupted)
     {
         ActiveAttempt? attempt = null;
@@ -159,6 +199,9 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops the cancellation endpoint and completes all registered attempts as owner unavailable.
+    /// </summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

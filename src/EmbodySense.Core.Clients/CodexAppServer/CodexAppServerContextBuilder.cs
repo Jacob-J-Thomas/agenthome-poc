@@ -6,16 +6,32 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
+/// <summary>
+/// Builds the fixed governance instructions and bounded logical conversation context sent to app-server.
+/// </summary>
+/// <remarks>
+/// The request's admitted governance snapshot must match the currently exposed command set. Restored transcript context is
+/// either preserved exactly when requested or bounded before being embedded in the latest user turn.
+/// </remarks>
 internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuilder
 {
     private const int MaxRestoredContextCharacters = 24_000; // TODO: revisit what an appropriate figures should actually be.
     private readonly IReadOnlyList<ToolCommand> _availableToolCommands;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CodexAppServerContextBuilder"/> type.
+    /// </summary>
+    /// <param name="availableToolCommands">The available tool commands.</param>
     public CodexAppServerContextBuilder(IReadOnlyList<ToolCommand>? availableToolCommands = null)
     {
         _availableToolCommands = availableToolCommands ?? [];
     }
 
+    /// <summary>
+    /// Creates developer instructions from the admitted governance snapshot and trusted instruction sources.
+    /// </summary>
+    /// <param name="request">The admitted inference request and trusted instruction context.</param>
+    /// <returns>The fixed EmbodySense governance instructions followed by the trusted workspace instruction sources.</returns>
     public string CreateDeveloperInstructions(LlmInferenceRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -32,6 +48,11 @@ internal sealed class CodexAppServerContextBuilder : ICodexAppServerContextBuild
         return EmbodySenseDeveloperInstructions.Compose(request.InstructionContext.Governance, request.InstructionContext.TrustedInstructions);
     }
 
+    /// <summary>
+    /// Creates the latest user turn with any bounded restored logical transcript context.
+    /// </summary>
+    /// <param name="request">The admitted inference request and logical message sequence.</param>
+    /// <returns>The latest user message, optionally prefixed by clearly delimited lower-authority restored context.</returns>
     public string CreateTurnInput(LlmInferenceRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);

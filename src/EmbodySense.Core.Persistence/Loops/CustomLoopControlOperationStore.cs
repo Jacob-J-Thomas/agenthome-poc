@@ -10,6 +10,15 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Persists bounded version-1 custom-loop control receipts with exclusive mutation ownership.
+/// </summary>
+/// <remarks>
+/// One canonical JSON artifact is stored per operation identifier. Begin and completion transitions are serialized by an
+/// in-process gate and cross-process file lease, then committed with a write-through atomic replace. Unknown fields, invalid
+/// enum values, noncanonical state, missing ownership, or identity/path mismatches throw <see cref="FormatException"/>.
+/// No compatibility reader or migration is provided for superseded POC shapes.
+/// </remarks>
 public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperationStore
 {
     private const long MaximumArtifactBytes = 64 * 1024;
@@ -27,6 +36,10 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     private readonly CustomLoopArtifactPathGuard _pathGuard;
     private readonly SemaphoreSlim _processGate;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopControlOperationStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public CustomLoopControlOperationStore(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -35,6 +48,15 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         _processGate = _processGates.GetOrAdd(_root, _ => new SemaphoreSlim(1, 1));
     }
 
+    /// <summary>
+    /// Creates, replays, or recovers the pending receipt for a control operation.
+    /// </summary>
+    /// <param name="operation">The canonical pending operation and request binding.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// A result reporting creation, replay, request conflict, or unproven ownership. A successful new or recovered pending
+    /// operation carries the exclusive in-process ownership lease required by its bounded executor.
+    /// </returns>
     public async Task<CustomLoopControlOperationStoreResult> BeginAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken = default)
     {
         Validate(operation, requirePending: true);
@@ -93,6 +115,12 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
     }
 
+    /// <summary>
+    /// Loads the canonical receipt for an operation identifier.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated receipt, or <see langword="null"/> when no artifact exists.</returns>
     public async Task<CustomLoopControlOperation?> GetAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var safeOperationId = CustomLoopArtifactIdentifier.Require(operationId, nameof(operationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
@@ -107,6 +135,12 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
     }
 
+    /// <summary>
+    /// Commits the terminal receipt for an existing control operation with matching request and ownership.
+    /// </summary>
+    /// <param name="operation">The canonical completed operation, including the owner generation that began it.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result reporting completion, idempotent replay, absence, or request/ownership conflict.</returns>
     public async Task<CustomLoopControlOperationStoreResult> CompleteAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken = default)
     {
         Validate(operation, requirePending: false);

@@ -6,11 +6,22 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
+/// <summary>
+/// Projects the permitted <c>embodysense.command</c> surface and returns brokered outcomes in app-server JSON form.
+/// </summary>
+/// <remarks>
+/// The bridge performs protocol-shape validation only; authority, permissions, approvals, audit, actuation, and retained
+/// results remain owned by <see cref="IToolBroker"/>.
+/// </remarks>
 internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
 {
     private const string Namespace = "embodysense";
     private readonly IToolBroker _toolBroker;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CodexAppServerToolBridge"/> type.
+    /// </summary>
+    /// <param name="toolBroker">The tool broker.</param>
     public CodexAppServerToolBridge(IToolBroker toolBroker)
     {
         ArgumentNullException.ThrowIfNull(toolBroker);
@@ -18,8 +29,16 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
         _toolBroker = toolBroker;
     }
 
+    /// <summary>
+    /// Gets the command set currently exposed by the governed broker.
+    /// </summary>
+    /// <value>The available commands tool commands.</value>
     public IReadOnlyList<ToolCommand> AvailableCommands => _toolBroker.AvailableCommands;
 
+    /// <summary>
+    /// Creates the single dynamic-tool declaration when at least one command is available.
+    /// </summary>
+    /// <returns>The JSON array.</returns>
     public JsonArray CreateToolSpecs()
     {
         if (AvailableCommands.Count == 0)
@@ -33,6 +52,12 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
         ];
     }
 
+    /// <summary>
+    /// Converts one dynamic-tool request to a governed broker request and serializes its terminal result.
+    /// </summary>
+    /// <param name="parameters">The parameters.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the JSON object.</returns>
     public async Task<JsonObject> HandleToolCallAsync(JsonElement parameters, CancellationToken cancellationToken)
     {
         try

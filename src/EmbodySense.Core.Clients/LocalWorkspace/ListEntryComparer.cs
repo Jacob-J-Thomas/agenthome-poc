@@ -2,10 +2,23 @@ using EmbodySense.Core.Clients.LocalWorkspace.Models;
 
 namespace EmbodySense.Core.Clients.LocalWorkspace;
 
+/// <summary>
+/// Orders directory entries before files, then by case-insensitive name, exact name, and canonical path.
+/// </summary>
 internal sealed class ListEntryComparer : IComparer<ListEntry>
 {
+    /// <summary>
+    /// Gets the shared stateless comparer.
+    /// </summary>
+    /// <value>The shared comparer instance.</value>
     public static ListEntryComparer Instance { get; } = new();
 
+    /// <summary>
+    /// Compares two entries using the deterministic workspace-list ordering.
+    /// </summary>
+    /// <param name="left">The left.</param>
+    /// <param name="right">The right.</param>
+    /// <returns>A negative value when <paramref name="left"/> sorts first, zero when equal, or a positive value otherwise.</returns>
     public int Compare(ListEntry? left, ListEntry? right)
     {
         if (ReferenceEquals(left, right))

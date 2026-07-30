@@ -8,8 +8,18 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// <summary>
 /// Serializes and hydrates the canonical persisted artifact contract for a live custom-loop run.
 /// </summary>
+/// <remarks>
+/// Serialization validates the complete run and the encoded byte limit before returning content. Deserialization accepts only
+/// the current compact version-1 envelope through <see cref="CustomLoopRunArtifactCodec"/>; malformed, unsupported, oversized,
+/// or semantically invalid artifacts throw <see cref="FormatException"/>.
+/// </remarks>
 public static class CustomLoopRunArtifactSerializer
 {
+    /// <summary>
+    /// Validates and encodes a run into the bounded canonical version-1 artifact representation.
+    /// </summary>
+    /// <param name="run">The run.</param>
+    /// <returns>The compact persisted artifact bytes.</returns>
     public static byte[] Serialize(CustomLoopRunRecord run)
     {
         var validation = CustomLoopRunValidator.Validate(run);
@@ -28,6 +38,11 @@ public static class CustomLoopRunArtifactSerializer
         return artifact;
     }
 
+    /// <summary>
+    /// Decodes and validates a bounded canonical version-1 run artifact.
+    /// </summary>
+    /// <param name="artifact">The artifact.</param>
+    /// <returns>The hydrated custom-loop run record.</returns>
     public static CustomLoopRunRecord Deserialize(byte[] artifact)
     {
         ArgumentNullException.ThrowIfNull(artifact);
