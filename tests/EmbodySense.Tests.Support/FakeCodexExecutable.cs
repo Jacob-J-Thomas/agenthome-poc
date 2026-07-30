@@ -61,7 +61,14 @@ public static class FakeCodexExecutable
               if (message.id === 99 && pendingToolTurn) {
                 const completed = pendingToolTurn;
                 pendingToolTurn = null;
-                completeTurn(completed.threadId, completed.turnId, `browser governed tool response: ${completed.prompt}`);
+                const toolText = (message.result?.contentItems ?? [])
+                  .map((item) => String(item?.text ?? ""))
+                  .join("\n");
+                const approved = message.result?.success === true && toolText.includes("approved browser evidence");
+                const outcome = approved
+                  ? `browser governed tool approved: ${toolText}`
+                  : `browser governed tool rejected: ${toolText}`;
+                completeTurn(completed.threadId, completed.turnId, `${outcome}; prompt: ${completed.prompt}`);
                 return;
               }
 

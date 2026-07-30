@@ -31,12 +31,16 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
 
+            app.AssertHealthy();
+            browser.BeginExpectedServerRestart();
             await app.DisposeAsync();
             app = null;
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent.includes('reconnecting')");
             Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('sendButton').disabled"));
+            await Task.Delay(TimeSpan.FromMilliseconds(1250));
 
             app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
+            browser.EndExpectedServerRestart();
             await browser.ReloadAsync();
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/125): Require the first turn to be restored after the Web process restarts.
@@ -120,8 +124,8 @@ public sealed class BrowserFlowTests
             await InvokeLoopAsync(browser, "browser-approval-approve");
             await browser.WaitForExpressionAsync("!document.getElementById('loopApprovalPanel').hidden && [...document.querySelectorAll('#loopApprovals button')].some((button) => button.textContent.includes('Approve'))");
             await ClickButtonByTextAsync(browser, "#loopApprovals button", "Approve");
-            await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('browser governed tool response')");
-            Assert.Contains("browser governed tool response", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.OrdinalIgnoreCase);
+            await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('approved browser evidence')");
+            Assert.Contains("browser governed tool approved", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.OrdinalIgnoreCase);
 
             await ClickAsync(browser, "#builderTab");
             await InvokeLoopAsync(browser, "browser-approval-reject");
@@ -288,22 +292,27 @@ public sealed class BrowserFlowTests
         private readonly BoundedProcessOutput _output;
         private readonly BoundedProcessOutput _error;
         private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pendingCommands = new();
+        private readonly ConcurrentDictionary<int, Task> _pendingSends = new();
+        private readonly ConcurrentDictionary<string, string> _requestUrls = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim _sendGate = new(1, 1);
         private readonly object _diagnosticsGate = new();
         private readonly List<string> _diagnostics = [];
         private readonly byte[] _buffer = new byte[65536];
         private readonly Task _readerTask;
+        private readonly string _targetAuthority;
         private Exception? _readerFailure;
+        private int _expectedServerRestart;
         private int _nextCommandId;
         private int _disposed;
 
-        private HeadlessBrowserSession(Process process, ClientWebSocket socket, string userDataDirectory, BoundedProcessOutput output, BoundedProcessOutput error)
+        private HeadlessBrowserSession(Process process, ClientWebSocket socket, string userDataDirectory, BoundedProcessOutput output, BoundedProcessOutput error, string targetUrl)
         {
             _process = process;
             _socket = socket;
             _userDataDirectory = userDataDirectory;
             _output = output;
             _error = error;
+            _targetAuthority = new Uri(targetUrl).Authority;
             _readerTask = ReceiveLoopAsync();
         }
 
@@ -370,7 +379,7 @@ public sealed class BrowserFlowTests
                 var websocketUrl = await GetInitialPageWebSocketUrlAsync(debugPort);
                 var socket = new ClientWebSocket();
                 await socket.ConnectAsync(new Uri(websocketUrl), CancellationToken.None);
-                session = new HeadlessBrowserSession(process, socket, userDataDirectory, output, error);
+                session = new HeadlessBrowserSession(process, socket, userDataDirectory, output, error, targetUrl);
                 await session.SendCommandAsync("Page.enable");
                 await session.SendCommandAsync("Runtime.enable");
                 await session.SendCommandAsync("Log.enable");
@@ -458,6 +467,16 @@ public sealed class BrowserFlowTests
             _ = await SendCommandAsync("Page.reload", new { ignoreCache = true });
         }
 
+        public void BeginExpectedServerRestart()
+        {
+            Interlocked.Exchange(ref _expectedServerRestart, 1);
+        }
+
+        public void EndExpectedServerRestart()
+        {
+            Interlocked.Exchange(ref _expectedServerRestart, 0);
+        }
+
         public async Task AssertHealthyAsync()
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -521,7 +540,23 @@ public sealed class BrowserFlowTests
             {
             }
 
-            _sendGate.Dispose();
+            var pendingSends = _pendingSends.Values.ToArray();
+            if (pendingSends.Length > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(pendingSends).WaitAsync(TimeSpan.FromSeconds(2));
+                }
+                catch (Exception exception) when (exception is TimeoutException or WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
+                {
+                }
+            }
+
+            if (_pendingSends.IsEmpty)
+            {
+                _sendGate.Dispose();
+            }
+
             await StopProcessAsync(_process);
             TryDeleteDirectory(_userDataDirectory);
         }
@@ -560,16 +595,10 @@ public sealed class BrowserFlowTests
 
             try
             {
-                await _sendGate.WaitAsync(cancellationToken);
-                try
-                {
-                    ThrowIfReaderFailed();
-                    await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
-                }
-                finally
-                {
-                    _sendGate.Release();
-                }
+                var sendTask = SendPayloadAsync(bytes);
+                _pendingSends[commandId] = sendTask;
+                _ = ObserveSendCompletionAsync(commandId, sendTask);
+                await sendTask.WaitAsync(cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -590,6 +619,35 @@ public sealed class BrowserFlowTests
             {
                 _pendingCommands.TryRemove(commandId, out _);
                 throw;
+            }
+        }
+
+        private async Task SendPayloadAsync(byte[] bytes)
+        {
+            await _sendGate.WaitAsync(CancellationToken.None);
+            try
+            {
+                ThrowIfReaderFailed();
+                await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+            }
+            finally
+            {
+                _sendGate.Release();
+            }
+        }
+
+        private async Task ObserveSendCompletionAsync(int commandId, Task sendTask)
+        {
+            try
+            {
+                await sendTask;
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _pendingSends.TryRemove(commandId, out _);
             }
         }
 
@@ -682,6 +740,8 @@ public sealed class BrowserFlowTests
                 return;
             }
 
+            CaptureRequestUrl(method, parameters);
+
             if (method == "Runtime.exceptionThrown")
             {
                 AddDiagnostic("page exception: " + parameters.GetRawText());
@@ -701,7 +761,7 @@ public sealed class BrowserFlowTests
                 && entry.TryGetProperty("level", out var level)
                 && string.Equals(level.GetString(), "error", StringComparison.OrdinalIgnoreCase))
             {
-                if (IsKnownBaselineBrowserLogEntry(entry))
+                if (IsKnownBaselineBrowserLogEntry(entry) || IsExpectedServerRestartLogEntry(entry))
                 {
                     return;
                 }
@@ -723,8 +783,87 @@ public sealed class BrowserFlowTests
             if (method == "Network.loadingFailed"
                 && (!parameters.TryGetProperty("canceled", out var cancelled) || cancelled.ValueKind != JsonValueKind.True))
             {
+                if (IsExpectedServerRestartNetworkFailure(parameters))
+                {
+                    return;
+                }
+
                 AddDiagnostic("network load failed: " + parameters.GetRawText());
             }
+        }
+
+        private void CaptureRequestUrl(string? method, JsonElement parameters)
+        {
+            if (!parameters.TryGetProperty("requestId", out var requestIdValue) || requestIdValue.ValueKind != JsonValueKind.String)
+            {
+                return;
+            }
+
+            var requestId = requestIdValue.GetString()!;
+            if (method == "Network.requestWillBeSent"
+                && parameters.TryGetProperty("request", out var request)
+                && request.TryGetProperty("url", out var requestUrl)
+                && requestUrl.ValueKind == JsonValueKind.String)
+            {
+                _requestUrls[requestId] = requestUrl.GetString()!;
+                return;
+            }
+
+            if (method == "Network.webSocketCreated"
+                && parameters.TryGetProperty("url", out var websocketUrl)
+                && websocketUrl.ValueKind == JsonValueKind.String)
+            {
+                _requestUrls[requestId] = websocketUrl.GetString()!;
+                return;
+            }
+
+            if (method is "Network.loadingFinished" or "Network.webSocketClosed")
+            {
+                _requestUrls.TryRemove(requestId, out _);
+            }
+        }
+
+        private bool IsExpectedServerRestartLogEntry(JsonElement entry)
+        {
+            if (Volatile.Read(ref _expectedServerRestart) == 0)
+            {
+                return false;
+            }
+
+            var source = entry.TryGetProperty("source", out var sourceValue) ? sourceValue.GetString() : null;
+            var text = entry.TryGetProperty("text", out var textValue) ? textValue.GetString() : null;
+            var url = entry.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null;
+            return string.Equals(source, "network", StringComparison.Ordinal)
+                && (ContainsTargetAuthority(text) || ContainsTargetAuthority(url))
+                && (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true || url?.StartsWith("ws", StringComparison.OrdinalIgnoreCase) == true)
+                && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true || text?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true);
+        }
+
+        private bool IsExpectedServerRestartNetworkFailure(JsonElement parameters)
+        {
+            if (!parameters.TryGetProperty("requestId", out var requestIdValue)
+                || requestIdValue.ValueKind != JsonValueKind.String
+                || !_requestUrls.TryRemove(requestIdValue.GetString()!, out var requestUrl))
+            {
+                return false;
+            }
+
+            if (Volatile.Read(ref _expectedServerRestart) == 0
+                || !Uri.TryCreate(requestUrl, UriKind.Absolute, out var uri)
+                || !string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(uri.Scheme, "ws", StringComparison.OrdinalIgnoreCase) && !string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
+            return errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
+                || errorText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true;
+        }
+
+        private bool ContainsTargetAuthority(string? value)
+        {
+            return value?.Contains(_targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
         }
 
         private void AddDiagnostic(string diagnostic)
