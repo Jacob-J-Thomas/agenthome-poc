@@ -179,10 +179,10 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         }
         catch (OperationCanceledException) when (request.CancellationToken.IsCancellationRequested)
         {
-            const string detail = "Turn was cancelled.";
-            var saveFailure = await TrySaveRunAsync(run.Cancel(DateTimeOffset.UtcNow, detail), CancellationToken.None);
+            const string Detail = "Turn was cancelled.";
+            var saveFailure = await TrySaveRunAsync(run.Cancel(DateTimeOffset.UtcNow, Detail), CancellationToken.None);
             return DefaultConversationLoopTurnResult.Cancelled(
-                IncludeRunPersistenceFailure(detail, saveFailure),
+                IncludeRunPersistenceFailure(Detail, saveFailure),
                 acceptedTranscriptMessages.ToArray(),
                 runIdentity,
                 userMessageAccepted);

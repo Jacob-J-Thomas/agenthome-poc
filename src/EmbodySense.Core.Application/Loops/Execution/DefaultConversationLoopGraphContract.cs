@@ -5,7 +5,7 @@ namespace EmbodySense.Core.Application.Loops.Execution;
 
 internal static class DefaultConversationLoopGraphContract
 {
-    private static readonly string[] RequiredNodeIds =
+    private static readonly string[] _requiredNodeIds =
     [
         DefaultConversationLoopGraphIds.AcceptUserMessage,
         DefaultConversationLoopGraphIds.AssembleContext,
@@ -14,7 +14,7 @@ internal static class DefaultConversationLoopGraphContract
         DefaultConversationLoopGraphIds.CompleteRun
     ];
 
-    private static readonly RequiredNode[] RequiredNodes =
+    private static readonly RequiredNode[] _requiredNodes =
     [
         new(DefaultConversationLoopGraphIds.AcceptUserMessage, LoopGraphNodeKind.Trigger),
         new(DefaultConversationLoopGraphIds.AssembleContext, LoopGraphNodeKind.ContextAssembly),
@@ -23,7 +23,7 @@ internal static class DefaultConversationLoopGraphContract
         new(DefaultConversationLoopGraphIds.CompleteRun, LoopGraphNodeKind.RunFinalization)
     ];
 
-    private static readonly RequiredEdge[] RequiredEdges =
+    private static readonly RequiredEdge[] _requiredEdges =
     [
         new("accept-message-to-context", DefaultConversationLoopGraphIds.AcceptUserMessage, DefaultConversationLoopGraphIds.AssembleContext, LoopGraphEdgeCondition.Always),
         new("context-to-inference", DefaultConversationLoopGraphIds.AssembleContext, DefaultConversationLoopGraphIds.DispatchInference, LoopGraphEdgeCondition.Success),
@@ -62,7 +62,7 @@ internal static class DefaultConversationLoopGraphContract
         }
 
         var nodeIds = loopDefinition.Graph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
-        foreach (var requiredNodeId in RequiredNodeIds)
+        foreach (var requiredNodeId in _requiredNodeIds)
         {
             if (!nodeIds.Contains(requiredNodeId))
             {
@@ -70,7 +70,7 @@ internal static class DefaultConversationLoopGraphContract
             }
         }
 
-        if (nodeIds.Count != RequiredNodeIds.Length)
+        if (nodeIds.Count != _requiredNodeIds.Length)
         {
             return $"Loop `{loopDefinition.Id}` graph contains nodes that the default conversation runner does not execute yet.";
         }
@@ -80,7 +80,7 @@ internal static class DefaultConversationLoopGraphContract
             return $"Loop `{loopDefinition.Id}` graph contains editable nodes that require the future generic graph executor.";
         }
 
-        foreach (var requiredNode in RequiredNodes)
+        foreach (var requiredNode in _requiredNodes)
         {
             var node = loopDefinition.Graph.Nodes.Single(item => string.Equals(item.Id, requiredNode.Id, StringComparison.Ordinal));
             if (node.Kind != requiredNode.Kind)
@@ -89,12 +89,12 @@ internal static class DefaultConversationLoopGraphContract
             }
         }
 
-        if (loopDefinition.Graph.Edges.Length != RequiredEdges.Length)
+        if (loopDefinition.Graph.Edges.Length != _requiredEdges.Length)
         {
             return $"Loop `{loopDefinition.Id}` graph contains edges that the default conversation runner does not execute yet.";
         }
 
-        foreach (var requiredEdge in RequiredEdges)
+        foreach (var requiredEdge in _requiredEdges)
         {
             if (!loopDefinition.Graph.Edges.Any(edge => requiredEdge.Matches(edge)))
             {

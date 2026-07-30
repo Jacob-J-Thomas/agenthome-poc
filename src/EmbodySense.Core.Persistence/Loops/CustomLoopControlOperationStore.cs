@@ -13,8 +13,8 @@ namespace EmbodySense.Core.Persistence.Loops;
 public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperationStore
 {
     private const long MaximumArtifactBytes = 64 * 1024;
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessGates = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _processGates = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -32,7 +32,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         ArgumentNullException.ThrowIfNull(paths);
         _root = Path.GetFullPath(paths.CustomLoopControlOperationsPath);
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
-        _processGate = ProcessGates.GetOrAdd(_root, _ => new SemaphoreSlim(1, 1));
+        _processGate = _processGates.GetOrAdd(_root, _ => new SemaphoreSlim(1, 1));
     }
 
     public async Task<CustomLoopControlOperationStoreResult> BeginAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken = default)
@@ -165,11 +165,11 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
 
         var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, MaximumArtifactBytes, "Custom-loop control operation", cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, JsonOptions.MaxDepth, "Custom-loop control operation", path);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, _jsonOptions.MaxDepth, "Custom-loop control operation", path);
         CustomLoopControlOperation? operation;
         try
         {
-            operation = JsonSerializer.Deserialize<CustomLoopControlOperation>(bytes, JsonOptions);
+            operation = JsonSerializer.Deserialize<CustomLoopControlOperation>(bytes, _jsonOptions);
         }
         catch (JsonException exception)
         {
@@ -196,11 +196,11 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         string json;
         try
         {
-            json = JsonSerializer.Serialize(operation, JsonOptions);
+            json = JsonSerializer.Serialize(operation, _jsonOptions);
         }
         catch (JsonException exception)
         {
-            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop control operation", JsonOptions.MaxDepth, exception, path);
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop control operation", _jsonOptions.MaxDepth, exception, path);
         }
 
         if (Encoding.UTF8.GetByteCount(json) > MaximumArtifactBytes)

@@ -21,8 +21,8 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 
 public sealed class CustomLoopWorkspaceExecutionGateTests
 {
-    private static readonly string FirstHash = new('1', CustomLoopLimits.Sha256HexCharacters);
-    private static readonly string SecondHash = new('2', CustomLoopLimits.Sha256HexCharacters);
+    private static readonly string _firstHash = new('1', CustomLoopLimits.Sha256HexCharacters);
+    private static readonly string _secondHash = new('2', CustomLoopLimits.Sha256HexCharacters);
 
     [Fact]
     public async Task Canonical_workspace_gate_never_waits_and_releases_after_execution()
@@ -33,36 +33,36 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await using var first = new CustomLoopWorkspaceExecutionGate(firstPaths);
         await using var second = new CustomLoopWorkspaceExecutionGate(canonicalAlias);
 
-        var acquired = first.TryAcquire("invoke-one", FirstHash);
-        var workspaceBusy = second.TryAcquire("invoke-two", SecondHash);
-        var sameOperation = second.TryAcquire("invoke-one", FirstHash);
-        var changedOperation = second.TryAcquire("invoke-one", SecondHash);
+        var acquired = first.TryAcquire("invoke-one", _firstHash);
+        var workspaceBusy = second.TryAcquire("invoke-two", _secondHash);
+        var sameOperation = second.TryAcquire("invoke-one", _firstHash);
+        var changedOperation = second.TryAcquire("invoke-one", _secondHash);
 
         Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, acquired.Status);
         Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceBusy, workspaceBusy.Status);
         Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, sameOperation.Status);
         Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, changedOperation.Status);
 
-        var busyReservation = second.TryReserveWorkspaceBusyOutcome("invoke-two", SecondHash);
+        var busyReservation = second.TryReserveWorkspaceBusyOutcome("invoke-two", _secondHash);
         Assert.Equal(CustomLoopExecutionLeaseStatus.BusyOutcomeReserved, busyReservation.Status);
         Assert.NotNull(busyReservation.Lease);
-        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, first.TryReserveWorkspaceBusyOutcome("invoke-two", SecondHash).Status);
-        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, first.TryReserveWorkspaceBusyOutcome("invoke-two", FirstHash).Status);
-        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, second.TryReserveWorkspaceBusyOutcome("invoke-one", FirstHash).Status);
-        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, second.TryReserveWorkspaceBusyOutcome("invoke-one", SecondHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, first.TryReserveWorkspaceBusyOutcome("invoke-two", _secondHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, first.TryReserveWorkspaceBusyOutcome("invoke-two", _firstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, second.TryReserveWorkspaceBusyOutcome("invoke-one", _firstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, second.TryReserveWorkspaceBusyOutcome("invoke-one", _secondHash).Status);
         acquired.Lease!.Dispose();
         acquired.Lease.Dispose();
-        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, first.TryAcquire("invoke-two", SecondHash).Status);
-        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, first.TryAcquire("invoke-two", FirstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationInProgress, first.TryAcquire("invoke-two", _secondHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.OperationConflict, first.TryAcquire("invoke-two", _firstHash).Status);
         busyReservation.Lease!.Dispose();
         busyReservation.Lease.Dispose();
-        using var next = second.TryAcquire("invoke-two", SecondHash).Lease;
+        using var next = second.TryAcquire("invoke-two", _secondHash).Lease;
         Assert.NotNull(next);
         next.Dispose();
-        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceAvailable, second.TryReserveWorkspaceBusyOutcome("invoke-three", FirstHash).Status);
-        Assert.Throws<ArgumentException>(() => first.TryAcquire("INVALID", FirstHash));
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceAvailable, second.TryReserveWorkspaceBusyOutcome("invoke-three", _firstHash).Status);
+        Assert.Throws<ArgumentException>(() => first.TryAcquire("INVALID", _firstHash));
         Assert.Throws<ArgumentException>(() => first.TryAcquire("invoke-three", "bad-hash"));
-        Assert.Throws<ArgumentException>(() => first.TryReserveWorkspaceBusyOutcome("INVALID", FirstHash));
+        Assert.Throws<ArgumentException>(() => first.TryReserveWorkspaceBusyOutcome("INVALID", _firstHash));
         Assert.Throws<ArgumentException>(() => first.TryReserveWorkspaceBusyOutcome("invoke-three", "bad-hash"));
     }
 
@@ -103,8 +103,8 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
 
-        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", FirstHash).Status);
-        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryReserveWorkspaceBusyOutcome("invoke-one", FirstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", _firstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryReserveWorkspaceBusyOutcome("invoke-one", _firstHash).Status);
     }
 
     [Fact]
@@ -121,9 +121,9 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         using var ownership = new WindowsFileLock(paths.CustomLoopHostLockPath);
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
 
-        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", FirstHash).Status);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, gate.TryAcquire("invoke-one", _firstHash).Status);
         ownership.Dispose();
-        using var acquired = gate.TryAcquire("invoke-one", FirstHash).Lease;
+        using var acquired = gate.TryAcquire("invoke-one", _firstHash).Lease;
 
         Assert.NotNull(acquired);
     }
@@ -139,7 +139,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
-        var active = gate.TryAcquire("invoke-one", FirstHash);
+        var active = gate.TryAcquire("invoke-one", _firstHash);
         Assert.NotNull(active.Lease);
 
         gate.RelinquishWorkspaceHost();
@@ -149,7 +149,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
             Assert.NotNull(externalOwnership);
         }
 
-        using var reacquired = gate.TryAcquire("invoke-two", SecondHash).Lease;
+        using var reacquired = gate.TryAcquire("invoke-two", _secondHash).Lease;
         Assert.NotNull(reacquired);
     }
 
@@ -447,14 +447,14 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        const string runId = "run-public-cross-process";
-        using var process = StartCancellationHost(workspace.RootPath, runId);
+        const string RunId = "run-public-cross-process";
+        using var process = StartCancellationHost(workspace.RootPath, RunId);
         try
         {
             Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
             var runStore = new CustomLoopRunStore(paths);
             var operationStore = new CustomLoopControlOperationStore(paths);
-            var running = RunningRun(runId);
+            var running = RunningRun(RunId);
             await PersistRunningRunAsync(runStore, running);
             await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
             var service = new CustomLoopLifecycleService(
@@ -465,7 +465,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
                 new RoutingCancellationSignal(requester),
                 new AuditLog(paths),
                 requester);
-            var request = new CustomLoopCancelRequest(runId, running.LifecycleVersion, "cancel-public-cross-process", AuditSchema.Actors.Web);
+            var request = new CustomLoopCancelRequest(RunId, running.LifecycleVersion, "cancel-public-cross-process", AuditSchema.Actors.Web);
 
             var result = await service.CancelAsync(request);
             var replay = await service.CancelAsync(request);

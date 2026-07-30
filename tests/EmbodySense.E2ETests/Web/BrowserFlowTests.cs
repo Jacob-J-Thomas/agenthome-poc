@@ -15,7 +15,7 @@ namespace EmbodySense.E2ETests.Web;
 
 public sealed class BrowserFlowTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     [InstalledBrowserFact]
     public async Task Headless_browser_initializes_workspace_and_restores_history()
@@ -85,7 +85,7 @@ public sealed class BrowserFlowTests
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "user", prompt);
         var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "assistant", answer);
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, JsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, JsonOptions) + Environment.NewLine);
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, _jsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, _jsonOptions) + Environment.NewLine);
     }
 
     private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
@@ -265,8 +265,8 @@ public sealed class BrowserFlowTests
         {
             var commandId = Interlocked.Increment(ref _nextCommandId);
             var payload = parameters is null
-                ? JsonSerializer.Serialize(new { id = commandId, method }, JsonOptions)
-                : JsonSerializer.Serialize(new { id = commandId, method, @params = parameters }, JsonOptions);
+                ? JsonSerializer.Serialize(new { id = commandId, method }, _jsonOptions)
+                : JsonSerializer.Serialize(new { id = commandId, method, @params = parameters }, _jsonOptions);
             var bytes = Encoding.UTF8.GetBytes(payload);
             try
             {

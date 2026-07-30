@@ -9,7 +9,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 internal static class CustomLoopRunPageCursorCodec
 {
     private const int CurrentVersion = 1;
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -20,7 +20,7 @@ internal static class CustomLoopRunPageCursorCodec
     {
         ArgumentNullException.ThrowIfNull(cursor);
         var payload = new CursorPayload(CurrentVersion, cursor.CreatedAtUtc.UtcTicks, cursor.RunId, cursor.LoopId);
-        return Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions));
+        return Base64UrlEncode(JsonSerializer.SerializeToUtf8Bytes(payload, _jsonOptions));
     }
 
     public static CustomLoopRunPageCursor? Decode(string? encoded, string? expectedLoopId)
@@ -37,7 +37,7 @@ internal static class CustomLoopRunPageCursorCodec
 
         try
         {
-            var payload = JsonSerializer.Deserialize<CursorPayload>(Base64UrlDecode(encoded), JsonOptions);
+            var payload = JsonSerializer.Deserialize<CursorPayload>(Base64UrlDecode(encoded), _jsonOptions);
             if (payload is null
                 || payload.Version != CurrentVersion
                 || !CustomLoopArtifactIdentifier.IsValid(payload.RunId)

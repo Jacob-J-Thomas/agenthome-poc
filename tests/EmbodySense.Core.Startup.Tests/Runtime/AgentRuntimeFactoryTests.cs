@@ -263,9 +263,9 @@ public sealed class AgentRuntimeFactoryTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         await PersistRunningRunAsync(runStore, RunningRun("run-unsupported-startup-recovery"));
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
         await using var runtime = await CreateRuntimeAsync(workspace);
         var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-after-unsupported-startup-recovery", "retry after cleanup");
 
@@ -273,7 +273,7 @@ public sealed class AgentRuntimeFactoryTests
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.InvokeCustomLoopAsync(input));
 
         Assert.Contains("Delete `.custom-loop-run-index.json`", exception.Message, StringComparison.Ordinal);
-        Assert.Equal(unsupportedIndex, await File.ReadAllTextAsync(indexPath));
+        Assert.Equal(UnsupportedIndex, await File.ReadAllTextAsync(indexPath));
 
         File.Delete(indexPath);
         var retry = await runtime.InvokeCustomLoopAsync(input);
@@ -294,9 +294,9 @@ public sealed class AgentRuntimeFactoryTests
         await using var runtime = await CreateRuntimeAsync(workspace);
         var recovered = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(running.Id));
         Assert.Equal("Paused", recovered.Status);
-        const string unsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
+        const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
         var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
-        await File.WriteAllTextAsync(indexPath, unsupportedIndex);
+        await File.WriteAllTextAsync(indexPath, UnsupportedIndex);
         var input = new LoopRunControlInput(recovered.Id, recovered.LifecycleVersion, "cancel-after-unsupported-index");
 
         var exception = await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtime.CancelCustomLoopAsync(input));

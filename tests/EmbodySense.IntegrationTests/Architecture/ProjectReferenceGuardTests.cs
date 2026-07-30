@@ -4,7 +4,7 @@ namespace EmbodySense.IntegrationTests.Architecture;
 
 public sealed class ProjectReferenceGuardTests
 {
-    private static readonly string[] ForbiddenInterfaceCoreNamespaces =
+    private static readonly string[] _forbiddenInterfaceCoreNamespaces =
     [
         "EmbodySense.Core.Application",
         "EmbodySense.Core.Clients",
@@ -12,7 +12,7 @@ public sealed class ProjectReferenceGuardTests
         "EmbodySense.Core.Persistence"
     ];
 
-    private static readonly string[] ForbiddenCoreSurfaceTokens =
+    private static readonly string[] _forbiddenCoreSurfaceTokens =
     [
         "IAgentRuntimeConsole",
         "AgentRuntimeConsoleHost",
@@ -20,7 +20,7 @@ public sealed class ProjectReferenceGuardTests
         "FormatRestoredConversation"
     ];
 
-    private static readonly IReadOnlyDictionary<string, string[]> ExpectedProductionReferences = new Dictionary<string, string[]>
+    private static readonly IReadOnlyDictionary<string, string[]> _expectedProductionReferences = new Dictionary<string, string[]>
     {
         ["EmbodySense.Core.Common"] = [],
         ["EmbodySense.Core.Application"] = ["EmbodySense.Core.Common"],
@@ -37,7 +37,7 @@ public sealed class ProjectReferenceGuardTests
     {
         var root = FindRepositoryRoot();
 
-        foreach (var item in ExpectedProductionReferences)
+        foreach (var item in _expectedProductionReferences)
         {
             var projectPath = Path.Combine(root, "src", item.Key, item.Key + ".csproj");
             var actual = ReadProjectReferences(projectPath);
@@ -97,7 +97,7 @@ public sealed class ProjectReferenceGuardTests
             .Select(projectName => Path.Combine(root, "src", projectName));
         var violations = coreDirectories
             .SelectMany(projectDirectory => Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories))
-            .SelectMany(file => ForbiddenCoreSurfaceTokens
+            .SelectMany(file => _forbiddenCoreSurfaceTokens
                 .Where(token => File.ReadAllText(file).Contains(token, StringComparison.Ordinal))
                 .Select(token => $"{Path.GetRelativePath(root, file)} contains {token}"))
             .ToArray();
@@ -120,7 +120,7 @@ public sealed class ProjectReferenceGuardTests
     private static bool ContainsForbiddenCoreReference(string file)
     {
         var text = File.ReadAllText(file);
-        return ForbiddenInterfaceCoreNamespaces.Any(namespaceName => text.Contains(namespaceName, StringComparison.Ordinal));
+        return _forbiddenInterfaceCoreNamespaces.Any(namespaceName => text.Contains(namespaceName, StringComparison.Ordinal));
     }
 
     private static string[] ReadProjectReferences(string projectPath)

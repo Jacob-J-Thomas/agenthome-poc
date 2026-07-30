@@ -11,7 +11,7 @@ namespace EmbodySense.Core.Application.Tests.Loops;
 
 public sealed class CustomLoopRunStoreDefaultsTests
 {
-    private static readonly DateTimeOffset Timestamp = new(2026, 7, 19, 12, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _timestamp = new(2026, 7, 19, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public async Task Optional_defaults_are_conservative_and_cancellation_aware()
@@ -19,7 +19,7 @@ public sealed class CustomLoopRunStoreDefaultsTests
         ICustomLoopRunStore store = new DefaultRunStore();
         var run = CreateRun();
         var request = new CustomLoopTraceDeletionRequest(run.Id, new string('a', CustomLoopLimits.Sha256HexCharacters), "delete-default", "test-user", "web");
-        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), Timestamp);
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp);
 
         Assert.True(await store.HasSufficientTraceCapacityForDispatchAsync(run, run.LifecycleVersion));
         Assert.Equal(CustomLoopTraceQuota.Empty(), await store.GetTraceQuotaAsync());
@@ -38,9 +38,9 @@ public sealed class CustomLoopRunStoreDefaultsTests
 
     private static CustomLoopRunRecord CreateRun()
     {
-        var definition = CustomLoopDefinition.CreateSeed("loop-default", "default-role", "step-1", "create-default", Timestamp);
-        var admitted = new CustomLoopRunEvent(1, "event-1", Timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-default", definition.Id, 1, CustomLoopRunStatus.Admitted, Timestamp, Timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-default", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(Timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var definition = CustomLoopDefinition.CreateSeed("loop-default", "default-role", "step-1", "create-default", _timestamp);
+        var admitted = new CustomLoopRunEvent(1, "event-1", _timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-default", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-default", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

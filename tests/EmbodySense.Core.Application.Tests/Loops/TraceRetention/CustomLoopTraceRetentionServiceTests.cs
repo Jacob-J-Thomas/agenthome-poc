@@ -13,7 +13,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.TraceRetention;
 
 public sealed class CustomLoopTraceRetentionServiceTests
 {
-    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+    private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
     private const string TraceHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     [Fact]
@@ -23,7 +23,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var tombstone = Tombstone(request, CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit);
         var store = new RecordingStore(Inspection(), new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit));
         var audit = new RecordingAuditLog();
-        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(Timestamp.AddMinutes(3)));
+        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(_timestamp.AddMinutes(3)));
 
         var result = await service.DeleteAsync(request);
 
@@ -79,7 +79,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var store = new RecordingStore(Inspection(), null);
         var audit = new RecordingAuditLog();
 
-        var result = await new CustomLoopTraceRetentionService(store, audit, new SequencedTimeProvider(Timestamp.AddMinutes(3), Timestamp.AddMinutes(3).AddSeconds(31))).DeleteAsync(Request());
+        var result = await new CustomLoopTraceRetentionService(store, audit, new SequencedTimeProvider(_timestamp.AddMinutes(3), _timestamp.AddMinutes(3).AddSeconds(31))).DeleteAsync(Request());
 
         Assert.Equal(CustomLoopTraceDeletionStatus.AuditUnavailable, result.Status);
         Assert.True(result.IsOutcomeCommitted);
@@ -94,7 +94,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var tombstone = Tombstone(request, CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit);
         var store = new RecordingStore(Inspection(), new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit));
         var audit = new BlockingIntentAuditLog();
-        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(Timestamp.AddMinutes(3)));
+        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(_timestamp.AddMinutes(3)));
         var firstTask = service.DeleteAsync(request);
         await audit.IntentStarted.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -116,10 +116,10 @@ public sealed class CustomLoopTraceRetentionServiceTests
     public async Task Stale_pending_reservation_fails_closed_with_one_durable_outcome_and_replays_without_more_audit()
     {
         var request = Request();
-        var pending = PendingOperation(request, Timestamp.AddMinutes(3));
+        var pending = PendingOperation(request, _timestamp.AddMinutes(3));
         var store = new RecordingStore(null, null) { Operation = pending };
         var audit = new RecordingAuditLog();
-        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(Timestamp.AddMinutes(4)));
+        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(_timestamp.AddMinutes(4)));
 
         var recovered = await service.DeleteAsync(request);
         var attemptsAfterRecovery = audit.Attempts;
@@ -146,9 +146,9 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var audit = new RecordingAuditLog();
         var request = Request();
 
-        var ambiguous = await new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(Timestamp.AddMinutes(3))).DeleteAsync(request);
+        var ambiguous = await new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(_timestamp.AddMinutes(3))).DeleteAsync(request);
         store.ReserveException = null;
-        var recovered = await new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(Timestamp.AddMinutes(4))).DeleteAsync(request);
+        var recovered = await new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(_timestamp.AddMinutes(4))).DeleteAsync(request);
 
         Assert.Equal(CustomLoopTraceDeletionStatus.OperationInProgress, ambiguous.Status);
         Assert.Equal(CustomLoopTraceDeletionStatus.AuditUnavailable, recovered.Status);
@@ -165,11 +165,11 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var stored = new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit);
         var store = new RecordingStore(deletedInspection, stored)
         {
-            Operation = PendingOperation(request, Timestamp.AddMinutes(3))
+            Operation = PendingOperation(request, _timestamp.AddMinutes(3))
         };
         var audit = new RecordingAuditLog();
 
-        var result = await new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(Timestamp.AddMinutes(4))).DeleteAsync(request);
+        var result = await new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(_timestamp.AddMinutes(4))).DeleteAsync(request);
 
         Assert.Equal(CustomLoopTraceDeletionStatus.Replayed, result.Status);
         Assert.Equal(CustomLoopTraceDeletionIntegrity.Complete, result.Tombstone!.OutcomeIntegrity);
@@ -184,7 +184,7 @@ public sealed class CustomLoopTraceRetentionServiceTests
         var tombstone = Tombstone(request, CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit);
         var store = new RecordingStore(Inspection(), new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, CustomLoopTraceDeletionIntegrity.PendingOutcomeAudit));
         var audit = new RecordingAuditLog(failOnAttempt: 2);
-        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(Timestamp.AddMinutes(3)));
+        var service = new CustomLoopTraceRetentionService(store, audit, new FixedTimeProvider(_timestamp.AddMinutes(3)));
 
         var first = await service.DeleteAsync(request);
         var attemptsAfterFirst = audit.Attempts;
@@ -629,16 +629,16 @@ public sealed class CustomLoopTraceRetentionServiceTests
 
     private static CustomLoopTraceDeletionRequest Request() => new("run-alpha", TraceHash, "delete-trace", "actor-user", "web");
 
-    private static CustomLoopTraceInspection Inspection() => new(CustomLoopTraceArtifactKind.LiveTrace, "run-alpha", "loop-alpha", CustomLoopRunStatus.Completed, 2, new string('b', 64), TraceHash, 4096, TraceHash, 4096, Timestamp, Timestamp.AddMinutes(2), null);
+    private static CustomLoopTraceInspection Inspection() => new(CustomLoopTraceArtifactKind.LiveTrace, "run-alpha", "loop-alpha", CustomLoopRunStatus.Completed, 2, new string('b', 64), TraceHash, 4096, TraceHash, 4096, _timestamp, _timestamp.AddMinutes(2), null);
 
     private static CustomLoopTraceTombstone Tombstone(CustomLoopTraceDeletionRequest request, CustomLoopTraceDeletionIntegrity integrity)
     {
-        return new CustomLoopTraceTombstone(CustomLoopTraceTombstone.CurrentSchemaVersion, CustomLoopTraceTombstone.CurrentArtifactKind, request.RunId, "loop-alpha", "invoke-alpha", new string('c', 64), CustomLoopRunStatus.Completed, 2, new string('b', 64), request.ExpectedTraceHash, 4096, Timestamp, Timestamp.AddMinutes(2), Timestamp.AddMinutes(3), request.Actor, request.Surface, request.OperationId, CustomLoopTraceDeletionRequestHash.Compute(request), request.OperationId, request.OperationId, integrity);
+        return new CustomLoopTraceTombstone(CustomLoopTraceTombstone.CurrentSchemaVersion, CustomLoopTraceTombstone.CurrentArtifactKind, request.RunId, "loop-alpha", "invoke-alpha", new string('c', 64), CustomLoopRunStatus.Completed, 2, new string('b', 64), request.ExpectedTraceHash, 4096, _timestamp, _timestamp.AddMinutes(2), _timestamp.AddMinutes(3), request.Actor, request.Surface, request.OperationId, CustomLoopTraceDeletionRequestHash.Compute(request), request.OperationId, request.OperationId, integrity);
     }
 
     private static CustomLoopTraceDeletionOperation Operation(CustomLoopTraceDeletionRequest request, CustomLoopTraceTombstone tombstone, CustomLoopTraceDeletionIntegrity integrity)
     {
-        return new CustomLoopTraceDeletionOperation(CustomLoopTraceDeletionOperation.CurrentSchemaVersion, request.OperationId, CustomLoopTraceDeletionRequestHash.Compute(request), request, Timestamp.AddMinutes(3), Timestamp.AddMinutes(3), CustomLoopTraceDeletionOperationState.OutcomeCommitted, CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, integrity);
+        return new CustomLoopTraceDeletionOperation(CustomLoopTraceDeletionOperation.CurrentSchemaVersion, request.OperationId, CustomLoopTraceDeletionRequestHash.Compute(request), request, _timestamp.AddMinutes(3), _timestamp.AddMinutes(3), CustomLoopTraceDeletionOperationState.OutcomeCommitted, CustomLoopTraceDeletionStoreStatus.Deleted, tombstone, integrity);
     }
 
     private static CustomLoopTraceDeletionOperation PendingOperation(CustomLoopTraceDeletionRequest request, DateTimeOffset timestamp)

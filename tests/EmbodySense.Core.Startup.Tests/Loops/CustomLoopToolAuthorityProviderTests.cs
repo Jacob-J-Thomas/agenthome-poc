@@ -11,13 +11,13 @@ namespace EmbodySense.Core.Startup.Tests.Loops;
 
 public sealed class CustomLoopToolAuthorityProviderTests
 {
-    private static readonly DateTimeOffset Timestamp = DateTimeOffset.Parse("2026-07-19T12:00:00+00:00");
+    private static readonly DateTimeOffset _timestamp = DateTimeOffset.Parse("2026-07-19T12:00:00+00:00");
 
     [Fact]
     public async Task Resolve_projects_default_role_ceiling_and_admitted_intersection()
     {
         using var workspace = new TestWorkspace();
-        var provider = await ProviderWithDefaultAsync(workspace, new FixedTimeProvider(Timestamp));
+        var provider = await ProviderWithDefaultAsync(workspace, new FixedTimeProvider(_timestamp));
 
         var authority = await provider.ResolveAsync("default-assistant", [CustomLoopToolAssignment.Search, CustomLoopToolAssignment.List]);
 
@@ -29,7 +29,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
         Assert.Equal([CustomLoopToolAssignment.List, CustomLoopToolAssignment.Search], authority.EffectiveAssignments);
         Assert.Equal(CustomLoopToolAuthorityProvider.ComputeRoleCeilingHash(authority.RoleId, authority.CurrentRoleCeiling), authority.RoleCeilingHash);
         Assert.Equal(CustomLoopToolAuthorityProvider.ComputeCatalogHash(), authority.CatalogHash);
-        Assert.Equal(Timestamp, authority.EvaluatedAtUtc);
+        Assert.Equal(_timestamp, authority.EvaluatedAtUtc);
         Assert.Contains("immutable admitted maximum", authority.Detail, StringComparison.Ordinal);
     }
 
@@ -58,7 +58,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
     public async Task Resolve_fails_closed_when_the_directory_role_definition_is_missing()
     {
         using var workspace = new TestWorkspace();
-        var provider = Provider(workspace, new FixedTimeProvider(Timestamp));
+        var provider = Provider(workspace, new FixedTimeProvider(_timestamp));
 
         var authority = await provider.ResolveAsync("default-assistant", [CustomLoopToolAssignment.Read]);
 
@@ -79,7 +79,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
             CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)]
         };
         await store.SaveAsync(definition);
-        var provider = new CustomLoopToolAuthorityProvider(store, new FixedTimeProvider(Timestamp));
+        var provider = new CustomLoopToolAuthorityProvider(store, new FixedTimeProvider(_timestamp));
 
         var authority = await provider.ResolveAsync(definition.RoleId, [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search]);
 
@@ -96,7 +96,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.LoopDefinitionsPath);
         await File.WriteAllTextAsync(Path.Combine(paths.LoopDefinitionsPath, "default-conversation.json"), "{invalid");
-        var provider = new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths), new FixedTimeProvider(Timestamp));
+        var provider = new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths), new FixedTimeProvider(_timestamp));
 
         var authority = await provider.ResolveAsync("default-assistant", [CustomLoopToolAssignment.Read]);
 
@@ -106,7 +106,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
         Assert.Empty(authority.CurrentRoleCeiling);
         Assert.Empty(authority.EffectiveAssignments);
         Assert.Equal(CustomLoopToolAuthorityProvider.ComputeRoleCeilingHash("default-assistant", []), authority.RoleCeilingHash);
-        Assert.Equal(Timestamp, authority.EvaluatedAtUtc);
+        Assert.Equal(_timestamp, authority.EvaluatedAtUtc);
         Assert.Contains("FormatException", authority.Detail, StringComparison.Ordinal);
     }
 
@@ -121,7 +121,7 @@ public sealed class CustomLoopToolAuthorityProviderTests
         File.Move(
             Path.Combine(paths.LoopDefinitionsPath, substituted.Id + ".json"),
             Path.Combine(paths.LoopDefinitionsPath, "default-conversation.json"));
-        var provider = new CustomLoopToolAuthorityProvider(store, new FixedTimeProvider(Timestamp));
+        var provider = new CustomLoopToolAuthorityProvider(store, new FixedTimeProvider(_timestamp));
 
         var authority = await provider.ResolveAsync(substituted.RoleId, [CustomLoopToolAssignment.Read]);
 

@@ -13,7 +13,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
 public sealed class CustomLoopRecoveryService
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly IAuditLog _auditLog;
@@ -58,15 +58,15 @@ public sealed class CustomLoopRecoveryService
         var target = !admissionAuditComplete
             ? CustomLoopRunStatus.NeedsReview
             : run.Status switch
-        {
-            CustomLoopRunStatus.Admitted => CustomLoopRunStatus.Paused,
-            CustomLoopRunStatus.Paused when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
-            CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
-            CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested => CustomLoopRunStatus.Paused,
-            CustomLoopRunStatus.CancelRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
-            CustomLoopRunStatus.CancelRequested => CustomLoopRunStatus.Cancelled,
-            _ => CustomLoopRunStatus.Unknown
-        };
+            {
+                CustomLoopRunStatus.Admitted => CustomLoopRunStatus.Paused,
+                CustomLoopRunStatus.Paused when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
+                CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
+                CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested => CustomLoopRunStatus.Paused,
+                CustomLoopRunStatus.CancelRequested when hasOpenAttempt => CustomLoopRunStatus.NeedsReview,
+                CustomLoopRunStatus.CancelRequested => CustomLoopRunStatus.Cancelled,
+                _ => CustomLoopRunStatus.Unknown
+            };
 
         if (target == CustomLoopRunStatus.Unknown)
         {
@@ -235,7 +235,7 @@ public sealed class CustomLoopRecoveryService
 
     private static CancellationToken IntegrityToken()
     {
-        return new CancellationTokenSource(IntegrityWriteTimeout).Token;
+        return new CancellationTokenSource(_integrityWriteTimeout).Token;
     }
 
     private static string SafeExceptionClass(Exception exception)

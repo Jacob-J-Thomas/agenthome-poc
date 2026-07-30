@@ -21,10 +21,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
-    private static readonly byte[] DiscoveryIndexPendingContent = "pending\n"u8.ToArray();
-    private static readonly TimeSpan DiscoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProcessMutationGates = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
+    private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _processMutationGates = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -78,7 +78,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         _mutationLockPath = Path.Combine(_runsRoot, MutationLockFileName);
         _discoveryIndexPath = Path.Combine(_runsRoot, DiscoveryIndexFileName);
         _discoveryIndexPendingPath = Path.Combine(_runsRoot, DiscoveryIndexPendingFileName);
-        _processMutationGate = ProcessMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
+        _processMutationGate = _processMutationGates.GetOrAdd(_runsRoot, _ => new SemaphoreSlim(1, 1));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _monitorWatcherFactory = monitorWatcherFactory;
         _monitorArtifactChangeVersions = new Dictionary<string, long>(PathComparer);
@@ -975,14 +975,14 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
 
         var content = await ReadBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPath, CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes, "Custom loop run discovery index", cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(content, JsonOptions.MaxDepth, "Custom loop run discovery index", _discoveryIndexPath);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(content, _jsonOptions.MaxDepth, "Custom loop run discovery index", _discoveryIndexPath);
         try
         {
-            using var document = JsonDocument.Parse(content, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
+            using var document = JsonDocument.Parse(content, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
             ThrowIfDiscoveryIndexSchemaVersionIsUnsupported(document.RootElement);
             RequireCompleteContract(document.RootElement, typeof(CustomLoopRunDiscoveryIndex), "$");
-            var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, JsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
+            var index = JsonSerializer.Deserialize<CustomLoopRunDiscoveryIndex>(content, _jsonOptions) ?? throw new FormatException("The custom loop run discovery index was empty.");
             ValidateDiscoveryIndex(index);
             return index;
         }
@@ -1062,7 +1062,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private async Task WriteDiscoveryIndexAsync(CustomLoopRunDiscoveryIndex index, CancellationToken cancellationToken)
     {
-        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(index, JsonOptions, "Custom loop run discovery index", _discoveryIndexPath);
+        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(index, _jsonOptions, "Custom loop run discovery index", _discoveryIndexPath);
         if (content.Length + 1 > CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes)
         {
             throw new FormatException($"The custom loop run discovery index exceeds {CustomLoopLimits.MaxRunDiscoveryIndexUtf8Bytes} UTF-8 bytes.");
@@ -1395,7 +1395,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             return;
         }
 
-        await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPendingPath, DiscoveryIndexPendingContent, overwrite: false, cancellationToken);
+        await WriteBoundedJsonArtifactAsync(_runsRoot, _discoveryIndexPendingPath, _discoveryIndexPendingContent, overwrite: false, cancellationToken);
     }
 
     private void DeleteDiscoveryIndexPendingMarker()
@@ -1665,10 +1665,10 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
         var utf8Json = await ReadBoundedArtifactAsync(location.Path, cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom loop run artifact", location.Path);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, _jsonOptions.MaxDepth, "Custom loop run artifact", location.Path);
         try
         {
-            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
+            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
             var persistedHash = ComputeHash(utf8Json);
             if (document.RootElement.TryGetProperty("artifactKind", out var artifactKind))
@@ -1681,7 +1681,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                 if (string.Equals(artifactKind.GetString(), CustomLoopTraceTombstone.CurrentArtifactKind, StringComparison.Ordinal))
                 {
                     RequireCompleteContract(document.RootElement, typeof(CustomLoopTraceTombstone), "$");
-                    var tombstone = JsonSerializer.Deserialize<CustomLoopTraceTombstone>(utf8Json, JsonOptions) ?? throw new FormatException($"Custom loop trace tombstone `{location.Path}` was empty.");
+                    var tombstone = JsonSerializer.Deserialize<CustomLoopTraceTombstone>(utf8Json, _jsonOptions) ?? throw new FormatException($"Custom loop trace tombstone `{location.Path}` was empty.");
                     ValidateTombstone(tombstone);
                     if (!string.Equals(tombstone.RunId, location.RunId, StringComparison.Ordinal) || !string.Equals(tombstone.LoopId, location.LoopId, StringComparison.Ordinal))
                     {
@@ -1985,7 +1985,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private static byte[] SerializeTombstoneBounded(CustomLoopTraceTombstone tombstone)
     {
-        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(tombstone, JsonOptions, $"Custom loop trace tombstone `{tombstone.RunId}`");
+        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(tombstone, _jsonOptions, $"Custom loop trace tombstone `{tombstone.RunId}`");
         if (content.Length + 1 > CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes)
         {
             throw new FormatException($"Custom loop trace tombstone `{tombstone.RunId}` exceeds the {CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes}-byte limit.");
@@ -2026,13 +2026,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
 
         var utf8Json = await ReadBoundedJsonArtifactAsync(_traceDeletionOperationsRoot, path, CustomLoopLimits.MaxRunTraceDeletionOperationUtf8Bytes, "Custom loop trace-deletion operation", cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom loop trace-deletion operation", path);
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, _jsonOptions.MaxDepth, "Custom loop trace-deletion operation", path);
         try
         {
-            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
+            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
             RequireCompleteContract(document.RootElement, typeof(CustomLoopTraceDeletionOperation), "$");
-            var operation = JsonSerializer.Deserialize<CustomLoopTraceDeletionOperation>(utf8Json, JsonOptions) ?? throw new FormatException($"Custom loop trace-deletion operation `{path}` was empty.");
+            var operation = JsonSerializer.Deserialize<CustomLoopTraceDeletionOperation>(utf8Json, _jsonOptions) ?? throw new FormatException($"Custom loop trace-deletion operation `{path}` was empty.");
             ValidateDeletionOperation(operation);
             if (!string.Equals(operation.OperationId, operationId, StringComparison.Ordinal))
             {
@@ -2235,7 +2235,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     {
         ValidateDeletionOperation(operation);
         var path = GetTraceDeletionOperationPath(operation.OperationId);
-        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(operation, JsonOptions, "Custom loop trace-deletion operation", path);
+        var content = CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(operation, _jsonOptions, "Custom loop trace-deletion operation", path);
         if (content.Length + 1 > CustomLoopLimits.MaxRunTraceDeletionOperationUtf8Bytes)
         {
             throw new FormatException($"Custom loop trace-deletion operation `{operation.OperationId}` exceeds the {CustomLoopLimits.MaxRunTraceDeletionOperationUtf8Bytes}-byte limit.");
@@ -2303,7 +2303,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         var index = await ReadCleanDiscoveryIndexAsync(cancellationToken);
         await MarkDiscoveryIndexPendingAsync(cancellationToken);
         await WriteArtifactContentAsync(path, content, overwrite, cancellationToken);
-        using var maintenanceCancellation = new CancellationTokenSource(DiscoveryIndexMaintenanceTimeout);
+        using var maintenanceCancellation = new CancellationTokenSource(_discoveryIndexMaintenanceTimeout);
         try
         {
             await UpdateDiscoveryIndexAsync(index, path, summary, ComputeHash(content), maintenanceCancellation.Token);
@@ -2476,14 +2476,14 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private static bool IsLockContention(IOException exception)
     {
-        const int resourceTemporarilyUnavailable = 11;
-        const int sharingViolation = 32;
-        const int lockViolation = 33;
-        const int resourceDeadlockAvoided = 35;
+        const int ResourceTemporarilyUnavailable = 11;
+        const int SharingViolation = 32;
+        const int LockViolation = 33;
+        const int ResourceDeadlockAvoided = 35;
         var errorCode = exception.HResult & 0xFFFF;
         return OperatingSystem.IsWindows()
-            ? errorCode is sharingViolation or lockViolation
-            : errorCode is resourceTemporarilyUnavailable or resourceDeadlockAvoided;
+            ? errorCode is SharingViolation or LockViolation
+            : errorCode is ResourceTemporarilyUnavailable or ResourceDeadlockAvoided;
     }
 
     private static bool IsReadOnlyLockAccessFailure(Exception exception)
@@ -2493,11 +2493,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             return true;
         }
 
-        const int accessDenied = 5;
-        const int permissionDenied = 13;
-        const int writeProtected = 19;
-        const int readOnlyFileSystem = 30;
-        return exception is IOException ioException && (ioException.HResult & 0xFFFF) is accessDenied or permissionDenied or writeProtected or readOnlyFileSystem;
+        const int AccessDenied = 5;
+        const int PermissionDenied = 13;
+        const int WriteProtected = 19;
+        const int ReadOnlyFileSystem = 30;
+        return exception is IOException ioException && (ioException.HResult & 0xFFFF) is AccessDenied or PermissionDenied or WriteProtected or ReadOnlyFileSystem;
     }
 
     private static void EnsureContained(string root, string candidate)
@@ -2702,7 +2702,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private static string ComputeSummaryBindingHash(CustomLoopRunSummary summary, string artifactHash)
     {
-        var summaryContent = JsonSerializer.SerializeToUtf8Bytes(summary, JsonOptions);
+        var summaryContent = JsonSerializer.SerializeToUtf8Bytes(summary, _jsonOptions);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(Convert.FromHexString(artifactHash));
         hash.AppendData(summaryContent);
@@ -2812,7 +2812,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
         foreach (var property in GetPersistedProperties(type))
         {
-            var name = property.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name ?? JsonOptions.PropertyNamingPolicy!.ConvertName(property.Name);
+            var name = property.GetCustomAttribute<JsonPropertyNameAttribute>()?.Name ?? _jsonOptions.PropertyNamingPolicy!.ConvertName(property.Name);
             if (!element.TryGetProperty(name, out var value))
             {
                 throw new FormatException($"JSON object `{path}` is missing required property `{name}`.");

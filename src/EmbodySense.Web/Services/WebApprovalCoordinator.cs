@@ -7,9 +7,9 @@ namespace EmbodySense.Web.Services;
 
 public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
 {
-    private static readonly (bool Approved, string DecisionBy, string Detail) OwnerDisconnected = (false, "system.web", "owner_disconnected");
-    private static readonly (bool Approved, string DecisionBy, string Detail) OwnerUnavailable = (false, "system.web", "approval_owner_unavailable");
-    private static readonly (bool Approved, string DecisionBy, string Detail) TimedOut = (false, "system.web", "approval_timeout");
+    private static readonly (bool Approved, string DecisionBy, string Detail) _ownerDisconnected = (false, "system.web", "owner_disconnected");
+    private static readonly (bool Approved, string DecisionBy, string Detail) _ownerUnavailable = (false, "system.web", "approval_owner_unavailable");
+    private static readonly (bool Approved, string DecisionBy, string Detail) _timedOut = (false, "system.web", "approval_timeout");
     private readonly ConcurrentDictionary<string, PendingApproval> _pending = new(StringComparer.Ordinal);
     private readonly HashSet<string> _liveOwnerConnections = new(StringComparer.Ordinal);
     private readonly object _ownerGate = new();
@@ -43,7 +43,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         {
             if (string.IsNullOrWhiteSpace(ownerConnectionId) || !_liveOwnerConnections.Contains(ownerConnectionId))
             {
-                return OwnerUnavailable;
+                return _ownerUnavailable;
             }
 
             pending = new PendingApproval(request, Interlocked.Increment(ref _lastSequence), _timeProvider.GetUtcNow(), ownerConnectionId);
@@ -110,7 +110,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
                     continue;
                 }
 
-                pending.TrySetResult(OwnerDisconnected);
+                pending.TrySetResult(_ownerDisconnected);
                 removedAny = true;
             }
         }
@@ -202,7 +202,7 @@ public sealed class WebApprovalCoordinator : IAgentToolApprovalPrompt
         {
             if (IsCurrentPending(pending))
             {
-                pending.TrySetResult(TimedOut);
+                pending.TrySetResult(_timedOut);
             }
         }
     }

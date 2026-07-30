@@ -24,7 +24,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversationPublisher
 {
-    private static readonly TimeSpan ReconciliationTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _reconciliationTimeout = TimeSpan.FromSeconds(30);
     private const int MaxRememberedNotificationOperations = 1_024;
     private readonly ConversationRuntimeState _conversationState;
     private readonly IConversationMemoryStore _conversationMemory;
@@ -143,7 +143,7 @@ internal sealed class CurrentConversationLoopPublisher : ICustomLoopConversation
 
     private async Task<CustomLoopConversationPublicationResult> ReconcileAppendExceptionAsync(CustomLoopConversationPublicationRequest request, IReadOnlyList<LlmMessage> expectedPrefix, Exception exception)
     {
-        using var reconciliation = new CancellationTokenSource(ReconciliationTimeout);
+        using var reconciliation = new CancellationTokenSource(_reconciliationTimeout);
         try
         {
             var persistedConversation = await _conversationMemory.LoadCurrentConversationSnapshotAsync(reconciliation.Token);

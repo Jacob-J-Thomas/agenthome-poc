@@ -18,7 +18,7 @@ public sealed class CSharpParameterNamingTests
     [Fact]
     public void Methods_and_class_or_struct_primary_constructors_accept_camel_case_while_records_accept_pascal_case()
     {
-        const string source = """
+        const string Source = """
             internal sealed class Worker(string workerName)
             {
                 public Worker(int retryCount) { }
@@ -47,13 +47,13 @@ public sealed class CSharpParameterNamingTests
             }
             """;
 
-        Assert.Empty(CSharpParameterNamingPolicy.FindViolations(source, "accepted.cs"));
+        Assert.Empty(CSharpParameterNamingPolicy.FindViolations(Source, "accepted.cs"));
     }
 
     [Fact]
     public void Local_functions_and_anonymous_functions_accept_camel_case_and_unused_underscores()
     {
-        const string source = """
+        const string Source = """
             internal sealed class Worker
             {
                 public void Run()
@@ -72,13 +72,13 @@ public sealed class CSharpParameterNamingTests
             }
             """;
 
-        Assert.Empty(CSharpParameterNamingPolicy.FindViolations(source, "anonymous-accepted.cs"));
+        Assert.Empty(CSharpParameterNamingPolicy.FindViolations(Source, "anonymous-accepted.cs"));
     }
 
     [Fact]
     public void Wrong_parameter_casing_is_reported_by_syntax_role()
     {
-        const string source = """
+        const string Source = """
             internal sealed class Worker(string WorkerName)
             {
                 public Worker(int RetryCount) { }
@@ -105,7 +105,7 @@ public sealed class CSharpParameterNamingTests
             }
             """;
 
-        var violations = CSharpParameterNamingPolicy.FindViolations(source, "rejected.cs");
+        var violations = CSharpParameterNamingPolicy.FindViolations(Source, "rejected.cs");
 
         Assert.Equal(12, violations.Count);
         Assert.Contains(violations, violation => violation.Contains("class primary constructor parameter `WorkerName` must use camelCase", StringComparison.Ordinal));
@@ -125,7 +125,7 @@ public sealed class CSharpParameterNamingTests
     [Fact]
     public void Local_and_anonymous_function_violations_are_reported()
     {
-        const string source = """
+        const string Source = """
             internal sealed class Worker
             {
                 public void Run()
@@ -141,7 +141,7 @@ public sealed class CSharpParameterNamingTests
             }
             """;
 
-        var violations = CSharpParameterNamingPolicy.FindViolations(source, "anonymous-rejected.cs");
+        var violations = CSharpParameterNamingPolicy.FindViolations(Source, "anonymous-rejected.cs");
 
         Assert.Equal(7, violations.Count);
         Assert.Contains(violations, violation => violation.Contains("local function parameter `LocalValue` must use camelCase", StringComparison.Ordinal));
@@ -155,7 +155,7 @@ public sealed class CSharpParameterNamingTests
     [Fact]
     public void Syntax_without_an_authored_parameter_identifier_needs_no_additional_rule()
     {
-        const string source = """
+        const string Source = """
             internal unsafe sealed class Worker
             {
                 ~Worker() { }
@@ -164,7 +164,7 @@ public sealed class CSharpParameterNamingTests
             }
             """;
 
-        Assert.Empty(CSharpParameterNamingPolicy.FindViolations(source, "identifier-free-syntax.cs"));
+        Assert.Empty(CSharpParameterNamingPolicy.FindViolations(Source, "identifier-free-syntax.cs"));
     }
 
     private static bool IsAuthoredSourceFile(string root, string file)

@@ -5,7 +5,7 @@ namespace EmbodySense.Core.Persistence.Memory;
 
 public sealed class FileConversationWorkspaceLease : IConversationWorkspaceLease
 {
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(25);
+    private static readonly TimeSpan _retryDelay = TimeSpan.FromMilliseconds(25);
     private readonly string _lockPath;
 
     public FileConversationWorkspaceLease(WorkspacePaths paths)
@@ -26,7 +26,7 @@ public sealed class FileConversationWorkspaceLease : IConversationWorkspaceLease
             }
             catch (IOException)
             {
-                await Task.Delay(RetryDelay, cancellationToken);
+                await Task.Delay(_retryDelay, cancellationToken);
             }
         }
     }

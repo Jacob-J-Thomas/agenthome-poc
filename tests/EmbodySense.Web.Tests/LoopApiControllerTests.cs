@@ -16,7 +16,7 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class LoopApiControllerTests
 {
-    private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
 
     [Fact]
     public async Task Loop_api_enforces_authentication_initialization_and_system_loop_lock()
@@ -29,12 +29,12 @@ public sealed class LoopApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var rejected = await client.GetAsync("/api/loops");
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
             var uninitializedCatalog = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
             var uninitializedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-before-init" });
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
             var catalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
-            var catalog = await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(JsonOptions);
+            var catalog = await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions);
             var systemGet = await SendAsync(client, HttpMethod.Get, "/api/loops/default-conversation", token);
             var malformedGet = await SendAsync(client, HttpMethod.Get, "/api/loops/INVALID%20ID", token);
             var systemUpdate = await SendAsync(client, HttpMethod.Put, "/api/loops/default-conversation", token, CreateUpdateBody(catalog!.SystemDefault, "system-update", "System loop"));
@@ -81,12 +81,12 @@ public sealed class LoopApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", JsonOptions))!.Token;
+            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { })).StatusCode);
 
             var unknownMember = await SendRawJsonAsync(client, HttpMethod.Post, "/api/loops", token, """{"operationId":"unknown-field","unexpected":true}""");
             var createResponse = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-api-loop" });
-            var created = await createResponse.Content.ReadFromJsonAsync<LoopAuthoringResponse>(JsonOptions);
+            var created = await createResponse.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions);
             var createdDefinition = Assert.IsType<LoopDefinitionSnapshot>(created!.Definition);
             var replayedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-api-loop" });
             var hostileText = "</textarea><script>globalThis.pwned=true</script><!-- & «quoted»";
@@ -98,28 +98,28 @@ public sealed class LoopApiControllerTests
             var updateResponse = await SendAsync(client, HttpMethod.Put, $"/api/loops/{createdDefinition.Id}", token, updateBody);
             var updateJson = await updateResponse.Content.ReadAsStringAsync();
             using var updateDocument = JsonDocument.Parse(updateJson);
-            var updated = JsonSerializer.Deserialize<LoopAuthoringResponse>(updateJson, JsonOptions);
+            var updated = JsonSerializer.Deserialize<LoopAuthoringResponse>(updateJson, _jsonOptions);
             var updatedDefinition = Assert.IsType<LoopDefinitionSnapshot>(updated!.Definition);
             var fetchedResponse = await SendAsync(client, HttpMethod.Get, $"/api/loops/{createdDefinition.Id}", token);
-            var fetched = await fetchedResponse.Content.ReadFromJsonAsync<LoopDefinitionSnapshot>(JsonOptions);
+            var fetched = await fetchedResponse.Content.ReadFromJsonAsync<LoopDefinitionSnapshot>(_jsonOptions);
             var conflict = await SendAsync(client, HttpMethod.Put, $"/api/loops/{createdDefinition.Id}", token, CreateUpdateBody(createdDefinition, "conflict-api-loop", "Conflicting edit"));
-            var conflictBody = await conflict.Content.ReadFromJsonAsync<LoopAuthoringResponse>(JsonOptions);
+            var conflictBody = await conflict.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions);
             var populatedCatalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
-            var populatedCatalog = await populatedCatalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(JsonOptions);
+            var populatedCatalog = await populatedCatalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions);
             var deleteResponse = await SendAsync(client, HttpMethod.Delete, $"/api/loops/{createdDefinition.Id}", token, new { expectedDefinitionVersion = updatedDefinition.DefinitionVersion, operationId = "delete-api-loop" });
-            var deleted = await deleteResponse.Content.ReadFromJsonAsync<LoopAuthoringResponse>(JsonOptions);
+            var deleted = await deleteResponse.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions);
             var missing = await SendAsync(client, HttpMethod.Get, $"/api/loops/{createdDefinition.Id}", token);
             var missingUpdate = await SendAsync(client, HttpMethod.Put, $"/api/loops/{createdDefinition.Id}", token, CreateUpdateBody(createdDefinition, "update-deleted-loop", "Deleted"));
             var finalCatalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
-            var finalCatalog = await finalCatalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(JsonOptions);
+            var finalCatalog = await finalCatalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions);
 
             Assert.Equal(HttpStatusCode.BadRequest, unknownMember.StatusCode);
             Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
             Assert.Equal("Created", created.Status);
             Assert.Equal(HttpStatusCode.OK, replayedCreate.StatusCode);
-            Assert.Equal("Replayed", (await replayedCreate.Content.ReadFromJsonAsync<LoopAuthoringResponse>(JsonOptions))!.Status);
+            Assert.Equal("Replayed", (await replayedCreate.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!.Status);
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
-            Assert.Equal("Invalid", (await invalid.Content.ReadFromJsonAsync<LoopAuthoringResponse>(JsonOptions))!.Status);
+            Assert.Equal("Invalid", (await invalid.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!.Status);
             Assert.Equal(HttpStatusCode.BadRequest, writeTool.StatusCode);
             Assert.Contains("unsupported_tool_assignment", await writeTool.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Equal(HttpStatusCode.BadRequest, numericEnum.StatusCode);
@@ -202,7 +202,7 @@ public sealed class LoopApiControllerTests
         request.Headers.Add(WebSessionSecurity.HeaderName, token);
         if (body is not null)
         {
-            request.Content = JsonContent.Create(body, options: JsonOptions);
+            request.Content = JsonContent.Create(body, options: _jsonOptions);
         }
 
         return await client.SendAsync(request);

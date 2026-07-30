@@ -20,7 +20,7 @@ internal static class CustomLoopRunArtifactCodec
     private const string AuthorityReferenceProperty = "$authority";
     private const string ToolRequestReferenceProperty = "$toolRequest";
     internal static readonly UTF8Encoding StrictUtf8 = new(false, true);
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
@@ -70,15 +70,15 @@ internal static class CustomLoopRunArtifactCodec
     {
         if (validateDepth)
         {
-            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, JsonOptions.MaxDepth, "Custom-loop run artifact", path);
+            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, _jsonOptions.MaxDepth, "Custom-loop run artifact", path);
         }
 
         JsonObject root;
         try
         {
-            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth });
+            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
-            root = JsonNode.Parse(utf8Json, documentOptions: new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = JsonOptions.MaxDepth }) as JsonObject
+            root = JsonNode.Parse(utf8Json, documentOptions: new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth }) as JsonObject
                 ?? throw new FormatException("The custom-loop live-run envelope was empty.");
         }
         catch (JsonException exception)
@@ -119,7 +119,7 @@ internal static class CustomLoopRunArtifactCodec
         CustomLoopRunRecord run;
         try
         {
-            run = hydratedProjection.Deserialize<CustomLoopRunRecord>(JsonOptions)
+            run = hydratedProjection.Deserialize<CustomLoopRunRecord>(_jsonOptions)
                 ?? throw new FormatException("The hydrated custom-loop run was empty.");
         }
         catch (JsonException exception)
@@ -175,12 +175,12 @@ internal static class CustomLoopRunArtifactCodec
         JsonObject projection;
         try
         {
-            projection = JsonSerializer.SerializeToNode(run, JsonOptions)?.AsObject()
+            projection = JsonSerializer.SerializeToNode(run, _jsonOptions)?.AsObject()
                 ?? throw new InvalidOperationException("The custom-loop run could not be projected.");
         }
         catch (JsonException exception)
         {
-            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop run artifact", JsonOptions.MaxDepth, exception);
+            throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop run artifact", _jsonOptions.MaxDepth, exception);
         }
 
         ProjectDefinition(RequireObject(projection, "admittedDefinition"), contents);
@@ -1060,7 +1060,7 @@ internal static class CustomLoopRunArtifactCodec
 
     internal static byte[] SerializeNode(JsonNode node)
     {
-        return CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(node, JsonOptions, "Custom-loop run artifact");
+        return CustomLoopJsonDepthPolicy.SerializeToUtf8Bytes(node, _jsonOptions, "Custom-loop run artifact");
     }
 
     private static JsonNode? Clone(JsonObject owner, string propertyName)
@@ -1172,7 +1172,7 @@ internal static class CustomLoopRunArtifactCodec
 
     internal static string IndexedId(string prefix, int index)
     {
-        const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+        const string Digits = "0123456789abcdefghijklmnopqrstuvwxyz";
         if (index < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(index));
@@ -1182,7 +1182,7 @@ internal static class CustomLoopRunArtifactCodec
         var position = buffer.Length;
         do
         {
-            buffer[--position] = digits[index % 36];
+            buffer[--position] = Digits[index % 36];
             index /= 36;
         }
         while (index > 0);

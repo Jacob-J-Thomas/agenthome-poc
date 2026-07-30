@@ -6,7 +6,7 @@ namespace EmbodySense.Core.Common.Governance.Tools;
 public static class ToolResultFormatter
 {
     public const int MaxFormattedCharacters = 64_000;
-    private static readonly string FinalTruncationMarker = $"[formatted tool results truncated to the {MaxFormattedCharacters}-character limit]";
+    private static readonly string _finalTruncationMarker = $"[formatted tool results truncated to the {MaxFormattedCharacters}-character limit]";
 
     public static string FormatResults(IReadOnlyList<ToolResult> results)
     {
@@ -47,7 +47,7 @@ public static class ToolResultFormatter
             return formatted;
         }
 
-        var marker = Environment.NewLine + FinalTruncationMarker;
+        var marker = Environment.NewLine + _finalTruncationMarker;
         var retainedCharacterCount = MaxFormattedCharacters - marker.Length;
         if (char.IsHighSurrogate(formatted[retainedCharacterCount - 1]))
         {

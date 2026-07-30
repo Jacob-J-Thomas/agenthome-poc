@@ -19,8 +19,8 @@ namespace EmbodySense.Core.Application.Governance.Tools;
 public sealed class ToolBroker : IToolBroker
 {
     private const int MaxCorrelationCharacters = 512;
-    private static readonly ToolCommand[] AllCommands = Enum.GetValues<ToolCommand>();
-    private static readonly TimeSpan DefaultPostActuationIntegrityTimeout = TimeSpan.FromSeconds(30);
+    private static readonly ToolCommand[] _allCommands = Enum.GetValues<ToolCommand>();
+    private static readonly TimeSpan _defaultPostActuationIntegrityTimeout = TimeSpan.FromSeconds(30);
     private readonly WorkspacePaths _paths;
     private readonly IToolPermissionService _permissionService;
     private readonly IToolApprovalPrompt _approvalPrompt;
@@ -64,7 +64,7 @@ public sealed class ToolBroker : IToolBroker
         _actuationAuthorityRevalidator = actuationAuthorityRevalidator;
         AvailableCommands = GetAvailableCommands(_loopDefinition);
         _auditMetadataFactory = new ToolAuditMetadataFactory(_paths, _loopDefinition, AvailableCommands);
-        _postActuationIntegrityTimeout = postActuationIntegrityTimeout ?? DefaultPostActuationIntegrityTimeout;
+        _postActuationIntegrityTimeout = postActuationIntegrityTimeout ?? _defaultPostActuationIntegrityTimeout;
         if (_postActuationIntegrityTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(postActuationIntegrityTimeout), "Post-actuation integrity timeout must be positive.");
@@ -410,7 +410,7 @@ public sealed class ToolBroker : IToolBroker
 
     private static IReadOnlyList<ToolCommand> GetAvailableCommands(LoopDefinition loopDefinition)
     {
-        return AllCommands.Where(command => LoopCapabilityIds.AllowsWorkspaceCommand(loopDefinition.CapabilityIds, command)).ToArray();
+        return _allCommands.Where(command => LoopCapabilityIds.AllowsWorkspaceCommand(loopDefinition.CapabilityIds, command)).ToArray();
     }
 
     private static string FormatDecision(PermissionDecision decision)

@@ -11,7 +11,7 @@ namespace EmbodySense.Core.Startup.Workspace;
 
 internal static class WorkspaceDefaults
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
 
     public static IReadOnlyList<string> GetDirectories(WorkspacePaths paths)
     {
@@ -67,7 +67,7 @@ internal static class WorkspaceDefaults
 
     private static string DefaultConversationLoopJson()
     {
-        return JsonSerializer.Serialize(LoopDefinition.CreateDefaultConversation(), JsonOptions) + Environment.NewLine;
+        return JsonSerializer.Serialize(LoopDefinition.CreateDefaultConversation(), _jsonOptions) + Environment.NewLine;
     }
 
     private static string DefaultRoleMd() => """

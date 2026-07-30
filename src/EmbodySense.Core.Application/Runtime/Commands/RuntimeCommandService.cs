@@ -156,8 +156,8 @@ public sealed class RuntimeCommandService
         }
 
         _pendingConversationLoad = conversations;
-        const string prompt = "Send conversation number to load, or /cancel.";
-        return RuntimeCommandResult.HandledPrompt(RuntimeCommandOutput.FormatConversationList(conversations), prompt);
+        const string Prompt = "Send conversation number to load, or /cancel.";
+        return RuntimeCommandResult.HandledPrompt(RuntimeCommandOutput.FormatConversationList(conversations), Prompt);
     }
 
     private async Task<RuntimeCommandResult> CompleteConversationLoadAsync(

@@ -11,8 +11,8 @@ namespace EmbodySense.Core.Application.Loops.TraceRetention;
 
 public sealed class CustomLoopTraceRetentionService
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan ReservationOwnershipTimeout = IntegrityWriteTimeout + TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _reservationOwnershipTimeout = _integrityWriteTimeout + TimeSpan.FromSeconds(5);
     private readonly ICustomLoopRunStore _store;
     private readonly IAuditLog _auditLog;
     private readonly TimeProvider _timeProvider;
@@ -112,7 +112,7 @@ public sealed class CustomLoopTraceRetentionService
         {
             try
             {
-                using var recoveryWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+                using var recoveryWindow = new CancellationTokenSource(_integrityWriteTimeout);
                 var recovered = await _store.GetTraceDeletionOperationAsync(request.OperationId, recoveryWindow.Token);
                 if (recovered.Operation is not null && OperationMatches(recovered.Operation, request, requestHash))
                 {
@@ -195,7 +195,7 @@ public sealed class CustomLoopTraceRetentionService
     private async Task<CustomLoopTraceDeletionResult> RecoverPendingReservationAsync(CustomLoopTraceDeletionMutation mutation, CustomLoopTraceDeletionOperation operation)
     {
         var now = _timeProvider.GetUtcNow().ToUniversalTime();
-        if (operation.UpdatedAtUtc > now - ReservationOwnershipTimeout)
+        if (operation.UpdatedAtUtc > now - _reservationOwnershipTimeout)
         {
             return Result(CustomLoopTraceDeletionStatus.OperationInProgress, null, "The matching deletion operation is still inside its bounded end-to-end intent/mutation ownership window.");
         }
@@ -211,7 +211,7 @@ public sealed class CustomLoopTraceRetentionService
 
     private async Task<CustomLoopTraceDeletionResult?> TryRecoverCommittedDeletionAsync(CustomLoopTraceDeletionMutation mutation)
     {
-        using var recoveryWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var recoveryWindow = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             var lookup = await _store.GetTraceDeletionOperationAsync(mutation.Request.OperationId, recoveryWindow.Token);
@@ -248,7 +248,7 @@ public sealed class CustomLoopTraceRetentionService
 
     private async Task<CustomLoopTraceDeletionResult> CommitAuditFailureAsync(CustomLoopTraceDeletionMutation mutation, string detail)
     {
-        using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var integrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             var stored = await _store.CommitTraceDeletionAuditFailureAsync(mutation, integrityWindow.Token);
@@ -304,7 +304,7 @@ public sealed class CustomLoopTraceRetentionService
                 : Result(CustomLoopTraceDeletionStatus.Invalid, stored.Tombstone, "The trace-deletion rejection has an unsupported durable audit-integrity state.");
         }
 
-        using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var integrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             var started = await _store.MarkTraceDeletionOutcomeAsync(request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted, integrityWindow.Token);
@@ -362,12 +362,12 @@ public sealed class CustomLoopTraceRetentionService
     private async Task<CustomLoopTraceDeletionResult> ResolveInterruptedOutcomeAuditAsync(CustomLoopTraceDeletionRequest request, CustomLoopTraceDeletionStoreResult stored, DateTimeOffset? outcomeAuditStartedAtUtc)
     {
         var now = _timeProvider.GetUtcNow().ToUniversalTime();
-        if (outcomeAuditStartedAtUtc is not null && outcomeAuditStartedAtUtc.Value <= now && outcomeAuditStartedAtUtc.Value > now - IntegrityWriteTimeout)
+        if (outcomeAuditStartedAtUtc is not null && outcomeAuditStartedAtUtc.Value <= now && outcomeAuditStartedAtUtc.Value > now - _integrityWriteTimeout)
         {
             return ProjectCompletedOutcome(stored, isReplay: true, auditWarning: true, "The existing outcome-audit owner is still active; retry after that bounded integrity window completes.");
         }
 
-        using var integrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+        using var integrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
             await _store.MarkTraceDeletionOutcomeAsync(request.OperationId, CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning, integrityWindow.Token);
@@ -482,14 +482,14 @@ public sealed class CustomLoopTraceRetentionService
     private CancellationTokenSource CreateOwnerWindow(DateTimeOffset reservedAtUtc, CancellationToken cancellationToken)
     {
         var ownerWindow = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var remaining = reservedAtUtc + IntegrityWriteTimeout - _timeProvider.GetUtcNow().ToUniversalTime();
+        var remaining = reservedAtUtc + _integrityWriteTimeout - _timeProvider.GetUtcNow().ToUniversalTime();
         if (remaining <= TimeSpan.Zero)
         {
             ownerWindow.Cancel();
         }
         else
         {
-            ownerWindow.CancelAfter(remaining < IntegrityWriteTimeout ? remaining : IntegrityWriteTimeout);
+            ownerWindow.CancelAfter(remaining < _integrityWriteTimeout ? remaining : _integrityWriteTimeout);
         }
 
         return ownerWindow;

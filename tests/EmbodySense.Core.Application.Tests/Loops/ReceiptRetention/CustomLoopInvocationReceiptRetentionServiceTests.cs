@@ -9,7 +9,7 @@ namespace EmbodySense.Core.Application.Tests.Loops.ReceiptRetention;
 
 public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 7, 24, 12, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset _now = new(2026, 7, 24, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public async Task Cleanup_records_intent_and_outcome_around_the_exact_committed_batch()
@@ -112,7 +112,7 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
     [Fact]
     public async Task Owner_window_is_capped_from_the_durable_reservation_timestamp()
     {
-        var ownershipStartedAtUtc = Now - CustomLoopInvocationReceiptRetentionPolicy.OperationOwnershipWindow;
+        var ownershipStartedAtUtc = _now - CustomLoopInvocationReceiptRetentionPolicy.OperationOwnershipWindow;
         var store = new FakeStore(Operation(CustomLoopInvocationReceiptRetentionOperationState.Reserved, ownershipStartedAtUtc));
         var audit = new FakeAuditLog { BlockingAction = AuditSchema.Actions.LoopInvocationReceiptRetentionIntent };
 
@@ -125,16 +125,16 @@ public sealed class CustomLoopInvocationReceiptRetentionServiceTests
 
     private static CustomLoopInvocationReceiptRetentionService Service(FakeStore store, FakeAuditLog audit)
     {
-        return new CustomLoopInvocationReceiptRetentionService(store, audit, new FixedTimeProvider(Now));
+        return new CustomLoopInvocationReceiptRetentionService(store, audit, new FixedTimeProvider(_now));
     }
 
     private static CustomLoopInvocationReceiptRetentionOperation Operation(CustomLoopInvocationReceiptRetentionOperationState state, DateTimeOffset? ownershipStartedAtUtc = null)
     {
-        var startedAtUtc = ownershipStartedAtUtc ?? Now;
+        var startedAtUtc = ownershipStartedAtUtc ?? _now;
         var candidates = new[]
         {
-            new CustomLoopInvocationReceiptRetentionCandidate("invoke-old-a", Now.AddDays(-31), new string('a', 64), 100),
-            new CustomLoopInvocationReceiptRetentionCandidate("invoke-old-b", Now.AddDays(-30), new string('b', 64), 200)
+            new CustomLoopInvocationReceiptRetentionCandidate("invoke-old-a", _now.AddDays(-31), new string('a', 64), 100),
+            new CustomLoopInvocationReceiptRetentionCandidate("invoke-old-b", _now.AddDays(-30), new string('b', 64), 200)
         };
         var committed = state is CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted
             or CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted

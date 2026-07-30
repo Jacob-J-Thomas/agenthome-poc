@@ -11,7 +11,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityProvider
 {
-    private static readonly CustomLoopToolAssignment[] Catalog = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search];
+    private static readonly CustomLoopToolAssignment[] _catalog = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search];
     private readonly LoopDefinitionStore _definitionStore;
     private readonly TimeProvider _timeProvider;
 
@@ -49,7 +49,7 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
         var current = ResolveCurrentRoleCeiling(definition);
         var admitted = admittedMaximum.ToArray();
         var roleMatches = string.Equals(definition.RoleId, roleId, StringComparison.Ordinal);
-        var assignmentsValid = admitted.All(Catalog.Contains) && admitted.Distinct().Count() == admitted.Length;
+        var assignmentsValid = admitted.All(_catalog.Contains) && admitted.Distinct().Count() == admitted.Length;
         var effective = roleMatches && assignmentsValid ? admitted.Intersect(current).OrderBy(value => value).ToArray() : [];
         var detail = !roleMatches
             ? "The admitted run role no longer matches the current server-owned directory role."
@@ -60,7 +60,7 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
             definition.RoleId,
             admitted,
             current,
-            Catalog.ToArray(),
+            _catalog.ToArray(),
             effective,
             ComputeRoleCeilingHash(definition.RoleId, current),
             ComputeCatalogHash(),
@@ -72,7 +72,7 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
     public static CustomLoopToolAssignment[] ResolveCurrentRoleCeiling(LoopDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
-        return Catalog
+        return _catalog
             .Where(assignment => LoopCapabilityIds.AllowsWorkspaceCommand(definition.CapabilityIds, MapCommand(assignment)))
             .OrderBy(value => value)
             .ToArray();
@@ -88,7 +88,7 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
 
     public static string ComputeCatalogHash()
     {
-        return CustomLoopTraceContentHash.Compute(string.Join('\n', Catalog.Select(value => value.ToString().ToLowerInvariant())));
+        return CustomLoopTraceContentHash.Compute(string.Join('\n', _catalog.Select(value => value.ToString().ToLowerInvariant())));
     }
 
     private static CustomLoopToolAuthoritySnapshot Invalid(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, DateTimeOffset evaluatedAtUtc, string detail)
@@ -97,7 +97,7 @@ public sealed class CustomLoopToolAuthorityProvider : ICustomLoopToolAuthorityPr
             roleId,
             admittedMaximum.ToArray(),
             [],
-            Catalog.ToArray(),
+            _catalog.ToArray(),
             [],
             ComputeRoleCeilingHash(roleId, []),
             ComputeCatalogHash(),

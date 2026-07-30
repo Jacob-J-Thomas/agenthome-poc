@@ -25,7 +25,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class BoundedCorrelatedToolBroker : IToolBroker
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
     private readonly IToolBroker _inner;
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
@@ -117,7 +117,7 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
             var scope = attemptLimitExceeded ? "attempt" : "run";
             var limit = attemptLimitExceeded ? CustomLoopLimits.MaxGovernedToolRequestsPerAttempt : CustomLoopLimits.MaxGovernedToolRequestsPerRun;
             await _observer.RecordIntegrityAsync(correlatedRequest, resolvedTarget, authority, requestOrdinal, cancellationToken);
-            using var auditIntegrityWindow = new CancellationTokenSource(IntegrityWriteTimeout);
+            using var auditIntegrityWindow = new CancellationTokenSource(_integrityWriteTimeout);
             await RecordAuthorityAsync(
                 null,
                 correlatedRequest,

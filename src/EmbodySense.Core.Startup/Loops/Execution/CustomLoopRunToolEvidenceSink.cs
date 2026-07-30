@@ -11,7 +11,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 public sealed class CustomLoopRunToolEvidenceSink : ICustomLoopToolEvidenceSink
 {
-    private static readonly TimeSpan IntegrityWriteTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
     private readonly ICustomLoopRunStore _runStore;
     private readonly TimeProvider _timeProvider;
 
@@ -34,7 +34,7 @@ public sealed class CustomLoopRunToolEvidenceSink : ICustomLoopToolEvidenceSink
         using var integrityWindow = evidence.Phase is CustomLoopToolEvidencePhase.OutcomeObserved or CustomLoopToolEvidencePhase.IntegrityFailed
             ? new CancellationTokenSource()
             : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        integrityWindow.CancelAfter(IntegrityWriteTimeout);
+        integrityWindow.CancelAfter(_integrityWriteTimeout);
         for (var retry = 0; retry < 12; retry++)
         {
             CustomLoopRunRecord? run;

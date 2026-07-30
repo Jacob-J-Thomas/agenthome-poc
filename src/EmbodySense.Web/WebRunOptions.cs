@@ -12,7 +12,7 @@ public sealed record WebRunOptions(
 {
     public const int DefaultPort = 4378;
     public const string DefaultHost = "127.0.0.1";
-    private static readonly HashSet<string> LocalHosts = new(StringComparer.OrdinalIgnoreCase) { "127.0.0.1", "localhost", "::1" };
+    private static readonly HashSet<string> _localHosts = new(StringComparer.OrdinalIgnoreCase) { "127.0.0.1", "localhost", "::1" };
 
     public string Url => Host == "::1" ? $"http://[::1]:{Port}" : $"http://{Host}:{Port}";
 
@@ -26,7 +26,7 @@ public sealed record WebRunOptions(
         }
 
         var host = OptionValue(args, "--host") ?? DefaultHost;
-        if (!LocalHosts.Contains(host))
+        if (!_localHosts.Contains(host))
         {
             throw new ArgumentException("The web client only binds to localhost hosts: 127.0.0.1, localhost, or ::1.");
         }

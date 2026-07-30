@@ -5,7 +5,7 @@ namespace EmbodySense.Web.Services;
 public sealed class WebSessionSecurity
 {
     public const string HeaderName = "X-EmbodySense-Session";
-    private static readonly HashSet<string> LocalHosts = new(StringComparer.OrdinalIgnoreCase) { "127.0.0.1", "localhost", "::1" };
+    private static readonly HashSet<string> _localHosts = new(StringComparer.OrdinalIgnoreCase) { "127.0.0.1", "localhost", "::1" };
 
     public WebSessionSecurity()
         : this(CreateToken())
@@ -24,7 +24,7 @@ public sealed class WebSessionSecurity
     public bool IsHostAllowed(HostString host)
     {
         var normalizedHost = NormalizeHost(host.Host);
-        return LocalHosts.Contains(normalizedHost);
+        return _localHosts.Contains(normalizedHost);
     }
 
     public bool IsOriginAllowed(HttpRequest request)
@@ -42,7 +42,7 @@ public sealed class WebSessionSecurity
             return false;
         }
 
-        if (!LocalHosts.Contains(NormalizeHost(originUri.Host)))
+        if (!_localHosts.Contains(NormalizeHost(originUri.Host)))
         {
             return false;
         }

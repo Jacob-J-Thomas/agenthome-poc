@@ -18,9 +18,9 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
     private const int IdentitySchemaVersion = 1;
     private const string CurrentConversationId = "current";
     private const string ArchiveDirectoryName = "archive";
-    private static readonly TimeSpan CurrentConversationLeaseRetryDelay = TimeSpan.FromMilliseconds(25);
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> CurrentConversationGates = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan _currentConversationLeaseRetryDelay = TimeSpan.FromMilliseconds(25);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _currentConversationGates = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
     private readonly WorkspacePaths _paths;
     private readonly SemaphoreSlim _currentConversationGate;
     private string CurrentConversationIdentityPath => _paths.CurrentConversationPath + ".identity.json";
@@ -31,7 +31,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         ArgumentNullException.ThrowIfNull(paths);
 
         _paths = paths;
-        _currentConversationGate = CurrentConversationGates.GetOrAdd(Path.GetFullPath(paths.CurrentConversationPath), _ => new SemaphoreSlim(1, 1));
+        _currentConversationGate = _currentConversationGates.GetOrAdd(Path.GetFullPath(paths.CurrentConversationPath), _ => new SemaphoreSlim(1, 1));
     }
 
     public async Task<IReadOnlyList<LlmMessage>> LoadCurrentConversationAsync(CancellationToken cancellationToken = default)
@@ -258,7 +258,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             }
             catch (IOException)
             {
-                await Task.Delay(CurrentConversationLeaseRetryDelay, cancellationToken);
+                await Task.Delay(_currentConversationLeaseRetryDelay, cancellationToken);
             }
         }
     }
@@ -273,7 +273,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             DateTimeOffset.UtcNow,
             message.Role.ToString().ToLowerInvariant(),
             message.Content);
-        var line = JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine;
+        var line = JsonSerializer.Serialize(entry, _jsonOptions) + Environment.NewLine;
         stream.Position = stream.Length;
         if (stream.Length > 0)
         {
@@ -359,7 +359,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
 
         var json = await File.ReadAllTextAsync(CurrentConversationIdentityPath, cancellationToken);
-        var identity = JsonSerializer.Deserialize<CurrentConversationIdentity>(json, JsonOptions)
+        var identity = JsonSerializer.Deserialize<CurrentConversationIdentity>(json, _jsonOptions)
             ?? throw new FormatException("Current conversation identity metadata was empty.");
         if (identity.SchemaVersion != IdentitySchemaVersion
             || !string.Equals(identity.ConversationId, CurrentConversationId, StringComparison.Ordinal)
@@ -379,7 +379,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         var temporaryPath = CurrentConversationIdentityPath + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
         try
         {
-            await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(identity, JsonOptions), cancellationToken);
+            await File.WriteAllTextAsync(temporaryPath, JsonSerializer.Serialize(identity, _jsonOptions), cancellationToken);
             File.Move(temporaryPath, CurrentConversationIdentityPath, overwrite: true);
         }
         finally
@@ -425,7 +425,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
                 continue;
             }
 
-            var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, JsonOptions)
+            var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions)
                 ?? throw new FormatException($"Conversation memory entry in `{path}` was empty.");
             ValidateEntry(entry);
             entries.Add(entry);
@@ -509,7 +509,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
 
     private static async Task WriteEntriesAsync(string path, IEnumerable<ConversationMemoryEntry> entries, CancellationToken cancellationToken)
     {
-        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, JsonOptions)).ToArray();
+        var lines = entries.Select(entry => JsonSerializer.Serialize(entry, _jsonOptions)).ToArray();
         var text = lines.Length == 0 ? string.Empty : string.Join(Environment.NewLine, lines) + Environment.NewLine;
         await File.WriteAllTextAsync(path, text, cancellationToken);
     }
