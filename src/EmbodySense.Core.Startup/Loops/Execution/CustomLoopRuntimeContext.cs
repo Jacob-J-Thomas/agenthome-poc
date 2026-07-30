@@ -31,6 +31,14 @@ internal sealed class CustomLoopRuntimeContext
     private readonly WorkspaceContextStore _workspaceContextStore;
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>
+    /// Creates the admission-time context capturer for one runtime conversation and workspace.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="conversationState">The conversation state.</param>
+    /// <param name="conversationMemory">The conversation memory.</param>
+    /// <param name="workspaceContextStore">The workspace context store.</param>
+    /// <param name="timeProvider">The time provider.</param>
     public CustomLoopRuntimeContext(WorkspacePaths paths, ConversationRuntimeState conversationState, IConversationMemoryStore conversationMemory, WorkspaceContextStore? workspaceContextStore = null, TimeProvider? timeProvider = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -40,6 +48,17 @@ internal sealed class CustomLoopRuntimeContext
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
+    /// <summary>
+    /// Captures bounded workspace documents and an optional bounded logical conversation into a
+    /// provenance-classified, content-hashed admission snapshot.
+    /// </summary>
+    /// <param name="includeInvokingConversation">Whether logical conversation content is admitted rather than represented as omitted evidence.</param>
+    /// <param name="cancellationToken">The token used to cancel document and coordinated conversation reads.</param>
+    /// <returns>A task whose result contains the hashed context snapshot and immutable conversation reference.</returns>
+    /// <remarks>
+    /// Conversation state is synchronized under exclusive runtime access and must match the durable
+    /// conversation version. Divergence fails before an admission snapshot is returned.
+    /// </remarks>
     public async Task<CustomLoopRuntimeContextCapture> CaptureAsync(bool includeInvokingConversation, CancellationToken cancellationToken)
     {
         var capturedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
@@ -69,6 +88,11 @@ internal sealed class CustomLoopRuntimeContext
             new CustomLoopConversationReference(persistedConversation.Version, conversationVersion, capturedAtUtc));
     }
 
+    /// <summary>
+    /// Attempts to synchronize active logical messages from durable current-conversation state.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is true only when the runtime's durable version already matches and transcript synchronization succeeds.</returns>
     public async Task<bool> TryReconcileConversationAsync(CancellationToken cancellationToken)
     {
         using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))
@@ -79,6 +103,11 @@ internal sealed class CustomLoopRuntimeContext
         }
     }
 
+    /// <summary>
+    /// Reads the current durable conversation identity after proving active and persisted transcript agreement.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the persistence-derived conversation version.</returns>
     public async Task<string> CaptureConversationIdentityAsync(CancellationToken cancellationToken)
     {
         using (await _conversationState.AcquireExclusiveAccessAsync(cancellationToken))

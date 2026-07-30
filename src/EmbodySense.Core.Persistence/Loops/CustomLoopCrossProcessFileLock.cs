@@ -3,8 +3,16 @@ using System.Runtime.InteropServices;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Provides operations for custom loop cross process file lock.
+/// </summary>
 internal static class CustomLoopCrossProcessFileLock
 {
+    /// <summary>
+    /// Attempts to acquire.
+    /// </summary>
+    /// <param name="ownership">The ownership.</param>
+    /// <returns><see langword="true"/> when acquire; otherwise, <see langword="false"/>.</returns>
     public static bool TryAcquire(FileStream ownership)
     {
         ArgumentNullException.ThrowIfNull(ownership);

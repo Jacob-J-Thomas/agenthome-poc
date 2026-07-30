@@ -39,6 +39,17 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
     private int _toolRequestsConsumed;
     private bool _visibleOverLimitDenied;
 
+    /// <summary>
+    /// Wraps the governed broker with per-attempt and per-run limits, immutable admission correlation,
+    /// current role-authority checks, and strict durable evidence capture.
+    /// </summary>
+    /// <param name="inner">The inner.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="toolResultRetention">The tool result retention.</param>
+    /// <param name="observer">The observer.</param>
+    /// <param name="paths">The paths.</param>
+    /// <param name="request">The request.</param>
     public BoundedCorrelatedToolBroker(
         IToolBroker inner,
         IAuditLog auditLog,
@@ -58,13 +69,28 @@ internal sealed class BoundedCorrelatedToolBroker : IToolBroker
         _toolRequestsUsedInRun = request.ToolRequestsUsedInRun;
     }
 
+    /// <summary>
+    /// Gets commands advertised to the model until the attempt or run request budget is exhausted.
+    /// </summary>
     public IReadOnlyList<ToolCommand> AvailableCommands => Volatile.Read(ref _requestsObserved) >= CustomLoopLimits.MaxGovernedToolRequestsPerAttempt
         || _toolRequestsUsedInRun + Volatile.Read(ref _toolRequestsConsumed) >= CustomLoopLimits.MaxGovernedToolRequestsPerRun
             ? []
             : _inner.AvailableCommands;
 
+    /// <summary>
+    /// Gets the number of requests that consumed this attempt's governed-tool budget.
+    /// </summary>
     public int ToolRequestsConsumed => Volatile.Read(ref _toolRequestsConsumed);
 
+    /// <summary>
+    /// Serializes, bounds, correlates, authorizes, governs, retains, and records one tool request.
+    /// </summary>
+    /// <param name="request">The model-issued request; its fields are bounded before evidence reservation or actuation.</param>
+    /// <param name="cancellationToken">The token used to cancel authority, governance, retention, and evidence work.</param>
+    /// <returns>
+    /// A task whose result is the governed tool outcome. The first over-limit request receives a
+    /// visible retained denial; a repeated over-limit request fails the attempt without actuation.
+    /// </returns>
     public async Task<ToolResult> ExecuteAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);

@@ -18,6 +18,15 @@ using ApplicationNodeContext = EmbodySense.Core.Common.Loops.Custom.CustomLoopNo
 
 namespace EmbodySense.Core.Startup.Loops;
 
+/// <summary>
+/// Exposes custom-loop authoring through Core.Startup without leaking application or persistence types.
+/// </summary>
+/// <remarks>
+/// The persisted default-conversation definition is the authority source for role identity and
+/// assignable tools. An initialized workspace with a missing or substituted system definition fails
+/// closed. Mutations are audited, operation-idempotent, and version-checked by the underlying authoring
+/// service; validation and conflicts are returned as data.
+/// </remarks>
 public sealed class LoopAuthoringFacade
 {
     private readonly CustomLoopAuthoringService _service;
@@ -25,10 +34,19 @@ public sealed class LoopAuthoringFacade
     private readonly WorkspacePaths? _paths;
     private readonly string _actor;
 
+    /// <summary>
+    /// Creates a Web-attributed authoring facade over the supplied workspace.
+    /// </summary>
+    /// <param name="workingDirectory">The workspace root, normalized to an absolute path.</param>
     public LoopAuthoringFacade(string workingDirectory) : this(workingDirectory, WorkspaceActors.Web)
     {
     }
 
+    /// <summary>
+    /// Creates an authoring facade over the supplied workspace and audit actor.
+    /// </summary>
+    /// <param name="workingDirectory">The workspace root, normalized to an absolute path.</param>
+    /// <param name="actor">The nonblank actor attributed to authoring audit events.</param>
     public LoopAuthoringFacade(string workingDirectory, string actor)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
@@ -53,6 +71,11 @@ public sealed class LoopAuthoringFacade
         _actor = actor;
     }
 
+    /// <summary>
+    /// Reads the system definition, current role's custom definitions, effective limits, and assignable tools.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel persistence reads.</param>
+    /// <returns>A task whose result is the complete authoring catalog for the system role.</returns>
     public async Task<LoopAuthoringCatalog> GetCatalogAsync(CancellationToken cancellationToken = default)
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
@@ -65,6 +88,12 @@ public sealed class LoopAuthoringFacade
             CreateToolCatalog(systemDefinition));
     }
 
+    /// <summary>
+    /// Reads one custom definition for the current system role.
+    /// </summary>
+    /// <param name="loopId">The custom loop identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel persistence reads.</param>
+    /// <returns>A task whose result is the definition, or null when no definition is visible to the current role.</returns>
     public async Task<LoopDefinitionSnapshot?> GetAsync(string loopId, CancellationToken cancellationToken = default)
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
@@ -72,12 +101,27 @@ public sealed class LoopAuthoringFacade
         return definition is null ? null : Map(definition);
     }
 
+    /// <summary>
+    /// Creates a new server-owned custom-loop draft for the current role.
+    /// </summary>
+    /// <param name="operationId">The idempotency identity to reuse when the caller cannot determine whether a prior response committed.</param>
+    /// <param name="cancellationToken">The token used to cancel the authoring operation.</param>
+    /// <returns>A task whose result reports commit status, the created definition, validation, conflict, and audit detail.</returns>
     public async Task<LoopAuthoringResponse> CreateAsync(string operationId, CancellationToken cancellationToken = default)
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
         return Map(await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, cancellationToken));
     }
 
+    /// <summary>
+    /// Validates and conditionally replaces a custom definition for the current role.
+    /// </summary>
+    /// <param name="loopId">The custom loop identifier.</param>
+    /// <param name="expectedDefinitionVersion">The version required for optimistic concurrency.</param>
+    /// <param name="operationId">The idempotency identity for this exact update request.</param>
+    /// <param name="input">The interface-owned replacement definition shape.</param>
+    /// <param name="cancellationToken">The token used to cancel validation, persistence, and auditing.</param>
+    /// <returns>A task whose result distinguishes commits, validation rejections, version conflicts, and audit warnings.</returns>
     public async Task<LoopAuthoringResponse> UpdateAsync(string loopId, int expectedDefinitionVersion, string operationId, LoopDefinitionInput input, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -95,6 +139,14 @@ public sealed class LoopAuthoringFacade
         return Map(result);
     }
 
+    /// <summary>
+    /// Conditionally deletes a custom definition while retaining its historical run evidence.
+    /// </summary>
+    /// <param name="loopId">The custom loop identifier.</param>
+    /// <param name="expectedDefinitionVersion">The version required for optimistic concurrency.</param>
+    /// <param name="operationId">The idempotency identity for this exact deletion request.</param>
+    /// <param name="cancellationToken">The token used to cancel persistence and auditing.</param>
+    /// <returns>A task whose result distinguishes deletion, replay, conflict, rejection, and audit-warning outcomes.</returns>
     public async Task<LoopAuthoringResponse> DeleteAsync(string loopId, int expectedDefinitionVersion, string operationId, CancellationToken cancellationToken = default)
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);

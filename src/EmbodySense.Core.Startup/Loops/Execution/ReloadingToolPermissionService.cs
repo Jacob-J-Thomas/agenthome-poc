@@ -25,12 +25,22 @@ internal sealed class ReloadingToolPermissionService : IToolPermissionService
     private readonly WorkspacePaths _paths;
     private readonly IPermissionPolicyStore _policyStore;
 
+    /// <summary>
+    /// Creates an evaluator that reloads the workspace permission document for every request.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="policyStore">The policy store.</param>
     public ReloadingToolPermissionService(WorkspacePaths paths, IPermissionPolicyStore policyStore)
     {
         _paths = paths;
         _policyStore = policyStore;
     }
 
+    /// <summary>
+    /// Evaluates one request against a freshly loaded, fail-closed directory policy.
+    /// </summary>
+    /// <param name="request">The governed workspace request.</param>
+    /// <returns>The permission decision produced from the policy observed at evaluation time.</returns>
     public ToolPermissionCheck Evaluate(ToolRequest request)
     {
         return new ToolPermissionService(_paths, _policyStore.Load(_paths)).Evaluate(request);

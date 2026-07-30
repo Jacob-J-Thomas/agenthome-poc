@@ -7,6 +7,14 @@ using EmbodySense.Core.Clients.LocalWorkspace.Models;
 
 namespace EmbodySense.Core.Clients.LocalWorkspace;
 
+/// <summary>
+/// Performs bounded file-system operations on paths already resolved and authorized by the application governance boundary.
+/// </summary>
+/// <remarks>
+/// This adapter does not perform permission decisions or path authorization. Callers must supply a governed canonical target.
+/// Listings and searches are deterministic and bounded; recursive search skips reparse points, inaccessible entries, and
+/// the custom-loop host lock file. Cancellation and underlying file-system exceptions propagate.
+/// </remarks>
 public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
 {
     // TODO: revisit what an appropriate figures should actually be.
@@ -19,6 +27,10 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
     private const long MaxSearchFileBytes = 1_048_576;
     private readonly WorkspacePaths _paths;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="LocalWorkspaceClient"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public LocalWorkspaceClient(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -26,6 +38,12 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         _paths = paths;
     }
 
+    /// <summary>
+    /// Lists the first bounded, deterministically sorted set of direct child entries.
+    /// </summary>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the local workspace result.</returns>
     public Task<LocalWorkspaceResult> ListAsync(string resolvedPath, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -64,6 +82,12 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         }));
     }
 
+    /// <summary>
+    /// Reads a bounded text prefix and reports whether the result was truncated.
+    /// </summary>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the local workspace result.</returns>
     public async Task<LocalWorkspaceResult> ReadAsync(string resolvedPath, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(resolvedPath))
@@ -77,6 +101,13 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         return new LocalWorkspaceResult(output, new Dictionary<string, object?> { ["character_count"] = text.Length, ["file_size_bytes"] = fileSize, ["truncated"] = truncated });
     }
 
+    /// <summary>
+    /// Searches a file or directory tree for a case-insensitive ordinal text pattern within explicit file, match, and output limits.
+    /// </summary>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="pattern">The pattern.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the local workspace result.</returns>
     public async Task<LocalWorkspaceResult> SearchAsync(string resolvedPath, string? pattern, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(pattern))
@@ -151,6 +182,13 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         });
     }
 
+    /// <summary>
+    /// Appends text to the target, creating its parent directory when necessary.
+    /// </summary>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="content">The content.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the local workspace result.</returns>
     public async Task<LocalWorkspaceResult> AppendAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default)
     {
         if (content is null)
@@ -168,6 +206,13 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         return new LocalWorkspaceResult($"appended {content.Length} characters", new Dictionary<string, object?> { ["character_count"] = content.Length });
     }
 
+    /// <summary>
+    /// Replaces the target with text, creating its parent directory when necessary.
+    /// </summary>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="content">The content.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the local workspace result.</returns>
     public async Task<LocalWorkspaceResult> WriteAsync(string resolvedPath, string? content, CancellationToken cancellationToken = default)
     {
         if (content is null)
@@ -185,6 +230,12 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
         return new LocalWorkspaceResult($"wrote {content.Length} characters", new Dictionary<string, object?> { ["character_count"] = content.Length });
     }
 
+    /// <summary>
+    /// Deletes one authorized file or recursively deletes one authorized directory tree.
+    /// </summary>
+    /// <param name="resolvedPath">The resolved path.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A result identifying the deleted file or directory.</returns>
     public Task<LocalWorkspaceResult> DeleteAsync(string resolvedPath, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

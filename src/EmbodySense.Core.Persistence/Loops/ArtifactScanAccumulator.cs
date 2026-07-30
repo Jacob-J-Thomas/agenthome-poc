@@ -4,6 +4,9 @@ using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Validates unique run/admission identities and accounts bounded trace, tombstone, and reservation capacity during a scan.
+/// </summary>
 internal sealed class ArtifactScanAccumulator
 {
     private readonly HashSet<string> _runIds = new(StringComparer.Ordinal);
@@ -15,6 +18,10 @@ internal sealed class ArtifactScanAccumulator
     private int _liveTraceCount;
     private int _tombstoneCount;
 
+    /// <summary>
+    /// Validates and accounts one canonical run or tombstone artifact.
+    /// </summary>
+    /// <param name="artifact">The artifact.</param>
     public void Add(RunArtifact artifact)
     {
         var runId = artifact.Run?.Id ?? artifact.Tombstone?.RunId ?? throw new FormatException($"Custom loop trace `{artifact.Location.Path}` contains an unsupported artifact.");
@@ -66,6 +73,10 @@ internal sealed class ArtifactScanAccumulator
         }
     }
 
+    /// <summary>
+    /// Produces the quota snapshot accumulated from the validated artifacts.
+    /// </summary>
+    /// <returns>The artifact scan result.</returns>
     public ArtifactScanResult Complete()
     {
         return new ArtifactScanResult(new CustomLoopTraceQuota(

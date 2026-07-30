@@ -7,11 +7,24 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Persists version-1 default-loop definitions as one JSON artifact per loop identifier.
+/// </summary>
+/// <remarks>
+/// Each save validates the complete definition and atomically replaces the target file through
+/// <see cref="LoopArtifactFileWriter"/>. Loads return <see langword="null"/> for a missing artifact; malformed JSON,
+/// unsupported enum values, invalid identities, and file I/O failures are surfaced to the caller. Listings are deterministic
+/// by loop identifier.
+/// </remarks>
 public sealed class LoopDefinitionStore : ILoopDefinitionStore
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
     private readonly WorkspacePaths _paths;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="LoopDefinitionStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public LoopDefinitionStore(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -19,6 +32,12 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         _paths = paths;
     }
 
+    /// <summary>
+    /// Validates and atomically writes the canonical definition artifact.
+    /// </summary>
+    /// <param name="definition">The definition.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task SaveAsync(LoopDefinition definition, CancellationToken cancellationToken = default)
     {
         ValidateDefinition(definition);
@@ -28,6 +47,12 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         await LoopArtifactFileWriter.WriteTextAsync(LoopArtifactPaths.GetDefinitionPath(_paths, definition.Id), json, cancellationToken);
     }
 
+    /// <summary>
+    /// Loads and validates one definition by its canonical identifier.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The definition, or <see langword="null"/> when its artifact does not exist.</returns>
     public async Task<LoopDefinition?> LoadAsync(string loopId, CancellationToken cancellationToken = default)
     {
         var path = LoopArtifactPaths.GetDefinitionPath(_paths, loopId);
@@ -39,6 +64,11 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         return await ReadDefinitionAsync(path, cancellationToken);
     }
 
+    /// <summary>
+    /// Loads every top-level definition artifact in deterministic identifier order.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>All validated definitions, or an empty collection when the definitions directory does not exist.</returns>
     public async Task<IReadOnlyList<LoopDefinition>> ListAsync(CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(_paths.LoopDefinitionsPath))

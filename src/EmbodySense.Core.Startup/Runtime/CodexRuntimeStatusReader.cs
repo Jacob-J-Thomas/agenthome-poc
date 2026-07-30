@@ -4,8 +4,18 @@ using EmbodySense.Core.Startup.Runtime.Models;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
+/// <summary>
+/// Projects Codex executable and model compatibility through the Core.Startup interface boundary.
+/// </summary>
 public sealed class CodexRuntimeStatusReader
 {
+    /// <summary>
+    /// Resolves and probes the effective Codex executable for the requested model.
+    /// </summary>
+    /// <param name="explicitExecutablePath">An optional executable that takes precedence over normal runtime discovery.</param>
+    /// <param name="configuredModel">The optional model that the discovered Codex CLI must support.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result describes compatibility, resolution source, version, and diagnostic detail without throwing for an incompatible runtime.</returns>
     public async Task<CodexRuntimeStatus> ReadAsync(string? explicitExecutablePath, string? configuredModel, CancellationToken cancellationToken = default)
     {
         var resolution = await new CodexRuntimeResolver().ResolveAsync(explicitExecutablePath, configuredModel, cancellationToken);

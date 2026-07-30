@@ -7,6 +7,14 @@ using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Coordinates one local custom-loop execution owner with the cross-process workspace-host lease.
+/// </summary>
+/// <remarks>
+/// Host ownership is durable only for the lifetime of the lock stream. Active-operation and busy-outcome reservations are
+/// in-memory concurrency state and are not durable receipts; the invocation-operation store establishes receipt durability.
+/// Losing or failing to acquire the host lease returns <c>WorkspaceHostUnavailable</c> and does not reserve a busy outcome.
+/// </remarks>
 public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecutionGate, ICustomLoopAttemptCancellationBroker
 {
     private static readonly object _hostsSync = new();
@@ -17,6 +25,10 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     private WorkspaceHost? _host;
     private bool _disposed;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopWorkspaceExecutionGate"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -29,6 +41,10 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Gets whether this process owns or can attach to the workspace's cross-process host lease.
+    /// </summary>
+    /// <value><see langword="true"/> when local custom-loop hosting is available.</value>
     public bool IsWorkspaceHostAvailable
     {
         get
@@ -41,6 +57,12 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Attempts to acquire the single in-memory execution slot for a canonical authorized request.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="requestHash">The request hash.</param>
+    /// <returns>The custom loop execution lease result.</returns>
     public CustomLoopExecutionLeaseResult TryAcquire(string operationId, string requestHash)
     {
         ValidateRequest(operationId, requestHash);
@@ -86,6 +108,12 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Reserves an in-memory busy-outcome slot while another operation owns workspace execution.
+    /// </summary>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="requestHash">The request hash.</param>
+    /// <returns>The custom loop execution lease result.</returns>
     public CustomLoopExecutionLeaseResult TryReserveWorkspaceBusyOutcome(string operationId, string requestHash)
     {
         ValidateRequest(operationId, requestHash);
@@ -131,6 +159,13 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Registers the provider cancellation source for the workspace's active run attempt.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="cancellation">The source signaled by a cancellation request.</param>
+    /// <param name="competingCancellationToken">A separate host or caller cancellation that must not be misreported as provider interruption.</param>
+    /// <returns>The custom loop attempt cancellation registration.</returns>
     public ICustomLoopAttemptCancellationRegistration RegisterActiveAttempt(string runId, CancellationTokenSource cancellation, CancellationToken competingCancellationToken = default)
     {
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
@@ -148,6 +183,13 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Routes a cancellation request to the local host or its authenticated cross-process cancellation channel.
+    /// </summary>
+    /// <param name="runId">The run ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the custom loop attempt cancellation result.</returns>
     public async Task<CustomLoopAttemptCancellationResult> RequestCancellationAsync(string runId, string operationId, CancellationToken cancellationToken = default)
     {
         CustomLoopArtifactIdentifier.Require(runId, nameof(runId));
@@ -167,6 +209,10 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         return await CustomLoopAttemptCancellationHost.RequestRemoteCancellationAsync(_paths, runId, operationId, cancellationToken);
     }
 
+    /// <summary>
+    /// Releases this gate's host reference and any process-wide host lease it solely owns.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public ValueTask DisposeAsync()
     {
         lock (_hostsSync)
@@ -186,6 +232,9 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Explicitly releases this instance's workspace-host reference without disposing the gate.
+    /// </summary>
     public void RelinquishWorkspaceHost()
     {
         lock (_hostsSync)
@@ -202,6 +251,14 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Executes the release lease operation.
+    /// </summary>
+    /// <param name="workspaceKey">The workspace key.</param>
+    /// <param name="host">The host.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="generation">The generation.</param>
+    /// <returns>The operation.</returns>
     internal static void ReleaseLease(string workspaceKey, WorkspaceHost host, string operationId, long generation)
     {
         lock (_hostsSync)
@@ -216,6 +273,14 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         }
     }
 
+    /// <summary>
+    /// Executes the release busy outcome reservation operation.
+    /// </summary>
+    /// <param name="workspaceKey">The workspace key.</param>
+    /// <param name="host">The host.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="generation">The generation.</param>
+    /// <returns>The operation.</returns>
     internal static void ReleaseBusyOutcomeReservation(string workspaceKey, WorkspaceHost host, string operationId, long generation)
     {
         lock (_hostsSync)

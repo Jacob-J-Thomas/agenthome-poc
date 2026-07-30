@@ -6,8 +6,24 @@ using EmbodySense.Core.Persistence.Audit;
 
 namespace EmbodySense.Core.Persistence.Workspace;
 
+/// <summary>
+/// Creates the requested workspace directories and seed files, then records the initialization audit event.
+/// </summary>
+/// <remarks>
+/// Seed files honor their individual overwrite policy. The sequence is not a multi-file transaction: an I/O or audit failure
+/// may leave already-created scaffolding in place, and the caller receives the original exception.
+/// </remarks>
 public sealed class WorkspaceScaffolder
 {
+    /// <summary>
+    /// Applies the supplied scaffold in input order and audits successful completion.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="directories">The directories.</param>
+    /// <param name="seedFiles">The seed files.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task ApplyAsync(
         WorkspacePaths paths,
         IReadOnlyList<string> directories,

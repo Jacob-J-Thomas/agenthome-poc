@@ -8,6 +8,18 @@ namespace EmbodySense.Core.Startup.Inference;
 
 internal static class LlmInferenceClientFactory
 {
+    /// <summary>
+    /// Creates the concrete provider selected by the startup options.
+    /// </summary>
+    /// <param name="options">The provider selection and runtime configuration.</param>
+    /// <param name="toolBroker">The optional governed tool broker supplied to Codex app-server.</param>
+    /// <param name="codexAppServerTransport">An optional Codex app-server transport override.</param>
+    /// <param name="auditLog">The optional audit sink supplied to the provider.</param>
+    /// <param name="providerRequestStarted">An optional provider-start callback.</param>
+    /// <returns>
+    /// The configured provider client, or a deterministic client that reports the selected surface
+    /// as unsupported when its adapter is not implemented.
+    /// </returns>
     public static ILlmInferenceClient CreateProvider(
         LlmInferenceClientOptions options,
         IToolBroker? toolBroker = null,
