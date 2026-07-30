@@ -82,6 +82,8 @@ public sealed class WebAgentRuntimeHostTests
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, advertiseConfiguredModels: false);
         await using var host = CreateHost(workspace.RootPath, codexPath, "gpt-test");
         await host.InitializeWorkspaceAsync();
+        await WriteCurrentTranscriptAsync(workspace, "restored while unavailable", "durable answer");
+        var transcript = Assert.IsAssignableFrom<IReadOnlyList<WebTranscriptMessage>>(await host.GetCurrentTranscriptAsync());
         var configuration = await host.GetConfigurationAsync();
         var events = new List<WebStreamEvent>();
 
@@ -92,6 +94,7 @@ public sealed class WebAgentRuntimeHostTests
         });
 
         Assert.Equal(CodexRuntimeCompatibility.ModelUnavailable, configuration.Runtime.CodexRuntime!.Compatibility);
+        Assert.Equal(["restored while unavailable", "durable answer"], transcript.Select(message => message.Content));
         var failure = Assert.Single(events);
         Assert.Equal("error", failure.Type);
         Assert.Contains(Path.GetFullPath(codexPath), failure.Error, StringComparison.Ordinal);
