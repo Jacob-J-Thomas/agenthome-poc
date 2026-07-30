@@ -7,8 +7,17 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Common.Loops.Custom;
 
+/// <summary>
+/// Computes, applies, and verifies the canonical custom loop definition content hash.
+/// </summary>
 public static class CustomLoopDefinitionContentHash
 {
+    /// <summary>
+    /// Computes the lowercase SHA-256 hash of the canonical behavior-affecting definition content.
+    /// </summary>
+    /// <param name="definition">The definition to serialize canonically; its current content-hash field is excluded.</param>
+    /// <returns>A 64-character lowercase hexadecimal SHA-256 digest.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="definition"/> is <see langword="null"/>.</exception>
     public static string Compute(CustomLoopDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
@@ -22,12 +31,24 @@ public static class CustomLoopDefinitionContentHash
         return Convert.ToHexString(SHA256.HashData(buffer.WrittenSpan)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Returns a copy of a definition with its canonical content hash applied.
+    /// </summary>
+    /// <param name="definition">The definition to hash.</param>
+    /// <returns>A copy whose content-hash field matches <see cref="Compute"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="definition"/> is <see langword="null"/>.</exception>
     public static CustomLoopDefinition Apply(CustomLoopDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);
         return definition with { ContentHash = Compute(definition) };
     }
 
+    /// <summary>
+    /// Determines whether a definition retains its exact canonical content hash.
+    /// </summary>
+    /// <param name="definition">The definition to verify.</param>
+    /// <returns><see langword="true"/> when the stored and recomputed ASCII digests have equal length and fixed-time equality; otherwise, <see langword="false"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="definition"/> is <see langword="null"/>.</exception>
     public static bool Matches(CustomLoopDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(definition);

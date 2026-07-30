@@ -78,9 +78,11 @@ try {
 
     if ($RunBrowserE2E) {
         $oldRunBrowserE2E = $env:EMBODYSENSE_RUN_BROWSER_E2E
+        $oldBrowserE2EArtifacts = $env:EMBODYSENSE_BROWSER_E2E_ARTIFACTS
         try {
             $env:EMBODYSENSE_RUN_BROWSER_E2E = "1"
             $browserE2ETestResultsPath = Join-Path $testsPath "EmbodySense.E2ETests\TestResults\BrowserE2E"
+            $env:EMBODYSENSE_BROWSER_E2E_ARTIFACTS = $browserE2ETestResultsPath
             Invoke-CheckedNative "dotnet" @("test", $e2eProjectPath, "-c", $Configuration, "--no-build", "--no-restore", "--filter", "FullyQualifiedName~BrowserFlowTests", "--logger", "trx;LogFileName=browser-e2e.trx", "--results-directory", $browserE2ETestResultsPath, "/p:RestoreIgnoreFailedSources=true")
         }
         finally {
@@ -89,6 +91,13 @@ try {
             }
             else {
                 $env:EMBODYSENSE_RUN_BROWSER_E2E = $oldRunBrowserE2E
+            }
+
+            if ($null -eq $oldBrowserE2EArtifacts) {
+                Remove-Item Env:\EMBODYSENSE_BROWSER_E2E_ARTIFACTS -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:EMBODYSENSE_BROWSER_E2E_ARTIFACTS = $oldBrowserE2EArtifacts
             }
         }
     }

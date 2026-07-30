@@ -7,12 +7,21 @@ using EmbodySense.Core.Common.Loops.Models;
 
 namespace EmbodySense.Core.Application.Governance.Tools;
 
+/// <summary>
+/// Retains full tool responses and records the resulting integrity evidence without hiding evidence gaps.
+/// </summary>
 public sealed class ToolResultRetentionService
 {
     private readonly IAuditLog _auditLog;
     private readonly LoopDefinition _loopDefinition;
     private readonly IToolResultRetentionStore _store;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ToolResultRetentionService"/> type.
+    /// </summary>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="loopDefinition">The loop definition.</param>
+    /// <param name="store">The store.</param>
     public ToolResultRetentionService(IAuditLog auditLog, LoopDefinition loopDefinition, IToolResultRetentionStore store)
     {
         ArgumentNullException.ThrowIfNull(auditLog);
@@ -24,6 +33,13 @@ public sealed class ToolResultRetentionService
         _store = store;
     }
 
+    /// <summary>
+    /// Attaches durable retention evidence to a tool result and audits the retention outcome.
+    /// </summary>
+    /// <param name="result">The result.</param>
+    /// <param name="additionalAuditMetadata">Optional metadata to merge into the retention audit event.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The original outcome with a retained or unavailable evidence reference.</returns>
     public async Task<ToolResult> RetainAsync(ToolResult result, IReadOnlyDictionary<string, object?>? additionalAuditMetadata = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(result);

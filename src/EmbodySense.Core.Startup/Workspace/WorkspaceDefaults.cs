@@ -390,7 +390,7 @@ internal static class WorkspaceDefaults
 
             The primary durable memory registry is `.agent/MEMORY.md`. Agents should store, update, create, and retrieve most memories there first.
 
-            `conversations/current.ndjson` is the active conversation transcript as JSON lines. Each run starts with a fresh active transcript, moving any non-empty previous `current.ndjson` into `conversations/archive/` first.
+            `conversations/current.ndjson` is the active conversation transcript as JSON lines. Each CLI run starts with a fresh active transcript, moving any non-empty previous `current.ndjson` into `conversations/archive/` first. The Web host restores the active transcript after its server process restarts so a fresh authenticated page can continue that logical conversation.
 
             Additional `.ndjson` files in `conversations/` and `conversations/archive/` are saved transcripts that can be listed and loaded from the runtime session with `/history`. Use `/new` to start another fresh active transcript without leaving the session.
 

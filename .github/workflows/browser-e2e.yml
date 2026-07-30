@@ -51,6 +51,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-e2e-diagnostics
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 14
           path: |
             tests/**/TestResults/**

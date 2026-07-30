@@ -4,26 +4,49 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
+/// <summary>
+/// Captures the ordered, provenance-tagged context admitted to one custom-loop execution.
+/// </summary>
+/// <param name="SchemaVersion">The persisted schema version.</param>
+/// <param name="CapturedAtUtc">The UTC capture time.</param>
+/// <param name="SourceManifest">The source manifest.</param>
+/// <param name="ManifestHash">The manifest hash.</param>
 public sealed record CustomLoopContextSnapshot(
     int SchemaVersion,
     DateTimeOffset CapturedAtUtc,
     CustomLoopContextManifestSource[] SourceManifest,
     string ManifestHash)
 {
+    /// <summary>
+    /// Schema version required by the current context-snapshot contract.
+    /// </summary>
     public const int CurrentSchemaVersion = 1;
 
+    /// <summary>
+    /// Projects included role, identity, and contextual-state sources into model messages.
+    /// </summary>
+    /// <value>Included non-conversation sources in manifest order, projected to their captured role and content.</value>
     [JsonIgnore]
     public CustomLoopMessageSnapshot[] WorkspaceContextMessages => (SourceManifest ?? [])
             .Where(source => source is not null && source.Included && (source.SourceType is CustomLoopContextSource.RoleInstruction or CustomLoopContextSource.AgentIdentity or CustomLoopContextSource.ContextualState))
             .Select(source => new CustomLoopMessageSnapshot(source.Role, source.Content))
             .ToArray();
 
+    /// <summary>
+    /// Projects included invoking-conversation sources into model messages.
+    /// </summary>
+    /// <value>Included invoking-conversation sources in manifest order, projected to their captured role and content.</value>
     [JsonIgnore]
     public CustomLoopMessageSnapshot[] InvokingConversationMessages => (SourceManifest ?? [])
             .Where(source => source is not null && source.Included && source.SourceType == CustomLoopContextSource.InvokingConversation)
             .Select(source => new CustomLoopMessageSnapshot(source.Role, source.Content))
             .ToArray();
 
+    /// <summary>
+    /// Creates a hash-bound snapshot whose standard workspace context sources are all explicitly omitted.
+    /// </summary>
+    /// <param name="capturedAtUtc">The UTC capture time recorded on the snapshot and every omission entry.</param>
+    /// <returns>A version-1 snapshot with deterministic source ordering, omission evidence, and a matching manifest hash.</returns>
     public static CustomLoopContextSnapshot CreateEmpty(DateTimeOffset capturedAtUtc)
     {
         var snapshot = new CustomLoopContextSnapshot(

@@ -9,6 +9,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Memory.Models;
 
 namespace EmbodySense.Core.Persistence.Memory;
 
@@ -68,6 +69,110 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             Directory.CreateDirectory(_paths.ConversationMemoryPath);
             await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
             return await ListConversationsUnsafeAsync(cancellationToken);
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads a bounded, internally consistent transcript-file snapshot while holding the same in-process gate and cross-process lease used by current-conversation writes and rotation.
+    /// </summary>
+    /// <param name="maxTranscriptFiles">The maximum number of file snapshots to return, including the current transcript placeholder.</param>
+    /// <param name="maxLinesPerTranscript">The maximum number of complete lines retained for one transcript.</param>
+    /// <param name="maxTotalCharacters">The aggregate character budget shared by every retained transcript line.</param>
+    /// <param name="cancellationToken">Cancels lease acquisition and file reads.</param>
+    /// <returns>A detached snapshot that configuration readers can parse after the persistence lease is released.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when a configured bound is not positive.</exception>
+    /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is cancelled.</exception>
+    public async Task<ConversationHistorySnapshot> LoadConversationHistorySnapshotAsync(
+        int maxTranscriptFiles,
+        int maxLinesPerTranscript,
+        int maxTotalCharacters,
+        CancellationToken cancellationToken = default)
+    {
+        if (maxTranscriptFiles <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxTranscriptFiles), maxTranscriptFiles, "Maximum transcript files must be greater than zero.");
+        }
+
+        if (maxLinesPerTranscript <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxLinesPerTranscript), maxLinesPerTranscript, "Maximum transcript lines must be greater than zero.");
+        }
+
+        if (maxTotalCharacters <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxTotalCharacters), maxTotalCharacters, "Maximum transcript characters must be greater than zero.");
+        }
+
+        if (!Directory.Exists(_paths.ConversationMemoryPath))
+        {
+            return new ConversationHistorySnapshot(
+                [new ConversationTranscriptFileSnapshot(CurrentConversationId, _paths.CurrentConversationPath, true, false, [], false)],
+                false);
+        }
+
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            var candidates = new List<(string ConversationId, string Path, bool IsCurrent)>
+            {
+                (CurrentConversationId, _paths.CurrentConversationPath, true)
+            };
+            var additionalFilesOmitted = false;
+
+            foreach (var path in Directory.EnumerateFiles(_paths.ConversationMemoryPath, "*.ndjson", SearchOption.TopDirectoryOnly).Where(path => !SamePath(path, _paths.CurrentConversationPath)).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+            {
+                if (candidates.Count == maxTranscriptFiles)
+                {
+                    additionalFilesOmitted = true;
+                    break;
+                }
+
+                candidates.Add((Path.GetFileNameWithoutExtension(path), path, false));
+            }
+
+            if (candidates.Count < maxTranscriptFiles && Directory.Exists(_paths.ArchivedConversationMemoryPath))
+            {
+                foreach (var path in Directory.EnumerateFiles(_paths.ArchivedConversationMemoryPath, "*.ndjson", SearchOption.TopDirectoryOnly).OrderByDescending(File.GetLastWriteTimeUtc))
+                {
+                    if (candidates.Count == maxTranscriptFiles)
+                    {
+                        additionalFilesOmitted = true;
+                        break;
+                    }
+
+                    candidates.Add(($"{ArchiveDirectoryName}/{Path.GetFileNameWithoutExtension(path)}", path, false));
+                }
+            }
+            else if (Directory.Exists(_paths.ArchivedConversationMemoryPath) && Directory.EnumerateFiles(_paths.ArchivedConversationMemoryPath, "*.ndjson", SearchOption.TopDirectoryOnly).Any())
+            {
+                additionalFilesOmitted = true;
+            }
+
+            var transcripts = new List<ConversationTranscriptFileSnapshot>(candidates.Count);
+            var remainingCharacters = maxTotalCharacters;
+            foreach (var candidate in candidates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var exists = File.Exists(candidate.Path);
+                IReadOnlyList<string> lines = [];
+                var additionalContentOmitted = false;
+                if (exists)
+                {
+                    var read = await ReadTranscriptLinesAsync(candidate.Path, maxLinesPerTranscript, remainingCharacters, cancellationToken);
+                    lines = read.Lines;
+                    remainingCharacters -= read.CharactersRead;
+                    additionalContentOmitted = read.AdditionalContentOmitted;
+                }
+
+                transcripts.Add(new ConversationTranscriptFileSnapshot(candidate.ConversationId, candidate.Path, candidate.IsCurrent, exists, lines, additionalContentOmitted));
+            }
+
+            return new ConversationHistorySnapshot(transcripts.ToArray(), additionalFilesOmitted);
         }
         finally
         {
@@ -413,6 +518,90 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         return await LoadEntriesAsync(stream, path, cancellationToken);
     }
 
+    private static async Task<(IReadOnlyList<string> Lines, int CharactersRead, bool AdditionalContentOmitted)> ReadTranscriptLinesAsync(
+        string path,
+        int maxLines,
+        int maxCharacters,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        if (maxCharacters == 0)
+        {
+            return ([], 0, stream.Length > 0);
+        }
+
+        var lines = new List<string>();
+        var currentLine = new StringBuilder(Math.Min(maxCharacters, 4_096));
+        var buffer = new char[4_096];
+        var charactersRead = 0;
+        while (lines.Count < maxLines && charactersRead < maxCharacters)
+        {
+            var allowed = maxCharacters - charactersRead;
+            var requested = allowed >= buffer.Length ? buffer.Length : allowed + 1;
+            var count = await reader.ReadAsync(buffer.AsMemory(0, requested), cancellationToken);
+            if (count == 0)
+            {
+                if (currentLine.Length > 0)
+                {
+                    lines.Add(currentLine.ToString());
+                }
+
+                return (lines.ToArray(), charactersRead, false);
+            }
+
+            var retainedCount = Math.Min(count, allowed);
+            charactersRead += retainedCount;
+            var processedCount = 0;
+            for (var index = 0; index < retainedCount && lines.Count < maxLines; index++)
+            {
+                processedCount++;
+                var character = buffer[index];
+                if (character == '\n')
+                {
+                    if (currentLine.Length > 0 && currentLine[^1] == '\r')
+                    {
+                        currentLine.Length--;
+                    }
+
+                    lines.Add(currentLine.ToString());
+                    currentLine.Clear();
+                }
+                else
+                {
+                    currentLine.Append(character);
+                }
+            }
+
+            if (count > retainedCount || processedCount < retainedCount)
+            {
+                return (lines.ToArray(), charactersRead, true);
+            }
+
+            if (lines.Count == maxLines)
+            {
+                var extra = new char[1];
+                return (lines.ToArray(), charactersRead, await reader.ReadAsync(extra, cancellationToken) > 0);
+            }
+        }
+
+        if (charactersRead == maxCharacters)
+        {
+            var extra = new char[1];
+            if (await reader.ReadAsync(extra, cancellationToken) == 0)
+            {
+                if (currentLine.Length > 0 && lines.Count < maxLines)
+                {
+                    lines.Add(currentLine.ToString());
+                }
+
+                return (lines.ToArray(), charactersRead, false);
+            }
+        }
+
+        return (lines.ToArray(), charactersRead, true);
+    }
+
     private static async Task<IReadOnlyList<ConversationMemoryEntry>> LoadEntriesAsync(Stream stream, string path, CancellationToken cancellationToken)
     {
         stream.Position = 0;
@@ -497,6 +686,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         var parentPath = Path.GetFullPath(Path.GetDirectoryName(path) ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         var archivePath = Path.GetFullPath(_paths.ArchivedConversationMemoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return string.Equals(parentPath, archivePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool SamePath(string left, string right)
+    {
+        return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task CopyFileAsync(string sourcePath, string destinationPath, bool overwrite, CancellationToken cancellationToken)
