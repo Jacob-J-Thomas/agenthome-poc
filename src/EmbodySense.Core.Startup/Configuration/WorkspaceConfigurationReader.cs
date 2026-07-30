@@ -24,7 +24,8 @@ namespace EmbodySense.Core.Startup.Configuration;
 /// </remarks>
 public sealed class WorkspaceConfigurationReader
 {
-    // TODO: revisit what appropriate figures should actually be.
+    // Independent per-source caps keep one configuration category from consuming the entire UI payload.
+    // Change them only with the redaction, truncation, history-snapshot, and Web projection coverage.
     private const int MaxRawJsonCharacters = 40_000;
     private const int MaxDocumentCharacters = 40_000;
     private const int MaxAuditEvents = 200;
@@ -57,8 +58,8 @@ public sealed class WorkspaceConfigurationReader
         var documents = await ReadDocumentsAsync(paths, cancellationToken);
         var audit = await ReadAuditAsync(paths, cancellationToken);
         var conversationHistory = await ReadConversationHistoryAsync(paths, cancellationToken);
-        // TODO(loop-configuration-visibility): Before Web loop panels or loop-builder work rely on this snapshot, include
-        // default loop definition state, latest run summaries, active loop identity, and loop read problems here.
+        // Loop definitions and execution evidence remain in their dedicated APIs; this snapshot projects
+        // workspace and runtime configuration without creating a second, potentially stale loop-state cache.
 
         return new WorkspaceConfigurationSnapshot(
             DateTimeOffset.UtcNow,
