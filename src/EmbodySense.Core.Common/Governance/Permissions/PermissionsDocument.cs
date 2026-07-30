@@ -81,13 +81,14 @@ public sealed class PermissionsDocument
     }
 
     /// <summary>
-    /// Deserializes a permissions document only when it uses the current schema version.
+    /// Deserializes a permissions document when its effective version is current; an omitted version defaults to <see cref="CurrentVersion"/>.
     /// </summary>
     /// <param name="json">The JSON document.</param>
-    /// <returns>The deserialized current-version document, or <see langword="null"/> when the version is unsupported.</returns>
+    /// <returns>The deserialized current-version document, including an unversioned document that receives the property default, or <see langword="null"/> when an explicit version is unsupported.</returns>
     /// <exception cref="JsonException">Thrown when <paramref name="json"/> is not valid for the permissions schema.</exception>
     public static PermissionsDocument? FromJson(string json)
     {
+        // TODO(#142): Require persisted permissions JSON to declare CurrentVersion explicitly.
         var document = JsonSerializer.Deserialize<PermissionsDocument>(json, PermissionsJson.Options);
         return document is { Version: CurrentVersion } ? document : null;
     }

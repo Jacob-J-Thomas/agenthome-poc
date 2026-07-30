@@ -18,7 +18,7 @@ public static class ToolResultFormatter
     /// Formats governed tool results for model-visible continuation context.
     /// </summary>
     /// <param name="results">The ordered governed tool results to project.</param>
-    /// <returns>A bounded text projection that includes outcome, path, output, and durable-retention evidence for each result.</returns>
+    /// <returns>A bounded prefix of the ordered projection. Global truncation can omit some or all fields for later results.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="results"/> is <see langword="null"/>.</exception>
     public static string FormatResults(IReadOnlyList<ToolResult> results)
     {
@@ -40,6 +40,7 @@ public static class ToolResultFormatter
         }
 
         builder.AppendLine("Use these results to continue the task. Request another dynamic tool only if needed.");
+        // TODO(#143): Reserve essential identity, outcome, path, and retention evidence for every result before allocating output text.
         return ApplyFinalLimit(builder.ToString().TrimEnd());
     }
 
