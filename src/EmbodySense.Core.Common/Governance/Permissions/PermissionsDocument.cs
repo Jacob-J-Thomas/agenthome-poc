@@ -99,11 +99,12 @@ public sealed class PermissionsDocument
     public string ToJson() => JsonSerializer.Serialize(this, PermissionsJson.Options);
 
     /// <summary>
-    /// Ensures read and list operations for retained tool responses are present behind human approval.
+    /// Adds a human-approval rule for retained tool-response read and list operations that are not already covered by an approved-path entry.
     /// </summary>
-    /// <returns><see langword="true"/> when a missing-operation rule was appended; <see langword="false"/> when existing approved rules already cover both operations.</returns>
+    /// <returns><see langword="true"/> when a missing-operation rule was appended; <see langword="false"/> when existing approved-path entries already cover both operations, regardless of their approval requirement.</returns>
     public bool EnsureToolResponseInspectionApproval()
     {
+        // TODO(#139): Treat operations covered only by non-approval rules as missing so retained-response inspection remains approval-gated.
         var coveredOperations = Approved
             .Where(entry => PathEquals(entry.Path, ToolResponseInspectionPath))
             .SelectMany(entry => entry.Operations)

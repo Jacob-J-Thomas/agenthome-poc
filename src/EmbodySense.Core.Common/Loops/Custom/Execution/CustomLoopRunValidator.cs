@@ -56,10 +56,10 @@ public static class CustomLoopRunValidator
     }
 
     /// <summary>
-    /// Determines whether the event stream begins with exactly one admission event followed by exactly one admission-audit completion event.
+    /// Determines whether the event stream begins with an admission event followed by a unique admission-audit completion event.
     /// </summary>
     /// <param name="run">The run whose append-only event prefix is inspected.</param>
-    /// <returns><see langword="true"/> when the required sequence-1 admission and sequence-2 audit-completion markers are present and unique; otherwise, <see langword="false"/>.</returns>
+    /// <returns><see langword="true"/> when the required sequence-1 admission and sequence-2 audit-completion markers are present and the completion marker is unique; otherwise, <see langword="false"/>.</returns>
     public static bool HasCompleteAdmissionAudit(CustomLoopRunRecord? run)
     {
         if (run?.Events is not { Length: >= 2 } events)
@@ -67,6 +67,7 @@ public static class CustomLoopRunValidator
             return false;
         }
 
+        // TODO(#140): Reject later duplicate admission markers before treating the admission-audit prefix as complete.
         return events[0] is { Sequence: 1, Kind: CustomLoopRunEventKind.Admitted }
             && events[1] is { Sequence: 2, Kind: CustomLoopRunEventKind.AdmissionAuditCompleted }
             && events.Count(item => item is { Kind: CustomLoopRunEventKind.AdmissionAuditCompleted }) == 1;
