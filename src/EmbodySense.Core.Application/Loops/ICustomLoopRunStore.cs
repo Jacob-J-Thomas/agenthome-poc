@@ -7,8 +7,12 @@ using EmbodySense.Core.Application.Loops.TraceRetention;
 namespace EmbodySense.Core.Application.Loops;
 
 /// <summary>
-/// Persists custom-loop lifecycle state, event traces, execution capacity, and idempotent trace-deletion receipts.
+/// Persists custom-loop lifecycle state and event traces and exposes optional retention, capacity, and deletion-receipt capabilities.
 /// </summary>
+/// <remarks>
+/// Core run methods are required. Compatibility implementations for advanced monitoring, paging, dispatch revalidation, and
+/// trace-retention members provide conservative or unsupported results; adapters that advertise those facilities must override them.
+/// </remarks>
 public interface ICustomLoopRunStore
 {
     /// <summary>
@@ -28,8 +32,12 @@ public interface ICustomLoopRunStore
     Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Loads the read-oriented run summary and its deletion state.
+    /// Loads a read-oriented run summary.
     /// </summary>
+    /// <remarks>
+    /// The compatibility implementation projects <see cref="GetAsync(string, CancellationToken)"/>, always reports the run as
+    /// non-deleted, and supplies an empty artifact hash. Adapters that expose deletion state or artifact identity must override this member.
+    /// </remarks>
     /// <param name="runId">The run ID.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The monitor view, or <see langword="null"/> when the run is unknown.</returns>
@@ -66,11 +74,18 @@ public interface ICustomLoopRunStore
     Task<IReadOnlyList<CustomLoopRunSummary>> ListRecentAsync(int maximumCount, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Lists a cursor page of run summaries using the requested loop filter.
+    /// Lists a page of run summaries.
     /// </summary>
+    /// <remarks>
+    /// The compatibility implementation supports only an unfiltered first page backed by
+    /// <see cref="ListRecentAsync(int, CancellationToken)"/>. Adapters that support loop filters or continuation cursors must override this member.
+    /// </remarks>
     /// <param name="request">The request.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result is the custom loop run page.</returns>
+    /// <exception cref="NotSupportedException">
+    /// The compatibility implementation received a loop filter or continuation cursor.
+    /// </exception>
     async Task<CustomLoopRunPage> ListPageAsync(CustomLoopRunPageRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -107,55 +122,62 @@ public interface ICustomLoopRunStore
     }
 
     /// <summary>
-    /// Reads current retained-trace usage and configured capacity.
+    /// Allows a store to read current retained-trace usage and configured capacity.
     /// </summary>
+    /// <remarks>The compatibility implementation returns an empty quota.</remarks>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result is the custom loop trace quota.</returns>
     Task<CustomLoopTraceQuota> GetTraceQuotaAsync(CancellationToken cancellationToken = default) => Task.FromResult(CustomLoopTraceQuota.Empty());
 
     /// <summary>
-    /// Inspects trace integrity and artifact sizes for one run.
+    /// Allows a store to inspect trace integrity and artifact sizes for one run.
     /// </summary>
+    /// <remarks>The compatibility implementation returns <see langword="null"/>.</remarks>
     /// <param name="runId">The run ID.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The inspection, or <see langword="null"/> when the run is unknown.</returns>
     Task<CustomLoopTraceInspection?> InspectTraceAsync(string runId, CancellationToken cancellationToken = default) => Task.FromResult<CustomLoopTraceInspection?>(null);
 
     /// <summary>
-    /// Loads a durable trace-deletion receipt by its idempotency identifier.
+    /// Allows a store to load a durable trace-deletion receipt by its idempotency identifier.
     /// </summary>
+    /// <remarks>The compatibility implementation reports the receipt as not found.</remarks>
     /// <param name="operationId">The operation ID.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result is the custom loop trace deletion lookup result.</returns>
     Task<CustomLoopTraceDeletionLookupResult> GetTraceDeletionOperationAsync(string operationId, CancellationToken cancellationToken = default) => Task.FromResult(CustomLoopTraceDeletionLookupResult.NotFound());
 
     /// <summary>
-    /// Atomically reserves an idempotent terminal-trace deletion operation.
+    /// Allows a store to atomically reserve an idempotent terminal-trace deletion operation.
     /// </summary>
+    /// <remarks>The compatibility implementation reports that the deletion-operation limit is exceeded and persists no receipt.</remarks>
     /// <param name="mutation">The mutation.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result is the custom loop trace deletion reservation result.</returns>
     Task<CustomLoopTraceDeletionReservationResult> ReserveTraceDeletionOperationAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default) => Task.FromResult(new CustomLoopTraceDeletionReservationResult(CustomLoopTraceDeletionReservationStatus.DeletionOperationLimitExceeded, null));
 
     /// <summary>
-    /// Commits a terminal deletion result that failed before destructive actuation because intent audit failed.
+    /// Allows a store to commit a terminal deletion result that failed before destructive actuation because intent audit failed.
     /// </summary>
+    /// <remarks>The compatibility implementation returns an unknown result and persists no mutation.</remarks>
     /// <param name="mutation">The mutation.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result is the custom loop trace deletion store result.</returns>
     Task<CustomLoopTraceDeletionStoreResult> CommitTraceDeletionAuditFailureAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default) => Task.FromResult(new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.Unknown, null, CustomLoopTraceDeletionIntegrity.Unknown));
 
     /// <summary>
-    /// Deletes artifacts for an eligible terminal run and commits its tombstone atomically.
+    /// Allows a store to delete artifacts for an eligible terminal run and commit its tombstone atomically.
     /// </summary>
+    /// <remarks>The compatibility implementation reports the run as not found and deletes nothing.</remarks>
     /// <param name="mutation">The mutation.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result is the custom loop trace deletion store result.</returns>
     Task<CustomLoopTraceDeletionStoreResult> DeleteTerminalTraceAsync(CustomLoopTraceDeletionMutation mutation, CancellationToken cancellationToken = default) => Task.FromResult(new CustomLoopTraceDeletionStoreResult(CustomLoopTraceDeletionStoreStatus.NotFound, null, CustomLoopTraceDeletionIntegrity.Unknown));
 
     /// <summary>
-    /// Marks the trace-deletion terminal outcome as audited with its integrity disposition.
+    /// Allows a store to mark the trace-deletion terminal outcome as audited with its integrity disposition.
     /// </summary>
+    /// <remarks>The compatibility implementation reports the operation as not found and persists no marker.</remarks>
     /// <param name="operationId">The operation ID.</param>
     /// <param name="integrity">The integrity.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
@@ -163,8 +185,9 @@ public interface ICustomLoopRunStore
     Task<CustomLoopTraceDeletionAuditMarkStatus> MarkTraceDeletionOutcomeAsync(string operationId, CustomLoopTraceDeletionIntegrity integrity, CancellationToken cancellationToken = default) => Task.FromResult(CustomLoopTraceDeletionAuditMarkStatus.NotFound);
 
     /// <summary>
-    /// Appends a warning to a terminal run under optimistic lifecycle concurrency.
+    /// Allows a store to append a warning to a terminal run under optimistic lifecycle concurrency.
     /// </summary>
+    /// <remarks>The compatibility implementation reports the run as not found and persists no warning.</remarks>
     /// <param name="runId">The run ID.</param>
     /// <param name="expectedLifecycleVersion">The expected lifecycle version.</param>
     /// <param name="warning">The warning.</param>

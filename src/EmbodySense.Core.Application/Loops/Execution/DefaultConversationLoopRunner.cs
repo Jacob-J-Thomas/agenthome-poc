@@ -19,8 +19,12 @@ using EmbodySense.Core.Common.Loops.Models;
 namespace EmbodySense.Core.Application.Loops.Execution;
 
 /// <summary>
-/// Serializes one interactive conversation turn through durable transcript synchronization, inference, projection, and run evidence.
+/// Serializes one interactive conversation turn through inference and projection, with optional durable transcript and run-evidence stores.
 /// </summary>
+/// <remarks>
+/// A configured conversation-memory store synchronizes and persists the durable transcript. A configured loop-run store records
+/// run evidence. When either optional store is absent, the corresponding durable behavior is not performed.
+/// </remarks>
 public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunner
 {
     private readonly ILlmInferenceClient _inferenceClient;
