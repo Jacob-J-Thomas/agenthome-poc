@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.E2ETests.Web;
@@ -81,17 +82,16 @@ public sealed class BrowserFlowTests
     {
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var currentTranscriptPath = workspace.File(".agent", "memory", "conversations", "current.ndjson");
+        await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
+        await using var externalLease = new FileStream(currentTranscriptPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
-        var currentTranscriptPath = workspace.File(".agent", "memory", "conversations", "current.ndjson");
 
         try
         {
-            await InitializeWorkspaceAsync(browser);
-            await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
-            await using var externalLease = new FileStream(currentTranscriptPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-
-            await ClickAsync(browser, "#refreshConfigButton");
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await SubmitMessageAsync(browser, "configuration-overlap-turn");
             await browser.WaitForExpressionAsync("document.getElementById('refreshConfigButton').disabled && document.getElementById('sendButton').disabled");
             await externalLease.DisposeAsync();
