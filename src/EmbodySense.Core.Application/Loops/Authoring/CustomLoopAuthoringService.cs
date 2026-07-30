@@ -11,6 +11,14 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Application.Loops.Authoring;
 
+/// <summary>
+/// Authors role-scoped custom-loop definitions with validation, optimistic concurrency, store-provided receipts, and audit integrity.
+/// </summary>
+/// <remarks>
+/// Idempotent replay depends on a definition-store adapter that implements the receipt-aware mutation overloads and lookup.
+/// With that support, operation identifiers bind the canonical request and may only replay that request. Mutations record
+/// intent before persistence, preserve version conflicts, and keep committed outcomes visible when terminal audit completion is uncertain.
+/// </remarks>
 public sealed class CustomLoopAuthoringService
 {
     private readonly ICustomLoopDefinitionStore _store;
@@ -19,6 +27,14 @@ public sealed class CustomLoopAuthoringService
     private readonly TimeProvider _timeProvider;
     private readonly ICustomLoopRunStore? _runStore;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopAuthoringService"/> type.
+    /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="auditLog">The audit log.</param>
+    /// <param name="identityGenerator">The identity generator.</param>
+    /// <param name="timeProvider">The time provider.</param>
+    /// <param name="runStore">The run store.</param>
     public CustomLoopAuthoringService(ICustomLoopDefinitionStore store, IAuditLog auditLog, ICustomLoopDefinitionIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null, ICustomLoopRunStore? runStore = null)
     {
         ArgumentNullException.ThrowIfNull(store);
@@ -31,6 +47,12 @@ public sealed class CustomLoopAuthoringService
         _runStore = runStore;
     }
 
+    /// <summary>
+    /// Lists the definitions owned by a directory role.
+    /// </summary>
+    /// <param name="roleId">The role ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The role-scoped definitions.</returns>
     public async Task<IReadOnlyList<CustomLoopDefinition>> ListAsync(string roleId, CancellationToken cancellationToken = default)
     {
         var safeRoleId = CustomLoopArtifactIdentifier.Require(roleId, nameof(roleId));
@@ -38,6 +60,13 @@ public sealed class CustomLoopAuthoringService
         return definitions.Where(definition => string.Equals(definition.RoleId, safeRoleId, StringComparison.Ordinal)).ToArray();
     }
 
+    /// <summary>
+    /// Loads a definition only when it belongs to the requested directory role.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="roleId">The role ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The role-scoped definition, or <see langword="null"/> when absent or owned by another role.</returns>
     public async Task<CustomLoopDefinition?> GetAsync(string loopId, string roleId, CancellationToken cancellationToken = default)
     {
         var safeRoleId = CustomLoopArtifactIdentifier.Require(roleId, nameof(roleId));
@@ -45,6 +74,14 @@ public sealed class CustomLoopAuthoringService
         return definition is not null && string.Equals(definition.RoleId, safeRoleId, StringComparison.Ordinal) ? definition : null;
     }
 
+    /// <summary>
+    /// Creates a validated seed definition under an idempotent mutation operation.
+    /// </summary>
+    /// <param name="roleId">The role ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The committed, replayed, rejected, or integrity-warning result.</returns>
     public async Task<CustomLoopAuthoringResult> CreateAsync(string roleId, string operationId, string actor, CancellationToken cancellationToken = default)
     {
         var invalidOperation = ValidateOperationId(operationId);
@@ -54,6 +91,8 @@ public sealed class CustomLoopAuthoringService
         }
 
         var requestHash = ComputeCreateRequestHash(roleId);
+        // Resolve the durable receipt before allocating a definition id. The same operation id must
+        // replay the same authorized request rather than create a second definition.
         var operation = await _store.GetMutationOperationAsync(operationId, cancellationToken);
         if (operation.Status is CustomLoopDefinitionMutationLookupStatus.PendingMutation or CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted)
         {
@@ -118,11 +157,34 @@ public sealed class CustomLoopAuthoringService
         return await CompleteMutationAsync("create", definition.Id, actor, operationId, storeResult, definition, null, isReplay: false);
     }
 
+    /// <summary>
+    /// Updates a definition under optimistic concurrency using no tool assignments.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="expectedDefinitionVersion">The expected definition version.</param>
+    /// <param name="roleId">The role ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="input">The input.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The committed, replayed, rejected, or version-conflict result.</returns>
     public Task<CustomLoopAuthoringResult> UpdateAsync(string loopId, int expectedDefinitionVersion, string roleId, string operationId, string actor, CustomLoopDefinitionInput input, CancellationToken cancellationToken = default)
     {
         return UpdateAsync(loopId, expectedDefinitionVersion, roleId, operationId, actor, input, [], cancellationToken);
     }
 
+    /// <summary>
+    /// Updates a definition while enforcing the current directory-role tool ceiling.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="expectedDefinitionVersion">The expected definition version.</param>
+    /// <param name="roleId">The role ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="input">The input.</param>
+    /// <param name="currentRoleCeiling">The current role ceiling.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The committed, replayed, rejected, or version-conflict result.</returns>
     public async Task<CustomLoopAuthoringResult> UpdateAsync(
         string loopId,
         int expectedDefinitionVersion,
@@ -288,6 +350,16 @@ public sealed class CustomLoopAuthoringService
         return await CompleteMutationAsync("update", definition.Id, actor, operationId, storeResult, definition, current, isReplay: false);
     }
 
+    /// <summary>
+    /// Tombstones a definition when its version matches and no nonterminal run depends on it.
+    /// </summary>
+    /// <param name="loopId">The loop ID.</param>
+    /// <param name="expectedDefinitionVersion">The expected definition version.</param>
+    /// <param name="roleId">The role ID.</param>
+    /// <param name="operationId">The operation ID.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The committed, replayed, rejected, or version-conflict result.</returns>
     public async Task<CustomLoopAuthoringResult> DeleteAsync(string loopId, int expectedDefinitionVersion, string roleId, string operationId, string actor, CancellationToken cancellationToken = default)
     {
         roleId = CustomLoopArtifactIdentifier.Require(roleId, nameof(roleId));

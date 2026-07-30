@@ -9,8 +9,16 @@ using EmbodySense.Core.Common.Loops.Models;
 
 namespace EmbodySense.Core.Application.Runtime.Diagnostics;
 
+/// <summary>
+/// Formats runtime diagnostics.
+/// </summary>
 public static class RuntimeDiagnosticFormatter
 {
+    /// <summary>
+    /// Formats the verbose context.
+    /// </summary>
+    /// <param name="context">The context.</param>
+    /// <returns>The text value.</returns>
     public static string FormatVerboseContext(RuntimeVerboseContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
