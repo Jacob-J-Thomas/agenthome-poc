@@ -61,6 +61,8 @@ public sealed class WorkspacePathsTests
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, string.Empty));
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, " "));
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, "."));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, "." + Path.DirectorySeparatorChar));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, Path.Combine("nested", "..") + Path.DirectorySeparatorChar));
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, workspace.File("rooted.txt")));
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, directEscape));
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, siblingPrefixEscape));
