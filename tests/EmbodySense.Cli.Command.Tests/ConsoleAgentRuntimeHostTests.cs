@@ -36,7 +36,6 @@ public sealed class ConsoleAgentRuntimeHostTests
             runtimeSurface ?? AgentRuntimeSurface.Cli);
     }
 
-    // TODO(#147): Make fake-Codex readiness deterministic before the runtime version probe starts.
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
     {
         if (!OperatingSystem.IsWindows())
