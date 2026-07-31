@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops;
@@ -132,6 +133,31 @@ public sealed class LoopAuthoringFacadeTests
         Assert.False(projection.ExecutionContract.UsesGenericGraphDispatcher);
         Assert.Contains("not dispatched independently", projection.ExecutionContract.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain(projection.Graph.Nodes, node => node.Id is "trigger" or "exit");
+    }
+
+    [Fact]
+    public async Task Structurally_valid_noncanonical_system_graph_is_not_labeled_runner_compatible()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var canonical = LoopDefinition.CreateDefaultConversation();
+        const string AlternateEntryNodeId = "alternate-entry";
+        var noncanonicalGraph = canonical.Graph with
+        {
+            EntryNodeId = AlternateEntryNodeId,
+            Nodes = canonical.Graph.Nodes.Select(node => node.Id == DefaultConversationLoopGraphIds.AcceptUserMessage ? node with { Id = AlternateEntryNodeId } : node).ToArray(),
+            Edges = canonical.Graph.Edges.Select(edge => edge.FromNodeId == DefaultConversationLoopGraphIds.AcceptUserMessage ? edge with { FromNodeId = AlternateEntryNodeId } : edge).ToArray()
+        };
+        await new LoopDefinitionStore(paths).SaveAsync(canonical with { Graph = noncanonicalGraph });
+
+        var projection = (await new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync()).SystemDefault;
+
+        Assert.Equal(SystemLoopExecutionSemantics.Unknown, projection.ExecutionContract.GraphSemantics);
+        Assert.All(projection.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.Unknown, node.ExecutionSemantics));
+        Assert.All(projection.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.Unknown, edge.ExecutionSemantics));
+        Assert.Contains("rejects this persisted graph contract", projection.ExecutionContract.Detail, StringComparison.Ordinal);
+        Assert.Contains(DefaultConversationLoopGraphIds.AcceptUserMessage, projection.ExecutionContract.Detail, StringComparison.Ordinal);
     }
 
     [Fact]

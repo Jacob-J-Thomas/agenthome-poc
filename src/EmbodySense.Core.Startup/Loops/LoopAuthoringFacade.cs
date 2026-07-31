@@ -244,6 +244,11 @@ public sealed class LoopAuthoringFacade
     private static SystemLoopDefinitionSnapshot MapSystemDefinition(LoopDefinition definition)
     {
         var graph = definition.Graph;
+        var executionBlocker = DefaultConversationLoopGraphContract.GetExecutionBlocker(definition);
+        var executionSemantics = executionBlocker is null ? SystemLoopExecutionSemantics.ValidatedRunnerContract : SystemLoopExecutionSemantics.Unknown;
+        var executionDetail = executionBlocker is null
+            ? "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor."
+            : $"The dedicated runner rejects this persisted graph contract: {executionBlocker}";
         return new SystemLoopDefinitionSnapshot(
             definition.SchemaVersion,
             definition.Id,
@@ -260,13 +265,13 @@ public sealed class LoopAuthoringFacade
             new SystemLoopGraphSnapshot(
                 graph.EntryNodeId,
                 graph.TerminalNodeIds.ToArray(),
-                graph.Nodes.Select(node => new SystemLoopGraphNodeSnapshot(node.Id, node.DisplayName, node.Description, node.Kind, node.EditMode, node.CapabilityIds.ToArray(), SystemLoopExecutionSemantics.ValidatedRunnerContract)).ToArray(),
-                graph.Edges.Select(edge => new SystemLoopGraphEdgeSnapshot(edge.Id, edge.FromNodeId, edge.ToNodeId, edge.Condition, edge.Description, SystemLoopExecutionSemantics.ValidatedRunnerContract)).ToArray()),
+                graph.Nodes.Select(node => new SystemLoopGraphNodeSnapshot(node.Id, node.DisplayName, node.Description, node.Kind, node.EditMode, node.CapabilityIds.ToArray(), executionSemantics)).ToArray(),
+                graph.Edges.Select(edge => new SystemLoopGraphEdgeSnapshot(edge.Id, edge.FromNodeId, edge.ToNodeId, edge.Condition, edge.Description, executionSemantics)).ToArray()),
             new SystemLoopExecutionContractSnapshot(
                 nameof(DefaultConversationLoopRunner),
-                SystemLoopExecutionSemantics.ValidatedRunnerContract,
+                executionSemantics,
                 false,
-                "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor."));
+                executionDetail));
     }
 
     private static CustomLoopTriggerPolicy? Map(LoopTriggerPolicy? trigger) => trigger is null ? null : new((CustomLoopTriggerPromptSource)(int)trigger.PromptSource, trigger.PresetPrompt, trigger.IncludeInvokingConversation);
