@@ -25,6 +25,16 @@ namespace EmbodySense.Web.Tests;
 public sealed class WebAgentRuntimeHostTests
 {
     [Fact]
+    public void Constructor_rejects_help_only_options_without_a_configured_model()
+    {
+        var options = WebRunOptions.FromArguments(["--help"]);
+
+        var exception = Assert.Throws<ArgumentException>(() => new WebAgentRuntimeHost(options, new WebApprovalCoordinator()));
+
+        Assert.Contains("nonblank configured model", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task InitializeWorkspaceAsync_initializes_workspace_with_web_audit_actor()
     {
         using var workspace = new TestWorkspace();
@@ -65,6 +75,7 @@ public sealed class WebAgentRuntimeHostTests
 
         Assert.True(configuration.Status.Initialized);
         Assert.Equal("web", configuration.Runtime.Surface);
+        Assert.Equal("gpt-test", configuration.Runtime.Model);
         Assert.NotNull(configuration.Runtime.CodexRuntime);
         Assert.Equal(CodexRuntimeCompatibility.Compatible, configuration.Runtime.CodexRuntime.Compatibility);
         Assert.Equal(Path.GetFullPath(codexPath), configuration.Runtime.CodexRuntime.ResolvedExecutablePath);
