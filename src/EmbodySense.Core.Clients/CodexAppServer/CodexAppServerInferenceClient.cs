@@ -9,6 +9,14 @@ using EmbodySense.Core.Application.Governance.Tools;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
+/// <summary>
+/// Maps EmbodySense inference requests to the Codex app-server JSON protocol and projects streamed responses back to the runtime.
+/// </summary>
+/// <remarks>
+/// The client lazily initializes one ephemeral app-server thread, handles server-initiated requests while awaiting responses,
+/// and accepts only bounded newline-delimited JSON messages. Callers must serialize generation, reset, and disposal; the
+/// mutable protocol correlation and thread state are not designed for concurrent use.
+/// </remarks>
 public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
 {
     private const string ClientName = "embodysense";
@@ -27,6 +35,14 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private bool _initialized;
     private string? _threadId;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CodexAppServerInferenceClient"/> type.
+    /// </summary>
+    /// <param name="options">The admitted model, sandbox, executable, and working-directory options.</param>
+    /// <param name="toolBroker">The governed tool broker, or <see langword="null"/> to expose no EmbodySense commands.</param>
+    /// <param name="transport">An injected protocol transport, or <see langword="null"/> to launch <c>codex app-server --stdio</c>.</param>
+    /// <param name="auditLog">The audit sink for declined native app-server requests, or <see langword="null"/> when unavailable.</param>
+    /// <param name="providerRequestStarted">An optional callback invoked immediately before <c>turn/start</c> is sent.</param>
     public CodexAppServerInferenceClient(
         LlmInferenceClientOptions options,
         IToolBroker? toolBroker = null,
@@ -45,6 +61,13 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         _providerRequestStarted = providerRequestStarted;
     }
 
+    /// <summary>
+    /// Starts one app-server turn and waits for its correlated terminal response.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="responseChunkHandler">An optional ordered handler for each correlated agent-message delta.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The completed response, preferring terminal message text over the accumulated delta stream.</returns>
     public async Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
@@ -135,6 +158,10 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             turnId);
     }
 
+    /// <summary>
+    /// Disposes the app-server transport and best-effort removes the ephemeral runtime directory.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
         if (_transport is not null)
@@ -157,6 +184,9 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }
     }
 
+    /// <summary>
+    /// Forgets the current app-server thread so the next turn starts a new logical conversation.
+    /// </summary>
     public void ResetConversation()
     {
         _threadId = null;

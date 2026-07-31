@@ -6,12 +6,26 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
-// TODO(#83): Add the repository-standard XML contract documentation to this resolver and its public runtime status types.
+/// <summary>
+/// Discovers and probes a compatible Codex executable without starting a durable inference session.
+/// </summary>
+/// <remarks>
+/// An explicit path is authoritative. Otherwise, Windows desktop installations are considered before <c>PATH</c> entries.
+/// Each candidate is bounded by a shared fifteen-second probe deadline, and diagnostics are truncated before being returned.
+/// Resolution reports incompatibility as data; caller cancellation still propagates.
+/// </remarks>
 public sealed class CodexRuntimeResolver
 {
     private const int MaxDiagnosticCharacters = 2_000;
     private static readonly TimeSpan _probeTimeout = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// Resolves the first executable that starts app-server and, when configured, advertises the requested model.
+    /// </summary>
+    /// <param name="explicitExecutablePath">An authoritative executable path or command name, or <see langword="null"/> for discovery.</param>
+    /// <param name="configuredModel">The model that must be advertised, or <see langword="null"/> to accept external model selection.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the Codex runtime resolution.</returns>
     public async Task<CodexRuntimeResolution> ResolveAsync(string? explicitExecutablePath, string? configuredModel, CancellationToken cancellationToken = default)
     {
         var candidates = GetCandidates(explicitExecutablePath).ToArray();

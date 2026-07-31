@@ -6,6 +6,13 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
+/// <summary>
+/// Owns a redirected <c>codex app-server --stdio</c> child process and its newline-delimited protocol streams.
+/// </summary>
+/// <remarks>
+/// Disposal terminates the full child-process tree and waits for the standard-error reader. Diagnostic output is retained
+/// only up to the configured character bound, with the oldest content discarded after truncation.
+/// </remarks>
 [ExcludeFromCodeCoverage]
 internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
 {
@@ -14,6 +21,11 @@ internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
     private readonly Task _errorReaderTask;
     private readonly StringBuilder _errorOutput = new();
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CodexAppServerProcessTransport"/> type.
+    /// </summary>
+    /// <param name="options">The executable override and other admitted inference-client options.</param>
+    /// <param name="workingDirectory">The process working directory used for the ephemeral app-server thread.</param>
     public CodexAppServerProcessTransport(LlmInferenceClientOptions options, string workingDirectory)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -23,6 +35,10 @@ internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
         _errorReaderTask = ReadErrorOutputAsync();
     }
 
+    /// <summary>
+    /// Gets the error output.
+    /// </summary>
+    /// <value>The error output.</value>
     public string ErrorOutput
     {
         get
@@ -34,17 +50,32 @@ internal sealed class CodexAppServerProcessTransport : ICodexAppServerTransport
         }
     }
 
+    /// <summary>
+    /// Reads the next complete newline-delimited JSON protocol message from app-server standard output.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The next protocol line, or <see langword="null"/> after app-server closes standard output.</returns>
     public async Task<string?> ReadLineAsync(CancellationToken cancellationToken = default)
     {
         return await _process.StandardOutput.ReadLineAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Writes and flushes one complete newline-delimited JSON protocol message to app-server standard input.
+    /// </summary>
+    /// <param name="line">The line.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task WriteLineAsync(string line, CancellationToken cancellationToken = default)
     {
         await _process.StandardInput.WriteLineAsync(line.AsMemory(), cancellationToken);
         await _process.StandardInput.FlushAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Closes the protocol streams and terminates the owned app-server process tree if it is still running.
+    /// </summary>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
         TryKill(_process);

@@ -750,6 +750,7 @@ public sealed class WebAgentRuntimeHostTests
 
     private static async Task WaitForPendingApprovalAsync(WebApprovalCoordinator approvals, string ownerConnectionId)
     {
+        // TODO(#146): Replace fixed-delay approval polling with deterministic synchronization.
         for (var attempt = 0; attempt < 100 && approvals.GetPending(ownerConnectionId).Count == 0; attempt++)
         {
             await Task.Delay(50);

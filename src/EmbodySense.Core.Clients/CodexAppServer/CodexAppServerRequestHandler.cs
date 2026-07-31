@@ -6,17 +6,36 @@ using EmbodySense.Core.Common.Governance.Audit;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
+/// <summary>
+/// Routes governed dynamic-tool calls and declines native mutation, approval, elicitation, and input requests.
+/// </summary>
+/// <remarks>
+/// Every recognized or rejected server request is audited when an audit sink is available. Native app-server command,
+/// file-change, permission, MCP elicitation, and user-input paths never bypass the EmbodySense tool broker.
+/// </remarks>
 internal sealed class CodexAppServerRequestHandler : ICodexAppServerRequestHandler
 {
     private readonly ICodexAppServerToolBridge? _toolBridge;
     private readonly IAuditLog? _auditLog;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CodexAppServerRequestHandler"/> type.
+    /// </summary>
+    /// <param name="toolBridge">The tool bridge.</param>
+    /// <param name="auditLog">The audit log.</param>
     public CodexAppServerRequestHandler(ICodexAppServerToolBridge? toolBridge, IAuditLog? auditLog)
     {
         _toolBridge = toolBridge;
         _auditLog = auditLog;
     }
 
+    /// <summary>
+    /// Maps one server-initiated method to its governed result or unsupported disposition.
+    /// </summary>
+    /// <param name="method">The method.</param>
+    /// <param name="parameters">The parameters.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the Codex app server request handling result.</returns>
     public async Task<CodexAppServerRequestHandlingResult> HandleAsync(string method, JsonElement parameters, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(method);

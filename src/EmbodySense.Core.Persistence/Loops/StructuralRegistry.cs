@@ -3,6 +3,9 @@ using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Maintains one canonical first-use, hash-verified structural table for a compact run artifact.
+/// </summary>
 internal sealed class StructuralRegistry
 {
     private readonly string _prefix;
@@ -13,6 +16,12 @@ internal sealed class StructuralRegistry
     private readonly HashSet<string> _seedIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _referencedIds = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="StructuralRegistry"/> type.
+    /// </summary>
+    /// <param name="prefix">The prefix.</param>
+    /// <param name="description">The description.</param>
+    /// <param name="seeds">The seeds.</param>
     public StructuralRegistry(string prefix, string description, IReadOnlyList<StructuralEntry> seeds)
     {
         _prefix = prefix;
@@ -48,8 +57,17 @@ internal sealed class StructuralRegistry
         }
     }
 
+    /// <summary>
+    /// Gets the structural entries.
+    /// </summary>
+    /// <value>The structural entries.</value>
     public IReadOnlyList<StructuralEntry> Entries => _entries;
 
+    /// <summary>
+    /// Returns the canonical structural identifier, adding a deep-cloned first-use entry when necessary.
+    /// </summary>
+    /// <param name="value">The value.</param>
+    /// <returns>The canonical compact structural identifier.</returns>
     public string Reference(JsonObject value)
     {
         var bytes = CustomLoopRunArtifactCodec.SerializeNode(value);
@@ -74,6 +92,11 @@ internal sealed class StructuralRegistry
         return id;
     }
 
+    /// <summary>
+    /// Resolves the requested value.
+    /// </summary>
+    /// <param name="id">The ID.</param>
+    /// <returns>The JSON object.</returns>
     public JsonObject Resolve(string id)
     {
         if (!_byId.TryGetValue(id, out var entry))
@@ -85,6 +108,9 @@ internal sealed class StructuralRegistry
         return entry.Value.DeepClone().AsObject();
     }
 
+    /// <summary>
+    /// Rejects decoded seed entries that were never referenced by the projected run.
+    /// </summary>
     public void RequireEverySeedReferenced()
     {
         if (_seedIds.Any(id => !_referencedIds.Contains(id)))

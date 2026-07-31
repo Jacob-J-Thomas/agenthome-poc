@@ -3,6 +3,9 @@ using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
+/// <summary>
+/// Maintains the canonical first-use, hash-verified content table for a compact run artifact.
+/// </summary>
 internal sealed class ContentRegistry
 {
     private readonly List<ContentEntry> _entries;
@@ -12,6 +15,10 @@ internal sealed class ContentRegistry
     private readonly HashSet<string> _seedIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _referencedIds = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ContentRegistry"/> type.
+    /// </summary>
+    /// <param name="seeds">The seeds.</param>
     public ContentRegistry(IReadOnlyList<ContentEntry> seeds)
     {
         _entries = new List<ContentEntry>(seeds.Count);
@@ -44,8 +51,17 @@ internal sealed class ContentRegistry
         }
     }
 
+    /// <summary>
+    /// Gets the content entries.
+    /// </summary>
+    /// <value>The content entries.</value>
     public IReadOnlyList<ContentEntry> Entries => _entries;
 
+    /// <summary>
+    /// Returns the canonical content identifier, adding a new first-use entry when necessary.
+    /// </summary>
+    /// <param name="text">The text.</param>
+    /// <returns>The canonical compact content identifier.</returns>
     public string Reference(string text)
     {
         byte[] bytes;
@@ -85,6 +101,11 @@ internal sealed class ContentRegistry
         return id;
     }
 
+    /// <summary>
+    /// Resolves the requested value.
+    /// </summary>
+    /// <param name="id">The ID.</param>
+    /// <returns>The exact strict-UTF-8 text bound to the identifier.</returns>
     public string Resolve(string id)
     {
         if (!_byId.TryGetValue(id, out var entry))
@@ -96,6 +117,9 @@ internal sealed class ContentRegistry
         return entry.Text;
     }
 
+    /// <summary>
+    /// Rejects decoded seed entries that were never referenced by the projected run.
+    /// </summary>
     public void RequireEverySeedReferenced()
     {
         if (_seedIds.Any(id => !_referencedIds.Contains(id)))

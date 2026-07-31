@@ -13,6 +13,18 @@ using EmbodySense.Core.Persistence.Memory.Models;
 
 namespace EmbodySense.Core.Persistence.Memory;
 
+/// <summary>
+/// Persists the current and archived conversation transcripts using strict version-1 newline-delimited JSON.
+/// </summary>
+/// <remarks>
+/// Current-conversation mutations hold a process-local gate and an exclusive cross-process file lease. Creating or rotating a
+/// conversation atomically replaces identity metadata before its transcript is created, cleared, or replaced. Because identity
+/// and transcript changes are separate file commits, cancellation or I/O failure can leave the new identity beside the prior or
+/// missing transcript. First append also creates missing identity metadata before appending, while a failed transcript append
+/// restores the prior file length. Compare-and-append verifies conversation identity, version, and exact prefix under the same
+/// lease. Syntactically malformed JSON can throw <see cref="JsonException"/>; unsupported schemas, semantically invalid entries,
+/// invalid roles, or invalid identity fields throw <see cref="FormatException"/>. No migration or legacy alias is attempted.
+/// </remarks>
 public sealed class ConversationMemoryStore : IConversationMemoryStore
 {
     private const int SchemaVersion = 1;
@@ -27,6 +39,10 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
     private string CurrentConversationIdentityPath => _paths.CurrentConversationPath + ".identity.json";
     private string CurrentConversationLockPath => _paths.CurrentConversationPath + ".lock";
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ConversationMemoryStore"/> type.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
     public ConversationMemoryStore(WorkspacePaths paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -35,6 +51,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         _currentConversationGate = _currentConversationGates.GetOrAdd(Path.GetFullPath(paths.CurrentConversationPath), _ => new SemaphoreSlim(1, 1));
     }
 
+    /// <summary>
+    /// Loads the validated current transcript in persisted message order.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the LLM messages.</returns>
     public async Task<IReadOnlyList<LlmMessage>> LoadCurrentConversationAsync(CancellationToken cancellationToken = default)
     {
         await _currentConversationGate.WaitAsync(cancellationToken);
@@ -48,6 +69,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
     }
 
+    /// <summary>
+    /// Loads the current transcript together with its stable identity and content version.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the conversation memory snapshot.</returns>
     public async Task<ConversationMemorySnapshot> LoadCurrentConversationSnapshotAsync(CancellationToken cancellationToken = default)
     {
         await _currentConversationGate.WaitAsync(cancellationToken);
@@ -61,6 +87,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
     }
 
+    /// <summary>
+    /// Lists the current and archived transcripts in deterministic recency order.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result is the conversation transcript list items.</returns>
     public async Task<IReadOnlyList<ConversationTranscriptListItem>> ListConversationsAsync(CancellationToken cancellationToken = default)
     {
         await _currentConversationGate.WaitAsync(cancellationToken);
@@ -215,6 +246,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             .ToArray();
     }
 
+    /// <summary>
+    /// Archives the current transcript when nonempty and atomically establishes a fresh current identity.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task StartFreshConversationAsync(CancellationToken cancellationToken = default)
     {
         await _currentConversationGate.WaitAsync(cancellationToken);
@@ -236,6 +272,12 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
     }
 
+    /// <summary>
+    /// Loads the current or archived transcript identified by <paramref name="conversationId"/>.
+    /// </summary>
+    /// <param name="conversationId">The conversation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The validated messages in persisted sequence order.</returns>
     public async Task<IReadOnlyList<LlmMessage>> LoadConversationAsync(string conversationId, CancellationToken cancellationToken = default)
     {
         var normalizedConversationId = NormalizeConversationId(conversationId);
@@ -254,6 +296,12 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         return entries.Select(ToMessage).ToArray();
     }
 
+    /// <summary>
+    /// Archives any nonempty current transcript, copies an archived transcript into the current file, and assigns a fresh current identity.
+    /// </summary>
+    /// <param name="conversationId">The conversation ID.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that completes after the new identity and copied current transcript are durable.</returns>
     public async Task ResumeConversationAsync(string conversationId, CancellationToken cancellationToken = default)
     {
         var normalizedConversationId = NormalizeConversationId(conversationId);
@@ -288,6 +336,15 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
     }
 
+    /// <summary>
+    /// Appends one version-1 message while holding current-conversation ownership.
+    /// </summary>
+    /// <remarks>
+    /// Ordinary appends do not change the conversation-generation identity established when the current conversation is created or resumed.
+    /// </remarks>
+    /// <param name="message">The message.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task that represents the asynchronous operation.</returns>
     public async Task AppendMessageAsync(LlmMessage message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -305,6 +362,18 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
     }
 
+    /// <summary>
+    /// Appends only when the current conversation identity, content version, and exact message prefix match the caller's snapshot.
+    /// </summary>
+    /// <param name="expectedConversationId">The expected conversation ID.</param>
+    /// <param name="expectedConversationVersion">The expected conversation version.</param>
+    /// <param name="expectedPrefix">The expected prefix.</param>
+    /// <param name="message">The message.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>
+    /// <see langword="true"/> after the append succeeds; <see langword="false"/> when any expected identity, version, or
+    /// message-prefix value is stale. A successful append does not change the conversation-generation identity.
+    /// </returns>
     public async Task<bool> TryAppendMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedConversationId);
@@ -411,6 +480,13 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
     }
 
+    /// <summary>
+    /// Searches the current transcript for a case-insensitive literal content substring.
+    /// </summary>
+    /// <param name="query">The nonblank literal substring to match.</param>
+    /// <param name="limit">The positive maximum number of matches.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The first matching transcript entries in persisted sequence order.</returns>
     public async Task<IReadOnlyList<ConversationMemorySearchResult>> SearchCurrentConversationAsync(
         string query,
         int limit = 20,
