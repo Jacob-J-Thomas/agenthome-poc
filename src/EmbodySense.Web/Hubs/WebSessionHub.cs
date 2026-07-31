@@ -111,12 +111,13 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     /// Sends one message or supported static runtime command through the serialized default-conversation path.
     /// </summary>
     /// <param name="message">The nonblank user message or supported static command.</param>
+    /// <param name="requestId">An optional browser-owned idempotency identity.</param>
     /// <returns>A task that completes after final, cancellation, or bounded failure events are sent to the caller.</returns>
     /// <remarks>
     /// Blank input and expected runtime failures are represented as stream events rather than hub errors.
     /// Disconnect cancellation is likewise projected as a cancellation event when the connection can still receive it.
     /// </remarks>
-    public async Task SendMessage(string message)
+    public async Task SendMessage(string message, string? requestId = null)
     {
         if (string.IsNullOrWhiteSpace(message))
         {
@@ -126,7 +127,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
 
         try
         {
-            await _host.SendMessageAsync(message, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionId, Context.ConnectionAborted);
+            await _host.SendMessageAsync(message, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionId, Context.ConnectionAborted, requestId);
         }
         catch (OperationCanceledException)
         {

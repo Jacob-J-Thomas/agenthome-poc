@@ -162,6 +162,12 @@ public sealed class WorkspacePaths
     public string LoopRunsPath => Path.Combine(LoopsPath, "runs");
 
     /// <summary>
+    /// Gets the durable default-conversation turn protocol path.
+    /// </summary>
+    /// <value>The default-conversation turn protocol path.</value>
+    public string DefaultConversationTurnsPath => Path.Combine(LoopRunsPath, "default-conversation-turns");
+
+    /// <summary>
     /// Gets the custom loop runs path.
     /// </summary>
     /// <value>The custom loop runs path.</value>

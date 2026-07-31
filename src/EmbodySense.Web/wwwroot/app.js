@@ -1040,7 +1040,8 @@ elements.messageForm.addEventListener("submit", async (event) => {
   elements.cancelButton.disabled = false;
 
   try {
-    await hub.invoke("SendMessage", message);
+    const requestId = globalThis.crypto?.randomUUID?.() ?? `request-${Date.now()}-${Math.random()}`;
+    await hub.invoke("SendMessage", message, requestId);
   } catch (error) {
     appendMessage("error", error.message);
   } finally {
@@ -1060,6 +1061,9 @@ function handleStreamEvent(event) {
     appendMessage("system", event.text ?? "");
   } else if (event.type === "cancelled") {
     appendMessage("error", event.text ?? "Message cancelled.");
+    activeAgentMessage = null;
+  } else if (event.type === "needs_review") {
+    appendMessage("system", event.text ?? "This turn requires explicit review.");
     activeAgentMessage = null;
   } else if (event.type === "error") {
     appendMessage("error", event.error ?? "Request failed.");

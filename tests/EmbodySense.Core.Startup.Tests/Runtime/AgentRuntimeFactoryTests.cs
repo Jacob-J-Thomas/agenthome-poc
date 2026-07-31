@@ -376,27 +376,47 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task RunTurnAsync_returns_failed_runtime_result_with_loop_identity_when_provider_fails()
+    public async Task RunTurnAsync_surfaces_provider_ambiguity_and_allows_explicit_review_resolution()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var fakeCodex = await CreateFakeCodexExecutableAsync(workspace, "provider exploded");
-        await using var runtime = await CreateRuntimeAsync(workspace, codexPath: fakeCodex);
+        AgentRuntimeTurnResult response;
+        AgentRuntimeTurnResult history;
+        AgentRuntimeTurnResult reviewList;
+        string reviewTurnId;
+        await using (var runtime = await CreateRuntimeAsync(workspace, codexPath: fakeCodex))
+        {
+            response = await runtime.RunTurnAsync("hello");
+            history = await runtime.RunTurnAsync("/history");
+            var review = Assert.Single(await runtime.ListDefaultConversationReviewsAsync());
+            reviewTurnId = review.TurnId;
+            reviewList = await runtime.RunTurnAsync("/review");
+        }
 
-        var response = await runtime.RunTurnAsync("hello");
-        var history = await runtime.RunTurnAsync("/history");
-
-        Assert.Equal(AgentRuntimeTurnStatus.MessageFailed, response.Status);
-        Assert.Equal("Codex app-server turn failed: provider exploded", response.FailureDetail);
+        Assert.Equal(AgentRuntimeTurnStatus.MessageNeedsReview, response.Status);
+        Assert.Contains("Codex app-server turn failed: provider exploded", response.FailureDetail, StringComparison.Ordinal);
+        Assert.Contains("Automatic redispatch is forbidden", response.FailureDetail, StringComparison.Ordinal);
         Assert.Equal(response.FailureDetail, response.Output);
         var failureEvent = Assert.Single(response.Events);
-        Assert.Equal(AgentRuntimeTurnEventKind.Failure, failureEvent.Kind);
+        Assert.Equal(AgentRuntimeTurnEventKind.NeedsReview, failureEvent.Kind);
         Assert.Equal(response.FailureDetail, failureEvent.Text);
         Assert.Equal(response.RunIdentity, failureEvent.RunIdentity);
         Assert.NotNull(response.RunIdentity);
         Assert.Equal("default-conversation", response.RunIdentity.LoopId);
         Assert.Equal("default-assistant", response.RunIdentity.RoleId);
         Assert.Contains("before sending the first prompt", history.Output, StringComparison.Ordinal);
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, reviewList.Status);
+        Assert.Contains("provider-attempt", reviewList.Output, StringComparison.Ordinal);
+
+        await using var restarted = await CreateRuntimeAsync(workspace, codexPath: fakeCodex);
+        Assert.Collection(
+            restarted.GetActiveConversationTranscript(),
+            message => Assert.Equal(("User", "hello"), (message.Role, message.Content)));
+        var reviewResolution = await restarted.RunTurnAsync($"/review resolve {reviewTurnId}");
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, reviewResolution.Status);
+        Assert.Contains("explicitly abandoning", reviewResolution.Output, StringComparison.Ordinal);
+        Assert.Empty(await restarted.ListDefaultConversationReviewsAsync());
     }
 
     [Fact]

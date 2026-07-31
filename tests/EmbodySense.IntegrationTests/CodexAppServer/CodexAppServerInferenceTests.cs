@@ -69,10 +69,26 @@ public sealed class CodexAppServerInferenceTests
             Notification("item/agentMessage/delta", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"The note says tool-visible note."}"""),
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"The note says tool-visible note.","phase":"final_answer"}]}}"""));
         var client = CreateClient(transport, broker, workspace.RootPath);
+        var correlation = new LlmInferenceCorrelation(
+            "provider-attempt-1",
+            "provider-correlation-1",
+            new ToolAuditCorrelation("run-1", BuiltInLoopIds.DefaultConversation, "default-assistant", 1, new string('a', 64), 1, "provider-adapter", 1, "provider-correlation-1", "read,write", "read,write", "read,write"));
+        var request = new LlmInferenceRequest([LlmMessage.User("read the note")], correlation: correlation);
+        var durableBoundaryObserved = false;
 
-        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("read the note"), (_, _) => Task.CompletedTask);
+        var response = await client.GenerateAsync(
+            request,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None,
+            _ =>
+            {
+                durableBoundaryObserved = true;
+                Assert.DoesNotContain(transport.Writes, IsTurnStart);
+                return Task.CompletedTask;
+            });
 
         Assert.Equal("The note says tool-visible note.", response.OutputText);
+        Assert.True(durableBoundaryObserved);
         var toolResponse = Assert.Single(transport.Writes, line => line.Contains("\"id\":99", StringComparison.Ordinal));
         Assert.Contains("\"success\":true", toolResponse, StringComparison.Ordinal);
         Assert.Contains("tool-visible note", toolResponse, StringComparison.Ordinal);
@@ -89,11 +105,21 @@ public sealed class CodexAppServerInferenceTests
         Assert.Contains("llm.appserver.request", auditText, StringComparison.Ordinal);
         Assert.Contains("tool.execute", auditText, StringComparison.Ordinal);
         var events = await ReadAuditEventsAsync(workspace);
+        var inferenceStart = Assert.Single(events, auditEvent => auditEvent.Action == "llm.inference.start");
+        Assert.Equal("provider-attempt-1", GetMetadataString(inferenceStart, "request_id"));
+        Assert.Equal("provider-attempt-1", GetMetadataString(inferenceStart, "provider_attempt_id"));
+        Assert.Equal("provider-correlation-1", GetMetadataString(inferenceStart, "provider_correlation_id"));
+        Assert.Equal("run-1", GetMetadataString(inferenceStart, "run_id"));
         var appServerToolCall = Assert.Single(events, auditEvent => auditEvent.Action == "llm.appserver.request" && GetMetadataString(auditEvent, "call_id") == "call-1");
         Assert.Equal("call-1", GetMetadataString(appServerToolCall, "tool_request_correlation_id"));
+        Assert.Equal("provider-attempt-1", GetMetadataString(appServerToolCall, "provider_attempt_id"));
+        Assert.Equal("provider-correlation-1", GetMetadataString(appServerToolCall, "provider_correlation_id"));
+        Assert.Equal("run-1", GetMetadataString(appServerToolCall, "run_id"));
         Assert.All(events.Where(auditEvent => auditEvent.Action.StartsWith("tool.", StringComparison.Ordinal)), auditEvent =>
         {
             Assert.Equal("call-1", GetMetadataString(auditEvent, "tool_request_correlation_id"));
+            Assert.Equal("run-1", GetMetadataString(auditEvent, "run_id"));
+            Assert.Equal("provider-correlation-1", GetMetadataString(auditEvent, "attempt_correlation_id"));
         });
     }
 
@@ -464,6 +490,20 @@ public sealed class CodexAppServerInferenceTests
         await client.DisposeAsync();
 
         Assert.True(transport.Disposed);
+    }
+
+    [Fact]
+    public async Task QuarantineAsync_disposes_and_permanently_rejects_reuse_of_an_ambiguous_injected_transport()
+    {
+        var transport = new ScriptedAppServerTransport();
+        var client = CreateClient(transport);
+
+        await client.QuarantineAsync();
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("must not reuse")));
+
+        Assert.True(transport.Disposed);
+        Assert.Contains("quarantined", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(transport.Writes);
     }
 
     private static LlmInferenceClient CreateClient(

@@ -17,7 +17,7 @@ namespace EmbodySense.Core.Clients.CodexAppServer;
 /// and accepts only bounded newline-delimited JSON messages. Callers must serialize generation, reset, and disposal; the
 /// mutable protocol correlation and thread state are not designed for concurrent use.
 /// </remarks>
-public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
+public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IQuarantinableInferenceClient, IAsyncDisposable
 {
     private const string ClientName = "embodysense";
     private const string ClientTitle = "EmbodySense";
@@ -26,14 +26,16 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private static readonly TimeSpan _protocolReadTimeout = TimeSpan.FromMinutes(2);
     private readonly LlmInferenceClientOptions _options;
     private ICodexAppServerTransport? _transport;
-    private readonly ICodexAppServerToolBridge? _toolBridge;
+    private readonly CodexAppServerToolBridge? _toolBridge;
     private readonly ICodexAppServerContextBuilder _contextBuilder;
-    private readonly ICodexAppServerRequestHandler _requestHandler;
+    private readonly CodexAppServerRequestHandler _requestHandler;
     private readonly Action? _providerRequestStarted;
     private readonly string _runtimeDirectory;
+    private readonly bool _transportWasInjected;
     private int _nextRequestId;
     private bool _initialized;
     private string? _threadId;
+    private bool _injectedTransportQuarantined;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CodexAppServerInferenceClient"/> type.
@@ -54,6 +56,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         _options = options;
         _transport = transport;
+        _transportWasInjected = transport is not null;
         _toolBridge = toolBroker is null ? null : new CodexAppServerToolBridge(toolBroker);
         _contextBuilder = new CodexAppServerContextBuilder(toolBroker?.AvailableCommands);
         _runtimeDirectory = CreateRuntimeDirectory();
@@ -68,17 +71,37 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     /// <param name="responseChunkHandler">An optional ordered handler for each correlated agent-message delta.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The completed response, preferring terminal message text over the accumulated delta stream.</returns>
-    public async Task<LlmInferenceResponse> GenerateAsync(
+    public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
+        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting: null);
+    }
+
+    /// <inheritdoc />
+    public async Task<LlmInferenceResponse> GenerateAsync(
+        LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? providerRequestStarting)
+    {
         ArgumentNullException.ThrowIfNull(request);
+
+        _toolBridge?.SetInferenceCorrelation(request.Correlation);
+        _requestHandler.SetInferenceCorrelation(request.Correlation);
+        try
+        {
 
         await EnsureThreadAsync(request, cancellationToken);
 
         var requestId = NextRequestId();
         var userText = _contextBuilder.CreateTurnInput(request);
+        if (providerRequestStarting is not null)
+        {
+            await providerRequestStarting(cancellationToken);
+        }
+
         _providerRequestStarted?.Invoke();
         await SendRequestAsync("turn/start", requestId, new JsonObject
         {
@@ -158,6 +181,12 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
             LlmInferenceSurface.OpenAiCodex,
             _options.Model,
             turnId);
+        }
+        finally
+        {
+            _requestHandler.SetInferenceCorrelation(null);
+            _toolBridge?.SetInferenceCorrelation(null);
+        }
     }
 
     /// <summary>
@@ -192,6 +221,27 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     public void ResetConversation()
     {
         _threadId = null;
+    }
+
+    /// <summary>
+    /// Disposes the live app-server transport and clears all protocol correlation after an ambiguous attempt.
+    /// </summary>
+    public async Task QuarantineAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var transport = _transport;
+        _transport = null;
+        _threadId = null;
+        _initialized = false;
+        _nextRequestId = 0;
+        _requestHandler.SetInferenceCorrelation(null);
+        _toolBridge?.SetInferenceCorrelation(null);
+        if (transport is not null)
+        {
+            await transport.DisposeAsync();
+        }
+
+        _injectedTransportQuarantined = _transportWasInjected;
     }
 
     private async Task EnsureThreadAsync(LlmInferenceRequest request, CancellationToken cancellationToken)
@@ -423,6 +473,11 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
     private ICodexAppServerTransport GetTransport()
     {
+        if (_injectedTransportQuarantined)
+        {
+            throw new InvalidOperationException("The injected Codex app-server transport was quarantined and cannot be reused.");
+        }
+
         return _transport ??= new CodexAppServerProcessTransport(_options, _runtimeDirectory);
     }
 

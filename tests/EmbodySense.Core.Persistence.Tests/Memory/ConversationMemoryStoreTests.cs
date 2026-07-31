@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Inference;
 using System.Text.Json;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
+using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Common.Workspace;
@@ -113,6 +114,26 @@ public sealed class ConversationMemoryStoreTests
         var messages = await first.LoadCurrentConversationAsync();
         Assert.Equal(2, messages.Count);
         Assert.Contains(messages[^1].Content, new[] { "winner-a", "winner-b" });
+    }
+
+    [Fact]
+    public async Task Identity_bearing_publication_rejects_reuse_of_an_identity_from_the_expected_prefix()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("seed"));
+        var expected = await store.LoadCurrentConversationSnapshotAsync();
+        var existing = JsonSerializer.Deserialize<ConversationMemoryEntry>(Assert.Single(await File.ReadAllLinesAsync(paths.CurrentConversationPath)), _jsonOptions)!;
+
+        var result = await store.TryPublishMessageAsync(
+            expected.ConversationId,
+            expected.Version,
+            expected.Messages,
+            new ConversationMessagePublication(existing.MessageId, "new-publication", LlmMessage.Assistant("must not append")));
+
+        Assert.Equal(ConversationPublicationAppendStatus.Conflict, result.Status);
+        Assert.Collection(await store.LoadCurrentConversationAsync(), message => Assert.Equal("seed", message.Content));
     }
 
     [Fact]
@@ -407,6 +428,6 @@ public sealed class ConversationMemoryStoreTests
 
     private static ConversationMemoryEntry Entry(string conversationId, int sequence, string role, string content)
     {
-        return new ConversationMemoryEntry(1, conversationId, sequence, DateTimeOffset.Parse("2026-06-01T00:00:00+00:00").AddMinutes(sequence), role, content);
+        return new ConversationMemoryEntry(1, conversationId, sequence, DateTimeOffset.Parse("2026-06-01T00:00:00+00:00").AddMinutes(sequence), $"message-{sequence}", $"publication-{sequence}", role, content);
     }
 }
