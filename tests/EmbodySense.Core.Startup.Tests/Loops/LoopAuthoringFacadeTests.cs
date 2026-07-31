@@ -1,5 +1,7 @@
 using EmbodySense.Core.Startup.Loops.Models;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Workspace;
@@ -43,8 +45,8 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal(30, initialCatalog.Limits.MaxGovernedToolRequestsPerRun);
         Assert.Equal(30 * 60 * 1_000, initialCatalog.Limits.MaxRunExecutionMilliseconds);
         Assert.Equal(
-            [LoopToolAssignment.List, LoopToolAssignment.Read, LoopToolAssignment.Search, LoopToolAssignment.Append, LoopToolAssignment.Write, LoopToolAssignment.Delete],
-            initialCatalog.SystemDefault.ToolAssignments);
+            [LoopCapabilityIds.ConversationTurn, LoopCapabilityIds.ConversationHistory, LoopCapabilityIds.AgentContext, LoopCapabilityIds.ProviderInference, LoopCapabilityIds.WorkspaceCommand, LoopCapabilityIds.ApprovalRequest, LoopCapabilityIds.AuditWrite],
+            initialCatalog.SystemDefault.CapabilityIds);
         Assert.Equal([LoopToolAssignment.List, LoopToolAssignment.Read, LoopToolAssignment.Search], initialCatalog.Tools.CustomAssignable);
         Assert.Equal(LoopCustomToolAuthorityCeiling.WorkspaceReadOnly, initialCatalog.Tools.CustomAuthorityCeiling);
         Assert.Equal("Created", created.Status);
@@ -75,6 +77,61 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal("Replayed", replayedDelete.Status);
         Assert.True(replayedDelete.IsCommitted);
         Assert.Null(missing);
+    }
+
+    [Fact]
+    public async Task System_default_projection_matches_the_canonical_graph_and_dedicated_runner_contract()
+    {
+        using var workspace = new TestWorkspace();
+        var projection = (await new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync()).SystemDefault;
+        var canonical = LoopDefinition.CreateDefaultConversation();
+
+        Assert.Equal(canonical.SchemaVersion, projection.SchemaVersion);
+        Assert.Equal(canonical.Id, projection.Id);
+        Assert.Equal(canonical.DisplayName, projection.DisplayName);
+        Assert.Equal(canonical.Description, projection.Description);
+        Assert.Equal(canonical.RoleId, projection.RoleId);
+        Assert.Equal(canonical.Trigger, projection.Trigger);
+        Assert.Equal(canonical.MemoryScope, projection.MemoryScope);
+        Assert.Equal(canonical.CapabilityIds, projection.CapabilityIds);
+        Assert.Equal(canonical.ReviewPolicy, projection.ReviewPolicy);
+        Assert.Equal(canonical.FailurePolicy, projection.FailurePolicy);
+        Assert.Equal(canonical.State, projection.State);
+        Assert.Equal(canonical.EditMode, projection.EditMode);
+        Assert.Equal(canonical.Graph.EntryNodeId, projection.Graph.EntryNodeId);
+        Assert.Equal(canonical.Graph.TerminalNodeIds, projection.Graph.TerminalNodeIds);
+        Assert.Equal(canonical.Graph.Nodes.Length, projection.Graph.Nodes.Count);
+        for (var index = 0; index < canonical.Graph.Nodes.Length; index++)
+        {
+            var expected = canonical.Graph.Nodes[index];
+            var actual = projection.Graph.Nodes[index];
+            Assert.Equal(expected.Id, actual.Id);
+            Assert.Equal(expected.DisplayName, actual.DisplayName);
+            Assert.Equal(expected.Description, actual.Description);
+            Assert.Equal(expected.Kind, actual.Kind);
+            Assert.Equal(expected.EditMode, actual.EditMode);
+            Assert.Equal(expected.CapabilityIds, actual.CapabilityIds);
+            Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, actual.ExecutionSemantics);
+        }
+
+        Assert.Equal(canonical.Graph.Edges.Length, projection.Graph.Edges.Count);
+        for (var index = 0; index < canonical.Graph.Edges.Length; index++)
+        {
+            var expected = canonical.Graph.Edges[index];
+            var actual = projection.Graph.Edges[index];
+            Assert.Equal(expected.Id, actual.Id);
+            Assert.Equal(expected.FromNodeId, actual.FromNodeId);
+            Assert.Equal(expected.ToNodeId, actual.ToNodeId);
+            Assert.Equal(expected.Condition, actual.Condition);
+            Assert.Equal(expected.Description, actual.Description);
+            Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, actual.ExecutionSemantics);
+        }
+
+        Assert.Equal("DefaultConversationLoopRunner", projection.ExecutionContract.Runner);
+        Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, projection.ExecutionContract.GraphSemantics);
+        Assert.False(projection.ExecutionContract.UsesGenericGraphDispatcher);
+        Assert.Contains("not dispatched independently", projection.ExecutionContract.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(projection.Graph.Nodes, node => node.Id is "trigger" or "exit");
     }
 
     [Fact]

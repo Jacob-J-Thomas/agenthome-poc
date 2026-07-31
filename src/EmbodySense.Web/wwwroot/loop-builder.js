@@ -478,8 +478,9 @@ function applyDefinition(definition) {
   historicalLoopId = null;
   currentDefinition = definition;
   draft = definition ? clone(definition) : null;
-  selectedNodeId = "trigger";
-  lastSelectedNodeId = "trigger";
+  const initialNodeId = definition?.graph?.entryNodeId ?? "trigger";
+  selectedNodeId = initialNodeId;
+  lastSelectedNodeId = initialNodeId;
   dirty = false;
   elements.name.value = draft?.displayName ?? "";
   elements.description.value = draft?.description ?? "";
@@ -1666,9 +1667,11 @@ function renderList() {
       node(
         "span",
         "",
-        projectedDefinition.inferenceSteps.length === 1
-          ? "1 step"
-          : `${projectedDefinition.inferenceSteps.length} steps`,
+        definition.id === "default-conversation"
+          ? `${projectedDefinition.graph.nodes.length} nodes · ${projectedDefinition.graph.edges.length} edges`
+          : projectedDefinition.inferenceSteps.length === 1
+            ? "1 step"
+            : `${projectedDefinition.inferenceSteps.length} steps`,
       ),
     );
     copy.append(meta);
@@ -1774,6 +1777,12 @@ function renderCanvas() {
     return;
   }
 
+  if (isSystemLoop()) {
+    renderSystemCanvas();
+    applyCanvasZoom();
+    return;
+  }
+
   elements.canvas.append(
     createNodeCard(
       "trigger",
@@ -1828,6 +1837,103 @@ function renderCanvas() {
     elements.canvas.append(rail);
   }
   applyCanvasZoom();
+}
+
+function renderSystemCanvas() {
+  const sequence = systemGraphSequence();
+  sequence.nodes.forEach((graphNode, index) => {
+    elements.canvas.append(createSystemNodeCard(graphNode, index));
+    const edge = sequence.edges[index];
+    if (edge) appendSystemConnector(edge);
+  });
+}
+
+function systemGraphSequence() {
+  const graph = draft.graph;
+  const nodesById = new Map(
+    graph.nodes.map((graphNode) => [graphNode.id, graphNode]),
+  );
+  const nodes = [];
+  const edges = [];
+  const visited = new Set();
+  let currentNodeId = graph.entryNodeId;
+  while (currentNodeId && !visited.has(currentNodeId)) {
+    const graphNode = nodesById.get(currentNodeId);
+    if (!graphNode) break;
+    visited.add(currentNodeId);
+    nodes.push(graphNode);
+    if (graph.terminalNodeIds.includes(currentNodeId)) break;
+    const edge = graph.edges.find(
+      (candidate) => candidate.fromNodeId === currentNodeId,
+    );
+    if (!edge) break;
+    edges.push(edge);
+    currentNodeId = edge.toNodeId;
+  }
+  return { nodes, edges };
+}
+
+function createSystemNodeCard(graphNode, index) {
+  const className =
+    graphNode.kind === "model-inference"
+      ? "inference"
+      : graphNode.kind === "run-finalization"
+        ? "exit"
+        : "system";
+  const button = node("button", `node-card ${className}`);
+  button.type = "button";
+  button.classList.toggle("selected", selectedNodeId === graphNode.id);
+  button.setAttribute(
+    "aria-pressed",
+    selectedNodeId === graphNode.id ? "true" : "false",
+  );
+  const header = node("span", "node-card-head");
+  const kindCopy = node("span", "node-kind-wrap");
+  kindCopy.append(
+    node("span", "node-kind-dot"),
+    node("span", "node-kind", capitalize(splitWords(graphNode.kind))),
+  );
+  header.append(
+    kindCopy,
+    node("span", "node-position", `Boundary ${index + 1}`),
+  );
+  button.append(
+    header,
+    node("span", "node-name", graphNode.displayName),
+    node("span", "node-summary", graphNode.description),
+  );
+  const chips = node("span", "node-card-chips");
+  chips.append(
+    node("span", "node-chip", graphNode.id),
+    node("span", "node-chip", "System locked"),
+    node("span", "node-chip", "Validated runner contract"),
+    node(
+      "span",
+      "node-chip",
+      `${graphNode.capabilityIds.length} ${graphNode.capabilityIds.length === 1 ? "capability" : "capabilities"}`,
+    ),
+  );
+  button.append(chips);
+  button.addEventListener("click", () => {
+    lastSelectedNodeId = graphNode.id;
+    selectedNodeId = graphNode.id;
+    renderCanvas();
+    renderInspector();
+    renderToolbar();
+  });
+  return button;
+}
+
+function appendSystemConnector(edge) {
+  const connector = node("span", "connector system-connector");
+  const label = node(
+    "span",
+    "system-connector-label",
+    `${edge.id} · ${capitalize(splitWords(edge.condition))} · Validated runner contract`,
+  );
+  label.title = edge.description;
+  connector.append(label);
+  elements.canvas.append(connector);
 }
 
 function createNodeCard(
@@ -1963,6 +2069,12 @@ function renderInspector() {
     return;
   }
 
+  if (isSystemLoop()) {
+    if (loopSettingsSelected) renderSystemLoopInspector();
+    else renderSystemNodeInspector();
+    return;
+  }
+
   if (selectedNodeId === "trigger") {
     renderTriggerInspector();
     return;
@@ -1978,6 +2090,119 @@ function renderInspector() {
     );
   if (step) renderInferenceInspector(step);
   else renderLoopInspector();
+}
+
+function renderSystemLoopInspector() {
+  elements.inspectorTitle.textContent = "System loop contract";
+  const policy = section("Actual role, trigger, and context policy");
+  policy.append(
+    systemFact("Role", draft.roleId),
+    systemFact("Trigger", capitalize(splitWords(draft.trigger))),
+    systemFact(
+      "Context and memory scope",
+      capitalize(splitWords(draft.memoryScope)),
+    ),
+    systemFact("Review policy", capitalize(splitWords(draft.reviewPolicy))),
+    systemFact("Failure policy", capitalize(splitWords(draft.failurePolicy))),
+    systemFact("State", capitalize(splitWords(draft.state))),
+    systemFact("Edit mode", capitalize(splitWords(draft.editMode))),
+  );
+  const authority = section("Loop-scoped capabilities");
+  authority.append(
+    node(
+      "p",
+      "field-hint",
+      "These are the canonical default-loop capabilities, not authored custom-loop tool assignments. Governed workspace commands still pass through permissions, approvals, and audit.",
+    ),
+    systemFact("Capability IDs", draft.capabilityIds.join(", ")),
+  );
+  const execution = section("Current executor support");
+  execution.append(
+    systemFact("Dedicated runner", draft.executionContract.runner),
+    systemFact(
+      "Graph semantics",
+      capitalize(splitWords(draft.executionContract.graphSemantics)),
+    ),
+    systemFact(
+      "Generic graph dispatch",
+      draft.executionContract.usesGenericGraphDispatcher
+        ? "Supported"
+        : "Not implemented",
+    ),
+    node("div", "context-note", draft.executionContract.detail),
+  );
+  const topology = section("Canonical topology");
+  topology.append(
+    systemFact("Entry node", draft.graph.entryNodeId),
+    systemFact("Terminal nodes", draft.graph.terminalNodeIds.join(", ")),
+    systemFact(
+      "Structure",
+      `${draft.graph.nodes.length} nodes · ${draft.graph.edges.length} edges`,
+    ),
+  );
+  elements.inspectorContent.append(policy, authority, execution, topology);
+}
+
+function renderSystemNodeInspector() {
+  const graphNode = draft.graph.nodes.find(
+    (item) => item.id === selectedNodeId,
+  );
+  if (!graphNode) {
+    renderSystemLoopInspector();
+    return;
+  }
+  elements.inspectorTitle.textContent = graphNode.displayName;
+  const boundary = section("Implemented boundary");
+  boundary.append(
+    node("div", "context-note", graphNode.description),
+    systemFact("Stable node ID", graphNode.id),
+    systemFact("Kind", capitalize(splitWords(graphNode.kind))),
+    systemFact("Edit mode", capitalize(splitWords(graphNode.editMode))),
+    systemFact("Capability IDs", graphNode.capabilityIds.join(", ") || "None"),
+  );
+  const execution = section("Execution semantics");
+  execution.append(
+    systemFact(
+      "Semantics",
+      capitalize(splitWords(graphNode.executionSemantics)),
+    ),
+    node("div", "context-note", draft.executionContract.detail),
+  );
+  const transitions = section("Canonical edges");
+  const incoming = draft.graph.edges.filter(
+    (edge) => edge.toNodeId === graphNode.id,
+  );
+  const outgoing = draft.graph.edges.filter(
+    (edge) => edge.fromNodeId === graphNode.id,
+  );
+  for (const edge of incoming)
+    transitions.append(
+      systemFact(
+        "Incoming",
+        `${edge.id} · ${capitalize(splitWords(edge.condition))} · from ${edge.fromNodeId}. ${edge.description}`,
+      ),
+    );
+  for (const edge of outgoing)
+    transitions.append(
+      systemFact(
+        "Outgoing",
+        `${edge.id} · ${capitalize(splitWords(edge.condition))} · to ${edge.toNodeId}. ${edge.description}`,
+      ),
+    );
+  if (incoming.length === 0)
+    transitions.append(systemFact("Incoming", "None · graph entry"));
+  if (outgoing.length === 0)
+    transitions.append(systemFact("Outgoing", "None · graph terminal"));
+  elements.inspectorContent.append(boundary, execution, transitions);
+}
+
+function systemFact(label, value) {
+  const fact = node("div", "context-note");
+  fact.append(
+    node("strong", "", `${label}: `),
+    document.createTextNode(String(value)),
+  );
+  return fact;
 }
 
 function renderLoopInspector() {
@@ -2402,7 +2627,9 @@ function evidenceNote() {
 
 function renderToolbar() {
   const editable = Boolean(draft) && !isSystemLoop() && !mutationInFlight;
-  const stepCount = draft?.inferenceSteps.length ?? 0;
+  const stepCount = isSystemLoop() ? 0 : (draft?.inferenceSteps.length ?? 0);
+  const systemNodeCount = isSystemLoop() ? draft.graph.nodes.length : 0;
+  const systemEdgeCount = isSystemLoop() ? draft.graph.edges.length : 0;
   const hasValidationErrors = validateDraft().length > 0;
   elements.name.disabled = !editable;
   elements.description.disabled = !editable;
@@ -2434,18 +2661,30 @@ function renderToolbar() {
           : hasValidationErrors
             ? `Saved · v${draft.definitionVersion} · needs attention`
             : `Saved · v${draft.definitionVersion}`;
-  elements.canvasStepCount.textContent = `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+  elements.canvasStepCount.textContent = isSystemLoop()
+    ? `${systemNodeCount} system nodes · ${systemEdgeCount} edges`
+    : `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
   elements.loopHeaderMeta.textContent = !draft
     ? "No loop selected"
-    : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+    : isSystemLoop()
+      ? `${draft.roleId} · Schema v${draft.schemaVersion} · ${systemNodeCount} nodes · ${systemEdgeCount} edges`
+      : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
   elements.canvasAuthority.replaceChildren();
   if (draft) {
-    elements.canvasAuthority.append(
-      node("strong", "", `Authority: ${draft.roleId}`),
-      document.createTextNode(
-        ` · ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "no model-facing tools assigned"} · all inference steps inherit this scope`,
-      ),
-    );
+    if (isSystemLoop())
+      elements.canvasAuthority.append(
+        node("strong", "", `Authority: ${draft.roleId}`),
+        document.createTextNode(
+          ` · ${capitalize(splitWords(draft.trigger))} trigger · ${capitalize(splitWords(draft.memoryScope))} · ${draft.capabilityIds.join(", ")}`,
+        ),
+      );
+    else
+      elements.canvasAuthority.append(
+        node("strong", "", `Authority: ${draft.roleId}`),
+        document.createTextNode(
+          ` · ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "no model-facing tools assigned"} · all inference steps inherit this scope`,
+        ),
+      );
   }
 }
 
@@ -2465,7 +2704,7 @@ function renderValidation() {
         ? "Draft is valid and ready to save"
         : `Definition v${draft.definitionVersion} is valid and runnable`;
     const detail = isSystemLoop()
-      ? "The system-managed default remains inspectable but cannot be edited here."
+      ? `${draft.executionContract.runner} validates this five-boundary graph before executing its dedicated turn transaction. The nodes and edges are not dispatched by the custom-loop or a generic graph executor.`
       : dirty
         ? "Save this definition before starting a run."
         : "The server will validate again before saving or admitting a run.";

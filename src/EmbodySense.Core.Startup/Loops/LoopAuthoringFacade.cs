@@ -1,9 +1,9 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Application.Loops.Authoring;
-using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
@@ -241,29 +241,32 @@ public sealed class LoopAuthoringFacade
             definition.LastMutationOperationId);
     }
 
-    private static LoopDefinitionSnapshot MapSystemDefinition(LoopDefinition definition)
+    private static SystemLoopDefinitionSnapshot MapSystemDefinition(LoopDefinition definition)
     {
-        var defaults = CustomLoopContextDefaults.CreatePrototypeDefaults();
-        var toolAssignments = Enum.GetValues<ToolCommand>()
-            .Where(command => LoopCapabilityIds.AllowsWorkspaceCommand(definition.CapabilityIds, command))
-            .Select(Map)
-            .ToArray();
-        return new LoopDefinitionSnapshot(
+        var graph = definition.Graph;
+        return new SystemLoopDefinitionSnapshot(
             definition.SchemaVersion,
             definition.Id,
-            1,
-            string.Empty,
-            DateTimeOffset.MinValue,
-            DateTimeOffset.MinValue,
             definition.DisplayName,
             definition.Description,
             definition.RoleId,
-            new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, true),
-            new LoopContextDefaults(Map(defaults.Inference), Map(defaults.Exit)),
-            [new LoopInferenceStep(DefaultConversationLoopGraphIds.DispatchInference, "Respond in role", "System-managed default conversation behavior.", new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(Map(defaults.Inference.ContextIn), new LoopContextOutputPolicy(true, true))))],
-            toolAssignments,
-            new LoopExitPolicy(0, string.Empty, new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)),
-            string.Empty);
+            definition.Trigger,
+            definition.MemoryScope,
+            definition.CapabilityIds.ToArray(),
+            definition.ReviewPolicy,
+            definition.FailurePolicy,
+            definition.State,
+            definition.EditMode,
+            new SystemLoopGraphSnapshot(
+                graph.EntryNodeId,
+                graph.TerminalNodeIds.ToArray(),
+                graph.Nodes.Select(node => new SystemLoopGraphNodeSnapshot(node.Id, node.DisplayName, node.Description, node.Kind, node.EditMode, node.CapabilityIds.ToArray(), SystemLoopExecutionSemantics.ValidatedRunnerContract)).ToArray(),
+                graph.Edges.Select(edge => new SystemLoopGraphEdgeSnapshot(edge.Id, edge.FromNodeId, edge.ToNodeId, edge.Condition, edge.Description, SystemLoopExecutionSemantics.ValidatedRunnerContract)).ToArray()),
+            new SystemLoopExecutionContractSnapshot(
+                nameof(DefaultConversationLoopRunner),
+                SystemLoopExecutionSemantics.ValidatedRunnerContract,
+                false,
+                "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor."));
     }
 
     private static CustomLoopTriggerPolicy? Map(LoopTriggerPolicy? trigger) => trigger is null ? null : new((CustomLoopTriggerPromptSource)(int)trigger.PromptSource, trigger.PresetPrompt, trigger.IncludeInvokingConversation);
@@ -273,17 +276,6 @@ public sealed class LoopAuthoringFacade
     private static CustomLoopToolAssignment Map(LoopToolAssignment assignment) => (CustomLoopToolAssignment)(int)assignment;
 
     private static LoopToolAssignment Map(CustomLoopToolAssignment assignment) => (LoopToolAssignment)(int)assignment;
-
-    private static LoopToolAssignment Map(ToolCommand command) => command switch
-    {
-        ToolCommand.List => LoopToolAssignment.List,
-        ToolCommand.Read => LoopToolAssignment.Read,
-        ToolCommand.Search => LoopToolAssignment.Search,
-        ToolCommand.Append => LoopToolAssignment.Append,
-        ToolCommand.Write => LoopToolAssignment.Write,
-        ToolCommand.Delete => LoopToolAssignment.Delete,
-        _ => throw new ArgumentOutOfRangeException(nameof(command), command, "Unsupported governed workspace command.")
-    };
 
     private static CustomLoopExitPolicy? Map(LoopExitPolicy? exit) => exit is null ? null : new(exit.MaxAdditionalIterations, exit.DecisionInstruction, Map(exit.ContextPolicy)!);
 
