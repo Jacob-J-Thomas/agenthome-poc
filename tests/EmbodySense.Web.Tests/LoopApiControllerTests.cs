@@ -55,7 +55,7 @@ public sealed class LoopApiControllerTests
             Assert.Equal([LoopToolAssignment.List, LoopToolAssignment.Read, LoopToolAssignment.Search], catalog.Tools.CustomAssignable);
             Assert.Equal(LoopCustomToolAuthorityCeiling.WorkspaceReadOnly, catalog.Tools.CustomAuthorityCeiling);
             Assert.Equal("OpenAiCodex", catalog.RuntimeModel!.Provider);
-            Assert.Null(catalog.RuntimeModel.Model);
+            Assert.Equal("gpt-test", catalog.RuntimeModel.Model);
             Assert.Equal(HttpStatusCode.OK, systemGet.StatusCode);
             Assert.True(systemGet.Headers.CacheControl?.NoStore == true);
             Assert.Equal(HttpStatusCode.BadRequest, malformedGet.StatusCode);
@@ -219,8 +219,9 @@ public sealed class LoopApiControllerTests
     private static WebApplication CreateApp(string rootPath, out WebRunOptions options)
     {
         var port = GetFreePort();
-        options = WebRunOptions.FromArguments(["--workdir", rootPath, "--port", port.ToString()]);
-        var builder = Program.CreateBuilder(["--workdir", rootPath, "--port", port.ToString()], options);
+        var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
+        options = WebRunOptions.FromArguments(arguments);
+        var builder = Program.CreateBuilder(arguments, options);
         var app = builder.Build();
         Program.ConfigurePipeline(app);
         return app;

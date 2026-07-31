@@ -4,7 +4,7 @@ namespace EmbodySense.Web;
 /// <summary>
 /// Represents validated process options for one localhost Web host.
 /// </summary>
-/// <param name="Model">The explicit model, or <see langword="null"/> for external configuration.</param>
+/// <param name="Model">The required explicit model, or <see langword="null"/> only when <paramref name="PrintHelp"/> is true.</param>
 /// <param name="WorkingDirectory">The workspace root used by runtime, authoring, audit, and persistence services.</param>
 /// <param name="CodexExecutablePath">The authoritative Codex executable path, or <see langword="null"/> for discovery.</param>
 /// <param name="CodexSandbox">The sandbox mode passed to Codex app-server thread startup.</param>
@@ -42,7 +42,8 @@ public sealed record WebRunOptions(
     /// <param name="args">The command-line tokens.</param>
     /// <returns>Validated options using current-directory, localhost, port 4378, and read-only defaults.</returns>
     /// <exception cref="ArgumentException">
-    /// An option lacks a value, the host is not loopback, the port is out of range, or the sandbox is unsupported.
+    /// An option lacks a value, the configured model is blank, the host is not loopback, the port is out of range,
+    /// or the sandbox is unsupported.
     /// </exception>
     /// <remarks>Any help token short-circuits other parsing so usage remains available despite unrelated invalid options.</remarks>
     public static WebRunOptions FromArguments(string[] args)
@@ -54,6 +55,9 @@ public sealed record WebRunOptions(
             return new WebRunOptions(null, Directory.GetCurrentDirectory(), null, "read-only", DefaultHost, DefaultPort, true);
         }
 
+        var model = OptionValue(args, "--model") ?? OptionValue(args, "-m");
+        var workingDirectory = OptionValue(args, "--workdir") ?? OptionValue(args, "--working-directory") ?? Directory.GetCurrentDirectory();
+        var codexExecutablePath = OptionValue(args, "--codex-path");
         var host = OptionValue(args, "--host") ?? DefaultHost;
         if (!_localHosts.Contains(host))
         {
@@ -64,11 +68,15 @@ public sealed record WebRunOptions(
         var port = string.IsNullOrWhiteSpace(portText) ? DefaultPort : ParsePort(portText);
         var sandbox = OptionValue(args, "--sandbox") ?? "read-only";
         ValidateSandbox(sandbox);
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            throw new ArgumentException("Web runtime composition requires a nonblank configured model.", nameof(args));
+        }
 
         return new WebRunOptions(
-            Model: OptionValue(args, "--model") ?? OptionValue(args, "-m"),
-            WorkingDirectory: OptionValue(args, "--workdir") ?? OptionValue(args, "--working-directory") ?? Directory.GetCurrentDirectory(),
-            CodexExecutablePath: OptionValue(args, "--codex-path"),
+            Model: model,
+            WorkingDirectory: workingDirectory,
+            CodexExecutablePath: codexExecutablePath,
             CodexSandbox: sandbox,
             Host: host,
             Port: port,

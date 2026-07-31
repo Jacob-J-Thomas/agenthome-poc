@@ -114,7 +114,9 @@ public sealed class CliCommandTests
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("EmbodySense POC CLI", result.Output, StringComparison.Ordinal);
-        Assert.Contains("embodysense run", result.Output, StringComparison.Ordinal);
+        Assert.Contains("embodysense run --model model", result.Output, StringComparison.Ordinal);
+        Assert.Contains("embodysense run --model configured-model", result.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("embodysense run [--model model]", result.Output, StringComparison.Ordinal);
     }
 
     [Fact]

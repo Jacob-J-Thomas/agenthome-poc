@@ -37,10 +37,18 @@ public sealed class ProgramTests
     }
 
     [Fact]
+    public async Task Main_rejects_a_missing_required_model_before_starting_server()
+    {
+        var exception = await Assert.ThrowsAsync<ArgumentException>(() => Program.Main([]));
+
+        Assert.Contains("nonblank configured model", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ConfigureServices_registers_web_runtime_services()
     {
         using var workspace = new TestWorkspace();
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test"]);
         var services = new ServiceCollection();
         services.AddLogging();
 
@@ -143,8 +151,10 @@ public sealed class ProgramTests
         Program.PrintHelp(writer);
 
         Assert.Contains("usage:", writer.ToString());
+        Assert.Contains("embodysense-web --model model", writer.ToString());
         Assert.Contains("--workdir path", writer.ToString());
         Assert.Contains("--host host", writer.ToString());
         Assert.Contains("--port port", writer.ToString());
+        Assert.Contains("Required model name", writer.ToString());
     }
 }

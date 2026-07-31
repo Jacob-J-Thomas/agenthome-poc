@@ -128,7 +128,7 @@ For scratch-workspace testing, start in `scratch/` and use the project path rela
 
 ```powershell
 cd C:\Users\98jak\source\repos\agenthome-poc\scratch
-dotnet run --project ..\src\EmbodySense.Web -- --workdir .
+dotnet run --project ..\src\EmbodySense.Web -- --workdir . --model configured-model
 ```
 
 Open the printed localhost URL in a browser. The default URL is `http://127.0.0.1:4378`.
@@ -137,7 +137,7 @@ The CLI remains available for verification and client-conformance checks:
 
 ```powershell
 dotnet run --project ..\src\EmbodySense.Cli -- --help
-dotnet run --project ..\src\EmbodySense.Cli -- run --workdir .
+dotnet run --project ..\src\EmbodySense.Cli -- run --workdir . --model configured-model
 ```
 
 ## Test
@@ -169,7 +169,7 @@ cd C:\Users\98jak\source\repos\agenthome-poc\scratch
 From there, run the Web UI through the project path relative to `scratch/`. The `..\` prefix is required because `src\EmbodySense.Web` lives one directory above `scratch`.
 
 ```powershell
-dotnet run --project ..\src\EmbodySense.Web -- --workdir .
+dotnet run --project ..\src\EmbodySense.Web -- --workdir . --model configured-model
 ```
 
 The browser UI can initialize the scratch workspace explicitly when `.agent/permissions.json` is missing. It then handles supported slash commands such as `/help`, `/history`, `/verbose`, and `/new`, shows visible role labels on transcript messages, exposes a Verbose toggle for visible-context debug output, replaces the session view with restored transcript messages after a successful history load, streams assistant responses over SignalR, and pushes governed tool approval requests into the approvals panel. Select Loops in the shared left rail, then use its local Builder tab to create and save custom definitions or Runs to inspect and control durable executions.
@@ -195,7 +195,7 @@ dotnet run --project ..\src\EmbodySense.Cli -- status .
 Start the CLI runtime from scratch. If the workspace is not already initialized, the `run` command warns first and asks whether to create workspace scaffolding before entering the loop:
 
 ```powershell
-dotnet run --project ..\src\EmbodySense.Cli -- run --workdir .
+dotnet run --project ..\src\EmbodySense.Cli -- run --workdir . --model configured-model
 ```
 
 Add `--verbose` to print the visible inference context before each model turn. Inside the CLI runtime, type a message at the `User: ` prompt and press Enter. Assistant output streams under an `Assistant:` header as provider chunks arrive. Type `/help` to list commands. Type `/verbose`, `/verbose on`, or `/verbose off` to inspect or change visible-context debug output. Type `/history`, `/conversations`, or `/load` before the first model turn to list saved `.agent/memory/conversations/*.ndjson` and `.agent/memory/conversations/archive/*.ndjson` transcripts by first-prompt preview and select one to load; a successful load clears the interactive console and prints the restored transcript before the confirmation. Type `/new` or `/new-session` to start another fresh conversation without leaving the session. Type `/exit`, `/quit`, `exit`, or `quit` to leave.
@@ -206,7 +206,7 @@ The default conversation loop reads the seeded `.agent/` documents when the runt
 
 The Web UI routes inference through the same local `codex app-server --stdio` path as CLI `run`, but exposes the interactive session through a token-guarded SignalR hub, supporting REST endpoints, and a static UI.
 
-Before either surface creates a runtime, the shared process boundary resolves and probes Codex. An explicit `--codex-path` is authoritative and never falls back. Without it, Windows discovery prefers current Codex Desktop-managed binaries under `%LOCALAPPDATA%\OpenAI\Codex\bin\` before considering PATH candidates. The probe records the resolved executable and `--version` output; when `--model` is supplied, it initializes app-server and requires `model/list` to advertise that exact model. It never silently substitutes another model. The Web Configuration overview shows this structured status, while CLI `run` prints it before workspace initialization. An unusable executable/model combination fails with the attempted path, version when available, model, and remediation before a conversation turn is accepted.
+Both surfaces require a nonblank `--model` before creating a runtime. The shared process boundary then resolves and probes Codex. An explicit `--codex-path` is authoritative and never falls back. Without it, Windows discovery prefers current Codex Desktop-managed binaries under `%LOCALAPPDATA%\OpenAI\Codex\bin\` before considering PATH candidates. The probe records the resolved executable and `--version` output, initializes app-server, and requires `model/list` to advertise that exact model. It never silently substitutes another model. The Web Configuration overview shows this structured status, while CLI `run` prints it before workspace initialization. An unusable executable/model combination fails with the attempted path, version when available, model, and remediation before a conversation turn is accepted.
 
 From `scratch/`:
 
@@ -216,7 +216,7 @@ dotnet run --project ..\src\EmbodySense.Web -- --workdir . --model configured-mo
 
 Available Web options:
 
-- `--model <model>` or `-m <model>`: choose the Codex model.
+- `--model <model>` or `-m <model>`: choose the required Codex model.
 - `--workdir <path>` or `--working-directory <path>`: set the EmbodySense workspace root for governed tools, permissions, and audit.
 - `--codex-path <path>`: use exactly this Codex executable. An incompatible explicit executable fails instead of falling back to another installation.
 - `--sandbox <mode>`: set the Codex app-server sandbox mode for the inert runtime directory, such as `read-only` or `workspace-write`. Workspace file access is still governed by EmbodySense dynamic tools and `.agent/permissions.json`.
@@ -239,7 +239,7 @@ dotnet run --project ..\src\EmbodySense.Cli -- run --workdir . --model configure
 
 Available `run` options:
 
-- `--model <model>` or `-m <model>`: choose the Codex model.
+- `--model <model>` or `-m <model>`: choose the required Codex model.
 - `--workdir <path>` or `--working-directory <path>`: set the EmbodySense workspace root for governed tools, permissions, and audit.
 - `--codex-path <path>`: use exactly this Codex executable. An incompatible explicit executable fails instead of falling back to another installation.
 - `--sandbox <mode>`: set the Codex app-server sandbox mode for the inert runtime directory, such as `read-only` or `workspace-write`. Workspace file access is still governed by EmbodySense dynamic tools and `.agent/permissions.json`.

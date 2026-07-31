@@ -262,7 +262,7 @@ public sealed class WebSessionHubTests
 
     private static WebAgentRuntimeHost CreateHost(string rootPath, WebApprovalCoordinator approvals)
     {
-        var options = WebRunOptions.FromArguments(["--workdir", rootPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", rootPath, "--model", "gpt-test"]);
         return new WebAgentRuntimeHost(options, approvals);
     }
 

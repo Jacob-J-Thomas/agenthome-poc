@@ -633,7 +633,7 @@ public sealed class LoopRunApiControllerTests
     {
         var port = GetFreePort();
         var arguments = codexPath is null
-            ? new[] { "--workdir", rootPath, "--port", port.ToString() }
+            ? new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "test-model" }
             : new[] { "--workdir", rootPath, "--port", port.ToString(), "--codex-path", codexPath, "--model", "test-model" };
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);

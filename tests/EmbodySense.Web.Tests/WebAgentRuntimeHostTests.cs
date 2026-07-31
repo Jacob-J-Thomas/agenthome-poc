@@ -532,7 +532,7 @@ public sealed class WebAgentRuntimeHostTests
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
         approvals.RegisterOwnerConnection("connection-1");
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test"]);
         await using var host = new WebAgentRuntimeHost(options, approvals);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => host.ResumeLoopAsync(new LoopRunControlInput("run-one", 1, "resume-uninitialized"), "connection-1"));
