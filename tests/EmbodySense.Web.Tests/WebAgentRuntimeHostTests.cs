@@ -761,25 +761,6 @@ public sealed class WebAgentRuntimeHostTests
         return Directory.Exists(archivePath) && Directory.EnumerateFiles(archivePath, "*.ndjson").Any();
     }
 
-    private sealed class ApprovalPublicationSignal : IWebClientNotifier
-    {
-        private readonly TaskCompletionSource<string> _nonemptyOwnerPublication = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
-        {
-            if (!string.IsNullOrWhiteSpace(ownerConnectionId) && approvals.Count > 0)
-            {
-                _nonemptyOwnerPublication.TrySetResult(ownerConnectionId);
-            }
-
-            return Task.CompletedTask;
-        }
-
-        public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task<string> WaitForNonemptyApprovalAsync() => _nonemptyOwnerPublication.Task.WaitAsync(TimeSpan.FromSeconds(10));
-    }
-
     private static async Task<string> CreateFakeCodexExecutableAsync(
         TestWorkspace workspace,
         string? turnFailureMessage = null,
