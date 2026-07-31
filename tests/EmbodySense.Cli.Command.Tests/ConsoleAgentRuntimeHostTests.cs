@@ -36,7 +36,6 @@ public sealed class ConsoleAgentRuntimeHostTests
             runtimeSurface ?? AgentRuntimeSurface.Cli);
     }
 
-    // TODO(#147): Make fake-Codex readiness deterministic before the runtime version probe starts.
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
     {
         if (!OperatingSystem.IsWindows())
@@ -44,63 +43,62 @@ public sealed class ConsoleAgentRuntimeHostTests
             throw new PlatformNotSupportedException("The fake Codex app-server executable is currently implemented as a Windows command script.");
         }
 
-        var scriptPath = workspace.File("fake-codex.ps1");
+        var scriptPath = workspace.File("fake-codex.js");
         var commandPath = workspace.File("fake-codex.cmd");
         await File.WriteAllTextAsync(scriptPath, """
-            if ($args -contains "--version") {
-                Write-Output "codex-cli 999.0.0-test"
-                exit 0
+            if (process.argv.slice(2).includes("--version")) {
+              process.stdout.write("codex-cli 999.0.0-test\n");
+              process.exit(0);
             }
 
-            $threadId = "thread-test"
-            $developerInstructions = ""
+            const readline = require("node:readline");
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+            const threadId = "thread-test";
+            let developerInstructions = "";
 
-            function Write-ProtocolJson($value) {
-                $value | ConvertTo-Json -Compress -Depth 20
-                [Console]::Out.Flush()
+            function write(value) {
+              process.stdout.write(`${JSON.stringify(value)}\n`);
             }
 
-            while (($line = [Console]::In.ReadLine()) -ne $null) {
-                $message = $line | ConvertFrom-Json
+            input.on("line", (line) => {
+              const message = JSON.parse(line);
+              switch (message.method) {
+                case "initialize":
+                  write({ id: message.id, result: {} });
+                  break;
+                case "model/list":
+                  write({ id: message.id, result: { data: [{ id: "test-model", model: "test-model" }, { id: "gpt-test", model: "gpt-test" }], nextCursor: null } });
+                  break;
+                case "thread/start":
+                  developerInstructions = String(message.params?.developerInstructions ?? "");
+                  write({ id: message.id, result: { thread: { id: threadId } } });
+                  break;
+                case "turn/start": {
+                  const turnId = "turn-test";
+                  const inputText = (message.params?.input ?? []).map((item) => String(item?.text ?? "")).join("\n");
+                  const prefix = developerInstructions.includes("runtime guide") || inputText.includes("runtime guide") ? "runtime guide observed" : "runtime guide missing";
+                  const currentUserMarker = "Current user message:";
+                  const currentUserIndex = inputText.indexOf(currentUserMarker);
+                  const userText = currentUserIndex < 0 ? inputText : inputText.slice(currentUserIndex + currentUserMarker.length).trim();
+                  const text = `${prefix}: ${userText}`;
 
-                switch ($message.method) {
-                    "initialize" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{} }
-                    }
-
-                    "initialized" {
-                    }
-
-                    "model/list" {
-                        Write-ProtocolJson @{ id = $message.id; result = @{ data = @(@{ id = "test-model"; model = "test-model" }, @{ id = "gpt-test"; model = "gpt-test" }) } }
-                    }
-
-                    "thread/start" {
-                        $developerInstructions = [string]$message.params.developerInstructions
-                        Write-ProtocolJson @{ id = $message.id; result = @{ thread = @{ id = $threadId } } }
-                    }
-
-                    "turn/start" {
-                        $turnId = "turn-test"
-                        $userText = [string]$message.params.input[0].text
-                        $prefix = if ($developerInstructions.Contains("runtime guide") -or $userText.Contains("runtime guide")) { "runtime guide observed" } else { "runtime guide missing" }
-                        $currentUserMarker = "Current user message:"
-                        $currentUserIndex = $userText.IndexOf($currentUserMarker)
-                        if ($currentUserIndex -ge 0) {
-                            $userText = $userText.Substring($currentUserIndex + $currentUserMarker.Length).Trim()
-                        }
-                        $text = "${prefix}: $userText"
-
-                        Write-ProtocolJson @{ id = $message.id; result = @{ turn = @{ id = $turnId } } }
-                        Write-ProtocolJson @{ method = "item/agentMessage/delta"; params = @{ threadId = $threadId; turnId = $turnId; delta = $text } }
-                        Write-ProtocolJson @{ method = "turn/completed"; params = @{ threadId = $threadId; turnId = $turnId; turn = @{ id = $turnId; status = "completed"; items = @(@{ type = "agentMessage"; phase = "final_answer"; text = $text }) } } }
-                    }
+                  write({ id: message.id, result: { turn: { id: turnId } } });
+                  write({ method: "item/agentMessage/delta", params: { threadId, turnId, delta: text } });
+                  write({ method: "turn/completed", params: { threadId, turnId, turn: { id: turnId, status: "completed", items: [{ type: "agentMessage", phase: "final_answer", text }] } } });
+                  break;
                 }
-            }
+                default:
+                  break;
+              }
+            });
             """);
         await File.WriteAllTextAsync(commandPath, """
             @echo off
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-codex.ps1" %*
+            if "%~1"=="--version" (
+                echo codex-cli 999.0.0-test
+                exit /b 0
+            )
+            node "%~dp0fake-codex.js" %*
             """);
 
         return commandPath;

@@ -604,7 +604,8 @@ public sealed class WebAgentRuntimeHostTests
     {
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: -1);
-        var approvals = new WebApprovalCoordinator();
+        var approvalPublication = new ApprovalPublicationSignal();
+        var approvals = new WebApprovalCoordinator(approvalPublication);
         approvals.RegisterOwnerConnection("connection-1");
         var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
         await using var host = new WebAgentRuntimeHost(options, approvals);
@@ -614,7 +615,8 @@ public sealed class WebAgentRuntimeHostTests
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-owner-disconnect-tool", "request-the-governed-read");
 
         var invocation = host.InvokeLoopAsync(input, "connection-1");
-        await WaitForPendingApprovalAsync(approvals, "connection-1");
+        Assert.Equal("connection-1", await approvalPublication.WaitForNonemptyApprovalAsync());
+        Assert.Single(approvals.GetPending("connection-1"));
         await approvals.DisconnectOwnerAsync("connection-1");
         var response = await invocation;
         var toolResponse = await File.ReadAllTextAsync(workspace.File("owner-disconnected-tool-response.json"));
@@ -729,13 +731,28 @@ public sealed class WebAgentRuntimeHostTests
 
     private static async Task WaitForMarkerAsync(string markerPath)
     {
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/169): Replace fixed-delay provider-marker polling with deterministic attempt synchronization.
-        for (var attempt = 0; attempt < 100 && !File.Exists(markerPath); attempt++)
+        if (File.Exists(markerPath))
         {
-            await Task.Delay(50);
+            return;
         }
 
-        Assert.True(File.Exists(markerPath), "The custom-loop provider attempt did not start within five seconds.");
+        var markerCreated = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var watcher = new FileSystemWatcher(Path.GetDirectoryName(markerPath)!, Path.GetFileName(markerPath))
+        {
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite
+        };
+        watcher.Created += (_, _) => markerCreated.TrySetResult(true);
+        watcher.Changed += (_, _) => markerCreated.TrySetResult(true);
+        watcher.Error += (_, args) => markerCreated.TrySetException(args.GetException());
+        watcher.EnableRaisingEvents = true;
+
+        if (File.Exists(markerPath))
+        {
+            return;
+        }
+
+        await markerCreated.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(File.Exists(markerPath), "The custom-loop provider attempt signal arrived without a durable marker.");
     }
 
     private static async Task<LoopRunSnapshot> WaitForRunAsync(WebAgentRuntimeHost host, string admissionOperationId)
@@ -752,17 +769,6 @@ public sealed class WebAgentRuntimeHostTests
         }
 
         throw new TimeoutException($"Custom run for admission operation `{admissionOperationId}` was not persisted.");
-    }
-
-    private static async Task WaitForPendingApprovalAsync(WebApprovalCoordinator approvals, string ownerConnectionId)
-    {
-        // TODO(#146): Replace fixed-delay approval polling with deterministic synchronization.
-        for (var attempt = 0; attempt < 100 && approvals.GetPending(ownerConnectionId).Count == 0; attempt++)
-        {
-            await Task.Delay(50);
-        }
-
-        Assert.Single(approvals.GetPending(ownerConnectionId));
     }
 
     private static string CurrentTranscriptPath(TestWorkspace workspace)
