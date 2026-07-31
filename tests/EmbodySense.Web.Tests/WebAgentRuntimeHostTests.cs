@@ -593,7 +593,8 @@ public sealed class WebAgentRuntimeHostTests
     {
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: -1);
-        var approvals = new WebApprovalCoordinator();
+        var approvalPublication = new ApprovalPublicationSignal();
+        var approvals = new WebApprovalCoordinator(approvalPublication);
         approvals.RegisterOwnerConnection("connection-1");
         var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
         await using var host = new WebAgentRuntimeHost(options, approvals);
@@ -603,7 +604,8 @@ public sealed class WebAgentRuntimeHostTests
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-owner-disconnect-tool", "request-the-governed-read");
 
         var invocation = host.InvokeLoopAsync(input, "connection-1");
-        await WaitForPendingApprovalAsync(approvals, "connection-1");
+        Assert.Equal("connection-1", await approvalPublication.WaitForNonemptyApprovalAsync());
+        Assert.Single(approvals.GetPending("connection-1"));
         await approvals.DisconnectOwnerAsync("connection-1");
         var response = await invocation;
         var toolResponse = await File.ReadAllTextAsync(workspace.File("owner-disconnected-tool-response.json"));
@@ -748,17 +750,6 @@ public sealed class WebAgentRuntimeHostTests
         throw new TimeoutException($"Custom run for admission operation `{admissionOperationId}` was not persisted.");
     }
 
-    private static async Task WaitForPendingApprovalAsync(WebApprovalCoordinator approvals, string ownerConnectionId)
-    {
-        // TODO(#146): Replace fixed-delay approval polling with deterministic synchronization.
-        for (var attempt = 0; attempt < 100 && approvals.GetPending(ownerConnectionId).Count == 0; attempt++)
-        {
-            await Task.Delay(50);
-        }
-
-        Assert.Single(approvals.GetPending(ownerConnectionId));
-    }
-
     private static string CurrentTranscriptPath(TestWorkspace workspace)
     {
         return workspace.File(".agent", "memory", "conversations", "current.ndjson");
@@ -768,6 +759,25 @@ public sealed class WebAgentRuntimeHostTests
     {
         var archivePath = workspace.File(".agent", "memory", "conversations", "archive");
         return Directory.Exists(archivePath) && Directory.EnumerateFiles(archivePath, "*.ndjson").Any();
+    }
+
+    private sealed class ApprovalPublicationSignal : IWebClientNotifier
+    {
+        private readonly TaskCompletionSource<string> _nonemptyOwnerPublication = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
+        {
+            if (!string.IsNullOrWhiteSpace(ownerConnectionId) && approvals.Count > 0)
+            {
+                _nonemptyOwnerPublication.TrySetResult(ownerConnectionId);
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<string> WaitForNonemptyApprovalAsync() => _nonemptyOwnerPublication.Task.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(
