@@ -134,6 +134,52 @@ public sealed class CustomLoopLifecycleServiceTests
     }
 
     [Fact]
+    public async Task Duplicate_admission_evidence_is_rejected_by_recovery_and_lifecycle_boundaries()
+    {
+        var admitted = Run("run-duplicate-admission-recovery", CustomLoopRunStatus.Admitted);
+        var malformedAdmission = admitted with
+        {
+            LifecycleVersion = 3,
+            Events =
+            [
+                .. admitted.Events,
+                new CustomLoopRunEvent(3, "duplicate-admission-recovery", admitted.UpdatedAtUtc, CustomLoopRunEventKind.Admitted, null, null, null, "Duplicate admission.", [], null, null, null, null, null, null, null, null, null, null)
+            ]
+        };
+        var recoveryStore = new MultiRunStore([malformedAdmission]);
+
+        var recoveryResult = Assert.Single(await new CustomLoopRecoveryService(recoveryStore, new RecordingAuditLog(), new FixedTimeProvider(_now.AddMinutes(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Failed, recoveryResult.Status);
+        Assert.Equal(malformedAdmission, recoveryStore[malformedAdmission.Id]);
+        Assert.Equal(0, recoveryStore.UpdateCallCount);
+
+        var paused = Run("run-duplicate-admission-lifecycle", CustomLoopRunStatus.Paused);
+        var malformedPaused = paused with
+        {
+            LifecycleVersion = 4,
+            Events =
+            [
+                .. paused.Events,
+                new CustomLoopRunEvent(4, "duplicate-admission-lifecycle", paused.UpdatedAtUtc, CustomLoopRunEventKind.Admitted, null, null, null, "Duplicate admission.", [], null, null, null, null, null, null, null, null, null, null)
+            ]
+        };
+        var lifecycleStore = new MultiRunStore([malformedPaused]);
+        var executor = new NoopResumeExecutor();
+        var availability = new RecordingModelAvailability();
+        var gate = new TestExecutionGate();
+        var service = new CustomLoopLifecycleService(lifecycleStore, new InMemoryOperationStore(), executor, availability, new RecordingCancellationSignal(), new RecordingAuditLog(), gate, new FixedTimeProvider(_now.AddMinutes(2)));
+
+        var resume = await service.ResumeAsync(new CustomLoopResumeRequest(malformedPaused.Id, malformedPaused.LifecycleVersion, "resume-duplicate-admission", AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.InvalidState, resume.Status);
+        Assert.Empty(availability.Requests);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(0, gate.AcquisitionCount);
+        Assert.Equal(0, lifecycleStore.UpdateCallCount);
+    }
+
+    [Fact]
     public async Task Restart_recovery_rejects_a_pre_role_workspace_manifest_without_mutation()
     {
         var unsupported = WithUnsupportedPreRoleWorkspaceContext(Run("run-legacy-recovery", CustomLoopRunStatus.Admitted));

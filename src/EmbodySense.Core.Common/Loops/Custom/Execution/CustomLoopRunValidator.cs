@@ -56,10 +56,10 @@ public static class CustomLoopRunValidator
     }
 
     /// <summary>
-    /// Determines whether the event stream begins with an admission event followed by a unique admission-audit completion event.
+    /// Determines whether the event stream contains exactly one admission event at sequence 1 followed by a unique admission-audit completion event.
     /// </summary>
     /// <param name="run">The run whose append-only event prefix is inspected.</param>
-    /// <returns><see langword="true"/> when the required sequence-1 admission and sequence-2 audit-completion markers are present and the completion marker is unique; otherwise, <see langword="false"/>.</returns>
+    /// <returns><see langword="true"/> when the unique admission and audit-completion markers occupy the required sequence-1 and sequence-2 prefix; otherwise, <see langword="false"/>.</returns>
     public static bool HasCompleteAdmissionAudit(CustomLoopRunRecord? run)
     {
         if (run?.Events is not { Length: >= 2 } events)
@@ -67,9 +67,9 @@ public static class CustomLoopRunValidator
             return false;
         }
 
-        // TODO(#140): Reject later duplicate admission markers before treating the admission-audit prefix as complete.
         return events[0] is { Sequence: 1, Kind: CustomLoopRunEventKind.Admitted }
             && events[1] is { Sequence: 2, Kind: CustomLoopRunEventKind.AdmissionAuditCompleted }
+            && events.Count(item => item is { Kind: CustomLoopRunEventKind.Admitted }) == 1
             && events.Count(item => item is { Kind: CustomLoopRunEventKind.AdmissionAuditCompleted }) == 1;
     }
 
@@ -684,6 +684,11 @@ public static class CustomLoopRunValidator
         if (run.Events[0] is { Sequence: 1, Kind: not CustomLoopRunEventKind.Admitted })
         {
             Add(errors, "first_event_not_admission", "events[0].kind", "The first run event must be the admission event.");
+        }
+
+        if (run.Events.Count(item => item is { Kind: CustomLoopRunEventKind.Admitted }) > 1)
+        {
+            Add(errors, "duplicate_admission_event", "events", "A run may retain exactly one admission event.");
         }
 
         var admissionAuditMarkers = run.Events.Where(item => item is { Kind: CustomLoopRunEventKind.AdmissionAuditCompleted }).ToArray();
