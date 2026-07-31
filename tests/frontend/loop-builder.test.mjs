@@ -75,6 +75,15 @@ test("a rejected system runner contract is shown as invalid throughout the graph
   catalog.systemDefault.executionContract.graphSemantics = "unknown";
   catalog.systemDefault.executionContract.detail =
     "The default conversation graph does not match the dedicated runner contract.";
+  catalog.systemDefault.graph.edges.push(
+    createSystemEdge(
+      "rejected-branch",
+      "accept-user-message",
+      "dispatch-provider-inference",
+      "success",
+      "A noncanonical branch that the dedicated runner rejects.",
+    ),
+  );
   for (const graphNode of catalog.systemDefault.graph.nodes)
     graphNode.executionSemantics = "unknown";
   for (const edge of catalog.systemDefault.graph.edges)
@@ -101,6 +110,14 @@ test("a rejected system runner contract is shown as invalid throughout the graph
   assert.match(
     app.elements.loopCanvas.textContent,
     /Runner contract not validated/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /rejected-branch.*accept-user-message → dispatch-provider-inference/,
+  );
+  assert.equal(
+    findByClass(app.elements.loopCanvas, "system-connector").length,
+    5,
   );
 });
 

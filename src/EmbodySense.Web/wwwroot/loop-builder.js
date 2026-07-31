@@ -1840,6 +1840,17 @@ function renderCanvas() {
 }
 
 function renderSystemCanvas() {
+  if (draft.executionContract?.graphSemantics !== "validated-runner-contract") {
+    draft.graph.nodes.forEach((graphNode, index) => {
+      elements.canvas.append(createSystemNodeCard(graphNode, index));
+      for (const edge of draft.graph.edges.filter(
+        (candidate) => candidate.fromNodeId === graphNode.id,
+      ))
+        appendSystemConnector(edge, true);
+    });
+    return;
+  }
+
   const sequence = systemGraphSequence();
   sequence.nodes.forEach((graphNode, index) => {
     elements.canvas.append(createSystemNodeCard(graphNode, index));
@@ -1928,12 +1939,15 @@ function createSystemNodeCard(graphNode, index) {
   return button;
 }
 
-function appendSystemConnector(edge) {
+function appendSystemConnector(edge, includeEndpoints = false) {
   const connector = node("span", "connector system-connector");
+  const endpoints = includeEndpoints
+    ? ` · ${edge.fromNodeId} → ${edge.toNodeId}`
+    : "";
   const label = node(
     "span",
     "system-connector-label",
-    `${edge.id} · ${capitalize(splitWords(edge.condition))} · ${runnerContractLabel(edge.executionSemantics)}`,
+    `${edge.id}${endpoints} · ${capitalize(splitWords(edge.condition))} · ${runnerContractLabel(edge.executionSemantics)}`,
   );
   label.title = edge.description;
   connector.append(label);
