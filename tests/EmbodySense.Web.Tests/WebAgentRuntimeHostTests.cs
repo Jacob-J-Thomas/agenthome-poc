@@ -723,13 +723,28 @@ public sealed class WebAgentRuntimeHostTests
 
     private static async Task WaitForMarkerAsync(string markerPath)
     {
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/169): Replace fixed-delay provider-marker polling with deterministic attempt synchronization.
-        for (var attempt = 0; attempt < 100 && !File.Exists(markerPath); attempt++)
+        if (File.Exists(markerPath))
         {
-            await Task.Delay(50);
+            return;
         }
 
-        Assert.True(File.Exists(markerPath), "The custom-loop provider attempt did not start within five seconds.");
+        var markerCreated = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var watcher = new FileSystemWatcher(Path.GetDirectoryName(markerPath)!, Path.GetFileName(markerPath))
+        {
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite
+        };
+        watcher.Created += (_, _) => markerCreated.TrySetResult(true);
+        watcher.Changed += (_, _) => markerCreated.TrySetResult(true);
+        watcher.Error += (_, args) => markerCreated.TrySetException(args.GetException());
+        watcher.EnableRaisingEvents = true;
+
+        if (File.Exists(markerPath))
+        {
+            return;
+        }
+
+        await markerCreated.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.True(File.Exists(markerPath), "The custom-loop provider attempt signal arrived without a durable marker.");
     }
 
     private static async Task<LoopRunSnapshot> WaitForRunAsync(WebAgentRuntimeHost host, string admissionOperationId)
