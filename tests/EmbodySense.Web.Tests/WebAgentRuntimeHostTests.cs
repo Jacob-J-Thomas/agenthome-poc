@@ -723,6 +723,7 @@ public sealed class WebAgentRuntimeHostTests
 
     private static async Task WaitForMarkerAsync(string markerPath)
     {
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/169): Replace fixed-delay provider-marker polling with deterministic attempt synchronization.
         for (var attempt = 0; attempt < 100 && !File.Exists(markerPath); attempt++)
         {
             await Task.Delay(50);
