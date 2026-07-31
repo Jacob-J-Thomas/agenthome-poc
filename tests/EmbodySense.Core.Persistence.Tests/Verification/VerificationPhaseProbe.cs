@@ -98,6 +98,11 @@ internal sealed class VerificationPhaseProbe
     private void Complete(VerificationPhaseBudget budget, PhaseObservation observation)
     {
         observation.Stopwatch.Stop();
+        if (observation.Stopwatch.Elapsed > budget.DiagnosticBound)
+        {
+            throw new TimeoutException($"Verification phase `{budget.Name}` completed in {observation.Stopwatch.Elapsed} after exceeding its diagnostic bound of {budget.DiagnosticBound}. Last completed phase: `{_lastCompletedPhase}`.");
+        }
+
         _lastCompletedPhase = budget.Name;
         var allocatedBytes = Math.Max(0, GC.GetTotalAllocatedBytes(precise: false) - observation.StartAllocatedBytes);
         Write("VERIFY_TEST_PHASE_COMPLETE", new
@@ -113,10 +118,6 @@ internal sealed class VerificationPhaseProbe
             completedAtUtc = DateTimeOffset.UtcNow,
             lastCompletedPhase = _lastCompletedPhase
         });
-        if (observation.Stopwatch.Elapsed > budget.DiagnosticBound)
-        {
-            throw new TimeoutException($"Verification phase `{budget.Name}` completed in {observation.Stopwatch.Elapsed} after exceeding its diagnostic bound of {budget.DiagnosticBound}. Last completed phase: `{_lastCompletedPhase}`.");
-        }
     }
 
     private void Fail(VerificationPhaseBudget budget, PhaseObservation observation, Exception exception)
