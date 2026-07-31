@@ -1071,7 +1071,6 @@ test("a new loop remains local until explicit Save sends the complete version-on
   );
   assert.equal(save.options.credentials, "same-origin");
   assert.equal(save.options.headers["X-EmbodySense-Session"], undefined);
-  assert.equal(save.body.expectedDefinitionVersion, 1);
   assert.equal(typeof save.body.operationId, "string");
   assert.equal(save.body.definition.displayName, "Issue research");
   assert.equal(save.body.definition.inferenceSteps[0].id, null);

@@ -166,7 +166,7 @@ public sealed class LoopApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { })).StatusCode);
             var initialCatalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
             var initialCatalog = (await initialCatalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions))!;

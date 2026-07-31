@@ -36,10 +36,10 @@ public sealed class WebClientFlowTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var index = await client.GetStringAsync("/");
             var script = await client.GetStringAsync("/app.js");
+            var rejectedConfig = await client.GetAsync("/api/configuration");
             using var sessionResponse = await client.GetAsync("/api/session");
             var session = await sessionResponse.Content.ReadFromJsonAsync<WebSessionInfo>(_jsonOptions);
             var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
-            var rejectedConfig = await client.GetAsync("/api/configuration");
 
             Assert.Contains("EmbodySense", index);
             Assert.Contains("JsonSignalRConnection", script);
@@ -77,13 +77,15 @@ public sealed class WebClientFlowTests
             await WriteCurrentTranscriptAsync(workspace, "e2e restored prompt", "e2e restored answer");
             await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).StartFreshConversationAsync();
 
-            var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history");
-            var historyEvent = Assert.Single(GetStreamEvents(historyMessages));
-            Assert.Equal("assistant_final", historyEvent.GetProperty("type").GetString());
+            var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history", "e2e-history-request");
+            var historyEvents = GetStreamEvents(historyMessages);
+            Assert.True(historyEvents.Count == 1, "Expected one history stream event. Raw SignalR messages: " + JsonSerializer.Serialize(historyMessages, _jsonOptions));
+            var historyEvent = historyEvents[0];
+            Assert.True(historyEvent.GetProperty("type").GetString() == "assistant_final", "Expected history output, received: " + historyEvent.GetRawText());
             Assert.Contains("Stored conversations:", historyEvent.GetProperty("text").GetString());
             Assert.Contains("Send conversation number to load", historyEvent.GetProperty("text").GetString());
 
-            var loadMessages = await signalr.InvokeAndCollectAsync("SendMessage", "1");
+            var loadMessages = await signalr.InvokeAndCollectAsync("SendMessage", "1", "e2e-load-request");
             var streamEvents = GetStreamEvents(loadMessages).ToArray();
             var loadedEvent = Assert.Single(streamEvents, streamEvent => streamEvent.GetProperty("type").GetString() == "history_loaded");
             var confirmationEvent = Assert.Single(streamEvents, streamEvent => streamEvent.GetProperty("type").GetString() == "assistant_final");
@@ -299,8 +301,8 @@ public sealed class WebClientFlowTests
     {
         var path = workspace.File(".agent", "memory", "conversations", "current.ndjson");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "user", prompt);
-        var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "assistant", answer);
+        var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "message-1", "publication-1", "user", prompt);
+        var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "message-2", "publication-2", "assistant", answer);
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, _jsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, _jsonOptions) + Environment.NewLine);
     }
 
@@ -324,7 +326,7 @@ public sealed class WebClientFlowTests
         return JsonSerializer.Deserialize<T>(element.GetRawText(), _jsonOptions) ?? throw new InvalidOperationException($"Could not deserialize {typeof(T).Name}.");
     }
 
-    private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
+    private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string MessageId, string PublicationId, string Role, string Content);
 
     private sealed class WebProcess : IDisposable
     {
