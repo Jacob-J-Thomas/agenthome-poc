@@ -24,22 +24,31 @@ public sealed class SignalRWebClientNotifier : IWebClientNotifier
     }
 
     /// <summary>
-    /// Replaces the approval projection for one owner, or broadcasts it when no owner is supplied.
+    /// Replaces the approval projection for one owner, or broadcasts an empty clear when no owner is supplied.
     /// </summary>
-    /// <param name="ownerConnectionId">The target connection, or <see langword="null"/> to select all clients.</param>
-    /// <param name="approvals">The complete replacement approval list.</param>
+    /// <param name="ownerConnectionId">The target connection, or <see langword="null"/> or whitespace only when broadcasting an empty clear.</param>
+    /// <param name="approvals">The complete replacement approval list; a nonempty list requires a live owner connection.</param>
     /// <param name="cancellationToken">
     /// Reserved for notifier implementations; the typed SignalR dispatch itself does not observe this token.
     /// </param>
     /// <returns>The SignalR dispatch task.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="approvals"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="approvals"/> is nonempty but <paramref name="ownerConnectionId"/> is null or whitespace.</exception>
     public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(approvals);
 
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/164): Prevent an ownerless caller from broadcasting a nonempty approval projection.
-        return string.IsNullOrWhiteSpace(ownerConnectionId)
-            ? _hubContext.Clients.All.ApprovalsChanged(approvals)
-            : _hubContext.Clients.Client(ownerConnectionId).ApprovalsChanged(approvals);
+        if (string.IsNullOrWhiteSpace(ownerConnectionId))
+        {
+            if (approvals.Count > 0)
+            {
+                throw new ArgumentException("A nonempty approval projection requires a live owner connection.", nameof(ownerConnectionId));
+            }
+
+            return _hubContext.Clients.All.ApprovalsChanged(approvals);
+        }
+
+        return _hubContext.Clients.Client(ownerConnectionId).ApprovalsChanged(approvals);
     }
 
     /// <summary>

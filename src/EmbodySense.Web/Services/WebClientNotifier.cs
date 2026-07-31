@@ -20,13 +20,19 @@ public sealed class WebClientNotifier : IWebClientNotifier
     /// <summary>
     /// Validates the approval projection and completes without publishing it.
     /// </summary>
-    /// <param name="ownerConnectionId">Ignored.</param>
-    /// <param name="approvals">The required approval projection.</param>
+    /// <param name="ownerConnectionId">The owning connection, or <see langword="null"/> or whitespace only for an empty clear.</param>
+    /// <param name="approvals">The required approval projection; a nonempty list requires an owner connection.</param>
     /// <param name="cancellationToken">Ignored because no asynchronous operation is started.</param>
     /// <returns>An already completed task.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="approvals"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="approvals"/> is nonempty but <paramref name="ownerConnectionId"/> is null or whitespace.</exception>
     public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(approvals);
+        if (string.IsNullOrWhiteSpace(ownerConnectionId) && approvals.Count > 0)
+        {
+            throw new ArgumentException("A nonempty approval projection requires a live owner connection.", nameof(ownerConnectionId));
+        }
 
         return Task.CompletedTask;
     }
