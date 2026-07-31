@@ -70,6 +70,40 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
 });
 
+test("a rejected system runner contract is shown as invalid throughout the graph", async () => {
+  const catalog = createCatalog();
+  catalog.systemDefault.executionContract.graphSemantics = "unknown";
+  catalog.systemDefault.executionContract.detail =
+    "The default conversation graph does not match the dedicated runner contract.";
+  for (const graphNode of catalog.systemDefault.graph.nodes)
+    graphNode.executionSemantics = "unknown";
+  for (const edge of catalog.systemDefault.graph.edges)
+    edge.executionSemantics = "unknown";
+
+  const app = await loadLoopBuilder({ catalog });
+
+  assert.equal(
+    app.elements.validationBanner.className,
+    "validation-banner visible error",
+  );
+  assert.equal(
+    app.elements.validationBanner.textContent,
+    "The default conversation graph does not match the dedicated runner contract.",
+  );
+  assert.match(
+    app.elements.validationBanner.attributes.get("aria-label"),
+    /Definition needs attention/,
+  );
+  assert.doesNotMatch(
+    app.elements.loopCanvas.textContent,
+    /Validated runner contract/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /Runner contract not validated/,
+  );
+});
+
 test("initialization refresh hydrates a loop builder that booted disabled", async () => {
   const server = new FakeFetchServer(createCatalog());
   let initialized = false;

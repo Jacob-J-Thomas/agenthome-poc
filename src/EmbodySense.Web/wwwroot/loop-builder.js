@@ -1906,7 +1906,11 @@ function createSystemNodeCard(graphNode, index) {
   chips.append(
     node("span", "node-chip", graphNode.id),
     node("span", "node-chip", "System locked"),
-    node("span", "node-chip", "Validated runner contract"),
+    node(
+      "span",
+      "node-chip",
+      runnerContractLabel(graphNode.executionSemantics),
+    ),
     node(
       "span",
       "node-chip",
@@ -1929,7 +1933,7 @@ function appendSystemConnector(edge) {
   const label = node(
     "span",
     "system-connector-label",
-    `${edge.id} · ${capitalize(splitWords(edge.condition))} · Validated runner contract`,
+    `${edge.id} · ${capitalize(splitWords(edge.condition))} · ${runnerContractLabel(edge.executionSemantics)}`,
   );
   label.title = edge.description;
   connector.append(label);
@@ -2726,7 +2730,15 @@ function renderValidation() {
 }
 
 function validateDraft() {
-  if (!draft || isSystemLoop()) return [];
+  if (!draft) return [];
+  if (isSystemLoop()) {
+    if (draft.executionContract?.graphSemantics === "validated-runner-contract")
+      return [];
+    return [
+      draft.executionContract?.detail?.trim() ||
+        "The dedicated runner did not validate this system definition.",
+    ];
+  }
   const errors = [];
   if (!draft.displayName.trim()) errors.push("Loop name is required.");
   if (
@@ -2760,6 +2772,12 @@ function validateDraft() {
       "Exit decision instruction is required when continuation is enabled.",
     );
   return errors;
+}
+
+function runnerContractLabel(executionSemantics) {
+  return executionSemantics === "validated-runner-contract"
+    ? "Validated runner contract"
+    : "Runner contract not validated";
 }
 
 function markDirty() {
