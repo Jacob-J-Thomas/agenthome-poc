@@ -1666,7 +1666,14 @@ function stopSessionForPageHide() {
   window.embodySenseLoopBuilder?.suspendSession?.();
 }
 
+function resumeSessionFromPageShow(event) {
+  if (!sessionPageHidden || event?.persisted !== true) return;
+  sessionPageHidden = false;
+  void startSessionRecovery("page-restored", { newGeneration: true });
+}
+
 window.addEventListener?.("pagehide", stopSessionForPageHide);
+window.addEventListener?.("pageshow", resumeSessionFromPageShow);
 
 window.embodySenseSession = Object.freeze({
   async getHub() {

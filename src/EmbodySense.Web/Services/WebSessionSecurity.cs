@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 
 namespace EmbodySense.Web.Services;
@@ -14,21 +15,26 @@ namespace EmbodySense.Web.Services;
 public sealed class WebSessionSecurity
 {
     /// <summary>
-    /// Names the HttpOnly browser cookie that carries the local session credential.
-    /// </summary>
-    public const string CookieName = "EmbodySense.Session";
-
-    /// <summary>
     /// Names the HTTP header that carries the local session token.
     /// </summary>
     public const string HeaderName = "X-EmbodySense-Session";
+    private const string CookieNamePrefix = "EmbodySense.Session";
     private static readonly HashSet<string> _localHosts = new(StringComparer.OrdinalIgnoreCase) { "127.0.0.1", "localhost", "::1" };
 
     /// <summary>
     /// Initializes a session policy with a cryptographically random 256-bit token.
     /// </summary>
     public WebSessionSecurity()
-        : this(CreateToken(), Guid.NewGuid().ToString("N"))
+        : this(CreateToken(), Guid.NewGuid().ToString("N"), WebRunOptions.DefaultPort)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a session policy with a cryptographically random 256-bit token scoped to one configured Web port.
+    /// </summary>
+    /// <param name="port">The configured localhost port that distinguishes this browser credential from other Web hosts.</param>
+    public WebSessionSecurity(int port)
+        : this(CreateToken(), Guid.NewGuid().ToString("N"), port)
     {
     }
 
@@ -37,7 +43,7 @@ public sealed class WebSessionSecurity
     /// </summary>
     /// <param name="token">The nonblank token required for authenticated requests.</param>
     public WebSessionSecurity(string token)
-        : this(token, Guid.NewGuid().ToString("N"))
+        : this(token, Guid.NewGuid().ToString("N"), WebRunOptions.DefaultPort)
     {
     }
 
@@ -47,12 +53,24 @@ public sealed class WebSessionSecurity
     /// <param name="token">The nonblank credential required for authenticated requests.</param>
     /// <param name="generationId">The nonblank, non-secret process generation identifier.</param>
     public WebSessionSecurity(string token, string generationId)
+        : this(token, generationId, WebRunOptions.DefaultPort)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a session policy with explicit credential, process-generation, and Web-port values.
+    /// </summary>
+    /// <param name="token">The nonblank credential required for authenticated requests.</param>
+    /// <param name="generationId">The nonblank, non-secret process generation identifier.</param>
+    /// <param name="port">The configured localhost port that scopes the browser cookie name.</param>
+    public WebSessionSecurity(string token, string generationId, int port)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
         ArgumentException.ThrowIfNullOrWhiteSpace(generationId);
 
         Token = token;
         GenerationId = generationId;
+        CookieName = GetCookieName(port);
     }
 
     /// <summary>
@@ -64,6 +82,26 @@ public sealed class WebSessionSecurity
     /// Gets the non-secret identifier for this Web host process generation.
     /// </summary>
     public string GenerationId { get; }
+
+    /// <summary>
+    /// Gets the HttpOnly browser-cookie name scoped to this configured localhost Web port.
+    /// </summary>
+    public string CookieName { get; }
+
+    /// <summary>
+    /// Creates the stable browser-cookie name for one configured localhost Web port.
+    /// </summary>
+    /// <param name="port">The configured port from 1 through 65535.</param>
+    /// <returns>A valid cookie name that does not collide with another port on the same browser hostname.</returns>
+    public static string GetCookieName(int port)
+    {
+        if (port is < 1 or > 65535)
+        {
+            throw new ArgumentOutOfRangeException(nameof(port), port, "Web session cookie ports must be from 1 through 65535.");
+        }
+
+        return CookieNamePrefix + "." + port.ToString(CultureInfo.InvariantCulture);
+    }
 
     /// <summary>
     /// Determines whether a request host is one of the accepted loopback spellings.

@@ -44,7 +44,7 @@ public sealed class SessionController : ControllerBase
 
         Response.Headers.CacheControl = "no-store";
         Response.Cookies.Append(
-            WebSessionSecurity.CookieName,
+            _sessionSecurity.CookieName,
             _sessionSecurity.Token,
             new CookieOptions
             {

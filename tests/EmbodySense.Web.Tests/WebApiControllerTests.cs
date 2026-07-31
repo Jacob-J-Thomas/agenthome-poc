@@ -104,6 +104,43 @@ public sealed class WebApiControllerTests
     }
 
     [Fact]
+    public async Task Browser_cookie_jar_keeps_two_local_web_hosts_authenticated_on_different_ports()
+    {
+        using var firstWorkspace = new TestWorkspace();
+        await using var firstApp = CreateApp(firstWorkspace.RootPath, out var firstOptions);
+        await firstApp.StartAsync();
+        using var secondWorkspace = new TestWorkspace();
+        await using var secondApp = CreateApp(secondWorkspace.RootPath, out var secondOptions);
+        await secondApp.StartAsync();
+
+        try
+        {
+            var cookies = new CookieContainer();
+            using var handler = new HttpClientHandler { CookieContainer = cookies };
+            using var client = new HttpClient(handler);
+            using var firstSession = await client.GetAsync(firstOptions.Url + "/api/session");
+            using var secondSession = await client.GetAsync(secondOptions.Url + "/api/session");
+            var firstSecurity = firstApp.Services.GetRequiredService<WebSessionSecurity>();
+            var secondSecurity = secondApp.Services.GetRequiredService<WebSessionSecurity>();
+            using var firstStatus = await client.GetAsync(firstOptions.Url + "/api/status");
+            using var secondStatus = await client.GetAsync(secondOptions.Url + "/api/status");
+
+            Assert.True(firstSession.IsSuccessStatusCode);
+            Assert.True(secondSession.IsSuccessStatusCode);
+            Assert.NotEqual(firstSecurity.CookieName, secondSecurity.CookieName);
+            Assert.Equal(firstSecurity.Token, cookies.GetCookies(new Uri(firstOptions.Url))[firstSecurity.CookieName]?.Value);
+            Assert.Equal(secondSecurity.Token, cookies.GetCookies(new Uri(secondOptions.Url))[secondSecurity.CookieName]?.Value);
+            Assert.True(firstStatus.IsSuccessStatusCode);
+            Assert.True(secondStatus.IsSuccessStatusCode);
+        }
+        finally
+        {
+            await secondApp.StopAsync();
+            await firstApp.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Hub_negotiate_requires_session_cookie_and_rejects_query_credentials()
     {
         using var workspace = new TestWorkspace();

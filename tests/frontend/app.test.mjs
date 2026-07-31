@@ -1108,6 +1108,32 @@ test("pagehide cancels a pending recovery and ignores its late completion", asyn
   );
 });
 
+test("a page restored from the back-forward cache reconnects its stopped session", async () => {
+  const app = await loadApp();
+  installWindowTimers(app);
+
+  app.context.window.dispatchEvent({ type: "pagehide", persisted: true });
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    false,
+  );
+
+  app.context.window.dispatchEvent({ type: "pageshow", persisted: true });
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(FakeWebSocket.instances.length, 2);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    true,
+  );
+});
+
 async function loadApp(overrides = {}) {
   FakeWebSocket.instances = [];
   FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
