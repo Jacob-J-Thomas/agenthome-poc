@@ -287,11 +287,19 @@ test("verified custom-loop publication rehydrates once per operation without app
 
 test("publication synchronization retries after deferred runtime disposal returns no transcript", async () => {
   const scheduledRetries = [];
+  let resolvePublicationRetry;
+  const publicationRetryScheduled = new Promise((resolve) => {
+    resolvePublicationRetry = resolve;
+  });
   const app = await loadApp({
     activeTranscript: [{ role: "user", content: "Original prompt" }],
     windowSetTimeout(handler, delay) {
       const scheduled = { handler, delay, cancelled: false };
       scheduledRetries.push(scheduled);
+      if (delay === 25) {
+        resolvePublicationRetry(scheduled);
+      }
+
       return scheduled;
     },
     windowClearTimeout(scheduled) {
@@ -308,7 +316,7 @@ test("publication synchronization retries after deferred runtime disposal return
     conversationId: "conversation-1",
     messageCount: 2,
   });
-  await flushAsyncWork();
+  await publicationRetryScheduled;
   const retry = assertSingle(
     scheduledRetries.filter(
       (scheduled) => scheduled.delay === 25 && !scheduled.cancelled,
@@ -319,8 +327,9 @@ test("publication synchronization retries after deferred runtime disposal return
     { role: "assistant", content: "Published after deferred disposal" },
   ];
   retry.cancelled = true;
+  const transcriptReplaced = app.elements.transcript.waitForNextReplacement();
   retry.handler();
-  await flushAsyncWork();
+  await transcriptReplaced;
 
   assert.equal(
     app.socket.sentInvocations("GetCurrentTranscript").length,
@@ -886,6 +895,7 @@ class FakeElement {
     this.scrollTop = 0;
     this.value = "";
     this._textContent = "";
+    this.replacementWaiter = null;
     this.classList = {
       toggle: (name, force) => {
         const values = new Set(this.className.split(/\s+/).filter(Boolean));
@@ -916,6 +926,16 @@ class FakeElement {
     this.children = [];
     this._textContent = "";
     this.append(...nodes);
+    const resolve = this.replacementWaiter;
+    this.replacementWaiter = null;
+    resolve?.();
+  }
+
+  waitForNextReplacement() {
+    assert.equal(this.replacementWaiter, null);
+    return new Promise((resolve) => {
+      this.replacementWaiter = resolve;
+    });
   }
 
   setAttribute(name, value) {
