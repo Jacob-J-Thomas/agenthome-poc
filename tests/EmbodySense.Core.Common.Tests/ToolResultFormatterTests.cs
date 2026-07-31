@@ -98,6 +98,95 @@ public sealed class ToolResultFormatterTests
     }
 
     [Fact]
+    public void FormatResults_reserves_meaningful_output_for_every_result_before_expanding_flexible_metadata()
+    {
+        var firstEvidence = "first-result|" + new string('a', 240);
+        var secondEvidence = "second-result|" + new string('b', 240);
+        var oversizedMetadata = new string('m', ToolResultFormatter.MaxFormattedCharacters);
+        var first = CreateResult(firstEvidence + new string('x', ToolResultFormatter.MaxFormattedCharacters)) with
+        {
+            ResolvedPath = oversizedMetadata,
+            Request = new ToolRequest(ToolCommand.Read, oversizedMetadata),
+            Retention = CreateRetention(characterCount: 0, utf8ByteCount: 0) with { Detail = oversizedMetadata }
+        };
+        var second = CreateResult(secondEvidence + new string('y', ToolResultFormatter.MaxFormattedCharacters)) with
+        {
+            RequestId = "request-2",
+            ResolvedPath = oversizedMetadata,
+            Request = new ToolRequest(ToolCommand.Read, oversizedMetadata),
+            Retention = new ToolResultRetentionReference(ToolResultRetentionStatus.Unavailable, null, null, null, null, null, null, 0, oversizedMetadata)
+        };
+
+        var forward = ToolResultFormatter.FormatResults([first, second]);
+        var reverse = ToolResultFormatter.FormatResults([second, first]);
+
+        Assert.Equal(ToolResultFormatter.MaxFormattedCharacters, forward.Length);
+        Assert.Equal(ToolResultFormatter.MaxFormattedCharacters, reverse.Length);
+        Assert.Contains(firstEvidence, forward, StringComparison.Ordinal);
+        Assert.Contains(secondEvidence, forward, StringComparison.Ordinal);
+        Assert.Contains(firstEvidence, reverse, StringComparison.Ordinal);
+        Assert.Contains(secondEvidence, reverse, StringComparison.Ordinal);
+        Assert.Equal(2, forward.Split("[tool output truncated to preserve all result evidence]", StringSplitOptions.None).Length - 1);
+        Assert.Equal(2, reverse.Split("[tool output truncated to preserve all result evidence]", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void FormatResults_keeps_essential_identifiers_and_retention_integrity_references_complete()
+    {
+        var requestId = "request-" + new string('q', 4_096);
+        var manifestPath = ".agent/logs/tool-responses/" + new string('m', 16_000) + "/manifest.json";
+        var contentSha256 = new string('b', 64);
+        var oversizedMetadata = new string('x', ToolResultFormatter.MaxFormattedCharacters);
+        var result = CreateResult(new string('o', ToolResultFormatter.MaxFormattedCharacters)) with
+        {
+            RequestId = requestId,
+            ResolvedPath = oversizedMetadata,
+            Request = new ToolRequest(ToolCommand.Read, oversizedMetadata),
+            Retention = CreateRetention(characterCount: 0, utf8ByteCount: 0) with
+            {
+                ManifestPath = manifestPath,
+                ContentSha256 = contentSha256,
+                Detail = oversizedMetadata
+            }
+        };
+
+        var formatted = ToolResultFormatter.FormatResults([result]);
+
+        Assert.Contains($"- request_id: {requestId}{Environment.NewLine}", formatted, StringComparison.Ordinal);
+        Assert.Contains($"  full_response_manifest: {manifestPath}{Environment.NewLine}", formatted, StringComparison.Ordinal);
+        Assert.Contains($"  full_response_sha256: {contentSha256}{Environment.NewLine}", formatted, StringComparison.Ordinal);
+        Assert.EndsWith(_expectedTruncationMarker, formatted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FormatResults_rejects_an_envelope_that_would_require_truncating_a_request_id()
+    {
+        var result = CreateResult("output") with { RequestId = new string('r', ToolResultFormatter.MaxFormattedCharacters) };
+
+        var exception = Assert.Throws<ArgumentException>(() => ToolResultFormatter.FormatResults([result]));
+
+        Assert.Contains("minimum evidence envelope", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("results", exception.ParamName);
+    }
+
+    [Fact]
+    public void FormatResults_rejects_an_envelope_that_would_require_truncating_a_retained_manifest_path()
+    {
+        var result = CreateResult("output") with
+        {
+            Retention = CreateRetention(characterCount: 0, utf8ByteCount: 0) with
+            {
+                ManifestPath = new string('m', ToolResultFormatter.MaxFormattedCharacters)
+            }
+        };
+
+        var exception = Assert.Throws<ArgumentException>(() => ToolResultFormatter.FormatResults([result]));
+
+        Assert.Contains("minimum evidence envelope", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("results", exception.ParamName);
+    }
+
+    [Fact]
     public void FormatResults_preserves_retention_references_before_untrusted_paths_consume_the_limit()
     {
         var result = CreateResult("complete") with

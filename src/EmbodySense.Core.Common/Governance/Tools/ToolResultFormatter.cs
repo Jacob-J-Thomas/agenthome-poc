@@ -12,12 +12,17 @@ public static class ToolResultFormatter
     private const string ContinuationInstruction = "Use these results to continue the task. Request another dynamic tool only if needed.";
     private const string MetadataTruncationMarker = "...[truncated]";
     private const string OutputTruncationMarker = "    [tool output truncated to preserve all result evidence]";
+    private const int MinimumOutputExcerptCharacters = 256;
+    private const int MinimumRetentionDetailCharacters = 128;
+    private const int MinimumTargetPathCharacters = 128;
+    private const int MinimumResolvedPathCharacters = 192;
     /// <summary>
     /// Maximum characters exposed to the model in one formatted tool-result block.
     /// </summary>
     public const int MaxFormattedCharacters = 64_000;
     private static readonly string _finalTruncationMarker = $"[formatted tool results truncated to the {MaxFormattedCharacters}-character limit]";
-    private static readonly int _minimumMetadataValueCharacters = MetadataTruncationMarker.Length + 1;
+    private static readonly FlexibleMetadataLimits _minimumFlexibleMetadataLimits = new(MinimumRetentionDetailCharacters, MinimumTargetPathCharacters, MinimumResolvedPathCharacters);
+    private static readonly FlexibleMetadataLimits _unboundedFlexibleMetadataLimits = new(int.MaxValue, int.MaxValue, int.MaxValue);
 
     /// <summary>
     /// Formats governed tool results for model-visible continuation context.
@@ -41,7 +46,7 @@ public static class ToolResultFormatter
 
         foreach (var result in results)
         {
-            builder.AppendLine(FormatResultPrefix(result, MaxFormattedCharacters));
+            builder.AppendLine(FormatResultPrefix(result, _unboundedFlexibleMetadataLimits));
             builder.AppendLine(Indent(result.OutputText));
         }
 
@@ -51,18 +56,17 @@ public static class ToolResultFormatter
 
     private static string FormatBoundedResults(IReadOnlyList<ToolResult> results)
     {
-        var metadataValueLimit = FindMetadataValueLimit(results);
-        var resultPrefixes = results.Select(result => FormatResultPrefix(result, metadataValueLimit)).ToArray();
+        var minimumOutputLengths = results.Select(result => CalculateMinimumOutputBodyLength(result.OutputText)).ToArray();
+        var metadataExpansion = FindFlexibleMetadataExpansion(results, minimumOutputLengths.Sum());
+        var metadataLimits = ExpandFlexibleMetadataLimits(metadataExpansion);
+        var resultPrefixes = results.Select(result => FormatResultPrefix(result, metadataLimits)).ToArray();
         var fixedLength = CalculateFixedLength(resultPrefixes, outputBodyLength: 0);
-        var remainingOutputBudget = MaxFormattedCharacters - fixedLength;
+        var outputBudgets = AllocateOutputBudgets(results, minimumOutputLengths, MaxFormattedCharacters - fixedLength);
         var outputBodies = new string[results.Count];
 
         for (var index = 0; index < results.Count; index++)
         {
-            var remainingResultCount = results.Count - index;
-            var outputBudget = remainingOutputBudget / remainingResultCount;
-            outputBodies[index] = FormatOutputWithinBudget(results[index].OutputText, outputBudget);
-            remainingOutputBudget -= outputBodies[index].Length;
+            outputBodies[index] = FormatOutputWithinBudget(results[index].OutputText, outputBudgets[index]);
         }
 
         var segments = new List<string>(3 + (results.Count * 2)) { Header };
@@ -77,10 +81,10 @@ public static class ToolResultFormatter
         return string.Join(Environment.NewLine, segments);
     }
 
-    private static int FindMetadataValueLimit(IReadOnlyList<ToolResult> results)
+    private static int FindFlexibleMetadataExpansion(IReadOnlyList<ToolResult> results, int minimumOutputBodyLength)
     {
-        var lower = _minimumMetadataValueCharacters;
-        if (!MetadataEnvelopeFits(results, lower))
+        var lower = 0;
+        if (!MetadataEnvelopeFits(results, _minimumFlexibleMetadataLimits, minimumOutputBodyLength))
         {
             throw new ArgumentException($"The minimum evidence envelope for {results.Count} tool results exceeds the {MaxFormattedCharacters}-character limit.", nameof(results));
         }
@@ -89,7 +93,7 @@ public static class ToolResultFormatter
         while (lower < upper)
         {
             var candidate = lower + ((upper - lower + 1) / 2);
-            if (MetadataEnvelopeFits(results, candidate))
+            if (MetadataEnvelopeFits(results, ExpandFlexibleMetadataLimits(candidate), minimumOutputBodyLength))
             {
                 lower = candidate;
             }
@@ -102,11 +106,18 @@ public static class ToolResultFormatter
         return lower;
     }
 
-    private static bool MetadataEnvelopeFits(IReadOnlyList<ToolResult> results, int metadataValueLimit)
+    private static FlexibleMetadataLimits ExpandFlexibleMetadataLimits(int expansion)
     {
-        var resultPrefixes = results.Select(result => FormatResultPrefix(result, metadataValueLimit)).ToArray();
-        var minimumOutputLength = results.Count * OutputTruncationMarker.Length;
-        return CalculateFixedLength(resultPrefixes, minimumOutputLength) <= MaxFormattedCharacters;
+        return new FlexibleMetadataLimits(
+            MinimumRetentionDetailCharacters + expansion,
+            MinimumTargetPathCharacters + expansion,
+            MinimumResolvedPathCharacters + expansion);
+    }
+
+    private static bool MetadataEnvelopeFits(IReadOnlyList<ToolResult> results, FlexibleMetadataLimits metadataLimits, int minimumOutputBodyLength)
+    {
+        var resultPrefixes = results.Select(result => FormatResultPrefix(result, metadataLimits)).ToArray();
+        return CalculateFixedLength(resultPrefixes, minimumOutputBodyLength) <= MaxFormattedCharacters;
     }
 
     private static int CalculateFixedLength(IReadOnlyList<string> resultPrefixes, int outputBodyLength)
@@ -116,15 +127,72 @@ public static class ToolResultFormatter
         return Header.Length + resultPrefixes.Sum(prefix => prefix.Length) + outputBodyLength + ContinuationInstruction.Length + _finalTruncationMarker.Length + separatorLength;
     }
 
-    private static string FormatResultPrefix(ToolResult result, int metadataValueLimit)
+    private static int CalculateMinimumOutputBodyLength(string text)
+    {
+        var excerpt = TakeSafePrefix(text, MinimumOutputExcerptCharacters);
+        var formattedExcerpt = Indent(excerpt);
+        return excerpt.Length == text.Length
+            ? formattedExcerpt.Length
+            : formattedExcerpt.Length + Environment.NewLine.Length + OutputTruncationMarker.Length;
+    }
+
+    private static int[] AllocateOutputBudgets(IReadOnlyList<ToolResult> results, IReadOnlyList<int> minimumOutputLengths, int totalOutputBudget)
+    {
+        var outputBudgets = minimumOutputLengths.ToArray();
+        var remainingBudget = totalOutputBudget - outputBudgets.Sum();
+        if (remainingBudget <= 0)
+        {
+            return outputBudgets;
+        }
+
+        var desiredOutputLengths = results.Select(result => Indent(result.OutputText).Length).ToArray();
+        var additionalNeeds = desiredOutputLengths.Select((length, index) => Math.Max(0, length - outputBudgets[index])).ToArray();
+        var lower = 0;
+        var upper = additionalNeeds.Max();
+        while (lower < upper)
+        {
+            var candidate = lower + ((upper - lower + 1) / 2);
+            var required = additionalNeeds.Sum(need => Math.Min(need, candidate));
+            if (required <= remainingBudget)
+            {
+                lower = candidate;
+            }
+            else
+            {
+                upper = candidate - 1;
+            }
+        }
+
+        for (var index = 0; index < outputBudgets.Length; index++)
+        {
+            var allocated = Math.Min(additionalNeeds[index], lower);
+            outputBudgets[index] += allocated;
+            remainingBudget -= allocated;
+        }
+
+        for (var index = 0; index < outputBudgets.Length && remainingBudget > 0; index++)
+        {
+            if (outputBudgets[index] >= desiredOutputLengths[index])
+            {
+                continue;
+            }
+
+            outputBudgets[index]++;
+            remainingBudget--;
+        }
+
+        return outputBudgets;
+    }
+
+    private static string FormatResultPrefix(ToolResult result, FlexibleMetadataLimits metadataLimits)
     {
         var builder = new StringBuilder();
-        builder.AppendLine($"- request_id: {FormatMetadataValue(result.RequestId, metadataValueLimit)}");
+        builder.AppendLine($"- request_id: {result.RequestId}");
         builder.AppendLine($"  tool: {ToolCommandFormatter.Format(result.Request.Command)}");
         builder.AppendLine($"  outcome: {FormatOutcome(result.Outcome)}");
-        AppendRetention(builder, result.Retention, metadataValueLimit);
-        builder.AppendLine($"  target_path: {FormatMetadataValue(result.Request.TargetPath, metadataValueLimit)}");
-        builder.AppendLine($"  resolved_path: {FormatMetadataValue(result.ResolvedPath, metadataValueLimit)}");
+        AppendRetention(builder, result.Retention, metadataLimits.RetentionDetailCharacters);
+        builder.AppendLine($"  target_path: {FormatMetadataValue(result.Request.TargetPath, metadataLimits.TargetPathCharacters)}");
+        builder.AppendLine($"  resolved_path: {FormatMetadataValue(result.ResolvedPath, metadataLimits.ResolvedPathCharacters)}");
         builder.Append("  output:");
         return builder.ToString();
     }
@@ -174,6 +242,11 @@ public static class ToolResultFormatter
         }
 
         count = Math.Min(count, value.Length);
+        if (count == 0)
+        {
+            return "";
+        }
+
         if (char.IsHighSurrogate(value[count - 1]))
         {
             count--;
@@ -187,18 +260,20 @@ public static class ToolResultFormatter
         return outcome.ToString().ToLowerInvariant();
     }
 
-    private static void AppendRetention(StringBuilder builder, ToolResultRetentionReference? retention, int metadataValueLimit)
+    private static void AppendRetention(StringBuilder builder, ToolResultRetentionReference? retention, int retentionDetailLimit)
     {
         if (retention?.Status == ToolResultRetentionStatus.Retained)
         {
-            builder.AppendLine($"  full_response_manifest: {FormatMetadataValue(retention.ManifestPath, metadataValueLimit)}");
-            builder.AppendLine($"  full_response_sha256: {FormatMetadataValue(retention.ContentSha256, metadataValueLimit)}");
+            builder.AppendLine($"  full_response_manifest: {retention.ManifestPath}");
+            builder.AppendLine($"  full_response_sha256: {retention.ContentSha256}");
             builder.AppendLine($"  full_response_size: {retention.CharacterCount} characters / {retention.Utf8ByteCount} UTF-8 bytes / {retention.ChunkCount} chunks");
-            builder.AppendLine($"  full_response_retention: {FormatMetadataValue(retention.Detail, metadataValueLimit)}");
+            builder.AppendLine($"  full_response_retention: {FormatMetadataValue(retention.Detail, retentionDetailLimit)}");
             return;
         }
 
         builder.AppendLine("  full_response_manifest: unavailable");
-        builder.AppendLine($"  full_response_retention: {FormatMetadataValue(retention?.Detail ?? "The caller did not provide a durable full-response reference.", metadataValueLimit)}");
+        builder.AppendLine($"  full_response_retention: {FormatMetadataValue(retention?.Detail ?? "The caller did not provide a durable full-response reference.", retentionDetailLimit)}");
     }
+
+    private readonly record struct FlexibleMetadataLimits(int RetentionDetailCharacters, int TargetPathCharacters, int ResolvedPathCharacters);
 }
