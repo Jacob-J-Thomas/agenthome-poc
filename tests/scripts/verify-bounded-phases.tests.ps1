@@ -109,6 +109,7 @@ finally {
 }
 
 $verifyScript = Get-Content -Raw $verifyScriptPath
+$phaseScript = Get-Content -Raw $phaseScriptPath
 $verifyWorkflow = Get-Content -Raw $verifyWorkflowPath
 $stressWorkflow = Get-Content -Raw $stressWorkflowPath
 $pullRequestSettings = Get-Content -Raw $pullRequestSettingsPath
@@ -117,6 +118,8 @@ $maximumTest = Get-Content -Raw $maximumTestPath
 $retentionTest = Get-Content -Raw $retentionTestPath
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
+Assert-Contains -Actual $phaseScript -Expected 'if ($null -ne $commandScriptPath) {' -Message "Windows batch phases must select cmd.exe command-line quoting before generic ArgumentList handling."
+Assert-Contains -Actual $phaseScript -Expected 'elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {' -Message "Non-batch phases should still use ArgumentList when the runtime provides it."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("Debug", "Release")]' -Message "The verifier must retain Debug as an explicit supported configuration."
 Assert-Contains -Actual $verifyScript -Expected 'VerificationTier!=Stress' -Message "Required verification must explicitly exclude only the owned stress trait."

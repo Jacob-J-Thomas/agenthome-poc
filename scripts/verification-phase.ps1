@@ -110,20 +110,21 @@ function Invoke-VerificationPhase {
         $startInfo.WorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
     }
 
-    if ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {
+    # cmd.exe gives /S /C its own quoting semantics. ProcessStartInfo.ArgumentList escapes the
+    # embedded command quotes as literal backslashes on modern PowerShell/.NET, so batch files
+    # must use the canonical single command-line string even when ArgumentList is available.
+    if ($null -ne $commandScriptPath) {
+        $commandArguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument -Value $_ -ForceQuotes }) -join " "
+        $argumentSuffix = if ([string]::IsNullOrWhiteSpace($commandArguments)) { "" } else { " $commandArguments" }
+        $startInfo.Arguments = '/d /s /c ""{0}"{1}"' -f $commandScriptPath, $argumentSuffix
+    }
+    elseif ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {
         foreach ($argument in $effectiveArguments) {
             $startInfo.ArgumentList.Add($argument)
         }
     }
     else {
-        if ($null -ne $commandScriptPath) {
-            $commandArguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument -Value $_ -ForceQuotes }) -join " "
-            $argumentSuffix = if ([string]::IsNullOrWhiteSpace($commandArguments)) { "" } else { " $commandArguments" }
-            $startInfo.Arguments = '/d /s /c ""{0}"{1}"' -f $commandScriptPath, $argumentSuffix
-        }
-        else {
-            $startInfo.Arguments = (($effectiveArguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")
-        }
+        $startInfo.Arguments = (($effectiveArguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " ")
     }
 
     $process = [Diagnostics.Process]::new()
