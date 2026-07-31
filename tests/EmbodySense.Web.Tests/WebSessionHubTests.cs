@@ -94,9 +94,9 @@ public sealed class WebSessionHubTests
     public async Task SetVerboseMode_streams_system_status_to_caller()
     {
         using var workspace = new TestWorkspace();
-        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var approvals = new WebApprovalCoordinator();
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
         await using var host = new WebAgentRuntimeHost(options, approvals);
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
@@ -262,7 +262,7 @@ public sealed class WebSessionHubTests
 
     private static WebAgentRuntimeHost CreateHost(string rootPath, WebApprovalCoordinator approvals)
     {
-        var options = WebRunOptions.FromArguments(["--workdir", rootPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", rootPath, "--model", "gpt-test"]);
         return new WebAgentRuntimeHost(options, approvals);
     }
 

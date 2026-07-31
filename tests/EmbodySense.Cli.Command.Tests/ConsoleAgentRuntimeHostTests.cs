@@ -29,7 +29,7 @@ public sealed class ConsoleAgentRuntimeHostTests
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null)
     {
         return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
-            null,
+            "test-model",
             workspace.RootPath,
             await CreateFakeCodexExecutableAsync(workspace),
             "read-only",

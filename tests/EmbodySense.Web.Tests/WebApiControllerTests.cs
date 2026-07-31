@@ -181,8 +181,9 @@ public sealed class WebApiControllerTests
     private static WebApplication CreateApp(string rootPath, out WebRunOptions options)
     {
         var port = GetFreePort();
-        options = WebRunOptions.FromArguments(["--workdir", rootPath, "--port", port.ToString()]);
-        var builder = Program.CreateBuilder(["--workdir", rootPath, "--port", port.ToString()], options);
+        var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
+        options = WebRunOptions.FromArguments(arguments);
+        var builder = Program.CreateBuilder(arguments, options);
         return BuildApp(builder);
     }
 

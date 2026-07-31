@@ -16,13 +16,15 @@ public static class RunCommand
     /// </summary>
     /// <param name="arguments">The complete CLI token sequence, including the root <c>run</c> token.</param>
     /// <returns>Zero after an orderly session exit; one when the user declines required workspace initialization.</returns>
+    /// <exception cref="ArgumentException">The run arguments do not provide a nonblank configured model.</exception>
     /// <exception cref="CodexRuntimeUnavailableException">
     /// Runtime resolution is not compatible because the executable is unavailable, its compatibility probe failed, or it does not advertise the requested model.
     /// </exception>
     public static async Task<int> RunAsync(CliArguments arguments)
     {
         var options = RunOptions.FromArguments(arguments);
-        var codexRuntimeStatus = await new CodexRuntimeStatusReader().ReadAsync(options.CodexExecutablePath, options.Model);
+        var configuredModel = options.Model;
+        var codexRuntimeStatus = await new CodexRuntimeStatusReader().ReadAsync(options.CodexExecutablePath, configuredModel);
         if (codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
         {
             throw new CodexRuntimeUnavailableException(codexRuntimeStatus);
@@ -44,7 +46,7 @@ public static class RunCommand
         }
 
         await using var runtime = await new AgentRuntimeFactory(new ConsoleToolApprovalPrompt(client), codexRuntimeStatus).CreateAsync(
-            options.Model,
+            configuredModel,
             options.WorkingDirectory,
             options.CodexExecutablePath,
             options.CodexSandbox,

@@ -22,7 +22,7 @@ public static class Program
     /// </summary>
     /// <param name="args">The supported Web command-line options.</param>
     /// <returns>Zero after help output or an orderly server shutdown.</returns>
-    /// <exception cref="ArgumentException">A host, port, sandbox, or option value is invalid.</exception>
+    /// <exception cref="ArgumentException">The required model or another host, port, sandbox, or option value is invalid.</exception>
     public static async Task<int> Main(string[] args)
     {
         var options = WebRunOptions.FromArguments(args);
@@ -207,13 +207,13 @@ public static class Program
             EmbodySense Web UI
 
             usage:
-              embodysense-web [--workdir path] [--host 127.0.0.1] [--port 4378]
+              embodysense-web --model model [--workdir path] [--host 127.0.0.1] [--port 4378]
 
             options:
               --workdir path     Workspace root for governed tools, permissions, and audit.
               --host host        Local bind host: 127.0.0.1, localhost, or ::1.
               --port port        Local bind port. Defaults to 4378.
-              --model model       Model name passed to the configured inference surface.
+              --model model      Required model name passed to the configured inference surface.
               --codex-path path   Codex executable path for app-server inferencing.
               --sandbox mode      Codex app-server sandbox for the inert runtime directory.
             """);

@@ -24,6 +24,7 @@ namespace EmbodySense.Web;
 public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker
 {
     private readonly WebRunOptions _options;
+    private readonly string _configuredModel;
     private readonly WebApprovalCoordinator _approvalCoordinator;
     private readonly IWorkspaceInitializer _workspaceInitializer;
     private readonly WorkspaceStatusReader _statusReader;
@@ -50,6 +51,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// </summary>
     /// <param name="options">The validated Web host and runtime options.</param>
     /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
+    /// <exception cref="ArgumentException">The options do not provide a nonblank configured model.</exception>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator)
         : this(options, approvalCoordinator, WorkspaceInitializer.ForWeb(), null)
     {
@@ -61,6 +63,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <param name="options">The validated Web host and runtime options.</param>
     /// <param name="approvalCoordinator">The connection-owned governed approval coordinator.</param>
     /// <param name="workspaceInitializer">The workspace initializer used by explicit initialization requests.</param>
+    /// <exception cref="ArgumentException">The options do not provide a nonblank configured model.</exception>
     public WebAgentRuntimeHost(WebRunOptions options, WebApprovalCoordinator approvalCoordinator, IWorkspaceInitializer workspaceInitializer)
         : this(options, approvalCoordinator, workspaceInitializer, null)
     {
@@ -75,6 +78,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <param name="conversationPublicationObserver">
     /// The observer notified after durable conversation publication, or <see langword="null"/> for no notification.
     /// </param>
+    /// <exception cref="ArgumentException">The options do not provide a nonblank configured model.</exception>
     public WebAgentRuntimeHost(
         WebRunOptions options,
         WebApprovalCoordinator approvalCoordinator,
@@ -84,8 +88,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(approvalCoordinator);
         ArgumentNullException.ThrowIfNull(workspaceInitializer);
+        if (string.IsNullOrWhiteSpace(options.Model))
+        {
+            throw new ArgumentException("Web runtime composition requires a nonblank configured model.", nameof(options));
+        }
 
         _options = options;
+        _configuredModel = options.Model;
         _approvalCoordinator = approvalCoordinator;
         _workspaceInitializer = workspaceInitializer;
         _conversationPublicationObserver = conversationPublicationObserver;
@@ -106,12 +115,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <summary>
     /// Gets the custom-loop inference provider and explicitly configured model.
     /// </summary>
-    /// <returns>
-    /// An OpenAI Codex model snapshot whose model is null when selection is delegated to external configuration.
-    /// </returns>
+    /// <returns>An OpenAI Codex model snapshot with the required explicitly configured model.</returns>
     public LoopRunModelSnapshot GetCustomLoopModel()
     {
-        return new LoopRunModelSnapshot("OpenAiCodex", string.IsNullOrWhiteSpace(_options.Model) ? null : _options.Model);
+        return new LoopRunModelSnapshot("OpenAiCodex", _configuredModel);
     }
 
     /// <summary>
@@ -658,7 +665,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver, codexRuntimeStatus);
             var preserveCurrentConversation = _preserveCurrentConversationOnNextRuntimeCreation;
             _runtime = await factory.CreateAsync(
-                _options.Model,
+                _configuredModel,
                 _options.WorkingDirectory,
                 _options.CodexExecutablePath,
                 _options.CodexSandbox,
@@ -786,7 +793,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         Task<CodexRuntimeStatus> statusTask;
         lock (_codexRuntimeStatusGate)
         {
-            _codexRuntimeStatusTask ??= new CodexRuntimeStatusReader().ReadAsync(_options.CodexExecutablePath, _options.Model);
+            _codexRuntimeStatusTask ??= new CodexRuntimeStatusReader().ReadAsync(_options.CodexExecutablePath, _configuredModel);
             statusTask = _codexRuntimeStatusTask;
         }
 
@@ -795,12 +802,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
     private WorkspaceRuntimeConfiguration CreateRuntimeConfiguration(CodexRuntimeStatus codexRuntimeStatus)
     {
-        var model = string.IsNullOrWhiteSpace(_options.Model) ? "configured externally" : _options.Model;
         var codexPath = codexRuntimeStatus.ResolvedExecutablePath ?? "not found";
         return new WorkspaceRuntimeConfiguration(
             AgentRuntimeSurface.Web.Id,
             _options.Url,
-            model,
+            _configuredModel,
             codexPath,
             _options.CodexSandbox,
             "Localhost web client is the primary browser surface; CLI remains available for verification.")

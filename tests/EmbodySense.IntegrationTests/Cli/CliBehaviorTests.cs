@@ -87,7 +87,7 @@ public sealed class CliBehaviorTests
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("n" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
+        var result = await RunCliWithInputAsync("n" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("Warning: this EmbodySense workspace is not initialized.", result.Output);
@@ -115,6 +115,19 @@ public sealed class CliBehaviorTests
     }
 
     [Fact]
+    public async Task Run_command_rejects_a_missing_model_before_runtime_resolution()
+    {
+        using var workspace = new TestWorkspace();
+
+        var result = await RunCliAsync("run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal("", result.Output);
+        Assert.Contains("nonblank configured model", result.Error, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(workspace.File(".agent")));
+    }
+
+    [Fact]
     public async Task Run_command_does_not_reinitialize_initialized_workspace()
     {
         using var workspace = new TestWorkspace();
@@ -123,7 +136,7 @@ public sealed class CliBehaviorTests
         var beforeInitEventCount = CountOccurrences(await File.ReadAllTextAsync(auditPath), "workspace.init");
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.DoesNotContain("Initialize this workspace now?", result.Output);
@@ -140,7 +153,7 @@ public sealed class CliBehaviorTests
         await store.AppendMessageAsync(LlmMessage.User("old prompt"));
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
+        var result = await RunCliWithInputAsync("/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Equal("", await File.ReadAllTextAsync(paths.CurrentConversationPath));
@@ -162,7 +175,7 @@ public sealed class CliBehaviorTests
             Entry("saved-conversation", 2, "assistant", "saved answer"));
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
+        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Stored conversations:", result.Output);
@@ -195,7 +208,7 @@ public sealed class CliBehaviorTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/help" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
+        var result = await RunCliWithInputAsync("/help" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Runtime commands:", result.Output);
@@ -217,7 +230,7 @@ public sealed class CliBehaviorTests
             Entry("saved-conversation", 2, "assistant", "saved answer"));
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
-        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/new" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--codex-path", codexPath);
+        var result = await RunCliWithInputAsync("/history" + Environment.NewLine + "1" + Environment.NewLine + "/new" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
 
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Loaded conversation `saved-conversation` (2 messages).", result.Output);

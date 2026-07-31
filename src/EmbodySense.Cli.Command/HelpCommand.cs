@@ -17,13 +17,13 @@ public static class HelpCommand
 
             usage:
               embodysense init [root]
-              embodysense run [--model model] [--workdir path] [--verbose]
+              embodysense run --model model [--workdir path] [--verbose]
               embodysense status [root]
               embodysense audit [tail] [root] [--limit count]
 
             example:
               embodysense init ./scratch
-              embodysense run
+              embodysense run --model configured-model
               embodysense audit tail ./scratch --limit 10
             """);
     }

@@ -188,10 +188,10 @@ public sealed class WebClientFlowTests
     {
         var port = GetFreePort();
         var portText = port.ToString(CultureInfo.InvariantCulture);
-        var args = new List<string> { "--workdir", rootPath, "--port", portText };
+        var args = new List<string> { "--workdir", rootPath, "--port", portText, "--model", "gpt-test" };
         if (!string.IsNullOrWhiteSpace(codexExecutablePath))
         {
-            args.AddRange(["--model", "gpt-test", "--codex-path", codexExecutablePath]);
+            args.AddRange(["--codex-path", codexExecutablePath]);
         }
 
         var arguments = args.ToArray();
@@ -235,7 +235,9 @@ public sealed class WebClientFlowTests
                 "--workdir",
                 rootPath,
                 "--port",
-                port.ToString(CultureInfo.InvariantCulture)
+                port.ToString(CultureInfo.InvariantCulture),
+                "--model",
+                "gpt-test"
             }
         });
         process = process ?? throw new InvalidOperationException("Web process did not start.");

@@ -7,11 +7,12 @@ public sealed class WebRunOptionsTests
     [Fact]
     public void FromArguments_uses_localhost_defaults()
     {
-        var options = WebRunOptions.FromArguments([]);
+        var options = WebRunOptions.FromArguments(["--model", "gpt-test"]);
 
         Assert.Equal(WebRunOptions.DefaultHost, options.Host);
         Assert.Equal(WebRunOptions.DefaultPort, options.Port);
         Assert.Equal(Directory.GetCurrentDirectory(), options.WorkingDirectory);
+        Assert.Equal("gpt-test", options.Model);
         Assert.Equal($"http://{WebRunOptions.DefaultHost}:{WebRunOptions.DefaultPort}", options.Url);
         Assert.False(options.PrintHelp);
     }
@@ -33,9 +34,21 @@ public sealed class WebRunOptionsTests
     [Fact]
     public void FromArguments_formats_ipv6_localhost_url()
     {
-        var options = WebRunOptions.FromArguments(["--host", "::1", "--port", "4567"]);
+        var options = WebRunOptions.FromArguments(["--model", "gpt-test", "--host", "::1", "--port", "4567"]);
 
         Assert.Equal("http://[::1]:4567", options.Url);
+    }
+
+    [Theory]
+    [InlineData()]
+    [InlineData("--model", "")]
+    [InlineData("--model", "   ")]
+    [InlineData("-m", "")]
+    public void FromArguments_rejects_missing_or_blank_model(params string[] arguments)
+    {
+        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(arguments));
+
+        Assert.Contains("nonblank configured model", exception.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -43,7 +56,7 @@ public sealed class WebRunOptionsTests
     [InlineData("192.168.1.10")]
     public void FromArguments_rejects_remote_bind_hosts(string host)
     {
-        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(["--host", host]));
+        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(["--model", "gpt-test", "--host", host]));
 
         Assert.Contains("only binds to localhost", exception.Message);
     }
@@ -54,7 +67,7 @@ public sealed class WebRunOptionsTests
     [InlineData("nope")]
     public void FromArguments_rejects_invalid_ports(string port)
     {
-        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(["--port", port]));
+        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(["--model", "gpt-test", "--port", port]));
 
         Assert.Contains("Port must be", exception.Message);
     }
@@ -73,7 +86,7 @@ public sealed class WebRunOptionsTests
     [Fact]
     public void FromArguments_rejects_unknown_sandbox_mode()
     {
-        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(["--sandbox", "loose"]));
+        var exception = Assert.Throws<ArgumentException>(() => WebRunOptions.FromArguments(["--model", "gpt-test", "--sandbox", "loose"]));
 
         Assert.Contains("Unsupported sandbox mode", exception.Message);
     }
