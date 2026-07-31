@@ -82,14 +82,19 @@ public sealed class PermissionsDocument
     }
 
     /// <summary>
-    /// Deserializes a permissions document when its effective version is current; an omitted version defaults to <see cref="CurrentVersion"/>.
+    /// Deserializes a permissions document only when it declares the current schema version explicitly.
     /// </summary>
     /// <param name="json">The JSON document.</param>
-    /// <returns>The deserialized current-version document, including an unversioned document that receives the property default, or <see langword="null"/> when an explicit version is unsupported.</returns>
+    /// <returns>The deserialized current-version document, or <see langword="null"/> when the version is missing, malformed, duplicated, or unsupported.</returns>
     /// <exception cref="JsonException">Thrown when <paramref name="json"/> is not valid for the permissions schema.</exception>
     public static PermissionsDocument? FromJson(string json)
     {
-        // TODO(#142): Require persisted permissions JSON to declare CurrentVersion explicitly.
+        using var jsonDocument = JsonDocument.Parse(json);
+        if (!HasExplicitCurrentVersion(jsonDocument.RootElement))
+        {
+            return null;
+        }
+
         var document = JsonSerializer.Deserialize<PermissionsDocument>(json, PermissionsJson.Options);
         return document is { Version: CurrentVersion } ? document : null;
     }
@@ -171,6 +176,27 @@ public sealed class PermissionsDocument
     private static List<FileSystemOperation> StandardWritableOperations()
     {
         return [FileSystemOperation.List, FileSystemOperation.Read, FileSystemOperation.Create, FileSystemOperation.Append, FileSystemOperation.Modify];
+    }
+
+    private static bool HasExplicitCurrentVersion(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var foundVersion = false;
+        foreach (var property in root.EnumerateObject().Where(property => string.Equals(property.Name, "version", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (foundVersion || property.Value.ValueKind != JsonValueKind.Number || !property.Value.TryGetInt32(out var version) || version != CurrentVersion)
+            {
+                return false;
+            }
+
+            foundVersion = true;
+        }
+
+        return foundVersion;
     }
 
     private static bool PathEquals(string workspaceRootPath, string left, string right)
