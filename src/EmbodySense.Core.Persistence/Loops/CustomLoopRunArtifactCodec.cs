@@ -118,6 +118,8 @@ internal static class CustomLoopRunArtifactCodec
         JsonObject root;
         try
         {
+            // JsonNode can collapse duplicate properties. Reject them with JsonDocument first so no
+            // alternate persisted spelling can hydrate to an apparently unambiguous run.
             using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
             root = JsonNode.Parse(utf8Json, documentOptions: new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth }) as JsonObject
@@ -178,6 +180,8 @@ internal static class CustomLoopRunArtifactCodec
 
         if (requireCanonical)
         {
+            // Hydrate and project again, then compare exact bytes. Semantic equivalence is insufficient:
+            // this rejects malleable table ordering, references, escaping, and newline variants.
             var reprojectedContents = new ContentRegistry([]);
             var reprojectedBlocks = new StructuralRegistry("b", "context-block", []);
             var reprojectedAuthorities = new StructuralRegistry("a", "authority", []);
@@ -375,6 +379,8 @@ internal static class CustomLoopRunArtifactCodec
 
     private static void CompactToolEvidence(JsonObject projection, ContentRegistry contents, StructuralRegistry blocks, StructuralRegistry authorities, StructuralRegistry requests)
     {
+        // This state machine preserves the append-only reservation -> governance -> outcome ->
+        // returned/integrity protocol while deduplicating repeated request and authority material.
         var states = new Dictionary<(int RequestOrdinal, string RequestCorrelationId), ToolProjectionState>();
         var reservationCorrelationIds = new HashSet<string>(StringComparer.Ordinal);
         var standaloneIntegrityProjected = false;
@@ -593,6 +599,8 @@ internal static class CustomLoopRunArtifactCodec
 
     private static void ExpandToolEvidence(JsonObject projection, StructuralRegistry authorities, StructuralRegistry requests)
     {
+        // Expansion is the inverse protocol validator, not just decompression: every compact shape must
+        // reconstruct the exact earlier request, authority, governance, and outcome evidence.
         var states = new Dictionary<string, ToolHydrationState>(StringComparer.Ordinal);
         var correlationIds = new HashSet<string>(StringComparer.Ordinal);
         var requestKeys = new HashSet<(int RequestOrdinal, string RequestCorrelationId)>();
@@ -972,6 +980,8 @@ internal static class CustomLoopRunArtifactCodec
             var utf16Characters = RequireInt32(entry, "utf16Characters");
             var utf8Bytes = RequireInt32(entry, "utf8Bytes");
             var base64 = RequireString(entry, "base64");
+            // Cross-check canonical base64, strict UTF-8 round-trip, ordered id, both character/byte
+            // counts, and the raw-byte hash so table references cannot alias different content.
             byte[] bytes;
             try
             {
@@ -1076,6 +1086,8 @@ internal static class CustomLoopRunArtifactCodec
             ["run"] = projection.DeepClone()
         };
         var content = SerializeNode(envelope);
+        // Persist exactly one trailing LF. Canonical readback compares this byte too, rejecting both
+        // unterminated files and alternate whitespace after the envelope.
         var terminated = new byte[content.Length + 1];
         content.CopyTo(terminated, 0);
         terminated[^1] = (byte)'\n';

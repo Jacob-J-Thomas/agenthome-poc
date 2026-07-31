@@ -143,8 +143,9 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 ["failurePolicy"] = _loopDefinition.FailurePolicy.ToString()
             });
         var userMessageAccepted = false;
-        // TODO(loop-turn-atomicity): Runtime state, conversation memory, and loop-run status are still separate writes.
-        // Before replay, resume, cron, hooks, or subagent loops depend on this path, introduce a transaction, outbox, or checkpoint model that can explain and repair partial turn acceptance.
+        // Run start, transcript append, and runtime-state acceptance are separate commits. Failures are
+        // surfaced and never replayed automatically; any future replay must first add a repairable transaction,
+        // outbox, or checkpoint that can distinguish which commits succeeded.
         var acceptedTranscriptMessages = new List<RuntimeTranscriptMessage>();
 
         try

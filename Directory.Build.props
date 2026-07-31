@@ -6,8 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RepositoryRelativeProjectDirectory>$([System.IO.Path]::GetRelativePath('$(MSBuildThisFileDirectory)', '$(MSBuildProjectDirectory)').Replace('\', '/'))</RepositoryRelativeProjectDirectory>
     <IsTestProjectLocation>$([System.String]::Copy('$(RepositoryRelativeProjectDirectory)/').StartsWith('tests/'))</IsTestProjectLocation>
+    <!-- Shipped production contracts emit XML documentation; test assemblies are intentionally outside this API-documentation gate. -->
     <GenerateDocumentationFile Condition="'$(IsTestProjectLocation)' != 'True'">true</GenerateDocumentationFile>
-    <!-- The source baseline is documented in issue #83 before CS1591 becomes an error. -->
-    <NoWarn Condition="'$(IsTestProjectLocation)' != 'True'">$(NoWarn);1591</NoWarn>
   </PropertyGroup>
 </Project>
