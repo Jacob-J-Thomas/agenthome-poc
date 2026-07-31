@@ -133,10 +133,29 @@ public sealed class CliCommandTests
     }
 
     [Fact]
+    public void RunOptions_rejects_missing_model()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run"])));
+
+        Assert.Contains("nonblank configured model", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("--model", "")]
+    [InlineData("--model", "   ")]
+    [InlineData("-m", "")]
+    public void RunOptions_rejects_blank_model(string option, string model)
+    {
+        var exception = Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run", option, model])));
+
+        Assert.Contains("nonblank configured model", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunOptions_rejects_missing_option_values_and_unknown_sandbox_modes()
     {
         Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run", "--workdir", "--model"])));
-        var exception = Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run", "--sandbox", "loose"])));
+        var exception = Assert.Throws<ArgumentException>(() => RunOptions.FromArguments(new CliArguments(["run", "--model", "gpt-test", "--sandbox", "loose"])));
 
         Assert.Contains("unsupported sandbox mode", exception.Message);
     }

@@ -115,6 +115,19 @@ public sealed class CliBehaviorTests
     }
 
     [Fact]
+    public async Task Run_command_rejects_a_missing_model_before_runtime_resolution()
+    {
+        using var workspace = new TestWorkspace();
+
+        var result = await RunCliAsync("run", "--workdir", workspace.RootPath);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal("", result.Output);
+        Assert.Contains("nonblank configured model", result.Error, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(workspace.File(".agent")));
+    }
+
+    [Fact]
     public async Task Run_command_does_not_reinitialize_initialized_workspace()
     {
         using var workspace = new TestWorkspace();
