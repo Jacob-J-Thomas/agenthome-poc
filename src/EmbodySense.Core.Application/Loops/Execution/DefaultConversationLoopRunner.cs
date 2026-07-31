@@ -503,7 +503,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             return DefaultConversationLoopTurnResult.Failed($"Request `{request.RequestId}` is already admitted as turn `{record.TurnId}` at checkpoint `{record.Checkpoint}`. Restart reconciliation must classify it before any retry.", runIdentity: runIdentity);
         }
 
-        var userAccepted = record.Checkpoint >= DefaultConversationTurnCheckpoint.UserMessageAccepted;
+        var userAccepted = record.Transitions.Any(transition => transition.Checkpoint == DefaultConversationTurnCheckpoint.UserMessageAccepted);
         if (record.Checkpoint == DefaultConversationTurnCheckpoint.ReviewResolved)
         {
             return DefaultConversationLoopTurnResult.Failed(record.ReviewResolution?.Detail ?? "The idempotently replayed turn was explicitly abandoned after review.", runIdentity: runIdentity, userMessageAccepted: userAccepted);

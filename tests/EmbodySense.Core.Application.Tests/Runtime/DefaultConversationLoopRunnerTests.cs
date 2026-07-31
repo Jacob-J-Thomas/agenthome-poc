@@ -197,6 +197,36 @@ public sealed class DefaultConversationLoopRunnerTests
             message => Assert.Equal((LlmMessageRole.Assistant, "completed response"), (message.Role, message.Content)));
     }
 
+    [Theory]
+    [InlineData(DefaultConversationTurnBoundary.TurnAdmitted)]
+    [InlineData(DefaultConversationTurnBoundary.RunStartCheckpointed)]
+    public async Task RunTurnAsync_replays_terminal_preacceptance_failures_without_marking_the_user_message_accepted(DefaultConversationTurnBoundary failureBoundary)
+    {
+        var client = new RecordingInferenceClient("must not run");
+        var memory = new RecordingConversationMemoryStore();
+        var state = new ConversationRuntimeState();
+        var runner = new DefaultConversationLoopRunner(
+            client,
+            state,
+            memory,
+            LoopDefinition.CreateDefaultConversation(),
+            new RecordingLoopRunStore(),
+            RuntimeSurfaceId.Web,
+            failpoint: new GenericFailureFailpoint(failureBoundary));
+        const string requestId = "preacceptance-replay";
+
+        var failed = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: requestId));
+        var replayed = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: requestId));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, failed.Status);
+        Assert.False(failed.UserMessageAccepted);
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, replayed.Status);
+        Assert.False(replayed.UserMessageAccepted);
+        Assert.Empty(client.Requests);
+        Assert.Empty(memory.Messages);
+        Assert.Empty(state.Messages);
+    }
+
     [Fact]
     public async Task RunTurnAsync_rejects_reuse_of_a_caller_request_for_a_different_payload()
     {
