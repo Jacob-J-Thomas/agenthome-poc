@@ -286,8 +286,17 @@ test("verified custom-loop publication rehydrates once per operation without app
 });
 
 test("publication synchronization retries after deferred runtime disposal returns no transcript", async () => {
+  const scheduledRetries = [];
   const app = await loadApp({
     activeTranscript: [{ role: "user", content: "Original prompt" }],
+    windowSetTimeout(handler, delay) {
+      const scheduled = { handler, delay, cancelled: false };
+      scheduledRetries.push(scheduled);
+      return scheduled;
+    },
+    windowClearTimeout(scheduled) {
+      scheduled.cancelled = true;
+    },
   });
   const initialHydrations = app.socket.sentInvocations(
     "GetCurrentTranscript",
@@ -300,11 +309,17 @@ test("publication synchronization retries after deferred runtime disposal return
     messageCount: 2,
   });
   await flushAsyncWork();
+  const retry = assertSingle(
+    scheduledRetries.filter(
+      (scheduled) => scheduled.delay === 25 && !scheduled.cancelled,
+    ),
+  );
   FakeWebSocket.currentTranscript = [
     { role: "user", content: "Original prompt" },
     { role: "assistant", content: "Published after deferred disposal" },
   ];
-  await flushAsyncWork();
+  retry.cancelled = true;
+  retry.handler();
   await flushAsyncWork();
 
   assert.equal(
@@ -616,8 +631,8 @@ async function loadApp(overrides = {}) {
         },
       },
       embodySenseLoopBuilder: overrides.loopBuilder,
-      setTimeout,
-      clearTimeout,
+      setTimeout: overrides.windowSetTimeout ?? setTimeout,
+      clearTimeout: overrides.windowClearTimeout ?? clearTimeout,
     },
     WebSocket: FakeWebSocket,
   };
