@@ -968,7 +968,7 @@ test("SignalR transport identifies a disconnect before invocation dispatch and r
   assert.equal(connection.invocations.size, 0);
 });
 
-test("create and save send versioned server-owned definition shapes", async () => {
+test("a new loop remains local until explicit Save sends the complete version-one definition", async () => {
   const catalog = createCatalog();
   const created = createCustomDefinition({
     id: "loop-created",
@@ -978,24 +978,29 @@ test("create and save send versioned server-owned definition shapes", async () =
   const server = new FakeFetchServer(catalog);
   server.on("POST", "/api/loops", ({ body }) => {
     assert.equal(typeof body.operationId, "string");
-    server.catalog.customDefinitions.push(clone(created));
-    return { status: 201, body: authoringResponse("Created", created) };
-  });
-  server.on("PUT", "/api/loops/loop-created", ({ body }) => {
-    const updated = {
+    const committed = {
       ...created,
       ...clone(body.definition),
-      definitionVersion: 2,
+      inferenceSteps: body.definition.inferenceSteps.map((step, index) => ({
+        ...clone(step),
+        id: `step-created-${index + 1}`,
+      })),
+      lastMutationOperationId: body.operationId,
     };
-    server.catalog.customDefinitions = server.catalog.customDefinitions.map(
-      (item) => (item.id === updated.id ? updated : item),
-    );
-    return { status: 200, body: authoringResponse("Updated", updated) };
+    server.catalog.customDefinitions.push(clone(committed));
+    return { status: 201, body: authoringResponse("Created", committed) };
   });
   const app = await loadLoopBuilder({ server });
 
   await app.elements.createLoopButton.click();
   assert.equal(app.elements.loopName.value, "Untitled loop");
+  assert.equal(
+    server.calls.some(
+      (call) => call.method === "POST" && call.url === "/api/loops",
+    ),
+    false,
+  );
+  assert.match(app.elements.loopList.textContent, /Draft.*Not durable/);
   app.elements.loopName.value = "Issue research";
   await app.elements.loopName.input();
 
@@ -1062,12 +1067,14 @@ test("create and save send versioned server-owned definition shapes", async () =
 
   await app.elements.saveButton.click();
   const save = server.calls.find(
-    (call) => call.method === "PUT" && call.url === "/api/loops/loop-created",
+    (call) => call.method === "POST" && call.url === "/api/loops",
   );
   assert.equal(save.options.credentials, "same-origin");
   assert.equal(save.options.headers["X-EmbodySense-Session"], undefined);
   assert.equal(save.body.expectedDefinitionVersion, 1);
   assert.equal(typeof save.body.operationId, "string");
+  assert.equal(save.body.definition.displayName, "Issue research");
+  assert.equal(save.body.definition.inferenceSteps[0].id, null);
   assert.deepEqual(save.body.definition.triggerPolicy, {
     promptSource: "preset",
     presetPrompt: "Research the configured issue.",
@@ -1088,22 +1095,19 @@ test("create and save send versioned server-owned definition shapes", async () =
     "Return Repeat only when another research pass is needed.",
   );
   assert.doesNotMatch(JSON.stringify(save.body), /additionalFixedContext/i);
-  assert.equal(app.elements.saveState.textContent, "Saved · v2");
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
 });
 
-test("create retries reuse the operation id after an ambiguous committed response", async () => {
+test("uncertain first-save retries reuse the exact request and operation id", async () => {
   const server = new FakeFetchServer(createCatalog());
-  const created = createCustomDefinition({
-    id: "loop-replayed",
-    definitionVersion: 1,
-    displayName: "Recovered loop",
-  });
+  let created = null;
   let committedOperationId = null;
   let attempts = 0;
   server.on("POST", "/api/loops", ({ body }) => {
     attempts++;
     if (attempts === 1) {
       committedOperationId = body.operationId;
+      created = createDefinitionFromFirstSave(body, "loop-replayed");
       server.catalog.customDefinitions.push(clone(created));
       throw new TypeError("Create response was lost.");
     }
@@ -1114,12 +1118,17 @@ test("create retries reuse the operation id after an ambiguous committed respons
   const app = await loadLoopBuilder({ server });
 
   await app.elements.createLoopButton.click();
+  app.elements.loopName.value = "Recovered loop";
+  await app.elements.loopName.input();
+  await app.elements.saveButton.click();
   assert.match(
     app.elements.validationBanner.textContent,
-    /Create response was lost/,
+    /First save outcome is uncertain.*Create response was lost/,
   );
+  assert.equal(app.elements.saveButton.textContent, "Retry save");
+  assert.equal(app.elements.reloadButton.disabled, true);
 
-  await app.elements.createLoopButton.click();
+  await app.elements.saveButton.click();
 
   const createCalls = server.calls.filter(
     (call) => call.method === "POST" && call.url === "/api/loops",
@@ -1129,6 +1138,7 @@ test("create retries reuse the operation id after an ambiguous committed respons
     createCalls[0].body.operationId,
     createCalls[1].body.operationId,
   );
+  assert.deepEqual(createCalls[0].body, createCalls[1].body);
   assert.equal(
     server.catalog.customDefinitions.filter(
       (definition) => definition.id === created.id,
@@ -1138,8 +1148,380 @@ test("create retries reuse the operation id after an ambiguous committed respons
   assert.equal(app.elements.loopName.value, "Recovered loop");
   assert.equal(
     app.elements.toast.textContent,
-    "Loop created. Add instructions, review context, then Save.",
+    "Loop saved for the first time.",
   );
+});
+
+test("first Save exposes saving and conflict states before an explicit fresh-operation retry", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let releaseConflict;
+  let attempts = 0;
+  server.on("POST", "/api/loops", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      return new Promise((resolve) => {
+        releaseConflict = () =>
+          resolve({
+            status: 409,
+            body: {
+              status: "Conflict",
+              isCommitted: false,
+              definition: null,
+              validationErrors: [],
+              conflict: null,
+              detail: "The operation identity was already bound.",
+            },
+          });
+      });
+    }
+
+    const created = createDefinitionFromFirstSave(body, "loop-after-conflict");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await app.elements.createLoopButton.click();
+
+  const firstSave = app.elements.saveButton.click();
+  assert.equal(app.elements.saveState.textContent, "Saving draft");
+  assert.equal(app.elements.loopName.disabled, true);
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  releaseConflict();
+  await firstSave;
+
+  assert.match(app.elements.saveState.textContent, /First save conflict/);
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /operation conflicted/i,
+  );
+  assert.equal(app.elements.loopName.disabled, false);
+  assert.equal(app.elements.saveButton.disabled, false);
+  const firstOperationId = server.calls.find(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  ).body.operationId;
+
+  await app.elements.saveButton.click();
+
+  const createCalls = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  );
+  assert.equal(createCalls.length, 2);
+  assert.notEqual(createCalls[1].body.operationId, firstOperationId);
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
+});
+
+test("a definitive audit-unavailable first save remains a local failed draft", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const durableDefinitionCount = server.catalog.customDefinitions.length;
+  server.on("POST", "/api/loops", () => ({
+    status: 503,
+    body: {
+      status: "AuditUnavailable",
+      isCommitted: false,
+      definition: null,
+      validationErrors: [],
+      conflict: null,
+      detail:
+        "The mutation was not attempted because its audit intent could not be recorded.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.createLoopButton.click();
+  await app.elements.saveButton.click();
+
+  assert.match(app.elements.saveState.textContent, /First save failed/);
+  assert.doesNotMatch(app.elements.saveState.textContent, /uncertain/i);
+  assert.equal(app.elements.reloadButton.disabled, false);
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /audit intent could not be recorded/i,
+  );
+  assert.equal(server.catalog.customDefinitions.length, durableDefinitionCount);
+});
+
+test("a tab-scoped draft survives Loops navigation and reload, stays out of other tabs, and Discard performs no mutation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sameTabStorage = new FakeStorage();
+  const firstView = await loadLoopBuilder({
+    server,
+    sessionStorage: sameTabStorage,
+  });
+
+  await firstView.elements.createLoopButton.click();
+  firstView.elements.loopName.value = "Reload-safe local draft";
+  await firstView.elements.loopName.input();
+  firstView.elements.loopDescription.value = "Not durable yet.";
+  await firstView.elements.loopDescription.input();
+  await firstView.window.embodySenseLoopBuilder.activate();
+
+  assert.equal(firstView.elements.loopName.value, "Reload-safe local draft");
+  assert.equal(
+    server.calls.some((call) =>
+      ["POST", "PUT", "DELETE"].includes(call.method),
+    ),
+    false,
+  );
+
+  const reloadedView = await loadLoopBuilder({
+    server,
+    sessionStorage: sameTabStorage,
+  });
+  assert.equal(reloadedView.elements.loopName.value, "Reload-safe local draft");
+  assert.equal(reloadedView.elements.loopDescription.value, "Not durable yet.");
+  assert.match(reloadedView.elements.saveState.textContent, /Unsaved draft/);
+  const guardedClose = {
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    returnValue: null,
+  };
+  reloadedView.window.eventListeners.get("beforeunload")(guardedClose);
+  assert.equal(guardedClose.prevented, true);
+  assert.equal(guardedClose.returnValue, "");
+
+  const otherTab = await loadLoopBuilder({
+    server,
+    sessionStorage: new FakeStorage(),
+  });
+  assert.equal(otherTab.elements.saveState.textContent, "System managed");
+  assert.doesNotMatch(
+    otherTab.elements.loopList.textContent,
+    /Reload-safe local draft/,
+  );
+
+  await reloadedView.elements.reloadButton.click();
+  assert.equal(reloadedView.elements.saveState.textContent, "System managed");
+  assert.equal(sameTabStorage.values.size, 0);
+  const unguardedClose = {
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    returnValue: null,
+  };
+  reloadedView.window.eventListeners.get("beforeunload")(unguardedClose);
+  assert.equal(unguardedClose.prevented, false);
+  assert.equal(unguardedClose.returnValue, null);
+  assert.equal(
+    server.calls.some((call) =>
+      ["POST", "PUT", "DELETE"].includes(call.method),
+    ),
+    false,
+  );
+});
+
+test("an uncertain first save survives reload and retries the exact request", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  let firstRequest = null;
+  let attempts = 0;
+  server.on("POST", "/api/loops", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      firstRequest = clone(body);
+      throw new TypeError("Connection closed after dispatch.");
+    }
+
+    assert.deepEqual(body, firstRequest);
+    const created = createDefinitionFromFirstSave(body, "loop-after-reload");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+  await firstView.elements.createLoopButton.click();
+  firstView.elements.loopName.value = "Retry after reload";
+  await firstView.elements.loopName.input();
+  await firstView.elements.saveButton.click();
+
+  const reloadedView = await loadLoopBuilder({ server, sessionStorage });
+  assert.equal(reloadedView.elements.loopName.value, "Retry after reload");
+  assert.equal(reloadedView.elements.saveButton.textContent, "Retry save");
+  assert.match(
+    reloadedView.elements.validationBanner.textContent,
+    /uncertain/i,
+  );
+  await reloadedView.elements.saveButton.click();
+
+  const requests = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  );
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0].body, requests[1].body);
+  assert.equal(reloadedView.elements.saveState.textContent, "Saved · v1");
+  assert.equal(sessionStorage.values.size, 0);
+});
+
+test("an uncertain first save rejects inspector mutations and retries the original request", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let firstRequest = null;
+  let committed = null;
+  let attempts = 0;
+  server.on("POST", "/api/loops", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      firstRequest = clone(body);
+      committed = createDefinitionFromFirstSave(body, "loop-uncertain-locked");
+      server.catalog.customDefinitions.push(clone(committed));
+      throw new TypeError("The committed response was lost.");
+    }
+
+    assert.deepEqual(body, firstRequest);
+    return { status: 200, body: authoringResponse("Replayed", committed) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await app.elements.createLoopButton.click();
+  await app.elements.saveButton.click();
+
+  assert.equal(app.elements.saveButton.textContent, "Retry save");
+  const inference = nodeCard(app, "inference");
+  await inference.click();
+  const instruction = findControlByLabel(
+    app.elements.inspectorContent,
+    "Prompt-visible instruction",
+    "textarea",
+  );
+  assert.equal(instruction.disabled, true);
+  instruction.value = "This edit must not replace the uncertain request.";
+  await instruction.input();
+
+  await app.elements.loopSettingsButton.click();
+  const readAssignment = findControlByLabel(
+    app.elements.inspectorContent,
+    "Read",
+    "input",
+  );
+  assert.equal(readAssignment.disabled, true);
+  readAssignment.checked = true;
+  await readAssignment.change();
+
+  await app.elements.saveButton.click();
+
+  const requests = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  );
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1].body, firstRequest);
+  assert.equal(server.catalog.customDefinitions.length, 2);
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
+});
+
+test("reload reconciles an uncertain committed first save from the read-only catalog without another mutation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  server.on("POST", "/api/loops", ({ body }) => {
+    const created = createDefinitionFromFirstSave(body, "loop-reconciled");
+    server.catalog.customDefinitions.push(clone(created));
+    throw new TypeError("The committed response was lost.");
+  });
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+  await firstView.elements.createLoopButton.click();
+  firstView.elements.loopName.value = "Catalog reconciled";
+  await firstView.elements.loopName.input();
+  await firstView.elements.saveButton.click();
+
+  const reloadedView = await loadLoopBuilder({ server, sessionStorage });
+
+  assert.equal(reloadedView.elements.loopName.value, "Catalog reconciled");
+  assert.equal(reloadedView.elements.saveState.textContent, "Saved · v1");
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/loops",
+    ).length,
+    1,
+  );
+  assert.equal(sessionStorage.values.size, 0);
+});
+
+test("a proved first-save response remains saved when the follow-up catalog refresh disconnects", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let catalogReads = 0;
+  server.on("GET", "/api/loops", () => {
+    catalogReads++;
+    return catalogReads === 1
+      ? { status: 200, body: clone(server.catalog) }
+      : { status: 503, body: { detail: "Catalog reconnect required." } };
+  });
+  server.on("POST", "/api/loops", ({ body }) => {
+    const created = createDefinitionFromFirstSave(body, "loop-proved-save");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await app.elements.createLoopButton.click();
+  app.elements.loopName.value = "Proved save";
+  await app.elements.loopName.input();
+
+  await app.elements.saveButton.click();
+
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
+  assert.equal(app.elements.saveButton.textContent, "Save");
+  assert.equal(app.elements.saveButton.disabled, true);
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /saved.*could not be refreshed/i,
+  );
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/loops",
+    ).length,
+    1,
+  );
+});
+
+test("independent tab drafts do not consume quota and a later quota rejection leaves the losing draft local", async () => {
+  const catalog = createCatalog();
+  catalog.customDefinitions = [];
+  catalog.limits.maxDefinitionsPerWorkspace = 1;
+  const server = new FakeFetchServer(catalog);
+  server.on("POST", "/api/loops", ({ body }) => {
+    if (server.catalog.customDefinitions.length >= 1) {
+      return {
+        status: 409,
+        body: {
+          status: "LimitExceeded",
+          isCommitted: false,
+          definition: null,
+          validationErrors: [],
+          conflict: null,
+          detail:
+            "The workspace custom-loop definition limit has been reached.",
+        },
+      };
+    }
+
+    const created = createDefinitionFromFirstSave(body, "loop-quota-winner");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const firstTab = await loadLoopBuilder({
+    server,
+    sessionStorage: new FakeStorage(),
+  });
+  const secondTab = await loadLoopBuilder({
+    server,
+    sessionStorage: new FakeStorage(),
+  });
+
+  await firstTab.elements.createLoopButton.click();
+  await secondTab.elements.createLoopButton.click();
+  assert.equal(server.catalog.customDefinitions.length, 0);
+  assert.match(firstTab.elements.loopList.textContent, /Not durable/);
+  assert.match(secondTab.elements.loopList.textContent, /Not durable/);
+
+  await firstTab.elements.saveButton.click();
+  await secondTab.elements.saveButton.click();
+
+  assert.equal(server.catalog.customDefinitions.length, 1);
+  assert.match(secondTab.elements.saveState.textContent, /First save failed/);
+  assert.match(
+    secondTab.elements.validationBanner.textContent,
+    /definition limit has been reached/,
+  );
+  assert.equal(secondTab.elements.invokeButton.disabled, true);
+  assert.match(secondTab.elements.loopList.textContent, /Not durable/);
 });
 
 test("save retries reuse the exact request after an ambiguous committed response", async () => {
@@ -7275,15 +7657,19 @@ async function loadLoopBuilder(options = {}) {
   const localStorage = options.localStorage ?? new FakeStorage();
   const locks = options.locks ?? new FakeLockManager();
   let operation = 0;
+  const eventListeners = new Map();
   const window = {
     confirmations: [],
     delayedHandlers: [],
+    eventListeners,
     intervalHandlers: [],
     location: { href: "http://127.0.0.1:4378/loops.html" },
     localStorage,
     sessionStorage,
     embodySenseSession: options.embodySenseSession,
-    addEventListener() {},
+    addEventListener(name, handler) {
+      this.eventListeners.set(name, handler);
+    },
     confirm(message) {
       this.confirmations.push(message);
       return true;
@@ -7551,6 +7937,7 @@ function createCatalog() {
       },
     },
     customDefinitions: [createCustomDefinition()],
+    draftTemplate: createDraftTemplate(),
     limits: {
       maxDefinitionsPerWorkspace: 50,
       minInferenceSteps: 1,
@@ -7575,6 +7962,49 @@ function createCatalog() {
       maxLifecycleControlDetailCharacters: 1024,
       maxRunTraceUtf8Bytes: 16777216,
       maxRunExecutionMilliseconds: 1800000,
+    },
+  };
+}
+
+function createDraftTemplate() {
+  return {
+    schemaVersion: 1,
+    roleId: "default",
+    definition: {
+      displayName: "Untitled loop",
+      description: "",
+      triggerPolicy: {
+        promptSource: "invocation",
+        presetPrompt: "",
+        includeInvokingConversation: false,
+      },
+      inferenceSteps: [
+        {
+          id: null,
+          name: "First step",
+          instruction:
+            "Use the invocation input to complete the user's requested task within this loop's governed authority.",
+          contextPolicy: { mode: "inherit", customPolicy: null },
+        },
+      ],
+      toolAssignments: [],
+      exitPolicy: {
+        maxAdditionalIterations: 0,
+        decisionInstruction:
+          "Request another iteration only when the latest result still has a concrete, recoverable gap. Otherwise complete.",
+        contextPolicy: { mode: "inherit", customPolicy: null },
+      },
+    },
+    contextDefaults: {
+      inference: createContextPolicy({
+        includePreviousIterationResult: true,
+        publishToInvokingConversation: false,
+      }),
+      exit: createContextPolicy({
+        includePreviousIterationResult: true,
+        retainForLoopReasoning: false,
+        publishToInvokingConversation: true,
+      }),
     },
   };
 }
@@ -7931,6 +8361,19 @@ function authoringResponse(status, definition) {
     conflict: null,
     detail: null,
   };
+}
+
+function createDefinitionFromFirstSave(body, id) {
+  return createCustomDefinition({
+    ...clone(body.definition),
+    id,
+    definitionVersion: 1,
+    inferenceSteps: body.definition.inferenceSteps.map((step, index) => ({
+      ...clone(step),
+      id: `step-${id}-${index + 1}`,
+    })),
+    lastMutationOperationId: body.operationId,
+  });
 }
 
 class FakeFetchServer {
