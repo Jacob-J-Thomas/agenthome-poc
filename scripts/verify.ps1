@@ -35,18 +35,7 @@ function Invoke-CheckedNative {
 
 Push-Location $repoRoot
 try {
-    $globalJson = Get-Content (Join-Path $repoRoot "global.json") -Raw | ConvertFrom-Json
-    $requestedSdkVersion = [Version]$globalJson.sdk.version
-    $resolvedSdkVersion = [Version]((& dotnet --version).Trim())
-    $requestedFeatureBand = [Math]::Floor($requestedSdkVersion.Build / 100)
-    $resolvedFeatureBand = [Math]::Floor($resolvedSdkVersion.Build / 100)
-    $sameSdkFeatureBand = $resolvedSdkVersion.Major -eq $requestedSdkVersion.Major -and $resolvedSdkVersion.Minor -eq $requestedSdkVersion.Minor -and $resolvedFeatureBand -eq $requestedFeatureBand
-
-    if (-not $sameSdkFeatureBand -or $resolvedSdkVersion -lt $requestedSdkVersion) {
-        throw "The resolved .NET SDK $resolvedSdkVersion does not satisfy global.json version $requestedSdkVersion with latestPatch roll-forward."
-    }
-
-    Write-Output "Using .NET SDK $resolvedSdkVersion selected by global.json."
+    & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json")
 
     Get-ChildItem -Path $testsPath -Directory | ForEach-Object {
         $testResultsPath = Join-Path $_.FullName "TestResults"
