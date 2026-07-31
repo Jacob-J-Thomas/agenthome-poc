@@ -22,6 +22,16 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal sealed class NullToolEvidenceSink : ICustomLoopToolEvidenceSink
 {
+    /// <summary>
+    /// Accepts evidence without persistence for explicitly isolated test compositions.
+    /// </summary>
+    /// <param name="runId">The ignored run identity.</param>
+    /// <param name="iteration">The ignored iteration.</param>
+    /// <param name="stepId">The ignored step identity.</param>
+    /// <param name="attempt">The ignored attempt number.</param>
+    /// <param name="evidence">The ignored evidence.</param>
+    /// <param name="cancellationToken">The ignored cancellation token.</param>
+    /// <returns>An already-completed task.</returns>
     public Task RecordAsync(string runId, int iteration, string stepId, int attempt, CustomLoopToolTraceEvidence evidence, CancellationToken cancellationToken = default)
     {
         return Task.CompletedTask;

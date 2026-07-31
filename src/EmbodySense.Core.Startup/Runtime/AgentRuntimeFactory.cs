@@ -30,26 +30,54 @@ using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
+/// <summary>
+/// Composes concrete clients, persistence adapters, governance services, and loop orchestration behind <see cref="AgentRuntime"/>.
+/// </summary>
+/// <remarks>
+/// Construction is side-effect free. <c>CreateAsync</c> resolves a compatible Codex runtime, performs bounded custom-run
+/// recovery, coordinates the durable conversation, and transfers ownership of all long-lived resources to the returned runtime.
+/// A failed or cancelled composition disposes the workspace execution gate before propagating the failure.
+/// </remarks>
 public sealed class AgentRuntimeFactory
 {
     private readonly IToolApprovalPrompt _approvalPrompt;
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly CodexRuntimeStatus? _codexRuntimeStatus;
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
+    /// </summary>
+    /// <param name="approvalPrompt">The interface callback used for governed tool approvals.</param>
     public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt) : this(new ToolApprovalPromptAdapter(approvalPrompt), null)
     {
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
+    /// </summary>
+    /// <param name="approvalPrompt">The interface callback used for governed tool approvals.</param>
+    /// <param name="codexRuntimeStatus">A previously verified compatible runtime status to reuse during composition.</param>
     public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt, CodexRuntimeStatus codexRuntimeStatus)
         : this(new ToolApprovalPromptAdapter(approvalPrompt), null, codexRuntimeStatus)
     {
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
+    /// </summary>
+    /// <param name="approvalPrompt">The interface callback used for governed tool approvals.</param>
+    /// <param name="conversationPublicationObserver">The observer notified after custom-loop output commits to the active conversation.</param>
     public AgentRuntimeFactory(IAgentToolApprovalPrompt approvalPrompt, IAgentRuntimeConversationPublicationObserver conversationPublicationObserver)
         : this(new ToolApprovalPromptAdapter(approvalPrompt), conversationPublicationObserver)
     {
     }
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
+    /// </summary>
+    /// <param name="approvalPrompt">The interface callback used for governed tool approvals.</param>
+    /// <param name="conversationPublicationObserver">The observer notified after custom-loop output commits to the active conversation.</param>
+    /// <param name="codexRuntimeStatus">A previously verified compatible runtime status to reuse during composition.</param>
     public AgentRuntimeFactory(
         IAgentToolApprovalPrompt approvalPrompt,
         IAgentRuntimeConversationPublicationObserver conversationPublicationObserver,
@@ -79,6 +107,17 @@ public sealed class AgentRuntimeFactory
         _codexRuntimeStatus = codexRuntimeStatus;
     }
 
+    /// <summary>
+    /// Creates a runtime and starts a fresh conversation unless recovery requires the current conversation to be preserved.
+    /// </summary>
+    /// <param name="model">The configured Codex model. Null or blank currently skips exact model-advertisement validation; public hosts must supply a nonblank value.</param>
+    /// <param name="workingDirectory">The absolute working directory.</param>
+    /// <param name="codexExecutablePath">An optional explicit Codex executable path.</param>
+    /// <param name="codexSandbox">The sandbox policy passed to the Codex app-server client.</param>
+    /// <param name="runtimeSurface">The interface surface used for attribution and actor selection.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result owns the composed inference, persistence, governance, and custom-loop resources.</returns>
+    /// <exception cref="CodexRuntimeUnavailableException">Thrown when no compatible Codex executable and configured model can be resolved.</exception>
     public Task<AgentRuntime> CreateAsync(
         string? model,
         string workingDirectory,
@@ -87,6 +126,7 @@ public sealed class AgentRuntimeFactory
         AgentRuntimeSurface runtimeSurface,
         CancellationToken cancellationToken = default)
     {
+        // TODO(#152): Enforce a nonblank model at the public runtime-composition boundary.
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
@@ -97,6 +137,18 @@ public sealed class AgentRuntimeFactory
         }, runtimeSurface, cancellationToken);
     }
 
+    /// <summary>
+    /// Creates a runtime with an explicit choice about preserving the current durable conversation.
+    /// </summary>
+    /// <param name="model">The configured Codex model. Null or blank currently skips exact model-advertisement validation; public hosts must supply a nonblank value.</param>
+    /// <param name="workingDirectory">The absolute working directory.</param>
+    /// <param name="codexExecutablePath">An optional explicit Codex executable path.</param>
+    /// <param name="codexSandbox">The sandbox policy passed to the Codex app-server client.</param>
+    /// <param name="runtimeSurface">The interface surface used for attribution and actor selection.</param>
+    /// <param name="preserveCurrentConversation">Whether to hydrate the existing transcript instead of rotating to a fresh conversation.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>A task whose result owns the composed inference, persistence, governance, and custom-loop resources.</returns>
+    /// <exception cref="CodexRuntimeUnavailableException">Thrown when no compatible Codex executable and configured model can be resolved.</exception>
     public Task<AgentRuntime> CreateAsync(
         string? model,
         string workingDirectory,
@@ -106,6 +158,7 @@ public sealed class AgentRuntimeFactory
         bool preserveCurrentConversation,
         CancellationToken cancellationToken = default)
     {
+        // TODO(#152): Enforce a nonblank model at the public runtime-composition boundary.
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,

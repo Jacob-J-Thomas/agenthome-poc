@@ -25,6 +25,14 @@ internal sealed class AdmittedMaximumAuthorityProvider : ICustomLoopToolAuthorit
 {
     private static readonly CustomLoopToolAssignment[] _catalog = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search];
 
+    /// <summary>
+    /// Produces a test-only authority snapshot that treats the immutable admitted maximum as the
+    /// current role ceiling.
+    /// </summary>
+    /// <param name="roleId">The admitted role identity.</param>
+    /// <param name="admittedMaximum">The admitted tool assignments.</param>
+    /// <param name="cancellationToken">The unused cancellation token.</param>
+    /// <returns>An already-completed task containing a valid admitted-authority snapshot.</returns>
     public Task<CustomLoopToolAuthoritySnapshot> ResolveAsync(string roleId, IReadOnlyList<CustomLoopToolAssignment> admittedMaximum, CancellationToken cancellationToken = default)
     {
         var admitted = admittedMaximum.ToArray();

@@ -6,8 +6,20 @@ using EmbodySense.Core.Persistence.Permissions;
 
 namespace EmbodySense.Core.Startup.Workspace;
 
+/// <summary>
+/// Projects workspace paths and fail-closed directory permission policy into an interface-safe status snapshot.
+/// </summary>
 public sealed class WorkspaceStatusReader
 {
+    /// <summary>
+    /// Reads current workspace initialization and permission status without modifying the workspace.
+    /// </summary>
+    /// <param name="rootPath">The workspace root, normalized to an absolute path.</param>
+    /// <returns>
+    /// A snapshot whose initialized flag requires the <c>.agent</c> directory, role document, and
+    /// permissions document to exist. Missing, invalid, or unsupported permission configuration is
+    /// represented as approval-required default access.
+    /// </returns>
     public WorkspaceStatusSnapshot Read(string rootPath)
     {
         var paths = new WorkspacePaths(rootPath);

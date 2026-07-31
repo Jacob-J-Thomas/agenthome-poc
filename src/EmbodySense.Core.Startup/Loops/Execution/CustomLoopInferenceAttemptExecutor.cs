@@ -24,8 +24,18 @@ using EmbodySense.Core.Startup.Inference;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
+/// <summary>
+/// Creates the fresh, attempt-owned inference client used for one custom-loop model attempt.
+/// </summary>
+/// <param name="options">The effective provider options, including the run-admitted model.</param>
+/// <param name="toolBroker">The bounded governed broker when the attempt admits tools; otherwise null.</param>
+/// <returns>A non-null disposable inference client that is not shared across attempts.</returns>
 public delegate ILlmInferenceClient CustomLoopInferenceClientFactory(LlmInferenceClientOptions options, IToolBroker? toolBroker);
 
+/// <summary>
+/// Executes one fresh-provider custom-loop inference attempt with run-scoped governed tool authority
+/// and mandatory correlated evidence.
+/// </summary>
 public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAttemptExecutor, ICustomLoopModelAvailability
 {
     private readonly LlmInferenceClientOptions _options;
@@ -37,6 +47,12 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     private readonly ICustomLoopToolEvidenceSink _evidenceSink;
     private readonly ToolResultRetentionStore _toolResultRetentionStore;
 
+    /// <summary>
+    /// Creates the production attempt executor over the workspace's live role authority and run evidence.
+    /// </summary>
+    /// <param name="options">The options.</param>
+    /// <param name="approvalPrompt">The approval prompt.</param>
+    /// <param name="clientFactory">The client factory.</param>
     public CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IAgentToolApprovalPrompt approvalPrompt,
@@ -56,6 +72,14 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     {
     }
 
+    /// <summary>
+    /// Creates an attempt executor over explicit authority and evidence boundaries.
+    /// </summary>
+    /// <param name="options">The options.</param>
+    /// <param name="approvalPrompt">The approval prompt.</param>
+    /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="evidenceSink">The evidence sink.</param>
+    /// <param name="clientFactory">The client factory.</param>
     public CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
@@ -93,6 +117,19 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         return new WorkspacePaths(Path.GetFullPath(options.WorkingDirectory));
     }
 
+    /// <summary>
+    /// Validates one admitted attempt, composes its optional bounded tool broker, executes a fresh
+    /// provider client, and disposes that client after the attempt.
+    /// </summary>
+    /// <param name="request">The run, model, instruction, authority, tool-budget, and correlation evidence for the attempt.</param>
+    /// <param name="cancellationToken">The token used to cancel authority resolution, governance, and provider work.</param>
+    /// <param name="providerRequestStarted">An optional callback invoked when the provider request starts.</param>
+    /// <returns>A task whose result contains canonical model output identity and consumed governed-tool count.</returns>
+    /// <remarks>
+    /// Every attempt requires a disposable client so provider transport state is not reused. Client
+    /// cleanup failures are intentionally suppressed so they cannot replace the authoritative attempt
+    /// outcome. Request, authority, and model mismatches fail before provider execution.
+    /// </remarks>
     public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -162,6 +199,12 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         }
     }
 
+    /// <summary>
+    /// Determines whether this executor can honor the exact provider and model captured at admission.
+    /// </summary>
+    /// <param name="modelSnapshot">The immutable admitted provider and model.</param>
+    /// <param name="cancellationToken">The token checked before returning the synchronous result.</param>
+    /// <returns>A task whose result is true only for a supported provider and exact configured model.</returns>
     public Task<bool> IsAvailableAsync(CustomLoopModelSnapshot modelSnapshot, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(modelSnapshot);

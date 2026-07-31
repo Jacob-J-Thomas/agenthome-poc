@@ -19,6 +19,11 @@ namespace EmbodySense.Core.Startup.Loops.Execution;
 
 internal static class CustomLoopConversationVersion
 {
+    /// <summary>
+    /// Computes the canonical logical-conversation identity from message order, role, and exact content.
+    /// </summary>
+    /// <param name="messages">The ordered logical conversation messages.</param>
+    /// <returns>The lowercase SHA-256 hash of the canonical UTF-8 JSON message projection.</returns>
     public static string Compute(IReadOnlyList<LlmMessage> messages)
     {
         ArgumentNullException.ThrowIfNull(messages);

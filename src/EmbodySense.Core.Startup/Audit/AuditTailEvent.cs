@@ -4,6 +4,18 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Startup.Audit;
 
+/// <summary>
+/// Provides a display-safe projection of one canonical audit event.
+/// </summary>
+/// <param name="TimestampUtc">The UTC timestamp recorded by the audit producer.</param>
+/// <param name="Action">The canonical action identifier.</param>
+/// <param name="Target">The resource or surface targeted by the action.</param>
+/// <param name="Outcome">The canonical outcome identifier.</param>
+/// <param name="Detail">The human-readable event detail.</param>
+/// <param name="Metadata">
+/// String projections of structured metadata. String, numeric, boolean, null, object, and array JSON
+/// values preserve their semantic text; null is represented as an empty string.
+/// </param>
 public sealed record AuditTailEvent(
     DateTimeOffset TimestampUtc,
     string Action,
