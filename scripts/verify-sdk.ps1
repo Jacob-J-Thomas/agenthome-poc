@@ -1,6 +1,9 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$GlobalJsonPath
+    [string]$GlobalJsonPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$RepositoryRoot
 )
 
 Set-StrictMode -Version Latest
@@ -91,7 +94,10 @@ function Invoke-CapturedNativeCommand {
         [string]$FilePath,
 
         [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$WorkingDirectory
     )
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -99,6 +105,7 @@ function Invoke-CapturedNativeCommand {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.WorkingDirectory = $WorkingDirectory
     $argumentText = (($Arguments | ForEach-Object { ConvertTo-NativeArgumentText -Argument $_ }) -join " ")
     $extension = [IO.Path]::GetExtension($FilePath)
 
@@ -281,7 +288,7 @@ if ($dotnetCommands.Count -eq 0) {
 $dotnetCommand = $dotnetCommands[0]
 $dotnetPath = if (-not [string]::IsNullOrWhiteSpace($dotnetCommand.Path)) { $dotnetCommand.Path } else { $dotnetCommand.Source }
 $dotnetPath = ConvertTo-SafeDiagnosticText -Text $dotnetPath
-$versionProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--version")
+$versionProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--version") -WorkingDirectory $RepositoryRoot
 
 if (-not $versionProbe.Started) {
     $message = New-SdkFailureMessage -FailureKind "dotnet command could not start" -FailureDetail "The resolved dotnet command could not be launched." -RequestedVersion $requestedVersionText -RollForward $rollForward -DotnetPath $dotnetPath -CompatibleFeatureBand $compatibleFeatureBand -VersionProbe $versionProbe -InstalledSdkProbe $null
@@ -289,7 +296,7 @@ if (-not $versionProbe.Started) {
 }
 
 if ($versionProbe.ExitCode -ne 0) {
-    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks")
+    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks") -WorkingDirectory $RepositoryRoot
     $message = New-SdkFailureMessage -FailureKind "dotnet host SDK selection failed" -FailureDetail "dotnet --version exited with code $($versionProbe.ExitCode) before a version could be parsed." -RequestedVersion $requestedVersionText -RollForward $rollForward -DotnetPath $dotnetPath -CompatibleFeatureBand $compatibleFeatureBand -VersionProbe $versionProbe -InstalledSdkProbe $installedSdkProbe
     Stop-SdkValidation -Message $message
 }
@@ -300,7 +307,7 @@ $hasSingleVersionLine = $versionLines.Count -eq 1
 $hasParsedVersion = $hasSingleVersionLine -and [Version]::TryParse($versionLines[0].Trim(), [ref]$resolvedVersion)
 
 if (-not $hasParsedVersion) {
-    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks")
+    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks") -WorkingDirectory $RepositoryRoot
     $detail = if ($hasSingleVersionLine) { "dotnet --version exited successfully but did not return a numeric SDK version." } else { "dotnet --version exited successfully but did not return exactly one non-empty version line." }
     $message = New-SdkFailureMessage -FailureKind "malformed dotnet --version output" -FailureDetail $detail -RequestedVersion $requestedVersionText -RollForward $rollForward -DotnetPath $dotnetPath -CompatibleFeatureBand $compatibleFeatureBand -VersionProbe $versionProbe -InstalledSdkProbe $installedSdkProbe
     Stop-SdkValidation -Message $message
@@ -310,14 +317,14 @@ $resolvedFeatureBand = [Math]::Floor($resolvedVersion.Build / 100)
 $sameFeatureBand = $resolvedVersion.Major -eq $requestedVersion.Major -and $resolvedVersion.Minor -eq $requestedVersion.Minor -and $resolvedFeatureBand -eq $requestedFeatureBand
 
 if (-not $sameFeatureBand) {
-    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks")
+    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks") -WorkingDirectory $RepositoryRoot
     $detail = "The resolved SDK $resolvedVersion is in feature band $($resolvedVersion.Major).$($resolvedVersion.Minor).${resolvedFeatureBand}xx; global.json requires $compatibleFeatureBand."
     $message = New-SdkFailureMessage -FailureKind "wrong SDK feature band" -FailureDetail $detail -RequestedVersion $requestedVersionText -RollForward $rollForward -DotnetPath $dotnetPath -CompatibleFeatureBand $compatibleFeatureBand -VersionProbe $versionProbe -InstalledSdkProbe $installedSdkProbe
     Stop-SdkValidation -Message $message
 }
 
 if ($resolvedVersion -lt $requestedVersion) {
-    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks")
+    $installedSdkProbe = Invoke-CapturedNativeCommand -FilePath $dotnetPath -Arguments @("--list-sdks") -WorkingDirectory $RepositoryRoot
     $detail = "The resolved SDK $resolvedVersion is older than the minimum patch $requestedVersion allowed in feature band $compatibleFeatureBand."
     $message = New-SdkFailureMessage -FailureKind "SDK patch is too old" -FailureDetail $detail -RequestedVersion $requestedVersionText -RollForward $rollForward -DotnetPath $dotnetPath -CompatibleFeatureBand $compatibleFeatureBand -VersionProbe $versionProbe -InstalledSdkProbe $installedSdkProbe
     Stop-SdkValidation -Message $message

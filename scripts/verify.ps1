@@ -35,7 +35,7 @@ function Invoke-CheckedNative {
 
 Push-Location $repoRoot
 try {
-    & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json")
+    & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json") -RepositoryRoot $repoRoot
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

@@ -107,6 +107,7 @@ function Invoke-VerifierScenario {
     $sentinelPath = Join-Path $testResultsPath "sentinel.txt"
     Set-ScenarioFile -Path $sentinelPath -Content "must survive SDK bootstrap failure"
     $callLogPath = Join-Path $scenarioRoot "dotnet-calls.log"
+    $workingDirectoryLogPath = Join-Path $scenarioRoot "dotnet-working-directories.log"
     $versionOutputPath = Join-Path $scenarioRoot "version-stdout.txt"
     $versionErrorPath = Join-Path $scenarioRoot "version-stderr.txt"
     $listOutputPath = Join-Path $scenarioRoot "list-stdout.txt"
@@ -120,6 +121,7 @@ function Invoke-VerifierScenario {
         $fakeDotnet = @'
 @echo off
 echo %*>>"%EMBODYSENSE_VERIFY_FAKE_CALL_LOG%"
+echo %CD%>>"%EMBODYSENSE_VERIFY_FAKE_WORKING_DIRECTORY_LOG%"
 if "%~1"=="--version" (
   if exist "%EMBODYSENSE_VERIFY_FAKE_VERSION_STDOUT%" type "%EMBODYSENSE_VERIFY_FAKE_VERSION_STDOUT%"
   if exist "%EMBODYSENSE_VERIFY_FAKE_VERSION_STDERR%" type "%EMBODYSENSE_VERIFY_FAKE_VERSION_STDERR%" 1>&2
@@ -141,6 +143,7 @@ exit /b 71
 @echo off
 set "PATH=$fakeBinPath"
 set "EMBODYSENSE_VERIFY_FAKE_CALL_LOG=$callLogPath"
+set "EMBODYSENSE_VERIFY_FAKE_WORKING_DIRECTORY_LOG=$workingDirectoryLogPath"
 set "EMBODYSENSE_VERIFY_FAKE_VERSION_STDOUT=$versionOutputPath"
 set "EMBODYSENSE_VERIFY_FAKE_VERSION_STDERR=$versionErrorPath"
 set "EMBODYSENSE_VERIFY_FAKE_VERSION_EXIT=$VersionExitCode"
@@ -170,11 +173,14 @@ exit /b %ERRORLEVEL%
         $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
         $standardError = $standardErrorTask.GetAwaiter().GetResult()
         $calls = if (Test-Path -LiteralPath $callLogPath) { @(Get-Content -LiteralPath $callLogPath) } else { @() }
+        $workingDirectories = if (Test-Path -LiteralPath $workingDirectoryLogPath) { @(Get-Content -LiteralPath $workingDirectoryLogPath) } else { @() }
 
         return [pscustomobject]@{
             ExitCode = $process.ExitCode
             Output = ($standardOutput + [Environment]::NewLine + $standardError).Trim()
             Calls = $calls
+            WorkingDirectories = $workingDirectories
+            RepositoryRoot = $scenarioRoot
             SentinelExists = Test-Path -LiteralPath $sentinelPath
         }
     }
@@ -203,6 +209,10 @@ function Assert-BootstrapFailureStoppedEarly {
     Assert-Contains -Actual $Result.Output -Expected "Requested SDK: 10.0.302" -Scenario $Scenario
     Assert-Contains -Actual $Result.Output -Expected "Roll-forward policy: latestPatch" -Scenario $Scenario
     Assert-Contains -Actual $Result.Output -Expected "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1" -Scenario $Scenario
+    Assert-True -Condition (@($Result.WorkingDirectories).Count -eq @($Result.Calls).Count) -Message "$Scenario did not capture one working directory for every dotnet command."
+    foreach ($workingDirectory in $Result.WorkingDirectories) {
+        Assert-True -Condition ([string]::Equals([IO.Path]::GetFullPath($workingDirectory), [IO.Path]::GetFullPath($Result.RepositoryRoot), [StringComparison]::OrdinalIgnoreCase)) -Message "$Scenario ran a dotnet command from '$workingDirectory' instead of repository root '$($Result.RepositoryRoot)'."
+    }
     $primaryErrorCount = [regex]::Matches($Result.Output, [regex]::Escape("Unable to use the .NET SDK required by this repository.")).Count
     Assert-True -Condition ($primaryErrorCount -eq 1) -Message "$Scenario reported $primaryErrorCount primary SDK errors instead of one."
 }
@@ -215,6 +225,7 @@ try {
     Assert-Contains -Actual $commandNotFound.Output -Expected "Failure kind: dotnet command not found" -Scenario "command-not-found"
     Assert-Contains -Actual $commandNotFound.Output -Expected "dotnet (not found on PATH)" -Scenario "command-not-found"
     Assert-True -Condition (@($commandNotFound.Calls).Count -eq 0) -Message "command-not-found unexpectedly invoked dotnet."
+    Assert-True -Condition (@($commandNotFound.WorkingDirectories).Count -eq 0) -Message "command-not-found unexpectedly launched a dotnet process."
 
     $observedHostError = @'
 The command could not be loaded, possibly because:
