@@ -36,7 +36,6 @@ public sealed class ConsoleAgentRuntimeHostTests
             runtimeSurface ?? AgentRuntimeSurface.Cli);
     }
 
-    // TODO(#147): Make fake-Codex readiness deterministic before the runtime version probe starts.
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace)
     {
         if (!OperatingSystem.IsWindows())
@@ -100,6 +99,10 @@ public sealed class ConsoleAgentRuntimeHostTests
             """);
         await File.WriteAllTextAsync(commandPath, """
             @echo off
+            if "%~1"=="--version" (
+                echo codex-cli 999.0.0-test
+                exit /b 0
+            )
             powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-codex.ps1" %*
             """);
 
