@@ -54,6 +54,7 @@ public sealed class WorkspacePathsTests
         var root = agentFile ? paths.AgentPath : paths.WorkspacePath;
         var siblingName = Path.GetFileName(root) + "-sibling";
         var siblingPrefixEscape = Path.Combine("..", siblingName, "file.txt");
+        var caseVariantSiblingEscape = Path.Combine("..", SwapCase(Path.GetFileName(root)), "file.txt");
         var directEscape = agentFile ? Path.Combine("..", "shared", "file.txt") : Path.Combine("..", "outside.txt");
 
         Assert.Throws<ArgumentNullException>(() => Resolve(paths, agentFile, null!));
@@ -63,6 +64,7 @@ public sealed class WorkspacePathsTests
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, workspace.File("rooted.txt")));
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, directEscape));
         Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, siblingPrefixEscape));
+        Assert.Throws<ArgumentException>(() => Resolve(paths, agentFile, caseVariantSiblingEscape));
     }
 
     [Fact]
@@ -80,4 +82,9 @@ public sealed class WorkspacePathsTests
     }
 
     private static string Resolve(WorkspacePaths paths, bool agentFile, string relativePath) => agentFile ? paths.AgentFile(relativePath) : paths.WorkspaceFile(relativePath);
+
+    private static string SwapCase(string value)
+    {
+        return new string(value.Select(character => char.IsUpper(character) ? char.ToLowerInvariant(character) : char.ToUpperInvariant(character)).ToArray());
+    }
 }

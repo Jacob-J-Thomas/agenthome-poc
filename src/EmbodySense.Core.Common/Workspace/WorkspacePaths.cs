@@ -296,9 +296,8 @@ public sealed class WorkspacePaths
         }
 
         var candidate = Path.GetFullPath(Path.Combine(rootPath, relativePath));
-        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         var rootWithSeparator = Path.EndsInDirectorySeparator(rootPath) ? rootPath : rootPath + Path.DirectorySeparatorChar;
-        if (!candidate.StartsWith(rootWithSeparator, comparison))
+        if (!candidate.StartsWith(rootWithSeparator, StringComparison.Ordinal))
         {
             throw new ArgumentException("Path must resolve to a descendant of its declared workspace boundary.", nameof(relativePath));
         }
