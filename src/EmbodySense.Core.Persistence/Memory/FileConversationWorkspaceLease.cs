@@ -7,8 +7,9 @@ namespace EmbodySense.Core.Persistence.Memory;
 /// Acquires exclusive cross-process ownership of one workspace conversation turn.
 /// </summary>
 /// <remarks>
-/// Contention retries at a bounded polling interval until cancellation. The returned stream is the ownership token and must be
-/// disposed to release the lease. Non-contention I/O and authorization failures propagate.
+/// Every <see cref="IOException"/> raised while opening the lock is treated as transient contention and retried at a bounded
+/// polling interval until cancellation. The returned stream is the ownership token and must be disposed to release the lease.
+/// Authorization and directory-creation failures propagate.
 /// </remarks>
 public sealed class FileConversationWorkspaceLease : IConversationWorkspaceLease
 {

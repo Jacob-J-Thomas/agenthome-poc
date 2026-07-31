@@ -17,10 +17,13 @@ namespace EmbodySense.Core.Persistence.Memory;
 /// Persists the current and archived conversation transcripts using strict version-1 newline-delimited JSON.
 /// </summary>
 /// <remarks>
-/// Current-conversation mutations hold a process-local gate and an exclusive cross-process file lease. Transcript appends are
-/// flushed to disk before identity metadata is atomically replaced, and compare-and-append verifies conversation identity,
-/// version, and exact prefix under the same lease. Unsupported schemas, malformed entries, invalid roles, or corrupt identity
-/// metadata throw <see cref="FormatException"/>; no migration or legacy alias is attempted.
+/// Current-conversation mutations hold a process-local gate and an exclusive cross-process file lease. Creating or rotating a
+/// conversation atomically replaces identity metadata before its transcript is created, cleared, or replaced. Because identity
+/// and transcript changes are separate file commits, cancellation or I/O failure can leave the new identity beside the prior or
+/// missing transcript. First append also creates missing identity metadata before appending, while a failed transcript append
+/// restores the prior file length. Compare-and-append verifies conversation identity, version, and exact prefix under the same
+/// lease. Syntactically malformed JSON can throw <see cref="JsonException"/>; unsupported schemas, semantically invalid entries,
+/// invalid roles, or invalid identity fields throw <see cref="FormatException"/>. No migration or legacy alias is attempted.
 /// </remarks>
 public sealed class ConversationMemoryStore : IConversationMemoryStore
 {
