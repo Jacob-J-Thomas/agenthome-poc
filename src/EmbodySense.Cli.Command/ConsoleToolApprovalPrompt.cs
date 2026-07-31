@@ -2,15 +2,29 @@ using EmbodySense.Core.Startup.Governance;
 
 namespace EmbodySense.Cli.Command;
 
+/// <summary>
+/// Projects governed tool approval requests to an interactive console.
+/// </summary>
 public sealed class ConsoleToolApprovalPrompt : IAgentToolApprovalPrompt
 {
     private readonly IAgentRuntimeConsole _client;
 
+    /// <summary>
+    /// Initializes an approval prompt.
+    /// </summary>
+    /// <param name="client">The console boundary, or <see langword="null"/> to use the process console.</param>
     public ConsoleToolApprovalPrompt(IAgentRuntimeConsole? client = null)
     {
         _client = client ?? ConsoleRuntimeTerminal.Instance;
     }
 
+    /// <summary>
+    /// Displays one approval request and accepts only <c>y</c> or <c>yes</c> as approval.
+    /// </summary>
+    /// <param name="request">The bounded governed request to present.</param>
+    /// <param name="cancellationToken">The token checked before prompting.</param>
+    /// <returns>The decision, the fixed <c>human.console</c> actor, and an audit-facing detail.</returns>
+    /// <exception cref="OperationCanceledException">The token is already cancelled.</exception>
     public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);

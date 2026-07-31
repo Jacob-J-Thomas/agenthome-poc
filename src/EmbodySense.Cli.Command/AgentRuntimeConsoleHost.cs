@@ -3,12 +3,26 @@ using EmbodySense.Core.Startup.Runtime.Models;
 
 namespace EmbodySense.Cli.Command;
 
+/// <summary>
+/// Hosts one interactive CLI conversation over a shared <see cref="AgentRuntime"/>.
+/// </summary>
+/// <remarks>
+/// The host owns console projection and serializes all runtime turns until the user requests exit,
+/// the input stream closes, or cancellation is observed before a top-level prompt read or during a turn.
+/// Synchronous console input, including a command's follow-up prompt, cannot be interrupted by the token.
+/// The host does not own or dispose the supplied runtime.
+/// </remarks>
 public sealed class AgentRuntimeConsoleHost
 {
     private const string UserPrompt = "User: ";
     private readonly AgentRuntime _runtime;
     private readonly IAgentRuntimeConsole _console;
 
+    /// <summary>
+    /// Initializes a console host for an already composed runtime.
+    /// </summary>
+    /// <param name="runtime">The session runtime that processes commands and model turns.</param>
+    /// <param name="console">The console abstraction used for all interactive input and output.</param>
     public AgentRuntimeConsoleHost(AgentRuntime runtime, IAgentRuntimeConsole console)
     {
         ArgumentNullException.ThrowIfNull(runtime);
@@ -18,6 +32,15 @@ public sealed class AgentRuntimeConsoleHost
         _console = console;
     }
 
+    /// <summary>
+    /// Runs the interactive console loop until end-of-input or an accepted exit command.
+    /// </summary>
+    /// <param name="banner">Optional text written once before the first prompt.</param>
+    /// <param name="prompt">The prompt written before each input read.</param>
+    /// <param name="verbose">Whether to enable verbose runtime context before accepting input.</param>
+    /// <param name="cancellationToken">The token checked before each top-level prompt read and passed through runtime turns; it cannot interrupt any synchronous input read and is not rechecked before a command follow-up read.</param>
+    /// <returns>Zero after an orderly exit or end-of-input.</returns>
+    /// <exception cref="OperationCanceledException">The token is observed as cancelled before a top-level prompt read or during a runtime turn.</exception>
     public async Task<int> RunAsync(
         string? banner = null,
         string prompt = UserPrompt,
