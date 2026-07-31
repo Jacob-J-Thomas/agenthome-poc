@@ -1,6 +1,7 @@
 using EmbodySense.Web;
 using EmbodySense.Core.Startup.Configuration.Models;
 using EmbodySense.Core.Startup.Governance;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
@@ -13,6 +14,7 @@ using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace EmbodySense.Web.Tests;
 
@@ -30,34 +32,42 @@ public sealed class WebApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
+            using var unauthenticatedClient = new HttpClient { BaseAddress = new Uri(options.Url) };
+            using var sessionResponse = await client.GetAsync("/api/session");
+            var session = await sessionResponse.Content.ReadFromJsonAsync<WebSessionInfo>(_jsonOptions);
+            var sessionCookie = SessionCookie(sessionResponse);
             using var beforeResponse = await client.GetAsync("/api/status");
             var before = await beforeResponse.Content.ReadFromJsonAsync<WebStatus>(_jsonOptions);
             using var indexResponse = await client.GetAsync("/");
             var index = await indexResponse.Content.ReadAsStringAsync();
             using var faviconResponse = await client.GetAsync("/favicon.svg");
-            var rejectedInit = await client.PostAsJsonAsync("/api/workspace/init", new { }, _jsonOptions);
-            var rejectedQueryTokenConfiguration = await client.GetAsync($"/api/configuration?access_token={Uri.EscapeDataString(session!.Token)}");
+            var rejectedInit = await unauthenticatedClient.PostAsJsonAsync("/api/workspace/init", new { }, _jsonOptions);
+            var rejectedQueryTokenConfiguration = await unauthenticatedClient.GetAsync("/api/configuration?access_token=rejected-query-token");
             var initRequest = new HttpRequestMessage(HttpMethod.Post, "/api/workspace/init");
-            initRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            initRequest.Headers.Add("Cookie", sessionCookie);
             initRequest.Content = JsonContent.Create(new { }, options: _jsonOptions);
             var initialized = await client.SendAsync(initRequest);
             var after = await initialized.Content.ReadFromJsonAsync<WebStatus>(_jsonOptions);
             var approvalsRequest = new HttpRequestMessage(HttpMethod.Get, "/api/approvals/pending");
-            approvalsRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            approvalsRequest.Headers.Add("Cookie", sessionCookie);
             var approvalsResponse = await client.SendAsync(approvalsRequest);
             var approvals = await approvalsResponse.Content.ReadFromJsonAsync<WebPendingApproval[]>(_jsonOptions);
-            var rejectedConfiguration = await client.GetAsync("/api/configuration");
+            var rejectedConfiguration = await unauthenticatedClient.GetAsync("/api/configuration");
             var configurationRequest = new HttpRequestMessage(HttpMethod.Get, "/api/configuration");
-            configurationRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            configurationRequest.Headers.Add("Cookie", sessionCookie);
             var configurationResponse = await client.SendAsync(configurationRequest);
             var configuration = await configurationResponse.Content.ReadFromJsonAsync<WorkspaceConfigurationSnapshot>(_jsonOptions);
             var missingApproval = new HttpRequestMessage(HttpMethod.Post, "/api/approvals/missing");
-            missingApproval.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            missingApproval.Headers.Add("Cookie", sessionCookie);
             missingApproval.Content = JsonContent.Create(new WebApprovalDecision(true, null), options: _jsonOptions);
             var missingApprovalResponse = await client.SendAsync(missingApproval);
 
             Assert.False(before!.Initialized);
+            Assert.False(string.IsNullOrWhiteSpace(session!.GenerationId));
+            Assert.DoesNotContain(app.Services.GetRequiredService<WebSessionSecurity>().Token, await sessionResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            Assert.Contains("HttpOnly", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("SameSite=Strict", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("no-store", sessionResponse.Headers.CacheControl?.ToString());
             Assert.True(beforeResponse.Headers.TryGetValues("Content-Security-Policy", out var csp));
             Assert.Equal("default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'", csp.Single());
             Assert.DoesNotContain("ws://", csp.Single(), StringComparison.Ordinal);
@@ -94,21 +104,32 @@ public sealed class WebApiControllerTests
     }
 
     [Fact]
-    public async Task Hub_negotiate_requires_session_token()
+    public async Task Hub_negotiate_requires_session_cookie_and_rejects_query_credentials()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        using var logs = new RecordingLoggerProvider();
+        await using var app = CreateApp(workspace.RootPath, out var options, logs);
         await app.StartAsync();
 
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            using var unauthenticatedClient = new HttpClient { BaseAddress = new Uri(options.Url) };
             var rejected = await client.PostAsync("/hubs/session/negotiate?negotiateVersion=1", null);
-            var accepted = await client.PostAsync($"/hubs/session/negotiate?negotiateVersion=1&access_token={Uri.EscapeDataString(token)}", null);
+            using var sessionResponse = await client.GetAsync("/api/session");
+            var currentToken = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var cookieRequest = new HttpRequestMessage(HttpMethod.Post, "/hubs/session/negotiate?negotiateVersion=1");
+            cookieRequest.Headers.Add("Cookie", SessionCookie(sessionResponse));
+            var accepted = await client.SendAsync(cookieRequest);
+            var rejectedLegacyQuery = await unauthenticatedClient.GetAsync($"/api/configuration?access_token={Uri.EscapeDataString(currentToken)}");
+            var rejectedNegotiateQuery = await unauthenticatedClient.PostAsync($"/hubs/session/negotiate?negotiateVersion=1&access_token={Uri.EscapeDataString(currentToken)}", null);
 
             Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
             Assert.True(accepted.IsSuccessStatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedLegacyQuery.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedNegotiateQuery.StatusCode);
+            Assert.NotEmpty(logs.Messages);
+            Assert.DoesNotContain(logs.Messages, message => message.Contains(currentToken, StringComparison.Ordinal));
         }
         finally
         {
@@ -126,7 +147,7 @@ public sealed class WebApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var coordinator = app.Services.GetRequiredService<WebApprovalCoordinator>();
             coordinator.RegisterOwnerConnection("connection-1");
             using var scope = coordinator.BeginApprovalScope("connection-1");
@@ -163,6 +184,12 @@ public sealed class WebApiControllerTests
             "Needs approval.");
     }
 
+    private static string SessionCookie(HttpResponseMessage response)
+    {
+        var setCookie = response.Headers.GetValues("Set-Cookie").Single();
+        return setCookie.Split(';', 2)[0];
+    }
+
     private static async Task WaitForPendingAsync(WebApprovalCoordinator coordinator, string ownerConnectionId)
     {
         for (var i = 0; i < 20; i++)
@@ -178,12 +205,17 @@ public sealed class WebApiControllerTests
         throw new TimeoutException("Approval request was not queued.");
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options)
+    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoggerProvider? loggerProvider = null)
     {
         var port = GetFreePort();
         var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
+        if (loggerProvider is not null)
+        {
+            builder.Logging.AddProvider(loggerProvider);
+        }
+
         return BuildApp(builder);
     }
 
@@ -208,5 +240,41 @@ public sealed class WebApiControllerTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private sealed class RecordingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> _messages = [];
+
+        public IReadOnlyCollection<string> Messages => _messages.ToArray();
+
+        public ILogger CreateLogger(string categoryName)
+        {
+            return new RecordingLogger(categoryName, _messages);
+        }
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class RecordingLogger(string categoryName, ConcurrentQueue<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull
+            {
+                return null;
+            }
+
+            public bool IsEnabled(LogLevel logLevel)
+            {
+                return true;
+            }
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                var renderedException = exception is null ? string.Empty : $"{Environment.NewLine}{exception}";
+                messages.Enqueue($"{categoryName}: {formatter(state, exception)}{renderedException}");
+            }
+        }
     }
 }

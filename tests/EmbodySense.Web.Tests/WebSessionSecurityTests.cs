@@ -12,14 +12,17 @@ public sealed class WebSessionSecurityTests
 
         Assert.Equal(64, session.Token.Length);
         Assert.True(session.Token.All(Uri.IsHexDigit));
+        Assert.Equal(32, session.GenerationId.Length);
     }
 
     [Fact]
-    public void HasValidToken_accepts_header_or_hub_query_token()
+    public void HasValidToken_accepts_cookie_or_header_and_rejects_query_token()
     {
-        var session = new WebSessionSecurity("secret");
+        var session = new WebSessionSecurity("secret", "generation");
         var header = CreateContext(HttpMethods.Post, "/api/workspace/init");
         header.Request.Headers[WebSessionSecurity.HeaderName] = "secret";
+        var cookie = CreateContext(HttpMethods.Get, "/hubs/session");
+        cookie.Request.Headers.Cookie = $"{WebSessionSecurity.CookieName}=secret";
         var query = CreateContext(HttpMethods.Get, "/hubs/session");
         query.Request.QueryString = QueryString.Create("access_token", "secret");
         var apiQuery = CreateContext(HttpMethods.Get, "/api/configuration");
@@ -27,7 +30,8 @@ public sealed class WebSessionSecurityTests
         var denied = CreateContext(HttpMethods.Post, "/api/workspace/init");
 
         Assert.True(session.HasValidToken(header.Request));
-        Assert.True(session.HasValidToken(query.Request));
+        Assert.True(session.HasValidToken(cookie.Request));
+        Assert.False(session.HasValidToken(query.Request));
         Assert.False(session.HasValidToken(apiQuery.Request));
         Assert.False(session.HasValidToken(denied.Request));
     }

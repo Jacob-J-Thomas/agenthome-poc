@@ -36,13 +36,15 @@ public sealed class WebClientFlowTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var index = await client.GetStringAsync("/");
             var script = await client.GetStringAsync("/app.js");
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
+            using var sessionResponse = await client.GetAsync("/api/session");
+            var session = await sessionResponse.Content.ReadFromJsonAsync<WebSessionInfo>(_jsonOptions);
             var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
             var rejectedConfig = await client.GetAsync("/api/configuration");
 
             Assert.Contains("EmbodySense", index);
             Assert.Contains("JsonSignalRConnection", script);
-            Assert.False(string.IsNullOrWhiteSpace(session!.Token));
+            Assert.False(string.IsNullOrWhiteSpace(session!.GenerationId));
+            Assert.Contains("HttpOnly", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
             Assert.False(status!.Initialized);
             Assert.Equal("web", status.Client);
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedConfig.StatusCode);
@@ -64,8 +66,8 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
-            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
+            var sessionCookie = await BootstrapSessionCookieAsync(client);
+            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, sessionCookie);
 
             var initializeMessages = await signalr.InvokeAndCollectAsync("InitializeWorkspace");
             var initializeResult = Deserialize<WebStatus>(GetCompletionResult(initializeMessages));
@@ -122,8 +124,8 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
-            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
+            var sessionCookie = await BootstrapSessionCookieAsync(client);
+            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, sessionCookie);
             var input = new LoopRunInvocationInput("loop-approval", 1, new string('a', 64), "invoke-concurrent-approval", "prompt");
 
             var (invocationCompletion, decisionCompletion) = await signalr.InvokeLoopAndApproveAsync(input);
@@ -142,7 +144,7 @@ public sealed class WebClientFlowTests
     }
 
     [Fact]
-    public async Task Direct_websocket_rejects_missing_or_invalid_session_token()
+    public async Task Direct_websocket_rejects_missing_or_invalid_session_cookie()
     {
         using var workspace = new TestWorkspace();
         await using var app = CreateApp(workspace.RootPath, out var options);
@@ -151,7 +153,7 @@ public sealed class WebClientFlowTests
         try
         {
             await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, null));
-            await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, "wrong-token"));
+            await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, $"{WebSessionSecurity.CookieName}=wrong-token"));
         }
         finally
         {
@@ -212,10 +214,22 @@ public sealed class WebClientFlowTests
         return port;
     }
 
-    private static async Task ConnectWebSocketAsync(string baseUrl, string? sessionToken)
+    private static async Task ConnectWebSocketAsync(string baseUrl, string? sessionCookie)
     {
         using var socket = new ClientWebSocket();
-        await socket.ConnectAsync(CreateHubUri(baseUrl, sessionToken), CancellationToken.None);
+        if (!string.IsNullOrWhiteSpace(sessionCookie))
+        {
+            socket.Options.Cookies = new CookieContainer();
+            socket.Options.Cookies.SetCookies(new Uri(baseUrl), sessionCookie);
+        }
+        await socket.ConnectAsync(CreateHubUri(baseUrl), CancellationToken.None);
+    }
+
+    private static async Task<string> BootstrapSessionCookieAsync(HttpClient client)
+    {
+        using var response = await client.GetAsync("/api/session");
+        response.EnsureSuccessStatusCode();
+        return response.Headers.GetValues("Set-Cookie").Single().Split(';', 2)[0];
     }
 
     private static WebProcess StartWebProcess(string rootPath, int port)
@@ -400,10 +414,12 @@ public sealed class WebClientFlowTests
         private readonly StringBuilder _incoming = new();
         private int _nextInvocationId;
 
-        public static async Task<SignalRTestClient> ConnectAsync(string baseUrl, string sessionToken)
+        public static async Task<SignalRTestClient> ConnectAsync(string baseUrl, string sessionCookie)
         {
             var client = new SignalRTestClient();
-            await client._socket.ConnectAsync(CreateHubUri(baseUrl, sessionToken), CancellationToken.None);
+            client._socket.Options.Cookies = new CookieContainer();
+            client._socket.Options.Cookies.SetCookies(new Uri(baseUrl), sessionCookie);
+            await client._socket.ConnectAsync(CreateHubUri(baseUrl), CancellationToken.None);
             await client.SendRawAsync(new { protocol = "json", version = 1 }, CancellationToken.None);
             await client.WaitForHandshakeAsync();
             return client;
@@ -546,11 +562,6 @@ public sealed class WebClientFlowTests
             _incoming.Append(text[start..]);
         }
 
-        private static Uri CreateHubUri(string baseUrl, string sessionToken)
-        {
-            return WebClientFlowTests.CreateHubUri(baseUrl, sessionToken);
-        }
-
         private static bool IsCompletionFor(JsonElement message, string invocationId)
         {
             return message.TryGetProperty("type", out var type)
@@ -560,14 +571,14 @@ public sealed class WebClientFlowTests
         }
     }
 
-    private static Uri CreateHubUri(string baseUrl, string? sessionToken)
+    private static Uri CreateHubUri(string baseUrl)
     {
         var baseUri = new Uri(baseUrl);
         var builder = new UriBuilder(baseUri)
         {
             Scheme = baseUri.Scheme == "https" ? "wss" : "ws",
             Path = "/hubs/session",
-            Query = string.IsNullOrEmpty(sessionToken) ? "" : "access_token=" + Uri.EscapeDataString(sessionToken)
+            Query = ""
         };
         return builder.Uri;
     }

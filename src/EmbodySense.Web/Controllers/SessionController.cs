@@ -6,10 +6,10 @@ using Microsoft.AspNetCore.Mvc;
 namespace EmbodySense.Web.Controllers;
 
 /// <summary>
-/// Bootstraps an anonymous localhost browser with the process-local session bearer token.
+/// Bootstraps an anonymous localhost browser with a process-local session cookie.
 /// </summary>
 /// <remarks>
-/// This endpoint validates the request host and optional origin before returning the token. It is
+/// This endpoint validates the request host and optional origin before issuing an HttpOnly cookie. It is
 /// a POC localhost bootstrap boundary rather than a hardened user-pairing or remote-authentication flow.
 /// </remarks>
 [ApiController]
@@ -31,9 +31,9 @@ public sealed class SessionController : ControllerBase
     }
 
     /// <summary>
-    /// Returns the process-local bearer token to an allowed localhost host and origin.
+    /// Establishes the process-local session cookie for an allowed localhost host and origin.
     /// </summary>
-    /// <returns>HTTP 200 with the opaque token, or HTTP 401 when host or origin validation fails.</returns>
+    /// <returns>HTTP 200 with a non-secret process generation identifier, or HTTP 401 when host or origin validation fails.</returns>
     [HttpGet]
     public ActionResult<WebSessionInfo> Get()
     {
@@ -42,6 +42,18 @@ public sealed class SessionController : ControllerBase
             return Unauthorized();
         }
 
-        return Ok(new WebSessionInfo(_sessionSecurity.Token));
+        Response.Headers.CacheControl = "no-store";
+        Response.Cookies.Append(
+            WebSessionSecurity.CookieName,
+            _sessionSecurity.Token,
+            new CookieOptions
+            {
+                HttpOnly = true,
+                IsEssential = true,
+                Path = "/",
+                SameSite = SameSiteMode.Strict,
+                Secure = Request.IsHttps
+            });
+        return Ok(new WebSessionInfo(_sessionSecurity.GenerationId));
     }
 }
