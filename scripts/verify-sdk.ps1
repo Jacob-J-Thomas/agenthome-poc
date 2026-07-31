@@ -256,7 +256,8 @@ function Stop-SdkValidation {
         [string]$Message
     )
 
-    Write-Error -Message $Message -ErrorId "RepositorySdkValidationFailed" -Category InvalidOperation -ErrorAction Stop
+    [Console]::Error.WriteLine($Message)
+    exit 1
 }
 
 $globalJson = Get-Content -LiteralPath $GlobalJsonPath -Raw | ConvertFrom-Json
@@ -323,3 +324,4 @@ if ($resolvedVersion -lt $requestedVersion) {
 }
 
 Write-Output "Using .NET SDK $resolvedVersion selected by global.json."
+exit 0

@@ -199,6 +199,7 @@ function Assert-BootstrapFailureStoppedEarly {
     Assert-NotContains -Actual $callText -Unexpected "test" -Scenario $Scenario
     Assert-NotContains -Actual $callText -Unexpected "format" -Scenario $Scenario
     Assert-NotContains -Actual $Result.Output -Unexpected "System.Object[]" -Scenario $Scenario
+    Assert-NotContains -Actual $Result.Output -Unexpected "Write-Error:" -Scenario $Scenario
     Assert-Contains -Actual $Result.Output -Expected "Requested SDK: 10.0.302" -Scenario $Scenario
     Assert-Contains -Actual $Result.Output -Expected "Roll-forward policy: latestPatch" -Scenario $Scenario
     Assert-Contains -Actual $Result.Output -Expected "powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1" -Scenario $Scenario

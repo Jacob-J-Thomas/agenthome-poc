@@ -36,6 +36,9 @@ function Invoke-CheckedNative {
 Push-Location $repoRoot
 try {
     & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json")
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 
     Get-ChildItem -Path $testsPath -Directory | ForEach-Object {
         $testResultsPath = Join-Path $_.FullName "TestResults"
