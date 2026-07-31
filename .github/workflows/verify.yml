@@ -22,6 +22,10 @@ jobs:
         shell: pwsh
         run: ./tests/scripts/verify-sdk-diagnostics.tests.ps1
 
+      - name: Test bounded verifier contracts
+        shell: pwsh
+        run: ./tests/scripts/verify-bounded-phases.tests.ps1
+
       - name: Install pinned .NET SDK
         uses: actions/setup-dotnet@v6
         with:

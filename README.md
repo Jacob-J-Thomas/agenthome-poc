@@ -148,11 +148,19 @@ From the repository root:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1
 ```
 
-The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. Pull requests also run the required `browser-e2e` check on a Windows runner. That deterministic suite starts the Web host and controlled Codex app-server fixture as external processes, then exercises default chat, active-transcript restoration across a server-process restart, reconnect behavior through a fresh authenticated page, system-loop locking, custom-loop authoring and evidence, governed approval decisions, provider/runtime failures, and diagnostic capture through installed Edge or Chrome. It remains opt-in locally because local browser GPU startup is host-specific:
+The canonical verifier defaults to the `Release` configuration, matching the required GitHub workflows. Use `-Configuration Debug` only when explicitly investigating a debug build. The verify script first enforces the SDK version and roll-forward policy from `global.json`, then builds the `net10.0` solution, installs the locked frontend dependencies with `npm ci`, runs the frontend lint, format, and Node test gates, runs the .NET tests with current-run coverage collection, and verifies package-level line coverage for every production assembly. Pull requests also run the required `browser-e2e` check on a Windows runner. That deterministic suite starts the Web host and controlled Codex app-server fixture as external processes, then exercises default chat, active-transcript restoration across a server-process restart, reconnect behavior through a fresh authenticated page, system-loop locking, custom-loop authoring and evidence, governed approval decisions, provider/runtime failures, and diagnostic capture through installed Edge or Chrome. It remains opt-in locally because local browser GPU startup is host-specific:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Configuration Release -RunBrowserE2E -BrowserE2EOnly
 ```
+
+The required verifier runs the `PullRequest` tier: it keeps a bounded maximum-artifact validation, canonical round-trip, storage, monitor, reload, inspection, and quota proof while excluding only tests explicitly marked `VerificationTier=Stress`. The adversarial every-transition/canonical-order matrix and 10,000-operation capacity case remain owned by the scheduled `Verification Stress` workflow and can be run locally with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Configuration Release -VerificationTier Stress
+```
+
+Both tiers emit phase progress, elapsed-time, timeout, last-completed-phase, and machine/context diagnostics. Exact stress filters and no-tests-as-error settings prevent the scheduled evidence from silently disappearing. See [docs/VERIFICATION.md](docs/VERIFICATION.md) for tier ownership, budgets, cancellation behavior, and the baseline ledger.
 
 The browser-only command fails if the installed-browser scenarios are skipped or the browser prerequisite is missing. Unexpected page, console, network, and server failures also fail the suite. On failure the suite writes the TRX plus browser screenshot, DOM, console/network diagnostics, process output, and Web-server output under `tests\EmbodySense.E2ETests\TestResults\BrowserE2E`; the pull-request workflow uploads that directory as `browser-e2e-diagnostics`.
 

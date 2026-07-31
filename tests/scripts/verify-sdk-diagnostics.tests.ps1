@@ -92,7 +92,9 @@ function Invoke-VerifierScenario {
         [AllowEmptyString()]
         [string]$ListStandardError = "",
 
-        [int]$ListExitCode = 0
+        [int]$ListExitCode = 0,
+
+        [string[]]$VerifierArguments = @()
     )
 
     $scenarioRoot = Join-Path $tempRoot $Name
@@ -102,6 +104,7 @@ function Invoke-VerifierScenario {
     [void](New-Item -ItemType Directory -Path $scriptsPath, $testResultsPath, $fakeBinPath -Force)
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verify-sdk.ps1") -Destination $scriptsPath
+    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\verification-phase.ps1") -Destination $scriptsPath
     Copy-Item -LiteralPath (Join-Path $repoRoot "global.json") -Destination $scenarioRoot
 
     $sentinelPath = Join-Path $testResultsPath "sentinel.txt"
@@ -138,6 +141,7 @@ exit /b 71
     }
 
     $verifierPath = Join-Path $scriptsPath "verify.ps1"
+    $verifierArgumentText = (($VerifierArguments | ForEach-Object { '"{0}"' -f $_ }) -join " ")
     $launcherPath = Join-Path $scenarioRoot "run-verifier.cmd"
     $launcher = @"
 @echo off
@@ -150,7 +154,7 @@ set "EMBODYSENSE_VERIFY_FAKE_VERSION_EXIT=$VersionExitCode"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_STDOUT=$listOutputPath"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_STDERR=$listErrorPath"
 set "EMBODYSENSE_VERIFY_FAKE_LIST_EXIT=$ListExitCode"
-"$powershellPath" -NoProfile -ExecutionPolicy Bypass -File "$verifierPath" -SkipCoverage
+"$powershellPath" -NoProfile -ExecutionPolicy Bypass -File "$verifierPath" -SkipCoverage $verifierArgumentText
 exit /b %ERRORLEVEL%
 "@
     Set-ScenarioFile -Path $launcherPath -Content $launcher
@@ -278,11 +282,17 @@ Requested SDK version: 10.0.302
         Assert-True -Condition ($compatible.ExitCode -ne 0) -Message "$scenario should stop at the fake build sentinel."
         Assert-True -Condition (-not $compatible.SentinelExists) -Message "$scenario did not proceed to normal TestResults cleanup."
         Assert-Contains -Actual $compatible.Output -Expected "Using .NET SDK $compatibleVersion selected by global.json." -Scenario $scenario
-        Assert-Contains -Actual ($compatible.Calls -join [Environment]::NewLine) -Expected "build" -Scenario $scenario
+        Assert-True -Condition (($compatible.Calls -join [Environment]::NewLine).Contains("build")) -Message "$scenario did not reach the fake build sentinel. Verifier output: $($compatible.Output)"
+        Assert-Contains -Actual ($compatible.Calls -join [Environment]::NewLine) -Expected '"-c" "Release"' -Scenario $scenario
         Assert-NotContains -Actual $compatible.Output -Unexpected "Unable to use the .NET SDK required by this repository." -Scenario $scenario
     }
 
-    Write-Output "Verifier SDK diagnostic process tests passed (8 failure scenarios, 2 compatible SDK scenarios)."
+    $explicitDebug = Invoke-VerifierScenario -Name "explicit-debug" -VersionStandardOutput "10.0.302" -VerifierArguments @("-Configuration", "Debug")
+    Assert-True -Condition ($explicitDebug.ExitCode -ne 0) -Message "explicit-debug should stop at the fake build sentinel."
+    Assert-True -Condition (-not $explicitDebug.SentinelExists) -Message "explicit-debug did not proceed to normal TestResults cleanup."
+    Assert-Contains -Actual ($explicitDebug.Calls -join [Environment]::NewLine) -Expected '"-c" "Debug"' -Scenario "explicit-debug"
+
+    Write-Output "Verifier SDK diagnostic process tests passed (8 failure scenarios, 3 compatible SDK scenarios)."
 }
 finally {
     $resolvedTempRoot = [IO.Path]::GetFullPath($tempRoot)
