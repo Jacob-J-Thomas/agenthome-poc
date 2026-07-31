@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using System.Text.Json;
 using EmbodySense.Core.Common.Workspace;
@@ -76,7 +77,7 @@ public sealed class PermissionsDocument
                 new DeniedFileSystemPermission { Path = ".agent/hooks", Operations = AllOperations() }
             ]
         };
-        document.EnsureToolResponseInspectionApproval();
+        document.EnsureToolResponseInspectionApproval(paths);
         return document;
     }
 
@@ -100,20 +101,47 @@ public sealed class PermissionsDocument
     public string ToJson() => JsonSerializer.Serialize(this, PermissionsJson.Options);
 
     /// <summary>
-    /// Adds a human-approval rule for retained tool-response read and list operations that are not already covered by an approved-path entry.
+    /// Ensures retained tool-response read and list operations are covered only by exact-path rules that require human approval.
     /// </summary>
-    /// <returns><see langword="true"/> when a missing-operation rule was appended; <see langword="false"/> when existing approved-path entries already cover both operations, regardless of their approval requirement.</returns>
-    public bool EnsureToolResponseInspectionApproval()
+    /// <param name="paths">The canonical workspace paths used to resolve permission-rule paths.</param>
+    /// <returns><see langword="true"/> when non-approval coverage was removed or approval-required coverage was added; otherwise, <see langword="false"/>.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="paths"/> is <see langword="null"/>.</exception>
+    public bool EnsureToolResponseInspectionApproval(WorkspacePaths paths)
     {
-        // TODO(#139): Treat operations covered only by non-approval rules as missing so retained-response inspection remains approval-gated.
-        var coveredOperations = Approved
-            .Where(entry => PathEquals(entry.Path, ToolResponseInspectionPath))
+        ArgumentNullException.ThrowIfNull(paths);
+
+        var inspectionOperations = ReadOnlyOperations();
+        var inspectionOperationSet = inspectionOperations.ToHashSet();
+        var emptiedEntries = new List<ApprovedFileSystemPermission>();
+        var changed = false;
+        foreach (var entry in Approved.Where(entry => !entry.RequiresApproval && PathEquals(paths.RootPath, entry.Path, ToolResponseInspectionPath)))
+        {
+            var removedOperations = entry.Operations.RemoveAll(inspectionOperationSet.Contains);
+            if (removedOperations == 0)
+            {
+                continue;
+            }
+
+            changed = true;
+            if (entry.Operations.Count == 0)
+            {
+                emptiedEntries.Add(entry);
+            }
+        }
+
+        foreach (var entry in emptiedEntries)
+        {
+            Approved.Remove(entry);
+        }
+
+        var approvalCoveredOperations = Approved
+            .Where(entry => entry.RequiresApproval && PathEquals(paths.RootPath, entry.Path, ToolResponseInspectionPath))
             .SelectMany(entry => entry.Operations)
             .ToHashSet();
-        var missingOperations = ReadOnlyOperations().Where(operation => !coveredOperations.Contains(operation)).ToList();
+        var missingOperations = inspectionOperations.Where(operation => !approvalCoveredOperations.Contains(operation)).ToList();
         if (missingOperations.Count == 0)
         {
-            return false;
+            return changed;
         }
 
         Approved.Add(new ApprovedFileSystemPermission
@@ -145,14 +173,14 @@ public sealed class PermissionsDocument
         return [FileSystemOperation.List, FileSystemOperation.Read, FileSystemOperation.Create, FileSystemOperation.Append, FileSystemOperation.Modify];
     }
 
-    private static bool PathEquals(string left, string right)
+    private static bool PathEquals(string workspaceRootPath, string left, string right)
     {
-        return string.Equals(NormalizePath(left), NormalizePath(right), StringComparison.Ordinal);
+        return string.Equals(ResolveRulePath(workspaceRootPath, left), ResolveRulePath(workspaceRootPath, right), FileSystemPathComparer.GetPathComparison());
     }
 
-    private static string NormalizePath(string value)
+    private static string ResolveRulePath(string workspaceRootPath, string rulePath)
     {
-        var normalized = value.Replace('\\', '/').TrimEnd('/');
-        return normalized.StartsWith("./", StringComparison.Ordinal) ? normalized[2..] : normalized;
+        var effectiveRulePath = Path.IsPathRooted(rulePath) ? rulePath : Path.Combine(workspaceRootPath, rulePath);
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(effectiveRulePath));
     }
 }

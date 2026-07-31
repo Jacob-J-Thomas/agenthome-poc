@@ -57,4 +57,29 @@ public sealed class DirectoryPermissionPolicyTests
         Assert.Equal(PermissionDecision.RequiresApproval, evaluation.Decision);
         Assert.Equal("generated", evaluation.MatchedPath);
     }
+
+    [Fact]
+    public void EvaluateDirectory_requires_approval_after_nonapproval_inspection_coverage_is_upgraded()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var document = new PermissionsDocument
+        {
+            Approved =
+            [
+                new ApprovedFileSystemPermission
+                {
+                    Path = PermissionsDocument.ToolResponseInspectionPath,
+                    Operations = [FileSystemOperation.List, FileSystemOperation.Read, FileSystemOperation.Modify],
+                    RequiresApproval = false
+                }
+            ]
+        };
+        Assert.True(document.EnsureToolResponseInspectionApproval(paths));
+        var policy = DirectoryPermissionPolicy.Create(paths, document);
+
+        Assert.Equal(PermissionDecision.RequiresApproval, policy.EvaluateDirectory(workspace.File(".agent", "logs", "tool-responses"), FileSystemOperation.List).Decision);
+        Assert.Equal(PermissionDecision.RequiresApproval, policy.EvaluateDirectory(workspace.File(".agent", "logs", "tool-responses"), FileSystemOperation.Read).Decision);
+        Assert.Equal(PermissionDecision.Allow, policy.EvaluateDirectory(workspace.File(".agent", "logs", "tool-responses"), FileSystemOperation.Modify).Decision);
+    }
 }
