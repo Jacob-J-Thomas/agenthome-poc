@@ -73,11 +73,39 @@ public sealed class AgentRuntimeFactoryTests
         var fakeCodex = await CreateFakeCodexExecutableAsync(workspace);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
-            null,
+            "test-model",
             workspace.RootPath,
             fakeCodex,
             "read-only",
             null!));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task CreateAsync_rejects_missing_models_before_runtime_probing(string? model)
+    {
+        using var workspace = new TestWorkspace();
+        var factory = new AgentRuntimeFactory(new RejectingApprovalPrompt());
+        var unavailableExecutable = workspace.File("must-not-be-probed.cmd");
+
+        var freshConversationException = await Assert.ThrowsAnyAsync<ArgumentException>(() => factory.CreateAsync(
+            model!,
+            workspace.RootPath,
+            unavailableExecutable,
+            "read-only",
+            AgentRuntimeSurface.Cli));
+        var preservedConversationException = await Assert.ThrowsAnyAsync<ArgumentException>(() => factory.CreateAsync(
+            model!,
+            workspace.RootPath,
+            unavailableExecutable,
+            "read-only",
+            AgentRuntimeSurface.Cli,
+            preserveCurrentConversation: true));
+
+        Assert.Equal("model", freshConversationException.ParamName);
+        Assert.Equal("model", preservedConversationException.ParamName);
     }
 
     [Fact]
@@ -402,7 +430,7 @@ public sealed class AgentRuntimeFactoryTests
     {
         var now = DateTimeOffset.UtcNow;
         var prompt = input.InvocationPrompt ?? string.Empty;
-        var requestHash = CustomLoopInvocationRequestHash.Compute(input.OperationId, input.LoopId, input.ExpectedDefinitionVersion, input.ExpectedDefinitionHash, WorkspaceActors.Cli, AgentRuntimeSurface.Cli.Id, "default-assistant", prompt, LlmInferenceSurface.OpenAiCodex.ToString(), null);
+        var requestHash = CustomLoopInvocationRequestHash.Compute(input.OperationId, input.LoopId, input.ExpectedDefinitionVersion, input.ExpectedDefinitionHash, WorkspaceActors.Cli, AgentRuntimeSurface.Cli.Id, "default-assistant", prompt, LlmInferenceSurface.OpenAiCodex.ToString(), "test-model");
         var pending = new CustomLoopInvocationOperation(
             CustomLoopInvocationOperation.CurrentSchemaVersion,
             input.OperationId,
@@ -415,7 +443,7 @@ public sealed class AgentRuntimeFactoryTests
             "default-assistant",
             CustomLoopInvocationRequestHash.ComputePromptHash(prompt),
             LlmInferenceSurface.OpenAiCodex.ToString(),
-            null,
+            "test-model",
             CustomLoopInvocationBindingState.Unbound,
             null,
             null,
@@ -774,7 +802,7 @@ public sealed class AgentRuntimeFactoryTests
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null, string? codexPath = null)
     {
         return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
-            null,
+            "test-model",
             workspace.RootPath,
             codexPath ?? await CreateFakeCodexExecutableAsync(workspace),
             "read-only",

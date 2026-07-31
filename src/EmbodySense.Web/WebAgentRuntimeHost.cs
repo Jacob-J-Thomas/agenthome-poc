@@ -647,6 +647,12 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         if (_runtime is null)
         {
+            if (string.IsNullOrWhiteSpace(_options.Model))
+            {
+                throw new ArgumentException("Web runtime composition requires a nonblank configured model.");
+            }
+
+            var configuredModel = _options.Model;
             var codexRuntimeStatus = await GetCodexRuntimeStatusAsync(cancellationToken);
             if (codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
             {
@@ -658,7 +664,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 : new AgentRuntimeFactory(_approvalCoordinator, _conversationPublicationObserver, codexRuntimeStatus);
             var preserveCurrentConversation = _preserveCurrentConversationOnNextRuntimeCreation;
             _runtime = await factory.CreateAsync(
-                _options.Model,
+                configuredModel,
                 _options.WorkingDirectory,
                 _options.CodexExecutablePath,
                 _options.CodexSandbox,

@@ -465,7 +465,7 @@ public sealed class WebAgentRuntimeHostTests
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: 30_000);
         var approvals = new WebApprovalCoordinator();
         approvals.RegisterOwnerConnection("connection-1");
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
         await using var host = new WebAgentRuntimeHost(options, approvals);
         await host.InitializeWorkspaceAsync();
         var definition = await CreateInvocationLoopAsync(workspace);
@@ -544,7 +544,7 @@ public sealed class WebAgentRuntimeHostTests
     public async Task Evidence_retries_recovery_after_retained_runtime_startup_schema_failure()
     {
         using var workspace = new TestWorkspace();
-        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         await using var host = CreateHost(workspace.RootPath, codexPath);
         await host.InitializeWorkspaceAsync();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -568,7 +568,7 @@ public sealed class WebAgentRuntimeHostTests
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: 30_000);
         var approvals = new WebApprovalCoordinator();
         approvals.RegisterOwnerConnection("connection-1");
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
         var host = new WebAgentRuntimeHost(options, approvals);
         await host.InitializeWorkspaceAsync();
         var definition = await CreateInvocationLoopAsync(workspace);
@@ -595,7 +595,7 @@ public sealed class WebAgentRuntimeHostTests
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: -1);
         var approvals = new WebApprovalCoordinator();
         approvals.RegisterOwnerConnection("connection-1");
-        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--codex-path", codexPath]);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
         await using var host = new WebAgentRuntimeHost(options, approvals);
         await host.InitializeWorkspaceAsync();
         await File.WriteAllTextAsync(workspace.File("approval-only-note.txt"), "content-that-must-not-be-returned");
@@ -621,17 +621,12 @@ public sealed class WebAgentRuntimeHostTests
         Assert.Contains("\"approved_by_human\":false", toolExecution, StringComparison.Ordinal);
     }
 
-    private static WebAgentRuntimeHost CreateHost(string rootPath, string? codexPath = null, string? model = null)
+    private static WebAgentRuntimeHost CreateHost(string rootPath, string? codexPath = null, string model = "gpt-test")
     {
-        var arguments = new List<string> { "--workdir", rootPath };
+        var arguments = new List<string> { "--workdir", rootPath, "--model", model };
         if (codexPath is not null)
         {
             arguments.AddRange(["--codex-path", codexPath]);
-        }
-
-        if (model is not null)
-        {
-            arguments.AddRange(["--model", model]);
         }
 
         var options = WebRunOptions.FromArguments(arguments.ToArray());

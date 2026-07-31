@@ -110,23 +110,25 @@ public sealed class AgentRuntimeFactory
     /// <summary>
     /// Creates a runtime and starts a fresh conversation unless recovery requires the current conversation to be preserved.
     /// </summary>
-    /// <param name="model">The configured Codex model. Null or blank currently skips exact model-advertisement validation; public hosts must supply a nonblank value.</param>
+    /// <param name="model">The nonblank configured Codex model that must be advertised exactly by the resolved runtime.</param>
     /// <param name="workingDirectory">The absolute working directory.</param>
     /// <param name="codexExecutablePath">An optional explicit Codex executable path.</param>
     /// <param name="codexSandbox">The sandbox policy passed to the Codex app-server client.</param>
     /// <param name="runtimeSurface">The interface surface used for attribution and actor selection.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result owns the composed inference, persistence, governance, and custom-loop resources.</returns>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="model"/> is empty or whitespace.</exception>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="model"/> is <see langword="null"/>.</exception>
     /// <exception cref="CodexRuntimeUnavailableException">Thrown when no compatible Codex executable and configured model can be resolved.</exception>
     public Task<AgentRuntime> CreateAsync(
-        string? model,
+        string model,
         string workingDirectory,
         string? codexExecutablePath,
         string codexSandbox,
         AgentRuntimeSurface runtimeSurface,
         CancellationToken cancellationToken = default)
     {
-        // TODO(#152): Enforce a nonblank model at the public runtime-composition boundary.
+        ArgumentException.ThrowIfNullOrWhiteSpace(model);
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
@@ -140,7 +142,7 @@ public sealed class AgentRuntimeFactory
     /// <summary>
     /// Creates a runtime with an explicit choice about preserving the current durable conversation.
     /// </summary>
-    /// <param name="model">The configured Codex model. Null or blank currently skips exact model-advertisement validation; public hosts must supply a nonblank value.</param>
+    /// <param name="model">The nonblank configured Codex model that must be advertised exactly by the resolved runtime.</param>
     /// <param name="workingDirectory">The absolute working directory.</param>
     /// <param name="codexExecutablePath">An optional explicit Codex executable path.</param>
     /// <param name="codexSandbox">The sandbox policy passed to the Codex app-server client.</param>
@@ -148,9 +150,11 @@ public sealed class AgentRuntimeFactory
     /// <param name="preserveCurrentConversation">Whether to hydrate the existing transcript instead of rotating to a fresh conversation.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task whose result owns the composed inference, persistence, governance, and custom-loop resources.</returns>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="model"/> is empty or whitespace.</exception>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="model"/> is <see langword="null"/>.</exception>
     /// <exception cref="CodexRuntimeUnavailableException">Thrown when no compatible Codex executable and configured model can be resolved.</exception>
     public Task<AgentRuntime> CreateAsync(
-        string? model,
+        string model,
         string workingDirectory,
         string? codexExecutablePath,
         string codexSandbox,
@@ -158,7 +162,7 @@ public sealed class AgentRuntimeFactory
         bool preserveCurrentConversation,
         CancellationToken cancellationToken = default)
     {
-        // TODO(#152): Enforce a nonblank model at the public runtime-composition boundary.
+        ArgumentException.ThrowIfNullOrWhiteSpace(model);
         return CreateAsync(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.OpenAiCodex,
