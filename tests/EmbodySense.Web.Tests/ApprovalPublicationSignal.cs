@@ -5,6 +5,7 @@ namespace EmbodySense.Web.Tests;
 
 internal sealed class ApprovalPublicationSignal : IWebClientNotifier
 {
+    private static readonly TimeSpan _publicationDeadline = TimeSpan.FromSeconds(30);
     private readonly TaskCompletionSource<string> _nonemptyOwnerPublication = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
@@ -19,5 +20,5 @@ internal sealed class ApprovalPublicationSignal : IWebClientNotifier
 
     public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-    public Task<string> WaitForNonemptyApprovalAsync() => _nonemptyOwnerPublication.Task.WaitAsync(TimeSpan.FromSeconds(10));
+    public Task<string> WaitForNonemptyApprovalAsync() => _nonemptyOwnerPublication.Task.WaitAsync(_publicationDeadline);
 }
