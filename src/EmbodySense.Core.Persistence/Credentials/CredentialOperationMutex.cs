@@ -1,3 +1,6 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
+
 namespace EmbodySense.Core.Persistence.Credentials;
 
 internal sealed class CredentialOperationMutex : IDisposable
@@ -19,7 +22,12 @@ internal sealed class CredentialOperationMutex : IDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            mutex = new Mutex(false, CredentialProviderTarget.MutexName(target));
+            mutex = CreateMutex(CredentialProviderTarget.MutexName(target));
+            if (mutex is null)
+            {
+                return false;
+            }
+
             var waitResult = WaitHandle.WaitAny([mutex, cancellationToken.WaitHandle], _acquisitionTimeout);
             if (waitResult != 0)
             {
@@ -44,6 +52,39 @@ internal sealed class CredentialOperationMutex : IDisposable
         {
             mutex?.Dispose();
             return false;
+        }
+    }
+
+    private static Mutex? CreateMutex(string name)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return new Mutex(false, name);
+        }
+
+        using var identity = WindowsIdentity.GetCurrent();
+        var currentUser = identity.User;
+        if (currentUser is null)
+        {
+            return null;
+        }
+
+        // Credential Manager targets persist across Windows logon sessions, so the global namespace is paired with an explicit current-user DACL.
+        var security = new MutexSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.SetOwner(currentUser);
+        security.AddAccessRule(new MutexAccessRule(currentUser, MutexRights.FullControl, AccessControlType.Allow));
+        Mutex? mutex = null;
+        try
+        {
+            mutex = MutexAcl.Create(initiallyOwned: false, name, out _, security);
+            mutex.SetAccessControl(security);
+            return mutex;
+        }
+        catch
+        {
+            mutex?.Dispose();
+            throw;
         }
     }
 

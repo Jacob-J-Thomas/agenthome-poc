@@ -29,7 +29,7 @@ internal static class CredentialProviderTarget
 
     internal static string MutexName(string target)
     {
-        var platformPrefix = OperatingSystem.IsWindows() ? "Local\\" : string.Empty;
+        var platformPrefix = OperatingSystem.IsWindows() ? "Global\\" : string.Empty;
         return platformPrefix + "EmbodySense.Credentials.v1." + target[TargetPrefix.Length..];
     }
 }

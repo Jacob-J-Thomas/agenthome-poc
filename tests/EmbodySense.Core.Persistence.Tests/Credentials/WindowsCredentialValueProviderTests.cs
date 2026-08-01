@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Credentials;
@@ -14,6 +17,9 @@ namespace EmbodySense.Core.Persistence.Tests.Credentials;
 public sealed class WindowsCredentialValueProviderTests
 {
     private const string ChildModeVariable = "EMBODYSENSE_CREDENTIAL_PROVIDER_CHILD";
+    private const string ExternalProcessMode = "external-value";
+    private const string MutexContentionIdVariable = "EMBODYSENSE_CREDENTIAL_MUTEX_CONTENTION_ID";
+    private const string MutexContentionMode = "mutex-contention";
 
     [Fact]
     public async Task Public_provider_round_trips_replaces_checks_health_and_deletes_without_workspace_artifacts()
@@ -184,6 +190,55 @@ public sealed class WindowsCredentialValueProviderTests
     }
 
     [Fact]
+    public async Task Windows_provider_uses_a_current_user_secured_global_mutex_for_a_shared_credential_target()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var workspaceId = "workspace-global-mutex-" + Guid.NewGuid().ToString("N");
+        var referenceId = "credential-global-mutex-" + Guid.NewGuid().ToString("N");
+        var requests = Requests(workspaceId, referenceId);
+        var provider = new WindowsCredentialValueProvider();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var value = Encoding.UTF8.GetBytes("global-mutex-canary-" + Guid.NewGuid().ToString("N"));
+        var createTask = Task.Run(async () => await provider.CreateAsync(requests.Mutation with { ValueByteLength = value.Length }, destination =>
+        {
+            entered.Set();
+            Assert.True(release.Wait(TimeSpan.FromSeconds(5)));
+            return Copy(value, destination);
+        }, CancellationToken.None));
+
+        CredentialProviderResult? create = null;
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            var target = DeriveTargetForTest(workspaceId, referenceId);
+            var name = "Global\\EmbodySense.Credentials.v1." + target["EmbodySense:v1:".Length..];
+            Assert.StartsWith("Global\\", name, StringComparison.Ordinal);
+            AssertCurrentUserMutexSecurity(name);
+        }
+        finally
+        {
+            release.Set();
+            try
+            {
+                create = await createTask;
+            }
+            finally
+            {
+                await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+                CryptographicOperations.ZeroMemory(value);
+            }
+        }
+
+        Assert.NotNull(create);
+        Assert.True(create.Succeeded);
+    }
+
+    [Fact]
     public async Task Public_results_diagnostics_process_state_and_serialization_do_not_expose_values_or_private_targets()
     {
         using var provider = new SecureFakeCredentialValueProvider();
@@ -206,7 +261,7 @@ public sealed class WindowsCredentialValueProviderTests
     [Fact]
     public async Task Windows_provider_value_survives_an_external_process_without_value_in_arguments_environment_or_output()
     {
-        if (!OperatingSystem.IsWindows() || string.Equals(Environment.GetEnvironmentVariable(ChildModeVariable), "1", StringComparison.Ordinal))
+        if (!OperatingSystem.IsWindows() || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(ChildModeVariable)))
         {
             return;
         }
@@ -214,7 +269,7 @@ public sealed class WindowsCredentialValueProviderTests
         var provider = new WindowsCredentialValueProvider();
         var requests = Requests("workspace-external-process-v1", "credential-external-process-v1");
         await provider.DeleteAsync(requests.Delete, CancellationToken.None);
-        using var process = StartCredentialChild();
+        using var process = StartCredentialChild(nameof(External_process_fixture_creates_credential_without_receiving_value_or_locator), ExternalProcessMode);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await process.WaitForExitAsync(timeout.Token);
         var output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
@@ -239,7 +294,7 @@ public sealed class WindowsCredentialValueProviderTests
     [Fact]
     public async Task External_process_fixture_creates_credential_without_receiving_value_or_locator()
     {
-        if (!OperatingSystem.IsWindows() || !string.Equals(Environment.GetEnvironmentVariable(ChildModeVariable), "1", StringComparison.Ordinal))
+        if (!OperatingSystem.IsWindows() || !string.Equals(Environment.GetEnvironmentVariable(ChildModeVariable), ExternalProcessMode, StringComparison.Ordinal))
         {
             return;
         }
@@ -251,7 +306,99 @@ public sealed class WindowsCredentialValueProviderTests
         Assert.True(result.Succeeded);
     }
 
-    private static Process StartCredentialChild()
+    [Fact]
+    public async Task Windows_global_mutex_serializes_a_second_process_for_the_same_shared_target()
+    {
+        if (!OperatingSystem.IsWindows() || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(ChildModeVariable)))
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var contentionId = Guid.NewGuid().ToString("N");
+        var requests = ContentionRequests(contentionId);
+        var value = Encoding.UTF8.GetBytes("global-contention-canary");
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+        var createTask = Task.Run(async () => await provider.CreateAsync(requests.Mutation with { ValueByteLength = value.Length }, destination =>
+        {
+            entered.Set();
+            Assert.True(release.Wait(TimeSpan.FromSeconds(30)));
+            return Copy(value, destination);
+        }, CancellationToken.None));
+
+        CredentialProviderResult? create = null;
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            Process? process = null;
+            try
+            {
+                process = StartCredentialChild(nameof(External_process_fixture_cannot_enter_shared_target_while_parent_holds_global_mutex), MutexContentionMode, contentionId);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                await process.WaitForExitAsync(timeout.Token);
+                var output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
+                var error = await process.StandardError.ReadToEndAsync(timeout.Token);
+                Assert.Equal(0, process.ExitCode);
+                Assert.DoesNotContain(Encoding.UTF8.GetString(value), process.StartInfo.Arguments + output + error, StringComparison.Ordinal);
+            }
+            finally
+            {
+                if (process is not null)
+                {
+                    try
+                    {
+                        await TerminateProcessTreeIfRunningAsync(process);
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }
+            }
+        }
+        finally
+        {
+            release.Set();
+            try
+            {
+                create = await createTask;
+            }
+            finally
+            {
+                await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+                CryptographicOperations.ZeroMemory(value);
+            }
+        }
+
+        Assert.True(create.Succeeded);
+    }
+
+    [Fact]
+    public async Task External_process_fixture_cannot_enter_shared_target_while_parent_holds_global_mutex()
+    {
+        if (!OperatingSystem.IsWindows() || !string.Equals(Environment.GetEnvironmentVariable(ChildModeVariable), MutexContentionMode, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var contentionId = Environment.GetEnvironmentVariable(MutexContentionIdVariable);
+        Assert.True(Guid.TryParseExact(contentionId, "N", out _));
+        var requests = ContentionRequests(contentionId!);
+        var callbackInvoked = false;
+        var result = await provider.CreateAsync(requests.Mutation, _ =>
+        {
+            callbackInvoked = true;
+            return requests.Mutation.ValueByteLength;
+        }, CancellationToken.None);
+
+        Assert.Equal(CredentialFailureCode.Unavailable, result.Failure?.Code);
+        Assert.False(callbackInvoked);
+    }
+
+    private static Process StartCredentialChild(string fixtureName, string childMode, string? contentionId = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -264,10 +411,37 @@ public sealed class WindowsCredentialValueProviderTests
         };
         startInfo.ArgumentList.Add("vstest");
         startInfo.ArgumentList.Add(typeof(WindowsCredentialValueProviderTests).Assembly.Location);
-        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests.External_process_fixture_creates_credential_without_receiving_value_or_locator");
-        startInfo.Environment[ChildModeVariable] = "1";
+        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests." + fixtureName);
+        startInfo.Environment[ChildModeVariable] = childMode;
+        if (contentionId is not null)
+        {
+            startInfo.Environment[MutexContentionIdVariable] = contentionId;
+        }
+
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The external credential-provider fixture did not start.");
+    }
+
+    private static async Task TerminateProcessTreeIfRunningAsync(Process process)
+    {
+        try
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited between the state check and termination request.
+            }
+        }
+        finally
+        {
+            await process.WaitForExitAsync(CancellationToken.None);
+        }
     }
 
     private static byte[] CrossProcessValue() => [99, 114, 111, 115, 115, 45, 112, 114, 111, 99, 101, 115, 115, 45, 115, 101, 99, 114, 101, 116];
@@ -281,6 +455,46 @@ public sealed class WindowsCredentialValueProviderTests
             new CredentialProviderMutationRequest(workspaceId, reference!, provider!, operation!, 16),
             new CredentialProviderUseRequest(workspaceId, reference!, provider!, operation!),
             new CredentialProviderDeleteRequest(workspaceId, reference!, provider!, operation!));
+    }
+
+    private static ProviderRequests ContentionRequests(string contentionId)
+    {
+        return Requests("workspace-global-contention-" + contentionId, "credential-global-contention-" + contentionId);
+    }
+
+    private static string DeriveTargetForTest(string workspaceId, string referenceId)
+    {
+        var workspaceBytes = Encoding.UTF8.GetBytes(workspaceId);
+        var referenceBytes = Encoding.UTF8.GetBytes(referenceId);
+        var input = new byte[sizeof(int) + workspaceBytes.Length + referenceBytes.Length];
+        BitConverter.GetBytes(workspaceBytes.Length).CopyTo(input, 0);
+        workspaceBytes.CopyTo(input, sizeof(int));
+        referenceBytes.CopyTo(input, sizeof(int) + workspaceBytes.Length);
+        var digest = SHA256.HashData(input);
+        var target = "EmbodySense:v1:" + Convert.ToHexString(digest);
+        CryptographicOperations.ZeroMemory(workspaceBytes);
+        CryptographicOperations.ZeroMemory(referenceBytes);
+        CryptographicOperations.ZeroMemory(input);
+        CryptographicOperations.ZeroMemory(digest);
+        return target;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertCurrentUserMutexSecurity(string name)
+    {
+        using var opened = MutexAcl.OpenExisting(name, MutexRights.ReadPermissions | MutexRights.Synchronize);
+        using var identity = WindowsIdentity.GetCurrent();
+        var currentUser = identity.User;
+        var security = opened.GetAccessControl();
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier)).OfType<MutexAccessRule>().ToArray();
+
+        Assert.NotNull(currentUser);
+        Assert.True(security.AreAccessRulesProtected);
+        Assert.Equal(currentUser, security.GetOwner(typeof(SecurityIdentifier)));
+        var rule = Assert.Single(rules);
+        Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+        Assert.Equal(currentUser, rule.IdentityReference);
+        Assert.True(rule.MutexRights.HasFlag(MutexRights.FullControl));
     }
 
     private static int Copy(byte[] source, Span<byte> destination)
