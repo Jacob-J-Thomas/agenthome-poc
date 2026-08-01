@@ -45,16 +45,34 @@ internal static class CapabilityCatalogTrustRootTopology
 
     private static IReadOnlyList<(string Identity, string RelativeTail)> GetExistingWindowsAncestors(string path)
     {
-        var ancestors = new List<(string Identity, string RelativeTail)>();
         var tailSegments = new List<string>();
         var current = path;
         for (var depth = 0; depth <= 32; depth++)
         {
-            if (CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var identity))
+            if (CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var identity, out var finalPath))
             {
-                ancestors.Add((identity, string.Join(Path.DirectorySeparatorChar, tailSegments)));
+                return GetCanonicalWindowsAncestors(finalPath, identity, tailSegments);
             }
 
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+            {
+                return [];
+            }
+
+            tailSegments.Insert(0, Path.GetFileName(current));
+            current = parent;
+        }
+
+        throw new IOException("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
+    }
+
+    private static IReadOnlyList<(string Identity, string RelativeTail)> GetCanonicalWindowsAncestors(string finalPath, string identity, List<string> tailSegments)
+    {
+        var ancestors = new List<(string Identity, string RelativeTail)> { (identity, string.Join(Path.DirectorySeparatorChar, tailSegments)) };
+        var current = Normalize(finalPath);
+        for (var depth = 0; depth <= 32; depth++)
+        {
             var parent = Path.GetDirectoryName(current);
             if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
             {
@@ -63,6 +81,12 @@ internal static class CapabilityCatalogTrustRootTopology
 
             tailSegments.Insert(0, Path.GetFileName(current));
             current = parent;
+            if (!CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var parentIdentity, out _))
+            {
+                throw new IOException("Capability catalog root topology could not resolve an existing directory safely.");
+            }
+
+            ancestors.Add((parentIdentity, string.Join(Path.DirectorySeparatorChar, tailSegments)));
         }
 
         throw new IOException("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
@@ -152,7 +176,11 @@ internal static class CapabilityCatalogTrustRootTopology
             {
                 fullPath = @"\\" + fullPath[8..];
             }
-            else if (fullPath.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+            else if (fullPath.Length >= 7
+                && fullPath.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)
+                && char.IsAsciiLetter(fullPath[4])
+                && fullPath[5] == ':'
+                && (fullPath[6] == Path.DirectorySeparatorChar || fullPath[6] == Path.AltDirectorySeparatorChar))
             {
                 fullPath = fullPath[4..];
             }

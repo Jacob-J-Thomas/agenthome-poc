@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace EmbodySense.Core.Persistence.Capabilities;
@@ -157,10 +158,11 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    public static bool TryGetExistingWindowsDirectoryIdentity(string fullPath, out string identity)
+    public static bool TryGetExistingWindowsDirectoryIdentity(string fullPath, out string identity, out string finalPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
         identity = string.Empty;
+        finalPath = string.Empty;
         if (!OperatingSystem.IsWindows())
         {
             return false;
@@ -197,6 +199,19 @@ internal static class CapabilityCatalogNativeFileSystem
             }
 
             identity = $"{information.VolumeSerialNumber:x16}:{information.FileId:N}";
+            var finalPathBuffer = new StringBuilder(32_768);
+            var finalPathLength = GetFinalPathNameByHandle(handle, finalPathBuffer, finalPathBuffer.Capacity, 0);
+            if (finalPathLength == 0)
+            {
+                throw NativeIOException("The capability catalog root topology could not resolve an existing directory", Marshal.GetLastPInvokeError());
+            }
+
+            if (finalPathLength >= finalPathBuffer.Capacity)
+            {
+                throw new IOException("The capability catalog root topology resolved an existing directory path beyond its safety bound.");
+            }
+
+            finalPath = finalPathBuffer.ToString();
             return true;
         }
     }
@@ -626,6 +641,9 @@ internal static class CapabilityCatalogNativeFileSystem
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool FlushFileBuffers(SafeFileHandle file);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, int pathLength, uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

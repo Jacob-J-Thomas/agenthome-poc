@@ -75,6 +75,26 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void File_backed_catalog_rejects_Windows_volume_GUID_alias_for_nested_trust_root()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        var nestedTrustRoot = Path.Combine(workspaceRoot, "server-trust");
+        Directory.CreateDirectory(nestedTrustRoot);
+        var volumeGuidTrustRoot = WindowsPathAliases.TryGetVolumeGuidPath(nestedTrustRoot);
+        Assert.NotNull(volumeGuidTrustRoot);
+        var provider = new FileCapabilityCatalogTrustProvider(volumeGuidTrustRoot);
+
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+        Assert.False(File.Exists(Path.Combine(nestedTrustRoot, "capability-catalog-root.key")));
+    }
+
+    [Fact]
     public void File_backed_catalog_resolves_existing_directory_links_before_topology_comparison()
     {
         using var root = new TestWorkspace();
@@ -94,6 +114,34 @@ public sealed class FileCapabilityCatalogTrustProviderTests
         var provider = new FileCapabilityCatalogTrustProvider(trustAlias);
         Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
         Assert.False(File.Exists(Path.Combine(linkedTrustTarget, "capability-catalog-root.key")));
+    }
+
+    [Fact]
+    public void File_backed_catalog_rejects_Windows_link_target_under_workspace_with_nonexistent_tail()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        var linkedTrustTarget = Path.Combine(workspaceRoot, "trust-target");
+        var trustAlias = root.File("trust-alias");
+        Directory.CreateDirectory(linkedTrustTarget);
+        try
+        {
+            Directory.CreateSymbolicLink(trustAlias, linkedTrustTarget);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        var provider = new FileCapabilityCatalogTrustProvider(Path.Combine(trustAlias, "not-created"));
+
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+        Assert.False(File.Exists(Path.Combine(linkedTrustTarget, "not-created", "capability-catalog-root.key")));
     }
 
     [Fact]
