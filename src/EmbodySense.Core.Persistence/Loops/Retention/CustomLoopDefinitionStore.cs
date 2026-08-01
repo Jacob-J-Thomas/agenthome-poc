@@ -168,8 +168,17 @@ public sealed partial class CustomLoopDefinitionStore
 
     internal Task<CustomLoopReceiptCleanupResult> CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default)
     {
-        var observedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
-        return CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupRequestFactory.Create(command, observedAtUtc), cancellationToken);
+        try
+        {
+            CustomLoopReceiptRetentionContractValidator.ValidateCleanupCommand(command);
+            RequireAuthoringArtifactClass(command.ArtifactClass);
+            var observedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
+            return CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupRequestFactory.Create(command, observedAtUtc), allowPersistedTimeReuse: true, cancellationToken);
+        }
+        catch (ArgumentException exception)
+        {
+            return Task.FromResult(CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, null, detail: exception.Message));
+        }
     }
 
     /// <summary>
@@ -252,7 +261,12 @@ public sealed partial class CustomLoopDefinitionStore
     /// <param name="request">The governed cleanup request.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The visible cleanup result.</returns>
-    public async Task<CustomLoopReceiptCleanupResult> CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken = default)
+    public Task<CustomLoopReceiptCleanupResult> CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken = default)
+    {
+        return CleanupReceiptRetentionAsync(request, allowPersistedTimeReuse: false, cancellationToken);
+    }
+
+    private async Task<CustomLoopReceiptCleanupResult> CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupRequest request, bool allowPersistedTimeReuse, CancellationToken cancellationToken)
     {
         try
         {
@@ -274,7 +288,7 @@ public sealed partial class CustomLoopDefinitionStore
             try
             {
                 using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
-                return await CleanupReceiptRetentionUnderLockAsync(request, cancellationToken);
+                return await CleanupReceiptRetentionUnderLockAsync(request, allowPersistedTimeReuse, cancellationToken);
             }
             catch (InvalidOperationException exception) when (exception.InnerException is IOException)
             {
@@ -295,6 +309,8 @@ public sealed partial class CustomLoopDefinitionStore
         var liveExpiries = new List<DateTimeOffset>();
         var budget = CustomLoopReceiptRetentionPolicy.GetBudget(artifactClass);
         var blockReason = CustomLoopReceiptCleanupBlockReason.None;
+        var cleanupHistoryCount = 0;
+        var cleanupHistoryBytes = 0L;
         var observedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
         IReadOnlyList<CustomLoopDefinitionRetentionArtifact> operations = [];
         CustomLoopReceiptProofLedger? ledger = null;
@@ -303,6 +319,17 @@ public sealed partial class CustomLoopDefinitionStore
         {
             operations = await ReadRetentionArtifactsAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, cancellationToken);
             ledger = await ReadProofLedgerAsync(cancellationToken);
+        }
+        catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+        {
+            blockReason = CustomLoopReceiptCleanupBlockReason.CorruptEvidence;
+            AddUsage(usage, CustomLoopReceiptArtifactCategory.Corrupt, 1);
+        }
+
+        try
+        {
+            var history = new CustomLoopReceiptCleanupHistoryStore(_pathGuard, GetCleanupHistoryRoot(artifactClass), artifactClass);
+            (cleanupHistoryCount, cleanupHistoryBytes) = await history.InspectAsync(cancellationToken);
         }
         catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
         {
@@ -356,12 +383,25 @@ public sealed partial class CustomLoopDefinitionStore
         var proofBytes = categories.Where(item => item.Category is CustomLoopReceiptArtifactCategory.RetainedLineage or CustomLoopReceiptArtifactCategory.ExpiredIdempotency).Sum(item => item.Utf8Bytes);
         var maximumNewArtifactBytes = artifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt ? MaxDefinitionMutationOperationArtifactBytes : MaxTombstoneArtifactBytes;
         var exhaustion = GetExhaustionReason(budget, artifactCount, artifactBytes, maximumNewArtifactBytes, proofCount, proofBytes);
+        if (exhaustion == CustomLoopReceiptQuotaExhaustionReason.None && cleanupHistoryCount >= CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryEntryCount)
+        {
+            exhaustion = CustomLoopReceiptQuotaExhaustionReason.CleanupHistoryCountLimit;
+            blockReason = CustomLoopReceiptCleanupBlockReason.CleanupHistoryCapacityExhausted;
+        }
+        else if (exhaustion == CustomLoopReceiptQuotaExhaustionReason.None && cleanupHistoryBytes >= CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryUtf8Bytes)
+        {
+            exhaustion = CustomLoopReceiptQuotaExhaustionReason.CleanupHistoryByteLimit;
+            blockReason = CustomLoopReceiptCleanupBlockReason.CleanupHistoryCapacityExhausted;
+        }
+
         var posture = new CustomLoopReceiptClassPosture(
             artifactClass,
             budget,
             categories,
             liveExpiries.Count == 0 ? null : liveExpiries.Min(),
             liveExpiries.Count == 0 ? null : liveExpiries.Max(),
+            cleanupHistoryCount,
+            cleanupHistoryBytes,
             exhaustion,
             blockReason,
             blockReason == CustomLoopReceiptCleanupBlockReason.None ? "Authoring receipt retention is bounded and recoverable." : "Authoring receipt retention contains evidence that cleanup must preserve for review.");
@@ -381,8 +421,31 @@ public sealed partial class CustomLoopDefinitionStore
         }
     }
 
-    private async Task<CustomLoopReceiptCleanupResult> CleanupReceiptRetentionUnderLockAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken)
+    private async Task<CustomLoopReceiptCleanupResult> CleanupReceiptRetentionUnderLockAsync(CustomLoopReceiptCleanupRequest request, bool allowPersistedTimeReuse, CancellationToken cancellationToken)
     {
+        var history = new CustomLoopReceiptCleanupHistoryStore(_pathGuard, GetCleanupHistoryRoot(request.ArtifactClass), request.ArtifactClass);
+        CustomLoopReceiptCleanupJournal? archived;
+        try
+        {
+            archived = await history.ReadAsync(request.OperationId, cancellationToken);
+        }
+        catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+        {
+            return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, null, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Cleanup history is corrupt or unreadable: {exception.GetType().Name}.");
+        }
+
+        if (archived is not null)
+        {
+            if (allowPersistedTimeReuse && MatchesCleanupCommand(archived.Request, request))
+            {
+                request = archived.Request;
+            }
+
+            return string.Equals(archived.RequestHash, CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(request), StringComparison.Ordinal)
+                ? MapTerminalJournal(archived, replay: true)
+                : CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, archived, detail: "Cleanup operation identity was reused with different canonical command content.");
+        }
+
         CustomLoopReceiptCleanupJournal? journal;
         try
         {
@@ -394,6 +457,11 @@ public sealed partial class CustomLoopDefinitionStore
         }
 
         var now = _timeProvider.GetUtcNow().ToUniversalTime();
+        if (journal is not null && string.Equals(journal.Request.OperationId, request.OperationId, StringComparison.Ordinal) && allowPersistedTimeReuse && MatchesCleanupCommand(journal.Request, request))
+        {
+            request = journal.Request;
+        }
+
         if (journal is not null && !IsTerminal(journal.Stage))
         {
             var sameRequest = string.Equals(journal.Request.OperationId, request.OperationId, StringComparison.Ordinal)
@@ -429,6 +497,24 @@ public sealed partial class CustomLoopDefinitionStore
             return MapTerminalJournal(journal, replay: true);
         }
 
+        if (journal is not null && IsTerminal(journal.Stage))
+        {
+            CustomLoopReceiptQuotaExhaustionReason archiveExhaustion;
+            try
+            {
+                archiveExhaustion = await history.ArchiveAsync(journal, cancellationToken);
+            }
+            catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+            {
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Completed cleanup history could not preserve the prior operation identity: {exception.GetType().Name}.");
+            }
+
+            if (archiveExhaustion != CustomLoopReceiptQuotaExhaustionReason.None)
+            {
+                return CleanupResult(CustomLoopReceiptCleanupStatus.QuotaExhausted, journal, exhaustionReason: archiveExhaustion, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupHistoryCapacityExhausted, detail: "Completed cleanup-operation history is full, so the prior identity was preserved and no new cleanup began.");
+            }
+        }
+
         IReadOnlyList<CustomLoopReceiptCleanupCandidate> candidates;
         try
         {
@@ -457,6 +543,17 @@ public sealed partial class CustomLoopDefinitionStore
             candidates.Count == 0 ? "No safely compactable evidence was selected." : "Immutable cleanup candidates are durable before mutation.");
         await WriteCleanupJournalAsync(journal, cancellationToken);
         return await ResumeCleanupAsync(journal, recovering: false, cancellationToken);
+    }
+
+    private static bool MatchesCleanupCommand(CustomLoopReceiptCleanupRequest persisted, CustomLoopReceiptCleanupRequest candidate)
+    {
+        return persisted.SchemaVersion == candidate.SchemaVersion
+            && persisted.ArtifactClass == candidate.ArtifactClass
+            && string.Equals(persisted.OperationId, candidate.OperationId, StringComparison.Ordinal)
+            && string.Equals(persisted.Actor, candidate.Actor, StringComparison.Ordinal)
+            && string.Equals(persisted.Surface, candidate.Surface, StringComparison.Ordinal)
+            && persisted.MaximumArtifactCount == candidate.MaximumArtifactCount
+            && persisted.MaximumArtifactUtf8Bytes == candidate.MaximumArtifactUtf8Bytes;
     }
 
     private async Task<CustomLoopReceiptCleanupResult> ResumeCleanupAsync(CustomLoopReceiptCleanupJournal journal, bool recovering, CancellationToken cancellationToken)
@@ -770,6 +867,16 @@ public sealed partial class CustomLoopDefinitionStore
         }
 
         return journal;
+    }
+
+    private string GetCleanupHistoryRoot(CustomLoopReceiptArtifactClass artifactClass)
+    {
+        return artifactClass switch
+        {
+            CustomLoopReceiptArtifactClass.DefinitionMutationReceipt => _paths.CustomLoopDefinitionMutationReceiptCleanupHistoryPath,
+            CustomLoopReceiptArtifactClass.DefinitionTombstone => _paths.CustomLoopDefinitionTombstoneCleanupHistoryPath,
+            _ => throw new ArgumentOutOfRangeException(nameof(artifactClass), artifactClass, "Authoring cleanup history requires a definition receipt or tombstone class.")
+        };
     }
 
     private async Task WriteCleanupJournalAsync(CustomLoopReceiptCleanupJournal journal, CancellationToken cancellationToken)

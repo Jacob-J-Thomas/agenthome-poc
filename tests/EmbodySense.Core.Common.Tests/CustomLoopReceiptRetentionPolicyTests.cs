@@ -141,10 +141,11 @@ public sealed class CustomLoopReceiptRetentionPolicyTests
             + CustomLoopReceiptRetentionPolicy.MaxDefinitionTombstoneUtf8Bytes
             + CustomLoopReceiptRetentionPolicy.MaxLifecycleControlReceiptUtf8Bytes
             + CustomLoopReceiptRetentionPolicy.MaxProofLedgerUtf8Bytes
-            + (3 * CustomLoopReceiptRetentionPolicy.MaxCleanupJournalUtf8Bytes);
+            + (3 * CustomLoopReceiptRetentionPolicy.MaxCleanupJournalUtf8Bytes)
+            + (3 * CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryUtf8Bytes);
 
         Assert.Equal(CustomLoopReceiptRetentionPolicy.MaxAccountedWorkspaceUtf8Bytes, expected);
-        Assert.Equal(424L * 1024 * 1024, expected);
+        Assert.Equal(448L * 1024 * 1024, expected);
         Assert.Throws<ArgumentOutOfRangeException>(() => CustomLoopReceiptRetentionPolicy.GetBudget(CustomLoopReceiptArtifactClass.Unknown));
     }
 }

@@ -414,6 +414,9 @@ public sealed class CustomLoopReceiptRetentionContractTests
         var noLiveUsage = mutation.Categories.SetItem(liveIndex, new CustomLoopReceiptCategoryUsage(CustomLoopReceiptArtifactCategory.Live, 0, 0));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { Categories = noLiveUsage }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { OldestExactReplayExpiresAtUtc = null, NewestExactReplayExpiresAtUtc = null }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { CompletedCleanupOperationCount = -1 }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { CompletedCleanupOperationCount = CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryEntryCount }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { CompletedCleanupHistoryUtf8Bytes = CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryUtf8Bytes }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateWorkspacePosture(workspace with { Classes = [mutation, tombstone, tombstone] }));
     }
 
@@ -587,6 +590,8 @@ public sealed class CustomLoopReceiptRetentionContractTests
             Usage(artifactClass),
             _now.AddDays(1),
             _now.AddDays(2),
+            1,
+            7,
             CustomLoopReceiptQuotaExhaustionReason.None,
             CustomLoopReceiptCleanupBlockReason.None,
             "Bounded class posture.");

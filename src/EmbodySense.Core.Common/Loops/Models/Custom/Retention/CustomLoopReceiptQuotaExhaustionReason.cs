@@ -41,6 +41,16 @@ public enum CustomLoopReceiptQuotaExhaustionReason
     ProofByteLimit,
 
     /// <summary>
+    /// The completed cleanup-operation identity ceiling is exhausted.
+    /// </summary>
+    CleanupHistoryCountLimit,
+
+    /// <summary>
+    /// The completed cleanup-operation byte ceiling is exhausted.
+    /// </summary>
+    CleanupHistoryByteLimit,
+
+    /// <summary>
     /// The workspace-wide accounted byte ceiling is exhausted.
     /// </summary>
     WorkspaceByteLimit

@@ -242,6 +242,67 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Timestamp_free_cleanup_replays_after_time_advances_and_completed_identity_survives_journal_rotation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var clock = new MutableTimeProvider(_createdAtUtc);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), clock);
+        var definition = CreateDefinition("loop-cleanup-history");
+        await CreateCommittedAsync(store, definition);
+        var port = store.CreateReceiptRetentionPort(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+        var firstCommand = CleanupCommand(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-history-a");
+
+        var first = await port.CleanupAsync(firstCommand);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        var second = await port.CleanupAsync(CleanupCommand(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-history-b"));
+
+        var updatedAtUtc = _createdAtUtc.AddMinutes(2);
+        var updated = Advance(definition, "update-after-cleanup-a", updatedAtUtc);
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Update, updated.LastMutationOperationId, updated, definition, definition.DefinitionVersion, updatedAtUtc);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Updated, (await store.UpdateAsync(updated, definition.DefinitionVersion, mutation)).Status);
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync(mutation.OperationId));
+        clock.Advance(TimeSpan.FromDays(40));
+
+        var delayedReplay = await port.CleanupAsync(firstCommand);
+        var changedReuse = await port.CleanupAsync(firstCommand with { Surface = "cli" });
+        var posture = await port.InspectAsync();
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, first.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, second.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, delayedReplay.Status);
+        Assert.Equal(first.Journal, delayedReplay.Journal);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Invalid, changedReuse.Status);
+        Assert.Equal(1, posture.CompletedCleanupOperationCount);
+        Assert.True(posture.CompletedCleanupHistoryUtf8Bytes > 0);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, mutation.OperationId + ".json")));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionMutationReceiptCleanupHistoryPath, firstCommand.OperationId + ".json")));
+    }
+
+    [Fact]
+    public async Task Cleanup_history_inventory_fails_closed_on_noncanonical_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var clock = new MutableTimeProvider(_createdAtUtc);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), clock);
+        var port = store.CreateReceiptRetentionPort(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, (await port.CleanupAsync(CleanupCommand(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-history-valid-a"))).Status);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, (await port.CleanupAsync(CleanupCommand(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-history-valid-b"))).Status);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopDefinitionMutationReceiptCleanupHistoryPath, "unexpected.JSON"), "{}");
+
+        var cleanup = await port.CleanupAsync(CleanupCommand(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-history-blocked"));
+        var posture = await port.InspectAsync();
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, cleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, cleanup.BlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, posture.CleanupBlockReason);
+        Assert.Contains(posture.Categories, item => item.Category == CustomLoopReceiptArtifactCategory.Corrupt && item.ArtifactCount > 0);
+    }
+
+    [Fact]
     public async Task Corrupt_proof_ledger_is_reported_separately_and_blocks_all_cleanup_mutation()
     {
         using var workspace = new TestWorkspace();
@@ -751,6 +812,18 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
             "web",
             _observedAtUtc,
             CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(_observedAtUtc),
+            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
+            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes);
+    }
+
+    private static CustomLoopReceiptCleanupCommand CleanupCommand(CustomLoopReceiptArtifactClass artifactClass, string operationId)
+    {
+        return new CustomLoopReceiptCleanupCommand(
+            CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
+            artifactClass,
+            operationId,
+            "embodysense.web",
+            "web",
             CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
             CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes);
     }

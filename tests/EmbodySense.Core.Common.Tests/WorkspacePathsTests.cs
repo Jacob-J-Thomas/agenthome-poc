@@ -19,6 +19,9 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom"), paths.CustomLoopDefinitionsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-tombstones"), paths.CustomLoopDefinitionTombstonesPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-create-operations"), paths.CustomLoopDefinitionOperationsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-cleanup-history"), paths.CustomLoopReceiptCleanupHistoryPath);
+        Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "definition-mutation-receipt"), paths.CustomLoopDefinitionMutationReceiptCleanupHistoryPath);
+        Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "definition-tombstone"), paths.CustomLoopDefinitionTombstoneCleanupHistoryPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs"), paths.LoopRunsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom"), paths.CustomLoopRunsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom-trace-deletion-operations"), paths.CustomLoopTraceDeletionOperationsPath);

@@ -180,6 +180,24 @@ public sealed class WorkspacePaths
     public string CustomLoopDefinitionTombstoneCleanupJournalPath => Path.Combine(CustomLoopReceiptRetentionPath, "definition-tombstone-cleanup.json");
 
     /// <summary>
+    /// Gets the bounded completed cleanup-operation history root.
+    /// </summary>
+    /// <value>The receipt cleanup history root.</value>
+    public string CustomLoopReceiptCleanupHistoryPath => Path.Combine(LoopsPath, "receipt-cleanup-history");
+
+    /// <summary>
+    /// Gets the completed definition-mutation receipt cleanup history path.
+    /// </summary>
+    /// <value>The definition-mutation cleanup history path.</value>
+    public string CustomLoopDefinitionMutationReceiptCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "definition-mutation-receipt");
+
+    /// <summary>
+    /// Gets the completed definition-tombstone cleanup history path.
+    /// </summary>
+    /// <value>The definition-tombstone cleanup history path.</value>
+    public string CustomLoopDefinitionTombstoneCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "definition-tombstone");
+
+    /// <summary>
     /// Gets the loop runs path.
     /// </summary>
     /// <value>The loop runs path.</value>
