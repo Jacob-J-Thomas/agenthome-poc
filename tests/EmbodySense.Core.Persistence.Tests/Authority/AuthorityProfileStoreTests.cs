@@ -82,6 +82,36 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Invalid_duplicate_and_missing_inputs_fail_closed_without_creating_operation_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var profile = Profile();
+
+        var invalidRead = await store.ReadAsync("not a profile id");
+        var missingRead = await store.ReadAsync("missing-profile");
+        var nullMutation = await store.MutateAsync(null!);
+        var missingMutation = await store.MutateAsync(Transition(ProfileId("missing-profile"), 1, AuthorityProfileStatus.Suspended, "transition-missing"));
+        var created = await store.MutateAsync(Create(profile, "create-once"));
+        var duplicate = await store.MutateAsync(Create(profile, "create-twice"));
+        var invalidCreate = await store.MutateAsync(new AuthorityProfileMutation(AuthorityProfileMutationKind.Create, "create-invalid-revision", 1, profile with { Revision = Revision(2) }, null, null, Actor(), Reason()));
+        var invalidTransition = await store.MutateAsync(new AuthorityProfileMutation(AuthorityProfileMutationKind.TransitionStatus, "transition-without-status", 1, null, profile.ProfileId, null, Actor(), Reason()));
+        var persisted = await Store(paths).ReadAsync(profile.ProfileId.Value);
+
+        Assert.Equal(AuthorityProfileReadStatus.Unavailable, invalidRead.Status);
+        Assert.Equal(AuthorityProfileReadStatus.NotFound, missingRead.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Invalid, nullMutation.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.NotFound, missingMutation.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, created.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Invalid, duplicate.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Invalid, invalidCreate.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Invalid, invalidTransition.Status);
+        Assert.Single(persisted.Record!.Operations);
+        Assert.Equal("create-once", persisted.Record.Operations[0].OperationId);
+    }
+
+    [Fact]
     public async Task Corrupt_primary_recovers_last_proved_state_and_substituted_workspace_is_unavailable()
     {
         using var source = new TestWorkspace();
