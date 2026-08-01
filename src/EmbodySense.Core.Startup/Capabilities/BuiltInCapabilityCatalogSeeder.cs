@@ -93,19 +93,37 @@ public sealed class BuiltInCapabilityCatalogSeeder
 
             if (existing.Lifecycle.Trust != CapabilityTrustState.Verified)
             {
-                RequireCommitted(await service.VerifyAsync(descriptor.Id, catalogRevision, OperationId("verify", descriptor.Id), cancellationToken), descriptor.Id);
+                var verified = await service.VerifyAsync(descriptor.Id, catalogRevision, OperationId("verify", descriptor.Id), cancellationToken);
+                if (verified.Status == CapabilityCatalogMutationStatus.Conflict)
+                {
+                    continue;
+                }
+
+                RequireCommitted(verified, descriptor.Id);
                 continue;
             }
 
             if (existing.Lifecycle.Enablement != CapabilityEnablementState.Enabled)
             {
-                RequireCommitted(await service.EnableAsync(descriptor.Id, catalogRevision, OperationId("enable", descriptor.Id), cancellationToken), descriptor.Id);
+                var enabled = await service.EnableAsync(descriptor.Id, catalogRevision, OperationId("enable", descriptor.Id), cancellationToken);
+                if (enabled.Status == CapabilityCatalogMutationStatus.Conflict)
+                {
+                    continue;
+                }
+
+                RequireCommitted(enabled, descriptor.Id);
                 continue;
             }
 
             if (existing.Lifecycle.Health != CapabilityHealthState.Healthy)
             {
-                RequireCommitted(await service.MarkHealthyAsync(descriptor.Id, catalogRevision, OperationId("healthy", descriptor.Id), cancellationToken), descriptor.Id);
+                var healthy = await service.MarkHealthyAsync(descriptor.Id, catalogRevision, OperationId("healthy", descriptor.Id), cancellationToken);
+                if (healthy.Status == CapabilityCatalogMutationStatus.Conflict)
+                {
+                    continue;
+                }
+
+                RequireCommitted(healthy, descriptor.Id);
                 continue;
             }
 
