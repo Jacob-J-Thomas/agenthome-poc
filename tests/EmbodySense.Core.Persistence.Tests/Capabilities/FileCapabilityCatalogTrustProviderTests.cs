@@ -189,8 +189,10 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     {
         using var trustRoot = new TestWorkspace();
         var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
-        var oldWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b3:00000004");
-        var reusedWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b4:00000004");
+        var oldMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 4, 0x65f1a2b3, 0);
+        var replacementMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 5, 0x65f1a2b3, 0);
+        var oldWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(oldMaterial);
+        var reusedWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(replacementMaterial);
         var digest = Digest("reused-unix-workspace-artifact");
 
         Assert.NotEqual(oldWorkspaceIdentity, reusedWorkspaceIdentity);
@@ -201,11 +203,14 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
-    public void Unix_workspace_lifetime_identity_changes_when_only_birth_time_changes()
+    public void Unix_workspace_lifetime_identity_changes_when_only_inode_generation_changes()
     {
-        var originalLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b3:00000004");
-        var replacementLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b4:00000004");
+        var originalMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 4, 0x65f1a2b3, 0);
+        var replacementMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 5, 0x65f1a2b3, 0);
+        var originalLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(originalMaterial);
+        var replacementLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(replacementMaterial);
 
+        Assert.NotEqual(originalMaterial, replacementMaterial);
         Assert.NotEqual(originalLifetime, replacementLifetime);
     }
 
@@ -219,15 +224,20 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     public void Unix_workspace_identity_material_requires_stable_identity_and_lifetime_availability()
     {
         Assert.Equal(
-            "linux:00000001:00000002:0000000000000003:0000000065f1a2b3:00000004",
-            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 0x65f1a2b3, 4));
+            "linux:00000001:00000002:0000000000000003:generation-00000004:0000000065f1a2b3:00000000",
+            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 4, 0x65f1a2b3, 0));
         Assert.Equal(
-            "macos:00000001:0000000000000003:0000000065f1a2b3:0000000000000004",
-            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 0x65f1a2b3, 4));
-        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, null, 0x65f1a2b3, 4));
-        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, null, null));
-        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 0, 0));
-        Assert.Throws<ArgumentException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("freebsd", 1, 2, 3, 0x65f1a2b3, 4));
+            "macos:00000001:0000000000000003:generation-00000004:0000000065f1a2b3:0000000000000000",
+            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 4, 0x65f1a2b3, 0));
+        Assert.Equal(
+            "macos:00000001:0000000000000003:nonrecycled-inode:0000000065f1a2b3:0000000000000000",
+            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 0, 0x65f1a2b3, 0, inodeIsNonRecycled: true));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, null, 4, 0x65f1a2b3, 0));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, null, 0x65f1a2b3, 0));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 0, 0x65f1a2b3, 0));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 4, null, null));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 4, 0, 0));
+        Assert.Throws<ArgumentException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("freebsd", 1, 2, 3, 4, 0x65f1a2b3, 0));
     }
 
     [Fact]

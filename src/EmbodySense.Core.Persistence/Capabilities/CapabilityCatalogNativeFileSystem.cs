@@ -36,6 +36,12 @@ internal static class CapabilityCatalogNativeFileSystem
     private const uint StatxMode = 0x2;
     private const uint StatxInode = 0x100;
     private const uint StatxBirthTime = 0x800;
+    private const uint AttributeVolumeCapabilities = 0x00020000;
+    private const uint AttributeVolumeInfo = 0x80000000;
+    private const uint VolumeCapabilityPathFromId = 0x00004000;
+    // Linux UAPI FS_IOC_GETVERSION is _IOR('v', 1, long), so its encoded size follows the native pointer width;
+    // filesystem implementations return the actual i_generation payload as an int.
+    private static nuint FsIoctlGetVersion => IntPtr.Size == 8 ? (nuint)0x80087601 : (nuint)0x80047601;
 
     public static SafeFileHandle? OpenDirectory(string fullPath, SafeFileHandle? parent, string? name, bool create, ICapabilityCatalogDurabilityBarrier durabilityBarrier, out bool created)
     {
@@ -179,7 +185,8 @@ internal static class CapabilityCatalogNativeFileSystem
 
             ulong? inode = (information.Mask & StatxInode) != 0 ? information.Inode : null;
             CapabilityCatalogStatxTimestamp? birthTime = (information.Mask & StatxBirthTime) != 0 ? information.BirthTime : null;
-            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", information.DeviceMajor, information.DeviceMinor, inode, birthTime?.Seconds, birthTime?.Nanoseconds);
+            var generation = ReadLinuxDirectoryGeneration(directory);
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", information.DeviceMajor, information.DeviceMinor, inode, generation, birthTime?.Seconds, birthTime?.Nanoseconds);
         }
 
         if (OperatingSystem.IsMacOS())
@@ -189,10 +196,40 @@ internal static class CapabilityCatalogNativeFileSystem
                 throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
             }
 
-            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", information.Device, 0, information.Inode, information.BirthTime.Seconds, information.BirthTime.Nanoseconds);
+            var inodeIsNonRecycled = information.Generation == 0 && MacVolumeUsesNonRecycledObjectIds(directory);
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", information.Device, 0, information.Inode, information.Generation, information.BirthTime.Seconds, information.BirthTime.Nanoseconds, inodeIsNonRecycled);
         }
 
         throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows, Linux, and macOS.");
+    }
+
+    private static uint ReadLinuxDirectoryGeneration(SafeFileHandle directory)
+    {
+        var rawGeneration = 0;
+        if (ioctl(directory, FsIoctlGetVersion, ref rawGeneration) != 0)
+        {
+            throw NativeIOException("The capability catalog workspace filesystem does not expose an inode generation", Marshal.GetLastPInvokeError());
+        }
+
+        var generation = unchecked((uint)rawGeneration);
+        return generation != 0 ? generation : throw new IOException("The capability catalog workspace filesystem returned no usable inode generation.");
+    }
+
+    private static bool MacVolumeUsesNonRecycledObjectIds(SafeFileHandle directory)
+    {
+        var attributes = new CapabilityCatalogMacAttributeList
+        {
+            BitmapCount = 5,
+            VolumeAttributes = AttributeVolumeInfo | AttributeVolumeCapabilities
+        };
+        if (fgetattrlist(directory, ref attributes, out CapabilityCatalogMacVolumeCapabilitiesBuffer capabilities, (nuint)Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>(), 0) != 0)
+        {
+            throw NativeIOException("The capability catalog workspace volume identity capability could not be read", Marshal.GetLastPInvokeError());
+        }
+
+        return capabilities.Length >= Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>()
+            && (capabilities.ValidFormatCapabilities & VolumeCapabilityPathFromId) != 0
+            && (capabilities.FormatCapabilities & VolumeCapabilityPathFromId) != 0;
     }
 
     public static string GetDirectoryEnumerationPath(SafeFileHandle directory)
@@ -617,6 +654,12 @@ internal static class CapabilityCatalogNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fchmod(SafeFileHandle file, int mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fgetattrlist(SafeFileHandle file, ref CapabilityCatalogMacAttributeList attributeList, out CapabilityCatalogMacVolumeCapabilitiesBuffer attributeBuffer, nuint attributeBufferSize, uint options);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int ioctl(SafeFileHandle file, nuint request, ref int value);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int statx(SafeFileHandle directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out CapabilityCatalogLinuxStatx information);
