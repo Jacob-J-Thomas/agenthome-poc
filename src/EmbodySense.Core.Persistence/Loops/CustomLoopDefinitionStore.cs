@@ -129,6 +129,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operationId = mutation.OperationId;
             var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, operationId, StringComparison.Ordinal));
@@ -252,6 +253,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null || operation.Kind != CustomLoopDefinitionMutationKind.Create)
@@ -290,6 +292,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null)
@@ -336,6 +339,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.SingleOrDefault(definition => string.Equals(definition.Id, safeLoopId, StringComparison.Ordinal));
@@ -357,6 +361,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.OrderBy(definition => definition.Id, StringComparer.Ordinal).ToArray();
@@ -387,6 +392,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             if (HasExpiredMutationProof(state, definition.LastMutationOperationId))
@@ -425,6 +431,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, mutation.OperationId, StringComparison.Ordinal));
             if (existingOperation is not null)
@@ -502,6 +509,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, safeOperationId, StringComparison.Ordinal));
             if (existingOperation is not null)
@@ -624,6 +632,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, safeOperationId, StringComparison.Ordinal));
             if (existingOperation is not null)
@@ -678,6 +687,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null)

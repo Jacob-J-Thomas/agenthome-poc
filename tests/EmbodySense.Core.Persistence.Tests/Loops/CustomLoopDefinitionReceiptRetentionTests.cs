@@ -53,6 +53,32 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Definition_reads_accept_shared_lifecycle_retention_lock_and_cleanup_journal()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var definitionStore = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var definition = CreateDefinition("loop-shared-lifecycle-retention");
+        await CreateCommittedAsync(definitionStore, definition);
+        var lifecycleStore = new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var cleanup = await lifecycleStore.CleanupAsync(new CustomLoopReceiptCleanupCommand(
+            CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
+            CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
+            "cleanup-shared-lifecycle-retention",
+            AuditSchema.Actors.Web,
+            "web",
+            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
+            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes));
+
+        var loaded = await definitionStore.GetAsync(definition.Id);
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, cleanup.Status);
+        Assert.True(Directory.Exists(paths.CustomLoopControlReceiptCleanupPath));
+        Assert.NotNull(loaded);
+        Assert.Equal(definition.ContentHash, loaded.ContentHash);
+    }
+
+    [Fact]
     public async Task Expired_create_receipt_for_a_live_definition_is_retained_as_live_lineage_not_reported_compactable()
     {
         using var workspace = new TestWorkspace();
