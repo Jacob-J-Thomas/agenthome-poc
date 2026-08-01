@@ -363,7 +363,7 @@ public sealed class BrowserFlowTests
 
     private static async Task AssertChatRequestRegistryEmptyAsync(HeadlessBrowserSession browser)
     {
-        const string Expression = "(() => { const raw = localStorage.getItem('embodysense.chat-requests.v1'); if (!raw) return false; const registry = JSON.parse(raw); return Object.keys(registry).sort().join(',') === 'entries,schemaVersion,scope' && registry.schemaVersion === 1 && /^[0-9a-f]{64}$/.test(registry.scope) && Array.isArray(registry.entries) && registry.entries.length === 0 && !raw.includes('access_token'); })()";
+        const string Expression = "(() => { const prefix = 'embodysense.chat-requests.v1'; const keys = Object.keys(localStorage).filter((key) => key.startsWith(prefix + '.')); if (keys.length !== 1 || localStorage.getItem(prefix) !== null) return false; const scope = keys[0].slice(prefix.length + 1); const raw = localStorage.getItem(keys[0]); if (!raw) return false; const registry = JSON.parse(raw); return Object.keys(registry).sort().join(',') === 'entries,schemaVersion,scope' && registry.schemaVersion === 1 && /^[0-9a-f]{64}$/.test(scope) && registry.scope === scope && Array.isArray(registry.entries) && registry.entries.length === 0 && !raw.includes('access_token'); })()";
         Assert.True(await browser.EvaluateBooleanAsync(Expression));
     }
 
