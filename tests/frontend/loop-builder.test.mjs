@@ -336,8 +336,72 @@ test("partial failure stays locked and offers a recoverable retry distinct from 
   );
   assert.match(
     app.elements.loopInitializationStatus.textContent,
-    /failed after creating part.*No loop ran.*Retry/i,
+    /failed after creating part.*No loop ran.*Retry to create/i,
   );
+});
+
+test("corrupt protected initialization sentinels require explicit cleanup instead of a futile retry", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let initialized = false;
+  let requiresCleanup = true;
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: {
+      workspaceRoot: "C:/workspace",
+      initialized,
+      initializationState: initialized ? "initialized" : "partial",
+      initializationRequiresCleanup: !initialized && requiresCleanup,
+    },
+  }));
+  server.on("POST", "/api/workspace/init", () => {
+    initialized = true;
+    return {
+      status: 200,
+      body: {
+        workspaceRoot: "C:/workspace",
+        initialized: true,
+        initializationState: "initialized",
+        initializationRequiresCleanup: false,
+        initializationOutcome: "initialized",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  assert.equal(app.elements.loopInitializationPanel.hidden, false);
+  assert.equal(
+    app.elements.initializeLoopsWorkspaceButton.textContent,
+    "Check after cleanup",
+  );
+  assert.equal(app.elements.initializeLoopsWorkspaceButton.disabled, false);
+  assert.match(
+    app.elements.loopInitializationStatus.textContent,
+    /unusable protected.*ROLE\.md.*permissions\.json.*Back up.*remove the invalid protected file.*retrying without cleanup cannot replace/i,
+  );
+  await app.elements.initializeLoopsWorkspaceButton.click();
+  assert.match(
+    app.elements.loopInitializationStatus.textContent,
+    /still requires cleanup.*Back up.*remove the unusable protected.*check again.*No loop ran.*no protected file was replaced/i,
+  );
+  assert.equal(
+    server.calls.some(
+      (call) => call.method === "POST" && call.url === "/api/workspace/init",
+    ),
+    false,
+  );
+
+  requiresCleanup = false;
+  await app.elements.initializeLoopsWorkspaceButton.click();
+
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/workspace/init",
+    ).length,
+    1,
+  );
+  assert.equal(app.elements.loopInitializationPanel.hidden, true);
+  assert.equal(app.elements.createLoopButton.disabled, false);
 });
 
 test("plain initialization failure keeps authoring locked and offers an exact retry without assuming success", async () => {

@@ -15,6 +15,7 @@ public sealed class WorkspaceStatusReaderTests
 
         Assert.Equal(workspace.RootPath, status.RootPath);
         Assert.True(status.IsInitialized);
+        Assert.False(status.RequiresExplicitCleanup);
         Assert.EndsWith(Path.Combine(".agent", "audit", "events.ndjson"), status.EventsLogPath, StringComparison.Ordinal);
         Assert.EndsWith(Path.Combine(".agent", "permissions.json"), status.PermissionsPath, StringComparison.Ordinal);
         Assert.Equal("requires approval for missing or unmatched directory rules", status.DefaultAccess);
@@ -31,6 +32,7 @@ public sealed class WorkspaceStatusReaderTests
 
         Assert.False(status.IsInitialized);
         Assert.False(status.HasPartialScaffold);
+        Assert.False(status.RequiresExplicitCleanup);
         Assert.Equal("requires approval because permissions.json is missing, invalid, or unsupported", status.DefaultAccess);
         Assert.Empty(status.ApprovedEntries);
         Assert.Empty(status.DeniedEntries);
@@ -41,14 +43,15 @@ public sealed class WorkspaceStatusReaderTests
     {
         using var workspace = new TestWorkspace();
         var paths = new EmbodySense.Core.Common.Workspace.WorkspacePaths(workspace.RootPath);
-        Directory.CreateDirectory(paths.AgentPath);
-        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        File.Delete(paths.RolePath);
         await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "legacy role");
 
         var status = new WorkspaceStatusReader().Read(workspace.RootPath);
 
         Assert.False(status.IsInitialized);
         Assert.True(status.HasPartialScaffold);
+        Assert.False(status.RequiresExplicitCleanup);
     }
 
     [Fact]
@@ -62,6 +65,7 @@ public sealed class WorkspaceStatusReaderTests
 
         Assert.False(status.IsInitialized);
         Assert.True(status.HasPartialScaffold);
+        Assert.True(status.RequiresExplicitCleanup);
         Assert.Equal("requires approval because permissions.json is missing, invalid, or unsupported", status.DefaultAccess);
     }
 
@@ -76,5 +80,6 @@ public sealed class WorkspaceStatusReaderTests
 
         Assert.False(status.IsInitialized);
         Assert.True(status.HasPartialScaffold);
+        Assert.True(status.RequiresExplicitCleanup);
     }
 }

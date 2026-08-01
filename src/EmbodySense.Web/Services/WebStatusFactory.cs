@@ -23,6 +23,6 @@ public static class WebStatusFactory
         ArgumentNullException.ThrowIfNull(status);
 
         var initializationState = status.IsInitialized ? "initialized" : status.HasPartialScaffold ? "partial" : "uninitialized";
-        return new WebStatus("web", true, status.RootPath, status.IsInitialized, initializationState, initializationOutcome, options.Url, "CLI remains supported for verification and third-party client conformance.");
+        return new WebStatus("web", true, status.RootPath, status.IsInitialized, initializationState, status.RequiresExplicitCleanup, initializationOutcome, options.Url, "CLI remains supported for verification and third-party client conformance.");
     }
 }

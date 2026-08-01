@@ -369,8 +369,13 @@ function initializationState(status = workspaceStatusSnapshot) {
     : "uninitialized";
 }
 
+function initializationRequiresCleanup(status = workspaceStatusSnapshot) {
+  return status?.initializationRequiresCleanup === true;
+}
+
 function renderWorkspaceInitialization() {
   const state = initializationState();
+  const requiresCleanup = initializationRequiresCleanup();
   const hydrated = state === "initialized" && workspaceAuthoringHydrated;
   elements.initializationRoot.textContent =
     workspaceStatusSnapshot?.workspaceRoot ?? "the configured workspace";
@@ -388,8 +393,9 @@ function renderWorkspaceInitialization() {
   } else if (workspaceInitializationMessage) {
     elements.initializationStatus.textContent = workspaceInitializationMessage;
   } else if (state === "partial") {
-    elements.initializationStatus.textContent =
-      "This workspace has an incomplete .agent scaffold. Retry initialization to repair the missing required files; existing protected seed documents will remain unchanged.";
+    elements.initializationStatus.textContent = requiresCleanup
+      ? "This workspace has an unusable protected .agent/ROLE.md or .agent/permissions.json document. Back up any intentional content, remove the invalid protected file, then initialize again. Retrying without cleanup cannot replace protected seed documents."
+      : "This workspace has an incomplete .agent scaffold. Retry initialization to create the missing required files; existing protected seed documents will remain unchanged.";
   } else if (state === "initialized") {
     elements.initializationStatus.textContent =
       "The workspace is initialized, but Loops has not finished loading authoritative role and catalog state. Retry hydration.";
@@ -409,7 +415,9 @@ function renderWorkspaceInitialization() {
   );
   elements.initializeWorkspaceButton.textContent =
     state === "partial"
-      ? "Retry initialization"
+      ? requiresCleanup
+        ? "Check after cleanup"
+        : "Retry initialization"
       : state === "initialized"
         ? "Retry Loops hydration"
         : "Initialize workspace";
@@ -445,6 +453,14 @@ async function initializeLoopsWorkspace() {
     const currentStatus = await requestJson("/api/status");
     if (generation !== workspaceInitializationGeneration) return;
     workspaceStatusSnapshot = currentStatus;
+    if (initializationRequiresCleanup(currentStatus)) {
+      setWorkspaceInitializationOutcome(
+        "partial",
+        "Initialization still requires cleanup. Back up any intentional content, remove the unusable protected .agent/ROLE.md or .agent/permissions.json document, then check again. No loop ran, and no protected file was replaced.",
+      );
+      return;
+    }
+
     if (currentStatus.initialized) {
       await completeWorkspaceInitialization(generation, "already-initialized");
       return;
@@ -458,10 +474,13 @@ async function initializeLoopsWorkspace() {
     workspaceStatusSnapshot = result;
     if (!result.initialized) {
       const partial = initializationState(result) === "partial";
+      const requiresCleanup = initializationRequiresCleanup(result);
       setWorkspaceInitializationOutcome(
         partial ? "partial" : "failed",
         partial
-          ? "Initialization stopped after creating part of the workspace scaffold. No loop ran. Retry to repair the missing required files."
+          ? requiresCleanup
+            ? "Initialization stopped with an unusable protected .agent/ROLE.md or .agent/permissions.json document. No loop ran. Back up any intentional content, remove the invalid protected file, then initialize again; retrying without cleanup cannot replace it."
+            : "Initialization stopped after creating part of the workspace scaffold. No loop ran. Retry to create the missing required files."
           : "Initialization did not produce a complete workspace. Nothing is unlocked, and no loop ran. Retry when ready.",
       );
       return;
@@ -536,10 +555,13 @@ async function reconcileWorkspaceInitializationFailure(generation, error) {
     }
 
     const partial = initializationState(status) === "partial";
+    const requiresCleanup = initializationRequiresCleanup(status);
     setWorkspaceInitializationOutcome(
       partial ? "partial" : "failed",
       partial
-        ? "Initialization failed after creating part of the .agent scaffold. No loop ran. Retry to repair the missing required files."
+        ? requiresCleanup
+          ? "Initialization failed with an unusable protected .agent/ROLE.md or .agent/permissions.json document. No loop ran. Back up any intentional content, remove the invalid protected file, then initialize again; retrying without cleanup cannot replace it."
+          : "Initialization failed after creating part of the .agent scaffold. No loop ran. Retry to create the missing required files."
         : `Initialization failed before the workspace became ready. Nothing is unlocked, and no loop ran. ${error.message}`,
     );
   } catch {
