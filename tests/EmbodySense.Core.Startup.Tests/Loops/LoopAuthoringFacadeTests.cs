@@ -139,7 +139,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Structurally_valid_noncanonical_system_graph_is_not_labeled_runner_compatible()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var canonical = LoopDefinition.CreateDefaultConversation();
         const string AlternateEntryNodeId = "alternate-entry";
@@ -181,7 +181,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Missing_system_authority_in_initialized_workspace_fails_closed()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         File.Delete(new WorkspacePaths(workspace.RootPath).DefaultConversationLoopDefinitionPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath);
 
@@ -196,7 +196,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Substituted_system_authority_identity_fails_closed()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var path = new WorkspacePaths(workspace.RootPath).DefaultConversationLoopDefinitionPath;
         var root = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
         root["id"] = "substituted-authority";

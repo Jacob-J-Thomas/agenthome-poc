@@ -84,7 +84,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_preserves_an_observed_success_when_completion_audit_fails()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
@@ -123,7 +123,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_preserves_a_conclusive_failure_when_completion_audit_also_fails()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
@@ -162,7 +162,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_routes_dynamic_tool_calls_through_tool_broker()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "tool-visible note");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
         var transport = new ScriptedAppServerTransport(
@@ -231,7 +231,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_advertises_only_loop_assigned_workspace_commands()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)] };
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
         var transport = new ScriptedAppServerTransport(
@@ -256,7 +256,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_omits_dynamic_tools_and_denies_stale_tool_calls_when_loop_grants_no_workspace_commands()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.ProviderInference] };
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
         var transport = new ScriptedAppServerTransport(
@@ -286,7 +286,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_rejects_old_per_command_dynamic_tool_names()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
@@ -315,7 +315,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_declines_native_app_server_approval_requests()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
@@ -346,7 +346,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_declines_other_native_app_server_requests(string method, string parameters, string expectedResponseFragment)
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
@@ -369,7 +369,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_rejects_unsupported_app_server_requests_with_json_rpc_error()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),

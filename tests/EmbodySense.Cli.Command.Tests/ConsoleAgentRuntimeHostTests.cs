@@ -13,7 +13,7 @@ public sealed class ConsoleAgentRuntimeHostTests
     public async Task RunAsync_runs_reusable_loop_through_cli_console_adapter()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
         var client = new ScriptedRuntimeClient("hello", "/exit");
 

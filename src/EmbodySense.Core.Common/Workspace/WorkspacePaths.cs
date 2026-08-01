@@ -245,6 +245,18 @@ public sealed class WorkspacePaths
     /// <value>The recipes path.</value>
     public string RecipesPath => Path.Combine(AgentPath, "recipes");
 
+    /// <summary>Gets the governed capability catalog directory.</summary>
+    public string CapabilityCatalogPath => Path.Combine(AgentPath, "capabilities");
+
+    /// <summary>Gets the canonical capability catalog artifact path.</summary>
+    public string CapabilityCatalogDocumentPath => Path.Combine(CapabilityCatalogPath, "catalog.json");
+
+    /// <summary>Gets the last independently proved capability catalog artifact path.</summary>
+    public string CapabilityCatalogProofPath => Path.Combine(CapabilityCatalogPath, "catalog.proved.json");
+
+    /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
+    public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
+
     /// <summary>
     /// Gets the permissions path.
     /// </summary>
