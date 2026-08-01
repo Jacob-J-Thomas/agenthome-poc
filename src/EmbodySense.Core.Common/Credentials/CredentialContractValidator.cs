@@ -130,8 +130,8 @@ public static class CredentialContractValidator
         return CredentialContractValidationResult.FromErrors(errors);
     }
 
-    /// <summary>Validates exact binding, proof, scope, and time relationships at verifier-observed trusted UTC.</summary>
-    public static CredentialContractValidationResult Validate(CredentialUseRequest? request, DateTimeOffset observedAtUtc)
+    /// <summary>Validates exact binding, proof, scope, admitted run, and time relationships at verifier-observed trusted UTC.</summary>
+    public static CredentialContractValidationResult Validate(CredentialUseRequest? request, CredentialContractId? currentRunId, DateTimeOffset observedAtUtc)
     {
         var errors = new List<CredentialContractError>();
         if (request is null)
@@ -143,6 +143,7 @@ public static class CredentialContractValidator
         Merge(Validate(request.Binding), "$.binding", errors);
         Merge(Validate(request.RequestedScope), "$.requestedScope", errors);
         Merge(Validate(request.AuthorityProof), "$.authorityProof", errors);
+        Require(currentRunId is not null, CredentialContractErrorCode.InvalidRunId, "$.currentRunId", errors);
         Require(CredentialContractText.IsUtc(observedAtUtc), CredentialContractErrorCode.InvalidTimestamp, "$.observedAtUtc", errors);
         if (request.Binding is not null && request.BindingHash is not null && request.AuthorityProof is not null && CredentialContractJson.TryHash(request.Binding, out var bindingHash, out _))
         {
@@ -155,6 +156,7 @@ public static class CredentialContractValidator
         }
 
         Require(request.Binding?.ReferenceId is not null && request.AuthorityProof?.ReferenceId is not null && request.Binding.ReferenceId.Equals(request.AuthorityProof.ReferenceId), CredentialContractErrorCode.ProofReferenceMismatch, "$.authorityProof.referenceId", errors);
+        Require(currentRunId is not null && request.AuthorityProof?.RunId is not null && currentRunId.Equals(request.AuthorityProof.RunId), CredentialContractErrorCode.ProofRunMismatch, "$.authorityProof.runId", errors);
         Require(request.Binding?.Scope is not null && request.AuthorityProof?.GrantedScope is not null && request.RequestedScope is not null && CredentialScopeRules.IsNarrowerThanOrEqual(request.RequestedScope, request.Binding.Scope) && CredentialScopeRules.IsNarrowerThanOrEqual(request.RequestedScope, request.AuthorityProof.GrantedScope), CredentialContractErrorCode.CredentialScopeMismatch, "$.requestedScope", errors);
         Require(request.AuthorityProof is not null && observedAtUtc >= request.AuthorityProof.IssuedAtUtc && observedAtUtc < request.AuthorityProof.ExpiresAtUtc, CredentialContractErrorCode.CredentialProofExpired, "$.observedAtUtc", errors);
         Require(request.RequestedScope is not null && (request.RequestedScope.NotBeforeUtc is null || observedAtUtc >= request.RequestedScope.NotBeforeUtc) && (request.RequestedScope.NotAfterUtc is null || observedAtUtc < request.RequestedScope.NotAfterUtc), CredentialContractErrorCode.CredentialRequestedOutsideScope, "$.observedAtUtc", errors);

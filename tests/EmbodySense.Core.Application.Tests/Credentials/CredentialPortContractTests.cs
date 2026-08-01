@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Credentials;
 using EmbodySense.Core.Application.Credentials.Models;
@@ -17,7 +16,7 @@ public sealed class CredentialPortContractTests
         var provider = new SecureFakeProvider();
         var mutation = Mutation();
         var canary = Encoding.UTF8.GetBytes("credential-canary-214");
-        var create = await provider.CreateAsync(mutation with { ValueByteLength = canary.Length }, destination => canary.CopyTo(destination), CancellationToken.None);
+        var create = await provider.CreateAsync(mutation with { ValueByteLength = canary.Length }, destination => Copy(canary, destination), CancellationToken.None);
         var consumer = new RecordingConsumer();
         var use = await provider.UseAsync(Use(), consumer, CancellationToken.None);
 
@@ -34,7 +33,7 @@ public sealed class CredentialPortContractTests
         var provider = new SecureFakeProvider();
         var original = Encoding.UTF8.GetBytes("original-canary");
         var mutation = Mutation() with { ValueByteLength = original.Length };
-        Assert.True((await provider.CreateAsync(mutation, destination => original.CopyTo(destination), CancellationToken.None)).Succeeded);
+        Assert.True((await provider.CreateAsync(mutation, destination => Copy(original, destination), CancellationToken.None)).Succeeded);
 
         var failed = await provider.ReplaceAsync(mutation, destination => throw new InvalidOperationException("hostile-provider-detail"), CancellationToken.None);
         var consumer = new RecordingConsumer();
@@ -47,18 +46,48 @@ public sealed class CredentialPortContractTests
     }
 
     [Fact]
+    public async Task Secure_fake_rejects_partial_write_and_cancellation_before_commit_without_replacing_value()
+    {
+        var provider = new SecureFakeProvider();
+        var original = Encoding.UTF8.GetBytes("original-canary");
+        var mutation = Mutation() with { ValueByteLength = original.Length };
+        Assert.True((await provider.CreateAsync(mutation, destination => Copy(original, destination), CancellationToken.None)).Succeeded);
+
+        var partial = await provider.ReplaceAsync(mutation, destination =>
+        {
+            original.AsSpan(0, original.Length - 1).CopyTo(destination);
+            return original.Length - 1;
+        }, CancellationToken.None);
+        using var source = new CancellationTokenSource();
+        var cancelled = await provider.ReplaceAsync(mutation, destination =>
+        {
+            var written = Copy(original, destination);
+            source.Cancel();
+            return written;
+        }, source.Token);
+        var consumer = new RecordingConsumer();
+        Assert.True((await provider.UseAsync(Use(), consumer, CancellationToken.None)).Succeeded);
+
+        Assert.Equal(CredentialFailureCode.CallbackFailed, partial.Failure?.Code);
+        Assert.Equal(CredentialFailureCode.Unavailable, cancelled.Failure?.Code);
+        Assert.Equal(original, consumer.Observed);
+    }
+
+    [Fact]
     public async Task Secure_fake_fails_closed_for_bounds_missing_values_and_cancellation()
     {
         var provider = new SecureFakeProvider();
-        var invalid = await provider.CreateAsync(Mutation() with { ValueByteLength = CredentialContractLimits.MaxCredentialBytes + 1 }, _ => { }, CancellationToken.None);
+        var invalid = await provider.CreateAsync(Mutation() with { ValueByteLength = CredentialContractLimits.MaxCredentialBytes + 1 }, _ => 0, CancellationToken.None);
         var missing = await provider.UseAsync(Use(), new RecordingConsumer(), CancellationToken.None);
         using var source = new CancellationTokenSource();
         source.Cancel();
         var cancelled = await provider.DeleteAsync(new CredentialProviderDeleteRequest("workspace-1", Reference(), Provider(), Id("operation-delete")), source.Token);
+        var cancelledHealth = await provider.GetHealthAsync(Use(), source.Token);
 
         Assert.Equal(CredentialFailureCode.InvalidRequest, invalid.Failure?.Code);
         Assert.Equal(CredentialFailureCode.NotFound, missing.Failure?.Code);
         Assert.Equal(CredentialFailureCode.Unavailable, cancelled.Failure?.Code);
+        Assert.Equal(CredentialProviderHealthStatus.Unavailable, cancelledHealth.Status);
         Assert.True(CredentialPortContractValidator.Validate(CredentialProviderResult.Success()).IsValid);
         Assert.False(CredentialPortContractValidator.Validate((CredentialProviderResult?)null).IsValid);
         Assert.Throws<ArgumentOutOfRangeException>(() => CredentialFailure.FromCode((CredentialFailureCode)99));
@@ -105,14 +134,15 @@ public sealed class CredentialPortContractTests
         Assert.True(CredentialContractJson.TryHash(binding, out var bindingHash, out _));
         var placeholder = CredentialContractHash.Compute("placeholder");
         var unsigned = new CredentialAuthorityProof(1, Id("proof-1"), binding.ReferenceId, bindingHash!, binding.Scope, "user-1", Id("run-1"), 7, _credentialNow.AddMinutes(-5), _credentialNow.AddMinutes(5), CredentialProvider("org.embodysense.authority"), placeholder);
-        var proof = unsigned with { Authenticator = Sign(unsigned, signingKey) };
+        var proof = unsigned with { Authenticator = SecureFakeAuthorityVerifier.Sign(unsigned, signingKey) };
         var request = new CredentialUseRequest(binding, bindingHash!, binding.Scope, proof);
         var verifier = new SecureFakeAuthorityVerifier(signingKey, new FixedTimeProvider(_credentialNow));
 
-        Assert.True((await verifier.VerifyAsync(request, CancellationToken.None)).Accepted);
-        Assert.False((await verifier.VerifyAsync(request with { AuthorityProof = proof with { AuthorityRevision = 8 } }, CancellationToken.None)).Accepted);
-        Assert.False((await verifier.VerifyAsync(request with { AuthorityProof = proof with { Authenticator = placeholder } }, CancellationToken.None)).Accepted);
-        Assert.False((await new SecureFakeAuthorityVerifier(signingKey, new FixedTimeProvider(proof.ExpiresAtUtc)).VerifyAsync(request, CancellationToken.None)).Accepted);
+        Assert.True((await verifier.VerifyAsync(request, proof.RunId, CancellationToken.None)).Accepted);
+        Assert.False((await verifier.VerifyAsync(request, Id("run-2"), CancellationToken.None)).Accepted);
+        Assert.False((await verifier.VerifyAsync(request with { AuthorityProof = proof with { AuthorityRevision = 8 } }, proof.RunId, CancellationToken.None)).Accepted);
+        Assert.False((await verifier.VerifyAsync(request with { AuthorityProof = proof with { Authenticator = placeholder } }, proof.RunId, CancellationToken.None)).Accepted);
+        Assert.False((await new SecureFakeAuthorityVerifier(signingKey, new FixedTimeProvider(proof.ExpiresAtUtc)).VerifyAsync(request, proof.RunId, CancellationToken.None)).Accepted);
     }
 
     private static CredentialProviderMutationRequest Mutation() => new("workspace-1", Reference(), Provider(), Id("operation-create"), 16);
@@ -132,12 +162,10 @@ public sealed class CredentialPortContractTests
         return new CredentialCapabilityBinding(1, Reference(), requirement!, identity, implementation, scope);
     }
 
-    private static CredentialContractHash Sign(CredentialAuthorityProof proof, byte[] signingKey)
+    private static int Copy(byte[] source, Span<byte> destination)
     {
-        Assert.True(CredentialContractJson.TrySerializeAuthorityClaim(proof, out var claim, out _));
-        var authenticator = HMACSHA256.HashData(signingKey, Encoding.UTF8.GetBytes(claim!));
-        Assert.True(CredentialContractHash.TryParse("sha256:" + Convert.ToHexStringLower(authenticator), out var parsed, out _));
-        return parsed!;
+        source.CopyTo(destination);
+        return source.Length;
     }
 
     private static CredentialReferenceId Reference()
@@ -164,142 +192,4 @@ public sealed class CredentialPortContractTests
         return value!;
     }
 
-    private sealed class RecordingConsumer : ICredentialTrustedUseConsumer
-    {
-        internal byte[] Observed { get; private set; } = [];
-
-        public void Use(ReadOnlySpan<byte> credential)
-        {
-            Observed = credential.ToArray();
-        }
-    }
-
-    private sealed class SecureFakeAuthorityVerifier(byte[] signingKey, TimeProvider timeProvider) : ICredentialAuthorityProofVerifier
-    {
-        private readonly byte[] _signingKey = signingKey.ToArray();
-        private readonly TimeProvider _timeProvider = timeProvider;
-
-        public ValueTask<CredentialAuthorityVerificationResult> VerifyAsync(CredentialUseRequest request, CancellationToken cancellationToken)
-        {
-            if (cancellationToken.IsCancellationRequested || !CredentialContractValidator.Validate(request, _timeProvider.GetUtcNow()).IsValid)
-            {
-                return ValueTask.FromResult(CredentialAuthorityVerificationResult.Reject(CredentialFailure.FromCode(CredentialFailureCode.Unauthorized)));
-            }
-
-            var expected = Sign(request.AuthorityProof, _signingKey);
-            var result = expected.FixedTimeEquals(request.AuthorityProof.Authenticator) ? CredentialAuthorityVerificationResult.Accept() : CredentialAuthorityVerificationResult.Reject(CredentialFailure.FromCode(CredentialFailureCode.Unauthorized));
-            return ValueTask.FromResult(result);
-        }
-    }
-
-    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
-    {
-        public override DateTimeOffset GetUtcNow() => value;
-    }
-
-    private sealed class SecureFakeProvider : ICredentialValueProvider
-    {
-        private readonly Dictionary<CredentialReferenceId, byte[]> _values = [];
-
-        public ValueTask<CredentialProviderResult> CreateAsync(CredentialProviderMutationRequest request, CredentialSecretWriteCallback source, CancellationToken cancellationToken)
-        {
-            return WriteAsync(request, source, replace: false, cancellationToken);
-        }
-
-        public ValueTask<CredentialProviderResult> ReplaceAsync(CredentialProviderMutationRequest request, CredentialSecretWriteCallback source, CancellationToken cancellationToken)
-        {
-            return WriteAsync(request, source, replace: true, cancellationToken);
-        }
-
-        public ValueTask<CredentialProviderResult> UseAsync(CredentialProviderUseRequest request, ICredentialTrustedUseConsumer trustedConsumer, CancellationToken cancellationToken)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.Unavailable));
-            }
-
-            if (!CredentialPortContractValidator.Validate(request).IsValid || trustedConsumer is null)
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.InvalidRequest));
-            }
-
-            if (!_values.TryGetValue(request.ReferenceId, out var value))
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.NotFound));
-            }
-
-            try
-            {
-                trustedConsumer.Use(value);
-                return ValueTask.FromResult(CredentialProviderResult.Success());
-            }
-            catch
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.CallbackFailed));
-            }
-        }
-
-        public ValueTask<CredentialProviderResult> DeleteAsync(CredentialProviderDeleteRequest request, CancellationToken cancellationToken)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.Unavailable));
-            }
-
-            if (!CredentialPortContractValidator.Validate(request).IsValid)
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.InvalidRequest));
-            }
-
-            if (_values.Remove(request.ReferenceId, out var removed))
-            {
-                CryptographicOperations.ZeroMemory(removed);
-            }
-
-            return ValueTask.FromResult(CredentialProviderResult.Success());
-        }
-
-        public ValueTask<CredentialProviderHealthResult> GetHealthAsync(CredentialProviderUseRequest request, CancellationToken cancellationToken)
-        {
-            var status = _values.ContainsKey(request.ReferenceId) ? CredentialProviderHealthStatus.Available : CredentialProviderHealthStatus.Missing;
-            return ValueTask.FromResult(status == CredentialProviderHealthStatus.Available ? CredentialProviderHealthResult.Available() : CredentialProviderHealthResult.Missing());
-        }
-
-        private ValueTask<CredentialProviderResult> WriteAsync(CredentialProviderMutationRequest request, CredentialSecretWriteCallback source, bool replace, CancellationToken cancellationToken)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.Unavailable));
-            }
-
-            if (!CredentialPortContractValidator.Validate(request).IsValid || source is null || replace != _values.ContainsKey(request.ReferenceId))
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.InvalidRequest));
-            }
-
-            var candidate = new byte[request.ValueByteLength];
-            try
-            {
-                source(candidate);
-                if (_values.Remove(request.ReferenceId, out var previous))
-                {
-                    CryptographicOperations.ZeroMemory(previous);
-                }
-
-                _values.Add(request.ReferenceId, candidate);
-                candidate = [];
-                return ValueTask.FromResult(CredentialProviderResult.Success());
-            }
-            catch
-            {
-                return ValueTask.FromResult(Failed(CredentialFailureCode.CallbackFailed));
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(candidate);
-            }
-        }
-
-        private static CredentialProviderResult Failed(CredentialFailureCode code) => CredentialProviderResult.Failed(CredentialFailure.FromCode(code));
-    }
 }

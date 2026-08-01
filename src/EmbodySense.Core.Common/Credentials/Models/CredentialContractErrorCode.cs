@@ -67,6 +67,8 @@ public enum CredentialContractErrorCode
     ProofActorMismatch,
     /// <summary>The run identity is invalid.</summary>
     InvalidRunId,
+    /// <summary>The proof covers a different runtime invocation.</summary>
+    ProofRunMismatch,
     /// <summary>The authority revision is invalid.</summary>
     InvalidAuthorityRevision,
     /// <summary>The proof lifetime is invalid.</summary>
