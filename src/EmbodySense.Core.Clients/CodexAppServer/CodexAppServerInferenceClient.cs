@@ -145,7 +145,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
                 if (IsResponse(message, requestId))
                 {
-                    ThrowIfError(message);
+                    ThrowIfTurnStartError(message);
                     turnStartResponseReceived = true;
                     turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
                     continue;
@@ -564,6 +564,18 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         var errorMessage = TryGetString(error, "message") ?? error.GetRawText();
         throw new InvalidOperationException($"Codex app-server request failed: {errorMessage}");
+    }
+
+    private static void ThrowIfTurnStartError(JsonElement message)
+    {
+        if (!message.TryGetProperty("error", out var error))
+        {
+            return;
+        }
+
+        var errorMessage = TryGetString(error, "message") ?? error.GetRawText();
+        var providerResponseId = TryGetNestedString(message, "error", "data", "turnId") ?? TryGetNestedString(message, "error", "data", "turn", "id");
+        throw new LlmInferenceTerminalFailureException($"Codex app-server turn/start failed: {errorMessage}", providerResponseId);
     }
 
     private static void ThrowIfTurnFailed(JsonElement message, string? providerResponseId)
