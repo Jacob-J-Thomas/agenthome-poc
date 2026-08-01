@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Common.Inference;
@@ -13,7 +14,8 @@ namespace EmbodySense.Core.Application.Loops.Execution;
 /// </summary>
 /// <remarks>
 /// Recovery holds workspace conversation ownership for its entire scan. It may repair idempotent transcript publication and
-/// terminal run projection, but an outcome-unknown provider attempt or divergent transcript is always parked as NeedsReview.
+/// terminal run projection. Outcome-unknown provider attempts and transcript conflicts are parked as NeedsReview unless a
+/// conclusive terminal provider failure already proves that the attempt must close as Failed without touching the transcript.
 /// </remarks>
 public sealed class DefaultConversationTurnRecoveryService
 {
@@ -103,6 +105,31 @@ public sealed class DefaultConversationTurnRecoveryService
                 return Result(record, originalCheckpoint, DefaultConversationTurnRecoveryClassification.ProviderOutcomeUnknown, OutcomeUnknownDetail(record));
 
             case DefaultConversationTurnCheckpoint.ProviderOutcomeObserved:
+                if (record.ProviderOutcome == DefaultConversationProviderOutcome.ObservedWithAuditFailure)
+                {
+                    var transcriptMatches = await CurrentTranscriptEqualsAsync(record, CanonicalUserTranscript(record), cancellationToken);
+                    var auditFailure = record.Transitions.Last(transition => transition.Checkpoint == DefaultConversationTurnCheckpoint.ProviderOutcomeObserved).Detail;
+                    var reviewDetail = transcriptMatches
+                        ? auditFailure
+                        : $"{auditFailure} Recovery also detected divergent transcript content and preserved it exactly.";
+                    record = await FinalizeAsync(record, LoopRunStatus.NeedsReview, reviewDetail, cancellationToken);
+                    return Result(record, originalCheckpoint, DefaultConversationTurnRecoveryClassification.ProviderOutcomeObserved, reviewDetail);
+                }
+
+                if (record.ProviderOutcome == DefaultConversationProviderOutcome.ObservedFailure)
+                {
+                    var transcriptMatches = await CurrentTranscriptEqualsAsync(record, CanonicalUserTranscript(record), cancellationToken);
+                    var providerFailure = record.Transitions.Last(transition => transition.Checkpoint == DefaultConversationTurnCheckpoint.ProviderOutcomeObserved).Detail;
+                    var failureDetail = transcriptMatches
+                        ? providerFailure
+                        : $"{providerFailure} Recovery also detected divergent transcript content and preserved it exactly.";
+                    record = await FinalizeAsync(record, LoopRunStatus.Failed, failureDetail, cancellationToken);
+                    var detail = transcriptMatches
+                        ? "The conclusive terminal provider failure and Failed run status were recovered without quarantine or redispatch."
+                        : "The conclusive terminal provider failure was closed as Failed without quarantine or redispatch; divergent transcript content was preserved exactly.";
+                    return Result(record, originalCheckpoint, DefaultConversationTurnRecoveryClassification.ProviderOutcomeObserved, detail);
+                }
+
                 record = await AdvanceAsync(record, DefaultConversationTurnCheckpoint.AssistantPublicationPrepared, "Recovery prepared publication of the durably observed assistant output.", DefaultConversationTurnBoundary.AssistantPublicationPrepared, cancellationToken);
                 return await RecoverObservedAssistantAsync(record, originalCheckpoint, cancellationToken);
 

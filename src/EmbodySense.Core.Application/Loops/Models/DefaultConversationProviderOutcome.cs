@@ -12,5 +12,9 @@ public enum DefaultConversationProviderOutcome
     /// <summary>The provider turn/start transport-write boundary was reached but no terminal outcome was durably observed.</summary>
     OutcomeUnknown,
     /// <summary>A successful terminal provider outcome and exact output were observed.</summary>
-    Observed
+    Observed,
+    /// <summary>A successful terminal provider outcome was observed, but required completion bookkeeping failed before publication.</summary>
+    ObservedWithAuditFailure,
+    /// <summary>A conclusive terminal provider failure was observed, so the attempt must not be quarantined or redispatched.</summary>
+    ObservedFailure
 }

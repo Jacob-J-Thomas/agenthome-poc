@@ -804,7 +804,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
 
             var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions)
                 ?? throw new FormatException($"Conversation memory entry in `{path}` was empty.");
-            ValidateEntry(entry);
+            ValidateEntry(entry, path);
             if (entries.Any(existing => string.Equals(existing.MessageId, entry.MessageId, StringComparison.Ordinal)
                 || string.Equals(existing.PublicationId, entry.PublicationId, StringComparison.Ordinal)))
             {
@@ -955,7 +955,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         return new LlmMessage(ParseRole(entry.Role), entry.Content);
     }
 
-    private static void ValidateEntry(ConversationMemoryEntry entry)
+    private static void ValidateEntry(ConversationMemoryEntry entry, string path)
     {
         if (entry.SchemaVersion != SchemaVersion)
         {
@@ -963,8 +963,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.ConversationId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(entry.MessageId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(entry.PublicationId);
+        if (string.IsNullOrWhiteSpace(entry.MessageId) || string.IsNullOrWhiteSpace(entry.PublicationId))
+        {
+            throw new ConversationTranscriptCleanupRequiredException(path);
+        }
+
         _ = ParseRole(entry.Role);
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.Content);
     }

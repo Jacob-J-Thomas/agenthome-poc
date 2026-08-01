@@ -52,7 +52,8 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
     /// <returns>A task whose result is the provider response.</returns>
     /// <remarks>
     /// Cancellation propagates and is not recorded as a failed inference. Other provider failures
-    /// are audited before being rethrown; an audit-write failure can therefore become the observed failure.
+    /// are audited before being rethrown. Once a terminal provider outcome is observed, a completion-audit
+    /// failure is attached to that conclusive outcome rather than replacing it with outcome-unknown evidence.
     /// </remarks>
     public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
@@ -82,8 +83,35 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
                 ? await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken)
                 : await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting);
             stopwatch.Stop();
-            await RecordInferenceSucceededAsync(requestId, request, response, stopwatch.Elapsed, cancellationToken);
+            try
+            {
+                await RecordInferenceSucceededAsync(requestId, request, response, stopwatch.Elapsed, CancellationToken.None);
+            }
+            catch (Exception auditException)
+            {
+                throw new LlmInferenceObservedResponseException("The terminal provider response was observed, but its completion audit could not be persisted. The response must be retained for review and the provider attempt must not be redispatched.", response, auditException);
+            }
+
             return response;
+        }
+        catch (LlmInferenceObservedResponseException)
+        {
+            throw;
+        }
+        catch (LlmInferenceTerminalFailureException exception)
+        {
+            stopwatch.Stop();
+            try
+            {
+                await RecordInferenceFailedAsync(requestId, request, exception, stopwatch.Elapsed, CancellationToken.None);
+            }
+            catch (Exception auditException)
+            {
+                var detail = $"{exception.Message} The conclusive provider failure was observed, but its completion audit could not be persisted; the provider attempt must not be redispatched.";
+                throw new LlmInferenceTerminalFailureException(detail, exception.ProviderResponseId, new AggregateException(exception, auditException));
+            }
+
+            throw;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
