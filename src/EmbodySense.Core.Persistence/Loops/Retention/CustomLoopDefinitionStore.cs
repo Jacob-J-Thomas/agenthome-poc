@@ -204,6 +204,35 @@ public sealed partial class CustomLoopDefinitionStore
     }
 
     /// <summary>
+    /// Measures the canonical active cleanup journal retained for one authoring receipt class.
+    /// </summary>
+    /// <param name="artifactClass">The definition-mutation receipt or definition-tombstone class.</param>
+    /// <param name="cancellationToken">The token used to cancel storage inspection.</param>
+    /// <returns>The serialized UTF-8 byte count and durable state, or an empty posture when no active journal exists.</returns>
+    /// <remarks>
+    /// This is an accounting-only inspection boundary. It preserves the journal and uses the same workspace lock and
+    /// strict schema validation as cleanup so an interface never needs to inspect retention files directly.
+    /// </remarks>
+    public async Task<CustomLoopReceiptActiveCleanupJournalPosture> InspectActiveReceiptCleanupJournalAsync(CustomLoopReceiptArtifactClass artifactClass, CancellationToken cancellationToken = default)
+    {
+        RequireAuthoringArtifactClass(artifactClass);
+        await _mutationGate.WaitAsync(cancellationToken);
+        try
+        {
+            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
+            var journal = await ReadCleanupJournalAsync(artifactClass, cancellationToken);
+            return journal is null
+                ? new CustomLoopReceiptActiveCleanupJournalPosture(0, null, null, null)
+                : new CustomLoopReceiptActiveCleanupJournalPosture(CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(journal).LongLength, journal.Stage, journal.Outcome, IsTerminal(journal.Stage) ? null : journal.OwnershipAcquiredAtUtc + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow);
+        }
+        finally
+        {
+            _mutationGate.Release();
+        }
+    }
+
+    /// <summary>
     /// Distinguishes an exact authoring receipt from compact expiry proof and an unknown operation identity.
     /// </summary>
     /// <param name="artifactClass">The definition-mutation receipt or definition-tombstone class.</param>

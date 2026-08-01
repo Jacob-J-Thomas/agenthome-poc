@@ -70,6 +70,278 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
 });
 
+test("retention stays lazy and performs only an explicit policy-permitted bounded cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let postureReads = 0;
+  server.on("GET", "/api/loops/receipt-retention", () => {
+    postureReads++;
+    return {
+      status: 200,
+      body: createRetentionPosture(),
+    };
+  });
+  server.on("POST", "/api/loops/receipt-retention/cleanup", (call) => ({
+    status: 409,
+    body: {
+      status: "Degraded",
+      health: "Degraded",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "AmbiguousEvidence",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "Evidence is ambiguous, so no raw receipt was removed.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  assert.equal(postureReads, 0);
+  await app.elements.retentionTab.click();
+
+  assert.equal(postureReads, 1);
+  assert.match(app.elements.retentionContent.textContent, /healthy/i);
+  assert.match(
+    app.elements.retentionContent.textContent,
+    /Exact replay horizon/,
+  );
+  const cleanup = findByTag(app.elements.retentionContent, "button").find(
+    (button) => /Clean eligible expired evidence/.test(button.textContent),
+  );
+  await cleanup.click();
+
+  const cleanupCall = server.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loops/receipt-retention/cleanup",
+  );
+  assert.equal(cleanupCall.body.maximumArtifactCount, 64);
+  assert.equal(cleanupCall.body.maximumArtifactUtf8Bytes, 4 * 1024 * 1024);
+  assert.match(app.window.confirmations.at(-1), /explicit request/i);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /no raw receipt was removed/i,
+  );
+  assert.equal(postureReads, 2);
+});
+
+test("retention cleanup retains its operation identity when an ambiguous transport failure is retried", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  let cleanupAttempts = 0;
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => {
+    cleanupAttempts++;
+    if (cleanupAttempts === 1)
+      throw new Error("Connection dropped before a response.");
+    return {
+      status: 200,
+      body: {
+        status: "NothingEligible",
+        health: "Healthy",
+        isCommitted: false,
+        exhaustionReason: "None",
+        cleanupBlockReason: "None",
+        compactedArtifactCount: 0,
+        compactedArtifactUtf8Bytes: 0,
+        detail: "No evidence is eligible for cleanup.",
+      },
+    };
+  });
+  const first = await loadLoopBuilder({ server, localStorage });
+  await first.elements.retentionTab.click();
+  const firstCleanup = findByTag(
+    first.elements.retentionContent,
+    "button",
+  ).find((button) =>
+    /Clean eligible expired evidence/.test(button.textContent),
+  );
+
+  await firstCleanup.click();
+  const storageKey = `embodysense.pending-receipt-cleanup.v1.${encodeURIComponent("C:/workspace")}`;
+  assert.ok(localStorage.getItem(storageKey));
+
+  const second = await loadLoopBuilder({ server, localStorage });
+  await second.elements.retentionTab.click();
+  const secondCleanup = findByTag(
+    second.elements.retentionContent,
+    "button",
+  ).find((button) =>
+    /Clean eligible expired evidence/.test(button.textContent),
+  );
+  await secondCleanup.click();
+
+  const cleanupCalls = server.calls.filter(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loops/receipt-retention/cleanup",
+  );
+  assert.equal(cleanupCalls.length, 2);
+  assert.equal(
+    cleanupCalls[0].body.operationId,
+    cleanupCalls[1].body.operationId,
+  );
+  assert.equal(localStorage.getItem(storageKey), null);
+});
+
+test("a superseded retention read cannot replace a newer blocked posture or re-enable cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const pendingReads = [];
+  server.on(
+    "GET",
+    "/api/loops/receipt-retention",
+    () => new Promise((resolve) => pendingReads.push(resolve)),
+  );
+  const app = await loadLoopBuilder({ server });
+
+  const firstRead = app.elements.retentionTab.click();
+  await flushAsyncWork();
+  const secondRead = app.elements.retentionTab.click();
+  await flushAsyncWork();
+  assert.equal(pendingReads.length, 2);
+
+  pendingReads[1]({
+    status: 200,
+    body: createRetentionPosture({
+      health: "corrupt",
+      cleanupBlockReason: "CorruptEvidence",
+    }),
+  });
+  await secondRead;
+  pendingReads[0]({ status: 200, body: createRetentionPosture() });
+  await firstRead;
+
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  assert.match(app.elements.retentionContent.textContent, /corrupt/i);
+  assert.equal(cleanup.disabled, true);
+  assert.equal(app.elements.refreshRetentionButton.disabled, false);
+});
+
+test("retention posture failure remains visible with its actionable server detail", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 503,
+    body: {
+      detail:
+        "The retention audit sink is unavailable; retry after audit recovery.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.retentionTab.click();
+
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /retention audit sink is unavailable/i,
+  );
+  assert.doesNotMatch(
+    app.elements.retentionNotice.textContent,
+    /Read the current bounded retention posture/i,
+  );
+  assert.match(
+    app.elements.retentionContent.textContent,
+    /Select Refresh posture to retry/i,
+  );
+});
+
+for (const [health, blockReason, exhaustionReason, cleanupEnabled, label] of [
+  ["healthy", "None", "None", true, "Healthy"],
+  ["exhausted", "None", "ArtifactCountLimit", true, "Exhausted"],
+  ["corrupt", "CorruptEvidence", "None", false, "Corrupt"],
+  ["audit-unavailable", "AuditUnavailable", "None", false, "Audit Unavailable"],
+  [
+    "ownership-conflict",
+    "OwnershipUnresolved",
+    "None",
+    false,
+    "Ownership Conflict",
+  ],
+  ["degraded", "PendingEvidence", "None", false, "Degraded"],
+  [
+    "recovery-pending",
+    "OwnershipUnresolved",
+    "None",
+    false,
+    "Recovery Pending",
+  ],
+]) {
+  test(`retention renders ${health} and enables cleanup only when posture permits it`, async () => {
+    const server = new FakeFetchServer(createCatalog());
+    server.on("GET", "/api/loops/receipt-retention", () => ({
+      status: 200,
+      body: createRetentionPosture({
+        health,
+        cleanupBlockReason: blockReason,
+        exhaustionReason,
+        cleanupRecoveryAvailableAtUtc:
+          health === "recovery-pending" ? "2999-08-01T12:00:00Z" : null,
+      }),
+    }));
+    const app = await loadLoopBuilder({ server });
+
+    await app.elements.retentionTab.click();
+
+    const cleanup = findByClass(
+      app.elements.retentionContent,
+      "retention-cleanup-button",
+    )[0];
+    assert.match(
+      app.elements.retentionContent.textContent,
+      new RegExp(label, "i"),
+    );
+    assert.equal(cleanup.disabled, !cleanupEnabled);
+  });
+}
+
+test("retention exposes an explicit recovery retry after the ownership window", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture({
+      health: "recovery-pending",
+      cleanupBlockReason: "OwnershipUnresolved",
+      cleanupRecoveryAvailableAtUtc: "2020-08-01T12:00:00Z",
+    }),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => ({
+    status: 200,
+    body: {
+      status: "NothingEligible",
+      health: "Healthy",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "The stale cleanup journal recovered without removing evidence.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.retentionTab.click();
+  const retry = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  assert.equal(retry.disabled, false);
+  assert.match(retry.textContent, /Retry cleanup recovery/i);
+  await retry.click();
+
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ).length,
+    1,
+  );
+});
+
 test("a rejected system runner contract is shown as invalid throughout the graph", async () => {
   const catalog = createCatalog();
   catalog.systemDefault.executionContract.graphSemantics = "unknown";
@@ -7727,6 +7999,54 @@ function authoringResponse(status, definition) {
     validationErrors: [],
     conflict: null,
     detail: null,
+  };
+}
+
+function createRetentionPosture({
+  health = "healthy",
+  cleanupBlockReason = "None",
+  exhaustionReason = "None",
+  cleanupRecoveryAvailableAtUtc = null,
+} = {}) {
+  return {
+    generatedAtUtc: "2026-08-01T12:00:00Z",
+    health,
+    classes: [
+      {
+        artifactClass: "DefinitionMutationReceipt",
+        health,
+        artifactCount: 2,
+        artifactUtf8Bytes: 2048,
+        maximumArtifactCount: 10000,
+        maximumArtifactUtf8Bytes: 134217728,
+        reservedArtifactCount: 64,
+        reservedArtifactUtf8Bytes: 41943040,
+        proofCount: 1,
+        proofUtf8Bytes: 512,
+        maximumProofCount: 100000,
+        maximumProofUtf8Bytes: 33554432,
+        activeCleanupJournalUtf8Bytes: 0,
+        cleanupRecoveryAvailableAtUtc,
+        completedCleanupOperationCount: 0,
+        completedCleanupHistoryUtf8Bytes: 0,
+        oldestExactReplayExpiresAtUtc: "2026-08-30T12:00:00Z",
+        newestExactReplayExpiresAtUtc: "2026-08-31T12:00:00Z",
+        exhaustionReason,
+        cleanupBlockReason,
+        categories: [
+          { category: "Live", artifactCount: 2, utf8Bytes: 2048 },
+          { category: "ExpiredIdempotency", artifactCount: 1, utf8Bytes: 512 },
+        ],
+        detail: "Retention evidence requires review before cleanup.",
+      },
+    ],
+    activeCleanupJournalUtf8Bytes: 0,
+    accountedWorkspaceUtf8Bytes: 2560,
+    maximumWorkspaceUtf8Bytes: 536870912,
+    availableWorkspaceUtf8Bytes: 536868352,
+    exhaustionReason,
+    cleanupBlockReason,
+    detail: "Retention evidence requires review; cleanup stays explicit.",
   };
 }
 

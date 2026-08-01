@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -6,6 +7,10 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Common.Loops.Custom.Retention;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Workspace;
@@ -218,6 +223,86 @@ public sealed class BrowserFlowTests
         catch
         {
             await WriteFailureDiagnosticsAsync(nameof(Browser_authors_runs_inspects_and_deletes_a_governed_custom_loop), browser, app);
+            throw;
+        }
+    }
+
+    [InstalledBrowserFact]
+    public async Task Browser_lazily_inspects_and_explicitly_requests_bounded_receipt_cleanup()
+    {
+        using var workspace = new TestWorkspace();
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
+        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+
+        try
+        {
+            await InitializeWorkspaceAsync(browser);
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            Assert.Equal(0, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention')).length"));
+            Assert.Equal(0, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention/cleanup')).length"));
+
+            await ClickAsync(browser, "#retentionTab");
+            await browser.WaitForExpressionAsync("document.getElementById('retentionContent').textContent.includes('Definition Mutation Receipt') && document.getElementById('retentionContent').textContent.includes('Exact replay horizon')");
+            Assert.Equal(1, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention')).length"));
+            await Task.Delay(250);
+            Assert.Equal(0, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention/cleanup')).length"));
+            Assert.True(
+                await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#retentionContent .retention-cleanup-button')].some((button) => !button.disabled)"),
+                await browser.EvaluateStringAsync("document.getElementById('retentionContent').textContent"));
+
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var ownershipAcquiredAtUtc = DateTimeOffset.UtcNow.AddSeconds(-25);
+            var interruptedRequest = new CustomLoopReceiptCleanupRequest(
+                CustomLoopReceiptCleanupRequest.CurrentSchemaVersion,
+                CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
+                "browser-retention-recovery",
+                "embodysense.web",
+                "web",
+                ownershipAcquiredAtUtc,
+                CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(ownershipAcquiredAtUtc),
+                64,
+                4 * 1024 * 1024);
+            var interruptedJournal = new CustomLoopReceiptCleanupJournal(
+                CustomLoopReceiptCleanupJournal.CurrentSchemaVersion,
+                interruptedRequest,
+                CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(interruptedRequest),
+                "cleanup-owner-interrupted-browser",
+                Environment.ProcessId,
+                ownershipAcquiredAtUtc,
+                CustomLoopReceiptCleanupStage.IntentPersisted,
+                CustomLoopReceiptCleanupOutcome.Unknown,
+                ownershipAcquiredAtUtc,
+                ImmutableArray<CustomLoopReceiptCleanupCandidate>.Empty,
+                null,
+                0,
+                0,
+                "The browser recovery test interrupted cleanup after its durable intent.");
+            Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+            await File.WriteAllBytesAsync(paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath, CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(interruptedJournal));
+
+            await ClickAsync(browser, "#refreshRetentionButton");
+            const string TargetCleanup = "[...document.querySelectorAll('#retentionContent .retention-class-card')].find((card) => card.textContent.includes('Definition Mutation Receipt')).querySelector('.retention-cleanup-button')";
+            await browser.WaitForExpressionAsync("document.getElementById('retentionContent').textContent.toLowerCase().includes('recovery pending') && " + TargetCleanup + ".disabled");
+            Assert.Contains("Recovery available", await browser.EvaluateStringAsync("document.getElementById('retentionContent').textContent"), StringComparison.OrdinalIgnoreCase);
+            await browser.WaitForExpressionAsync("!" + TargetCleanup + ".disabled && " + TargetCleanup + ".textContent.includes('Retry cleanup recovery')");
+
+            await browser.EvaluateAsync("window.__retentionConfirmation = ''; window.confirm = (message) => { window.__retentionConfirmation = message; return true; };");
+            await browser.EvaluateAsync(TargetCleanup + ".click()");
+            await browser.WaitForExpressionAsync("document.getElementById('retentionNotice').textContent.includes('Nothing Eligible')");
+
+            Assert.Contains("64 artifacts", await browser.EvaluateStringAsync("window.__retentionConfirmation"), StringComparison.Ordinal);
+            Assert.Contains("4 MiB", await browser.EvaluateStringAsync("window.__retentionConfirmation"), StringComparison.Ordinal);
+            Assert.Equal(1, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention/cleanup')).length"));
+            Assert.Equal(3, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention')).length"));
+            Assert.Contains("No complete audited evidence", await browser.EvaluateStringAsync("document.getElementById('retentionNotice').textContent"), StringComparison.OrdinalIgnoreCase);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Browser_lazily_inspects_and_explicitly_requests_bounded_receipt_cleanup), browser, app);
             throw;
         }
     }

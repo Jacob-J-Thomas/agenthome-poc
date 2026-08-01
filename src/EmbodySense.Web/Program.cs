@@ -107,6 +107,7 @@ public static class Program
             provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>()));
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
         services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
+        services.AddSingleton<ILoopReceiptRetentionFacade>(_ => new LoopReceiptRetentionFacade(options.WorkingDirectory));
     }
 
     /// <summary>

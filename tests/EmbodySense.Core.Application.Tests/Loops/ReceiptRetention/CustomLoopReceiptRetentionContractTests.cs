@@ -623,6 +623,8 @@ public sealed class CustomLoopReceiptRetentionContractTests
 
         public Task<CustomLoopReceiptClassPosture> InspectAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
+        public Task<CustomLoopReceiptActiveCleanupJournalPosture> InspectActiveCleanupJournalAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
         public Task<CustomLoopReceiptOperationLookupResult> LookupOperationAsync(string operationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         public Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default) => throw new NotSupportedException();

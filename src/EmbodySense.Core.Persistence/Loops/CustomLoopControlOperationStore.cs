@@ -423,6 +423,32 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
     }
 
+    /// <summary>
+    /// Measures the canonical active lifecycle-control cleanup journal retained by this workspace.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel storage inspection.</param>
+    /// <returns>The serialized UTF-8 byte count and durable state, or an empty posture when no active journal exists.</returns>
+    /// <remarks>
+    /// This method only reports strict-schema journal accounting. It never changes ownership, rotates history, or
+    /// resumes cleanup, so callers can expose workspace posture without reading protocol files themselves.
+    /// </remarks>
+    public async Task<CustomLoopReceiptActiveCleanupJournalPosture> InspectActiveCleanupJournalAsync(CancellationToken cancellationToken = default)
+    {
+        await _processGate.WaitAsync(cancellationToken);
+        try
+        {
+            using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_retentionRoot);
+            var journal = await ReadCleanupJournalAsync(cancellationToken);
+            return journal is null
+                ? new CustomLoopReceiptActiveCleanupJournalPosture(0, null, null, null)
+                : new CustomLoopReceiptActiveCleanupJournalPosture(CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(journal).LongLength, journal.Stage, journal.Outcome, IsCleanupActive(journal.Stage) ? journal.OwnershipAcquiredAtUtc + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow : null);
+        }
+        finally
+        {
+            _processGate.Release();
+        }
+    }
+
     /// <inheritdoc />
     public async Task<CustomLoopReceiptOperationLookupResult> LookupOperationAsync(string operationId, CancellationToken cancellationToken = default)
     {

@@ -1329,6 +1329,8 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public Task<CustomLoopReceiptClassPosture> InspectAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
+        public Task<CustomLoopReceiptActiveCleanupJournalPosture> InspectActiveCleanupJournalAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
         public Task<CustomLoopReceiptOperationLookupResult> LookupOperationAsync(string operationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
