@@ -98,6 +98,7 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
     {
         var paths = new WorkspacePaths(rootPath);
         cancellationToken.ThrowIfCancellationRequested();
+        _capabilitySeeder.RequireDisjointTrustRoot(paths.RootPath);
         Directory.CreateDirectory(paths.RootPath);
         await _capabilitySeeder.SeedAsync(paths, cancellationToken);
         await _scaffolder.ApplyAsync(paths, WorkspaceDefaults.GetDirectories(paths), WorkspaceDefaults.GetSeedFiles(paths), _actor, cancellationToken);

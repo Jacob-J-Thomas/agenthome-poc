@@ -46,6 +46,8 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
+        trustProvider.RequireDisjointWorkspace(paths.RootPath);
+
         _paths = paths;
         _pathGuard = new CapabilityCatalogPathGuard(paths.RootPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
         _trustProvider = trustProvider;

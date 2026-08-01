@@ -6,6 +6,12 @@ namespace EmbodySense.Core.Persistence.Capabilities;
 /// <remarks>Implementations are server infrastructure, not secret brokerage or a catalog projection surface.</remarks>
 public interface ICapabilityCatalogTrustProvider
 {
+    /// <summary>Validates that provider-owned trust state is disjoint from the governed workspace before either location is mutated.</summary>
+    /// <remarks>Providers without filesystem-backed trust state may return normally. Decorators must preserve their inner provider's validation.</remarks>
+    /// <param name="workspaceRootPath">The governed workspace root.</param>
+    /// <exception cref="InvalidOperationException">Thrown when provider-owned trust state overlaps the governed workspace.</exception>
+    void RequireDisjointWorkspace(string workspaceRootPath);
+
     /// <summary>Reads the authenticated trust anchor, or <see langword="null"/> when this workspace has never been anchored.</summary>
     Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default);
 

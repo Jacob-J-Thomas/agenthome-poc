@@ -14,6 +14,8 @@ internal sealed class BlockingCapabilityCatalogTrustProvider(ICapabilityCatalogT
 
     public void Release() => _release.TrySetResult();
 
+    public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
+
     public async Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default)
     {
         if (BlockNextRead)

@@ -48,8 +48,6 @@ public sealed class FileCapabilityCatalogTrustProvider : ICapabilityCatalogTrust
     /// <summary>Creates the default provider beneath the current server account's local application data.</summary>
     public static FileCapabilityCatalogTrustProvider CreateDefault()
     {
-        // TODO(#275): Reject any normalized overlap between the governed workspace and capability trust root.
-        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/275
         var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localData))
         {
@@ -57,6 +55,14 @@ public sealed class FileCapabilityCatalogTrustProvider : ICapabilityCatalogTrust
         }
 
         return new FileCapabilityCatalogTrustProvider(Path.Combine(localData, "EmbodySense", "server-state", "capability-catalog"));
+    }
+
+    /// <summary>Validates that this server-owned trust root is physically disjoint from a governed workspace.</summary>
+    /// <param name="workspaceRootPath">The governed workspace root to validate.</param>
+    /// <exception cref="InvalidOperationException">Thrown when either root contains the other.</exception>
+    public void RequireDisjointWorkspace(string workspaceRootPath)
+    {
+        CapabilityCatalogTrustRootTopology.RequireDisjoint(workspaceRootPath, RootPath);
     }
 
     /// <summary>Gets the canonical anchor path for a validated workspace identity.</summary>

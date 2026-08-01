@@ -1,5 +1,7 @@
 using System.Text;
+using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Tests.Support;
 
@@ -16,6 +18,87 @@ public sealed class FileCapabilityCatalogTrustProviderTests
         Assert.Null(await provider.ReadAsync(Identity("empty-root")));
         Assert.False(File.Exists(provider.AuthenticationKeyPath));
         Assert.False(Directory.Exists(provider.AnchorsPath));
+    }
+
+    [Fact]
+    public void File_backed_catalog_rejects_equal_or_nested_workspace_and_trust_roots_before_use()
+    {
+        using var root = new TestWorkspace();
+        var equalProvider = new FileCapabilityCatalogTrustProvider(root.RootPath);
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.RootPath), equalProvider));
+
+        var workspaceRoot = root.File("workspace");
+        var nestedTrustRoot = Path.Combine(workspaceRoot, "server-trust");
+        var nestedTrustProvider = new FileCapabilityCatalogTrustProvider(Path.Combine(workspaceRoot, ".", "server-trust"));
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), nestedTrustProvider));
+
+        var outerTrustProvider = new FileCapabilityCatalogTrustProvider(root.RootPath);
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.File("governed", "workspace")), outerTrustProvider));
+        Assert.False(File.Exists(equalProvider.AuthenticationKeyPath));
+        Assert.False(File.Exists(Path.Combine(nestedTrustRoot, "capability-catalog-root.key")));
+    }
+
+    [Fact]
+    public void File_backed_catalog_rejects_overlap_through_a_delegating_trust_provider()
+    {
+        using var root = new TestWorkspace();
+        var wrapped = new FailingCapabilityCatalogTrustProvider(new FileCapabilityCatalogTrustProvider(root.RootPath));
+
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.RootPath), wrapped));
+        Assert.False(File.Exists(Path.Combine(root.RootPath, "capability-catalog-root.key")));
+    }
+
+    [Fact]
+    public void File_backed_catalog_rejects_Windows_case_and_extended_path_aliases()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var upperCaseProvider = new FileCapabilityCatalogTrustProvider(root.RootPath.ToUpperInvariant());
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.RootPath.ToLowerInvariant()), upperCaseProvider));
+
+        var extendedProvider = new FileCapabilityCatalogTrustProvider(@"\\?\" + root.RootPath);
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.RootPath), extendedProvider));
+    }
+
+    [Fact]
+    public void File_backed_catalog_resolves_existing_directory_links_before_topology_comparison()
+    {
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        var linkedTrustTarget = Path.Combine(workspaceRoot, "trust-target");
+        var trustAlias = root.File("trust-alias");
+        Directory.CreateDirectory(linkedTrustTarget);
+        try
+        {
+            Directory.CreateSymbolicLink(trustAlias, linkedTrustTarget);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        var provider = new FileCapabilityCatalogTrustProvider(trustAlias);
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+        Assert.False(File.Exists(Path.Combine(linkedTrustTarget, "capability-catalog-root.key")));
+    }
+
+    [Fact]
+    public async Task File_backed_catalog_accepts_disjoint_sibling_roots()
+    {
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        var trustRoot = root.File("server-trust");
+        Directory.CreateDirectory(workspaceRoot);
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var store = new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider);
+
+        var result = await store.ReadAsync(null, 1);
+
+        Assert.Equal(CapabilityCatalogReadStatus.Available, result.Status);
     }
 
     [Fact]
