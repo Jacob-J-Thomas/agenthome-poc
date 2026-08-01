@@ -27,7 +27,14 @@ internal static class LoopArtifactFileWriter
         try
         {
             await File.WriteAllTextAsync(tempPath, content, cancellationToken);
-            File.Move(tempPath, path, overwrite: true);
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
         }
         finally
         {

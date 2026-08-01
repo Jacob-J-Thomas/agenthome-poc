@@ -21,8 +21,15 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
+    };
+    private static readonly JsonDocumentOptions _jsonDocumentOptions = new()
+    {
+        AllowTrailingCommas = false,
+        CommentHandling = JsonCommentHandling.Disallow
     };
     private static readonly TimeSpan _leaseRetryDelay = TimeSpan.FromMilliseconds(25);
     private readonly WorkspacePaths _paths;
@@ -191,12 +198,15 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         DefaultConversationTurnRecord? record;
         try
         {
-            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            record = await JsonSerializer.DeserializeAsync<DefaultConversationTurnRecord>(stream, _jsonOptions, cancellationToken);
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            // TODO(#259): Bound the persisted-artifact byte budget before DOM materialization so one corrupt turn cannot consume unbounded memory.
+            using var document = await JsonDocument.ParseAsync(stream, _jsonDocumentOptions, cancellationToken);
+            RejectDuplicateProperties(document.RootElement);
+            record = JsonSerializer.Deserialize<DefaultConversationTurnRecord>(document.RootElement, _jsonOptions);
         }
-        catch (JsonException exception)
+        catch (JsonException)
         {
-            throw new FormatException($"Default-conversation turn artifact `{path}` contains invalid JSON or unsupported enum values.", exception);
+            throw new FormatException($"Default-conversation turn artifact `{path}` contains invalid JSON, unsupported fields, or unsupported enum values.");
         }
 
         if (record is null)
@@ -206,6 +216,30 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
         ValidateRecord(record);
         return record;
+    }
+
+    private static void RejectDuplicateProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw new FormatException("Default-conversation turn artifact contains duplicate JSON object members.");
+                }
+
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                RejectDuplicateProperties(item);
+            }
+        }
     }
 
     private static async Task WriteAsync(string path, DefaultConversationTurnRecord record, CancellationToken cancellationToken)
