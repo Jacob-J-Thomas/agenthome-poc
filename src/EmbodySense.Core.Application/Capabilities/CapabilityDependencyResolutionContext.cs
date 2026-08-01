@@ -80,6 +80,12 @@ internal sealed class CapabilityDependencyResolutionContext
             return;
         }
 
+        if (group.Any(candidate => !HasValidCandidateShape(candidate)))
+        {
+            Fail(subjectId, dependency.CapabilityId, dependency.CompatibleVersionRange, optional, CapabilityDependencyResolutionOutcome.Invalid, "A catalog candidate has incomplete or invalid descriptor, lifecycle, or artifact evidence.");
+            return;
+        }
+
         var compatible = group.Where(item => candidateRanges.All(range => range.Contains(item.Entry.Descriptor.Version))).ToArray();
         if (compatible.Length == 0)
         {
@@ -155,7 +161,7 @@ internal sealed class CapabilityDependencyResolutionContext
 
     private static bool IsResolvable(CapabilityDependencyCatalogCandidate candidate)
     {
-        if (candidate.Entry?.Descriptor is null || candidate.Entry.Lifecycle is null || candidate.Artifact is null || !CapabilityDescriptorIdentity.TryCreate(candidate.Entry.Descriptor, out var computedIdentity, out var descriptorValidation) || !descriptorValidation.IsValid || !CapabilityLifecycleSnapshotValidator.Validate(candidate.Entry.Lifecycle).IsValid || !candidate.Entry.Lifecycle.DescriptorIdentity.Equals(computedIdentity))
+        if (!HasValidCandidateShape(candidate) || !CapabilityDescriptorIdentity.TryCreate(candidate.Entry.Descriptor, out var computedIdentity, out _) || !candidate.Entry.Lifecycle.DescriptorIdentity.Equals(computedIdentity))
         {
             return false;
         }
@@ -163,6 +169,16 @@ internal sealed class CapabilityDependencyResolutionContext
         var lifecycle = candidate.Entry.Lifecycle;
         var declaredIntegrity = candidate.Entry.Descriptor.Provenance.Integrity;
         return lifecycle.Declaration == CapabilityDeclarationState.Declared && lifecycle.Installation == CapabilityInstallationState.Installed && lifecycle.Health is CapabilityHealthState.Healthy or CapabilityHealthState.Degraded && lifecycle.Retirement != CapabilityRetirementState.Removed && lifecycle.Trust == CapabilityTrustState.Verified && (candidate.Artifact.Checksum is null || declaredIntegrity is null || candidate.Artifact.Checksum.FixedTimeEquals(declaredIntegrity));
+    }
+
+    private static bool HasValidCandidateShape(CapabilityDependencyCatalogCandidate candidate)
+    {
+        return candidate?.Entry?.Descriptor is not null
+            && candidate.Entry.Lifecycle is not null
+            && candidate.Artifact is not null
+            && CapabilityDescriptorIdentity.TryCreate(candidate.Entry.Descriptor, out _, out var descriptorValidation)
+            && descriptorValidation.IsValid
+            && CapabilityLifecycleSnapshotValidator.Validate(candidate.Entry.Lifecycle).IsValid;
     }
 
     private static bool HasMatchingArtifactEvidence(CapabilityDependencyArtifactMetadata manifestArtifact, CapabilityDependencyArtifactMetadata candidateArtifact)

@@ -105,6 +105,32 @@ public sealed class CapabilityDependencyResolverTests
     }
 
     [Fact]
+    public void Resolver_returns_bounded_invalid_evidence_for_matching_candidates_with_incomplete_public_evidence()
+    {
+        var valid = Candidate("org.example/a", "1.0.0");
+        var malformed = new[]
+        {
+            valid with { Entry = valid.Entry with { Descriptor = valid.Entry.Descriptor with { Version = null! } } },
+            valid with { Entry = valid.Entry with { Descriptor = valid.Entry.Descriptor with { Provenance = null! } } },
+            valid with { Entry = valid.Entry with { Lifecycle = null! } },
+            valid with { Artifact = null! }
+        };
+
+        foreach (var candidate in malformed)
+        {
+            var exception = Record.Exception(() => new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [candidate]));
+
+            Assert.Null(exception);
+            var result = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [candidate]);
+            Assert.False(result.IsResolved);
+            Assert.Empty(result.Selected);
+            var evidence = Assert.Single(result.Evidence);
+            Assert.Equal(CapabilityDependencyResolutionOutcome.Invalid, evidence.Outcome);
+            Assert.Null(evidence.Pin);
+        }
+    }
+
+    [Fact]
     public void Resolver_returns_invalid_evidence_for_a_candidate_with_a_malformed_dependency_manifest()
     {
         var malformed = Manifest("org.example/a", []) with { SubjectId = null! };
