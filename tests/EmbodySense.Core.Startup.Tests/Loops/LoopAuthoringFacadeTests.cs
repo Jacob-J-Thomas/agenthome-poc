@@ -112,7 +112,7 @@ public sealed class LoopAuthoringFacadeTests
             Assert.Equal(expected.Kind, actual.Kind);
             Assert.Equal(expected.EditMode, actual.EditMode);
             Assert.Equal(expected.CapabilityIds, actual.CapabilityIds);
-            Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, actual.ExecutionSemantics);
+            Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, actual.ExecutionSemantics);
         }
 
         Assert.Equal(canonical.Graph.Edges.Length, projection.Graph.Edges.Count);
@@ -125,13 +125,14 @@ public sealed class LoopAuthoringFacadeTests
             Assert.Equal(expected.ToNodeId, actual.ToNodeId);
             Assert.Equal(expected.Condition, actual.Condition);
             Assert.Equal(expected.Description, actual.Description);
-            Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, actual.ExecutionSemantics);
+            Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, actual.ExecutionSemantics);
         }
 
         Assert.Equal("DefaultConversationLoopRunner", projection.ExecutionContract.Runner);
-        Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, projection.ExecutionContract.GraphSemantics);
+        Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, projection.ExecutionContract.GraphSemantics);
         Assert.False(projection.ExecutionContract.UsesGenericGraphDispatcher);
-        Assert.Contains("not dispatched independently", projection.ExecutionContract.Detail, StringComparison.Ordinal);
+        Assert.Contains("does not certify", projection.ExecutionContract.Detail, StringComparison.Ordinal);
+        Assert.Contains("assembles context before durable user acceptance", projection.ExecutionContract.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain(projection.Graph.Nodes, node => node.Id is "trigger" or "exit");
     }
 

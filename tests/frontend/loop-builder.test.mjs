@@ -53,7 +53,7 @@ test("catalog loading is authenticated and projects the system loop as read-only
   );
   assert.match(
     app.elements.validationBanner.textContent,
-    /DefaultConversationLoopRunner.*not dispatched by the custom-loop or a generic graph executor/,
+    /does not certify the nodes and edges as an exact execution-order contract/,
   );
 
   await app.elements.loopSettingsButton.click();
@@ -7341,10 +7341,10 @@ function createCatalog() {
       },
       executionContract: {
         runner: "DefaultConversationLoopRunner",
-        graphSemantics: "validated-runner-contract",
+        graphSemantics: "authority-topology-only",
         usesGenericGraphDispatcher: false,
         detail:
-          "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor.",
+          "The dedicated runner accepts this system-owned graph as its authority topology, but it does not certify the nodes and edges as an exact execution-order contract.",
       },
     },
     customDefinitions: [createCustomDefinition()],
@@ -7384,7 +7384,7 @@ function createSystemNode(id, displayName, kind, capabilityIds, description) {
     kind,
     editMode: "system-locked",
     capabilityIds,
-    executionSemantics: "validated-runner-contract",
+    executionSemantics: "authority-topology-only",
   };
 }
 
@@ -7395,7 +7395,7 @@ function createSystemEdge(id, fromNodeId, toNodeId, condition, description) {
     toNodeId,
     condition,
     description,
-    executionSemantics: "validated-runner-contract",
+    executionSemantics: "authority-topology-only",
   };
 }
 
