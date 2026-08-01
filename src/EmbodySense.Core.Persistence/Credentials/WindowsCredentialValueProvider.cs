@@ -222,6 +222,7 @@ public sealed class WindowsCredentialValueProvider : ICredentialValueProvider
             int bytesWritten;
             try
             {
+                // TODO(#266): Reject same-target mutation reentrancy from this source callback before a nested write can succeed. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/266
                 bytesWritten = source(candidate);
             }
             catch (Exception)
