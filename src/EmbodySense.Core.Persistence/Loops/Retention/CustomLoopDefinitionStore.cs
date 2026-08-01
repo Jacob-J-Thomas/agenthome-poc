@@ -1422,19 +1422,19 @@ public sealed partial class CustomLoopDefinitionStore
     {
         return journal.Stage switch
         {
-            CustomLoopReceiptCleanupStage.Completed when journal.Outcome == CustomLoopReceiptCleanupOutcome.NothingEligible => CleanupResult(CustomLoopReceiptCleanupStatus.NothingEligible, journal, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.Completed => CleanupResult(replay ? CustomLoopReceiptCleanupStatus.Replayed : CustomLoopReceiptCleanupStatus.Pruned, journal, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => CleanupResult(CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.AbandonedConflict => CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupConflict, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable => CleanupResult(CustomLoopReceiptCleanupStatus.AuditUnavailable, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.Corrupt => CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: journal.Detail),
-            _ => CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail)
+            CustomLoopReceiptCleanupStage.Completed when journal.Outcome == CustomLoopReceiptCleanupOutcome.NothingEligible => CleanupResult(CustomLoopReceiptCleanupStatus.NothingEligible, journal, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.Completed => CleanupResult(replay ? CustomLoopReceiptCleanupStatus.Replayed : CustomLoopReceiptCleanupStatus.Pruned, journal, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => CleanupResult(CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.AbandonedConflict => CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupConflict, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable => CleanupResult(CustomLoopReceiptCleanupStatus.AuditUnavailable, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.Corrupt => CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: journal.Detail, isReplay: replay),
+            _ => CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail, isReplay: replay)
         };
     }
 
-    private static CustomLoopReceiptCleanupResult CleanupResult(CustomLoopReceiptCleanupStatus status, CustomLoopReceiptCleanupJournal? journal, CustomLoopReceiptQuotaExhaustionReason exhaustionReason = CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason blockReason = CustomLoopReceiptCleanupBlockReason.None, int compactedCount = 0, long compactedBytes = 0, string detail = "Receipt cleanup stopped safely.")
+    private static CustomLoopReceiptCleanupResult CleanupResult(CustomLoopReceiptCleanupStatus status, CustomLoopReceiptCleanupJournal? journal, CustomLoopReceiptQuotaExhaustionReason exhaustionReason = CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason blockReason = CustomLoopReceiptCleanupBlockReason.None, int compactedCount = 0, long compactedBytes = 0, string detail = "Receipt cleanup stopped safely.", bool isReplay = false)
     {
-        return new CustomLoopReceiptCleanupResult(status, journal, exhaustionReason, blockReason, compactedCount, compactedBytes, detail);
+        return new CustomLoopReceiptCleanupResult(status, journal, exhaustionReason, blockReason, compactedCount, compactedBytes, detail) { IsReplay = isReplay };
     }
 
     private string GetArtifactRoot(CustomLoopReceiptArtifactClass artifactClass) => artifactClass switch

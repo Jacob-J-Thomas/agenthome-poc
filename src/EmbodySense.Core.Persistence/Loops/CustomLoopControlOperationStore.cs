@@ -442,6 +442,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         await _processGate.WaitAsync(cancellationToken);
         try
         {
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_retentionRoot);
             var exact = await ReadIfExistsAsync(safeOperationId, cancellationToken);
             var expired = await FindExpiredProofAsync(safeOperationId, cancellationToken);
             ThrowIfRawAndCompactProofConflict(safeOperationId, exact, expired);
@@ -891,20 +892,20 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     {
         return journal.Stage switch
         {
-            CustomLoopReceiptCleanupStage.Completed when journal.Candidates.Length == 0 => CleanupResult(CustomLoopReceiptCleanupStatus.NothingEligible, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, journal.Detail),
-            CustomLoopReceiptCleanupStage.Completed => CleanupResult(replay ? CustomLoopReceiptCleanupStatus.Replayed : CustomLoopReceiptCleanupStatus.Pruned, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, journal.Detail),
-            CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => CleanupResult(CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.AuditUnavailable, journal.Detail),
-            CustomLoopReceiptCleanupStage.AbandonedConflict => CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.CleanupConflict, journal.Detail),
-            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable => CleanupResult(CustomLoopReceiptCleanupStatus.AuditUnavailable, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.AuditUnavailable, journal.Detail),
-            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.Corrupt => CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.CorruptEvidence, journal.Detail),
-            CustomLoopReceiptCleanupStage.Degraded => CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, journal.Detail),
-            _ => CleanupResult(CustomLoopReceiptCleanupStatus.OperationInProgress, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.OwnershipUnresolved, journal.Detail)
+            CustomLoopReceiptCleanupStage.Completed when journal.Candidates.Length == 0 => CleanupResult(CustomLoopReceiptCleanupStatus.NothingEligible, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, journal.Detail, replay),
+            CustomLoopReceiptCleanupStage.Completed => CleanupResult(replay ? CustomLoopReceiptCleanupStatus.Replayed : CustomLoopReceiptCleanupStatus.Pruned, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, journal.Detail, replay),
+            CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => CleanupResult(CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.AuditUnavailable, journal.Detail, replay),
+            CustomLoopReceiptCleanupStage.AbandonedConflict => CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.CleanupConflict, journal.Detail, replay),
+            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable => CleanupResult(CustomLoopReceiptCleanupStatus.AuditUnavailable, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.AuditUnavailable, journal.Detail, replay),
+            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.Corrupt => CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.CorruptEvidence, journal.Detail, replay),
+            CustomLoopReceiptCleanupStage.Degraded => CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, journal.Detail, replay),
+            _ => CleanupResult(CustomLoopReceiptCleanupStatus.OperationInProgress, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.OwnershipUnresolved, journal.Detail, replay)
         };
     }
 
-    private static CustomLoopReceiptCleanupResult CleanupResult(CustomLoopReceiptCleanupStatus status, CustomLoopReceiptCleanupJournal? journal, CustomLoopReceiptQuotaExhaustionReason exhaustionReason, CustomLoopReceiptCleanupBlockReason blockReason, string detail)
+    private static CustomLoopReceiptCleanupResult CleanupResult(CustomLoopReceiptCleanupStatus status, CustomLoopReceiptCleanupJournal? journal, CustomLoopReceiptQuotaExhaustionReason exhaustionReason, CustomLoopReceiptCleanupBlockReason blockReason, string detail, bool isReplay = false)
     {
-        return new CustomLoopReceiptCleanupResult(status, journal, exhaustionReason, blockReason, journal?.RemovedArtifactCount ?? 0, journal?.RemovedArtifactUtf8Bytes ?? 0, detail);
+        return new CustomLoopReceiptCleanupResult(status, journal, exhaustionReason, blockReason, journal?.RemovedArtifactCount ?? 0, journal?.RemovedArtifactUtf8Bytes ?? 0, detail) { IsReplay = isReplay };
     }
 
     private async Task<IReadOnlyList<(CustomLoopControlOperation Operation, byte[] Bytes, string Path)>> ReadAllOperationArtifactsAsync(CancellationToken cancellationToken, string? allowedOrphanOwnerOperationId = null)
