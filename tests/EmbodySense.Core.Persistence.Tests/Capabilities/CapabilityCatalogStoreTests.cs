@@ -517,7 +517,7 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Unix_replacement_lifetime_with_reused_device_and_inode_rejects_copied_authenticated_artifacts()
+    public async Task Public_store_construction_rejects_copied_authenticated_catalog_artifacts_across_workspaces()
     {
         using var originalWorkspace = new TestWorkspace();
         using var replacementWorkspace = new TestWorkspace();
@@ -526,20 +526,15 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
         var originalPaths = new WorkspacePaths(originalWorkspace.RootPath);
         var replacementPaths = new WorkspacePaths(replacementWorkspace.RootPath);
         var descriptor = CapabilityCatalogTestData.Descriptor();
-        var originalIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b3:00000004");
-        var replacementIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b4:00000004");
-        var originalIdentityProvider = new FixedCapabilityCatalogWorkspaceIdentityProvider(originalIdentity);
-        var replacementIdentityProvider = new FixedCapabilityCatalogWorkspaceIdentityProvider(replacementIdentity);
-        var originalStore = new CapabilityCatalogStore(originalPaths, provider, originalIdentityProvider);
+        var originalStore = new CapabilityCatalogStore(originalPaths, provider);
 
-        Assert.NotEqual(originalIdentity, replacementIdentity);
         Assert.Equal(CapabilityCatalogMutationStatus.Applied, (await new CapabilityCatalogService(originalStore).DeclareAsync(descriptor, 0, "declare-original-lifetime")).Status);
-        Assert.Equal(CapabilityCatalogReadStatus.Available, (await new CapabilityCatalogStore(originalPaths, provider, originalIdentityProvider).ReadAsync(null, 10)).Status);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, (await new CapabilityCatalogStore(originalPaths, provider).ReadAsync(null, 10)).Status);
         var copiedPair = await CapturePairAsync(originalPaths);
         Directory.CreateDirectory(replacementPaths.CapabilityCatalogPath);
         await RestorePairAsync(replacementPaths, copiedPair);
 
-        var replacementRead = await new CapabilityCatalogStore(replacementPaths, provider, replacementIdentityProvider).ReadAsync(null, 10);
+        var replacementRead = await new CapabilityCatalogStore(replacementPaths, provider).ReadAsync(null, 10);
 
         Assert.Equal(CapabilityCatalogReadStatus.Unavailable, replacementRead.Status);
         Assert.Null(replacementRead.Page);

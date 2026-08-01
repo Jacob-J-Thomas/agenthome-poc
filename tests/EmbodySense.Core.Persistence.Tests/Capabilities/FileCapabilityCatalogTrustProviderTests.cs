@@ -188,6 +188,21 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void Unix_workspace_identity_material_requires_stable_identity_and_lifetime_availability()
+    {
+        Assert.Equal(
+            "linux:00000001:00000002:0000000000000003:0000000065f1a2b3:00000004",
+            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 0x65f1a2b3, 4));
+        Assert.Equal(
+            "macos:00000001:0000000000000003:0000000065f1a2b3:0000000000000004",
+            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 0x65f1a2b3, 4));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, null, 0x65f1a2b3, 4));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, null, null));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 0, 0));
+        Assert.Throws<ArgumentException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("freebsd", 1, 2, 3, 0x65f1a2b3, 4));
+    }
+
+    [Fact]
     public async Task Provider_retains_anchors_without_eviction_and_rejects_a_root_over_its_byte_quota()
     {
         using var trustRoot = new TestWorkspace();

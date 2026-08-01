@@ -177,17 +177,13 @@ internal static class CapabilityCatalogNativeFileSystem
                 throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
             }
 
-            if ((information.Mask & StatxInode) == 0)
-            {
-                throw new IOException("The capability catalog workspace physical identity does not expose a stable inode.");
-            }
-
-            if ((information.Mask & StatxBirthTime) == 0 || information.BirthTime.Seconds == 0 && information.BirthTime.Nanoseconds == 0)
-            {
-                throw new IOException("The capability catalog workspace filesystem does not expose the required lifetime discriminator.");
-            }
-
-            return $"linux:{information.DeviceMajor:x8}:{information.DeviceMinor:x8}:{information.Inode:x16}:{information.BirthTime.Seconds:x16}:{information.BirthTime.Nanoseconds:x8}";
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial(
+                "linux",
+                information.DeviceMajor,
+                information.DeviceMinor,
+                (information.Mask & StatxInode) != 0 ? information.Inode : null,
+                (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Seconds : null,
+                (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Nanoseconds : null);
         }
 
         if (OperatingSystem.IsMacOS())
@@ -197,12 +193,13 @@ internal static class CapabilityCatalogNativeFileSystem
                 throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
             }
 
-            if (information.BirthTime.Seconds == 0 && information.BirthTime.Nanoseconds == 0)
-            {
-                throw new IOException("The capability catalog workspace filesystem does not expose the required lifetime discriminator.");
-            }
-
-            return $"macos:{information.Device:x8}:{information.Inode:x16}:{information.BirthTime.Seconds:x16}:{information.BirthTime.Nanoseconds:x16}";
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial(
+                "macos",
+                information.Device,
+                0,
+                information.Inode,
+                information.BirthTime.Seconds,
+                information.BirthTime.Nanoseconds);
         }
 
         throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows, Linux, and macOS.");

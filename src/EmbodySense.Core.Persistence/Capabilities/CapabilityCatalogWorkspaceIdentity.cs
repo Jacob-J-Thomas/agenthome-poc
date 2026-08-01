@@ -27,4 +27,37 @@ public static class CapabilityCatalogWorkspaceIdentity
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes("embodysense-capability-workspace-physical-v1\n" + physicalIdentityMaterial));
         return "sha256:" + Convert.ToHexString(digest).ToLowerInvariant();
     }
+
+    /// <summary>Creates canonical Unix physical identity material after requiring a directory lifetime discriminator.</summary>
+    /// <remarks>This deterministic validation seam keeps filesystem availability failures testable without treating a path string as trusted identity evidence.</remarks>
+    /// <param name="platform">The supported Unix platform identifier: <c>linux</c> or <c>macos</c>.</param>
+    /// <param name="deviceMajor">The server-observed filesystem device major identifier.</param>
+    /// <param name="deviceMinor">The server-observed filesystem device minor identifier.</param>
+    /// <param name="inode">The server-observed stable directory inode, or <see langword="null" /> when unavailable.</param>
+    /// <param name="birthTimeSeconds">The server-observed directory creation timestamp seconds, or <see langword="null" /> when unavailable.</param>
+    /// <param name="birthTimeNanoseconds">The server-observed directory creation timestamp nanoseconds, or <see langword="null" /> when unavailable.</param>
+    /// <returns>Opaque physical identity material that includes the directory lifetime discriminator.</returns>
+    /// <exception cref="ArgumentException"><paramref name="platform" /> is unsupported.</exception>
+    /// <exception cref="IOException">The filesystem did not provide a stable inode or lifetime discriminator.</exception>
+    public static string CreateUnixPhysicalIdentityMaterial(string platform, uint deviceMajor, uint deviceMinor, ulong? inode, long? birthTimeSeconds, long? birthTimeNanoseconds)
+    {
+        if (platform is not ("linux" or "macos"))
+        {
+            throw new ArgumentException("Capability catalog Unix workspace identity requires the linux or macos platform identifier.", nameof(platform));
+        }
+
+        if (inode is null)
+        {
+            throw new IOException("The capability catalog workspace physical identity does not expose a stable inode.");
+        }
+
+        if (birthTimeSeconds is null || birthTimeNanoseconds is null || birthTimeSeconds == 0 && birthTimeNanoseconds == 0)
+        {
+            throw new IOException("The capability catalog workspace filesystem does not expose the required lifetime discriminator.");
+        }
+
+        return platform == "linux"
+            ? $"linux:{deviceMajor:x8}:{deviceMinor:x8}:{inode:x16}:{birthTimeSeconds:x16}:{birthTimeNanoseconds:x8}"
+            : $"macos:{deviceMajor:x8}:{inode:x16}:{birthTimeSeconds:x16}:{birthTimeNanoseconds:x16}";
+    }
 }

@@ -27,7 +27,6 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
     private readonly WorkspacePaths _paths;
     private readonly CapabilityCatalogPathGuard _pathGuard;
     private readonly ICapabilityCatalogTrustProvider _trustProvider;
-    private readonly Func<string, string> _createWorkspaceIdentity;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates a catalog store rooted in one workspace.</summary>
@@ -44,29 +43,12 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
     /// <param name="timeProvider">The optional trusted store clock.</param>
     /// <param name="durabilityBarrier">The optional trusted post-rename durability adapter.</param>
     public CapabilityCatalogStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
-        : this(paths, trustProvider, createWorkspaceIdentity: null, timeProvider, durabilityBarrier)
-    {
-    }
-
-    /// <summary>Creates a catalog store with an explicit trusted physical-identity mapping.</summary>
-    /// <param name="paths">The canonical workspace paths.</param>
-    /// <param name="trustProvider">The server-owned trust provider outside mutable workspace storage.</param>
-    /// <param name="workspaceIdentityProvider">The trusted physical workspace identity provider.</param>
-    /// <param name="timeProvider">The optional trusted store clock.</param>
-    /// <param name="durabilityBarrier">The optional trusted post-rename durability adapter.</param>
-    public CapabilityCatalogStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, ICapabilityCatalogWorkspaceIdentityProvider workspaceIdentityProvider, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
-        : this(paths, trustProvider, (workspaceIdentityProvider ?? throw new ArgumentNullException(nameof(workspaceIdentityProvider))).Create, timeProvider, durabilityBarrier)
-    {
-    }
-
-    private CapabilityCatalogStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, Func<string, string>? createWorkspaceIdentity, TimeProvider? timeProvider, ICapabilityCatalogDurabilityBarrier? durabilityBarrier)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
         _paths = paths;
         _pathGuard = new CapabilityCatalogPathGuard(paths.RootPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
         _trustProvider = trustProvider;
-        _createWorkspaceIdentity = createWorkspaceIdentity ?? CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -81,7 +63,7 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
         try
         {
             await using var ownership = await AcquireLockAsync(cancellationToken);
-            var workspaceIdentity = _createWorkspaceIdentity(ownership.PhysicalIdentityMaterial);
+            var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(ownership.PhysicalIdentityMaterial);
             var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken);
             var loaded = await LoadAsync(ownership, workspaceIdentity, trust, cancellationToken);
             if (loaded.Document is null)
@@ -124,7 +106,7 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
         try
         {
             await using var ownership = await AcquireLockAsync(cancellationToken);
-            var workspaceIdentity = _createWorkspaceIdentity(ownership.PhysicalIdentityMaterial);
+            var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(ownership.PhysicalIdentityMaterial);
             var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken);
             var loaded = await LoadAsync(ownership, workspaceIdentity, trust, cancellationToken);
             if (loaded.Document is null || loaded.Recovered)
