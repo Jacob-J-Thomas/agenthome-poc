@@ -53,6 +53,7 @@ public sealed class DefaultConversationTurnReviewService
             return current;
         }
 
+        // TODO(#263): Restrict abandonment to outcome-unknown reviews or add state-specific dispositions. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/263
         if (current.Checkpoint != DefaultConversationTurnCheckpoint.Terminal || current.Run.Status != LoopRunStatus.NeedsReview)
         {
             throw new InvalidOperationException($"Default-conversation turn `{turnId}` is not an unresolved NeedsReview turn.");
