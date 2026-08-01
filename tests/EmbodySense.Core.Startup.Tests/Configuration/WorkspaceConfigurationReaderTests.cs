@@ -168,8 +168,8 @@ public sealed class WorkspaceConfigurationReaderTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, $$"""
-            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","role":"user","content":"{{prompt}}"}
-            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","role":"assistant","content":"{{answer}}"}
+            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"{{prompt}}"}
+            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","messageId":"message-2","publicationId":"publication-2","role":"assistant","content":"{{answer}}"}
             """);
     }
 
@@ -179,7 +179,7 @@ public sealed class WorkspaceConfigurationReaderTests
         var lines = Enumerable.Range(1, 205).Select(index =>
         {
             var role = index % 2 == 0 ? "assistant" : "user";
-            return $$"""{"schemaVersion":1,"conversationId":"current","sequence":{{index}},"timestampUtc":"2026-06-01T00:01:00+00:00","role":"{{role}}","content":"message {{index}}"}""";
+            return $$"""{"schemaVersion":1,"conversationId":"current","sequence":{{index}},"timestampUtc":"2026-06-01T00:01:00+00:00","messageId":"message-{{index}}","publicationId":"publication-{{index}}","role":"{{role}}","content":"message {{index}}"}""";
         });
         await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
     }

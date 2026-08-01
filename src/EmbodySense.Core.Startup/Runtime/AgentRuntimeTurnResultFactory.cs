@@ -43,6 +43,10 @@ internal static class AgentRuntimeTurnResultFactory
                 result.FailureDetail ?? "Default conversation loop turn failed.",
                 runIdentity,
                 BuildAcceptedAssistantEvents(result.TranscriptMessages, runIdentity)),
+            DefaultConversationLoopTurnStatus.NeedsReview => AgentRuntimeTurnResult.MessageNeedsReview(
+                result.FailureDetail ?? "Default conversation loop turn requires explicit review.",
+                runIdentity,
+                BuildAcceptedAssistantEvents(result.TranscriptMessages, runIdentity)),
             _ => throw new InvalidOperationException($"Unsupported default conversation loop status: {result.Status}.")
         };
     }
