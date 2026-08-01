@@ -62,6 +62,8 @@ public sealed class WebApiControllerTests
             var missingApprovalResponse = await client.SendAsync(missingApproval);
 
             Assert.False(before!.Initialized);
+            Assert.Equal("uninitialized", before.InitializationState);
+            Assert.Null(before.InitializationOutcome);
             Assert.False(string.IsNullOrWhiteSpace(session!.GenerationId));
             Assert.DoesNotContain(app.Services.GetRequiredService<WebSessionSecurity>().Token, await sessionResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Contains("HttpOnly", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
@@ -82,6 +84,8 @@ public sealed class WebApiControllerTests
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedQueryTokenConfiguration.StatusCode);
             Assert.True(initialized.IsSuccessStatusCode);
             Assert.True(after!.Initialized);
+            Assert.Equal("initialized", after.InitializationState);
+            Assert.Equal("initialized", after.InitializationOutcome);
             Assert.Equal("web", after.Client);
             Assert.True(after.PrimaryClient);
             Assert.Equal(options.Url, after.Url);

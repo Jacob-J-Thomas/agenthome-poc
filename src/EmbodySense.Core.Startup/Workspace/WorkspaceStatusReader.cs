@@ -30,6 +30,7 @@ public sealed class WorkspaceStatusReader
             AgentPath: paths.AgentPath,
             WorkspacePath: paths.WorkspacePath,
             IsInitialized: paths.IsInitialized,
+            HasPartialScaffold: Directory.Exists(paths.AgentPath) && !paths.IsInitialized,
             EventsLogPath: paths.EventsLogPath,
             PermissionsPath: paths.PermissionsPath,
             TasksPath: paths.TasksPath,

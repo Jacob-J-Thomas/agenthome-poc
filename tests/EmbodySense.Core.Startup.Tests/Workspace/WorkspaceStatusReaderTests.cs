@@ -30,6 +30,7 @@ public sealed class WorkspaceStatusReaderTests
         var status = new WorkspaceStatusReader().Read(workspace.RootPath);
 
         Assert.False(status.IsInitialized);
+        Assert.False(status.HasPartialScaffold);
         Assert.Equal("requires approval because permissions.json is missing, invalid, or unsupported", status.DefaultAccess);
         Assert.Empty(status.ApprovedEntries);
         Assert.Empty(status.DeniedEntries);
@@ -47,5 +48,6 @@ public sealed class WorkspaceStatusReaderTests
         var status = new WorkspaceStatusReader().Read(workspace.RootPath);
 
         Assert.False(status.IsInitialized);
+        Assert.True(status.HasPartialScaffold);
     }
 }

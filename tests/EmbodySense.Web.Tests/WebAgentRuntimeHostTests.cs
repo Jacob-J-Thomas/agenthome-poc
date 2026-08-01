@@ -50,6 +50,30 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task InitializeWorkspaceAsync_serializes_concurrent_clients_and_reports_the_already_initialized_race()
+    {
+        using var workspace = new TestWorkspace();
+        var initializer = new SerializedTestWorkspaceInitializer();
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test"]);
+        await using var host = new WebAgentRuntimeHost(options, new WebApprovalCoordinator(), initializer);
+
+        var first = host.InitializeWorkspaceAsync();
+        await initializer.WaitUntilEnteredAsync();
+        var second = host.InitializeWorkspaceAsync();
+        await Task.Delay(50);
+
+        Assert.Equal(1, initializer.CallCount);
+        initializer.Release();
+        var results = await Task.WhenAll(first, second);
+
+        Assert.Equal(1, initializer.CallCount);
+        Assert.All(results, result => Assert.True(result.Initialized));
+        Assert.Equal("initialized", results[0].InitializationOutcome);
+        Assert.Equal("already-initialized", results[1].InitializationOutcome);
+        Assert.All(results, result => Assert.Equal("initialized", result.InitializationState));
+    }
+
+    [Fact]
     public async Task SendMessageAsync_requires_initialized_workspace()
     {
         using var workspace = new TestWorkspace();

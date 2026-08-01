@@ -134,7 +134,7 @@ test("initialization refresh hydrates a loop builder that booted disabled", asyn
   assert.equal(app.elements.createLoopButton.disabled, true);
   assert.match(
     app.elements.validationBanner.textContent,
-    /Initialize the workspace from Chat/,
+    /Complete workspace initialization/,
   );
   initialized = true;
   await app.window.embodySenseLoopBuilder.refreshWorkspace();
@@ -143,6 +143,305 @@ test("initialization refresh hydrates a loop builder that booted disabled", asyn
   assert.equal(app.elements.loopSearch.disabled, false);
   assert.match(app.elements.loopList.textContent, /Default conversation/);
   assert.match(app.elements.loopList.textContent, /Research pass/);
+});
+
+test("the uninitialized Loops deep link explains exact effects and supports an explicit decline", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: {
+      workspaceRoot: "C:/deliberate-workspace",
+      initialized: false,
+      initializationState: "uninitialized",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  assert.equal(app.elements.loopInitializationPanel.hidden, false);
+  assert.equal(
+    app.elements.loopInitializationRoot.textContent,
+    "C:/deliberate-workspace",
+  );
+  assert.match(
+    loopsHtml,
+    /create <code>\.agent\/<\/code> identity, role, context, memory,[\s\S]*permissions, audit, loop, task, skill, hook, recipe, log,[\s\S]*and export scaffolding/,
+  );
+  assert.match(
+    loopsHtml,
+    /<code>private\/<\/code>,[\s\S]*<code>shared\/<\/code>,[\s\S]*<code>generated\/<\/code>, and[\s\S]*<code>system\/<\/code>/,
+  );
+  assert.match(
+    loopsHtml,
+    /No custom loop is created, and no loop or model inference runs[\s\S]*as a side effect/,
+  );
+  assert.match(
+    loopsHtml,
+    /id="loopInitializationAnnouncement"[\s\S]*role="status"[\s\S]*aria-live="polite"[\s\S]*aria-atomic="true"/,
+  );
+
+  await app.elements.declineLoopsInitializationButton.click();
+
+  assert.match(
+    app.elements.loopInitializationStatus.textContent,
+    /declined.*Nothing was changed.*no loop ran/i,
+  );
+  assert.equal(
+    server.calls.some((call) => call.method === "POST"),
+    false,
+  );
+});
+
+test("Loops initializes through the existing workspace boundary and hydrates only after authoritative success", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let initialized = false;
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: {
+      workspaceRoot: "C:/workspace",
+      initialized,
+      initializationState: initialized ? "initialized" : "uninitialized",
+    },
+  }));
+  server.on("POST", "/api/workspace/init", () => {
+    initialized = true;
+    return {
+      status: 200,
+      body: {
+        workspaceRoot: "C:/workspace",
+        initialized: true,
+        initializationState: "initialized",
+        initializationOutcome: "initialized",
+      },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.initializeLoopsWorkspaceButton.click();
+
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/workspace/init",
+    ).length,
+    1,
+  );
+  assert.equal(app.elements.loopInitializationPanel.hidden, true);
+  assert.equal(app.elements.createLoopButton.disabled, false);
+  assert.notEqual(app.elements.roleId.textContent, "Loading");
+  assert.match(app.elements.loopList.textContent, /Research pass/);
+  assert.match(
+    app.elements.loopInitializationAnnouncement.textContent,
+    /initialization completed.*no loop ran/i,
+  );
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        (call.url === "/api/loops" || call.url.includes("loop-runs")),
+    ),
+    false,
+  );
+});
+
+test("double click and two tabs serialize one workspace initialization submission", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const locks = new FakeLockManager();
+  let initialized = false;
+  let releaseInitialization;
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: {
+      workspaceRoot: "C:/workspace",
+      initialized,
+      initializationState: initialized ? "initialized" : "uninitialized",
+    },
+  }));
+  server.on(
+    "POST",
+    "/api/workspace/init",
+    () =>
+      new Promise((resolve) => {
+        releaseInitialization = () => {
+          initialized = true;
+          resolve({
+            status: 200,
+            body: {
+              workspaceRoot: "C:/workspace",
+              initialized: true,
+              initializationState: "initialized",
+              initializationOutcome: "initialized",
+            },
+          });
+        };
+      }),
+  );
+  const first = await loadLoopBuilder({ server, locks });
+  const second = await loadLoopBuilder({ server, locks });
+
+  const firstAttempt = first.elements.initializeLoopsWorkspaceButton.click();
+  await flushAsyncWork();
+  const duplicateClick = first.elements.initializeLoopsWorkspaceButton.click();
+  const secondAttempt = second.elements.initializeLoopsWorkspaceButton.click();
+  await flushAsyncWork();
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/workspace/init",
+    ).length,
+    1,
+  );
+
+  releaseInitialization();
+  await Promise.all([firstAttempt, duplicateClick, secondAttempt]);
+
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/workspace/init",
+    ).length,
+    1,
+  );
+  assert.equal(first.elements.loopInitializationPanel.hidden, true);
+  assert.equal(second.elements.loopInitializationPanel.hidden, true);
+  assert.match(
+    second.elements.loopInitializationAnnouncement.textContent,
+    /already initialized/i,
+  );
+});
+
+test("partial failure stays locked and offers a recoverable retry distinct from decline", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let partial = false;
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: {
+      workspaceRoot: "C:/workspace",
+      initialized: false,
+      initializationState: partial ? "partial" : "uninitialized",
+    },
+  }));
+  server.on("POST", "/api/workspace/init", () => {
+    partial = true;
+    return {
+      status: 500,
+      body: { detail: "A scaffold write failed." },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.initializeLoopsWorkspaceButton.click();
+
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  assert.equal(app.elements.loopInitializationPanel.hidden, false);
+  assert.equal(
+    app.elements.initializeLoopsWorkspaceButton.textContent,
+    "Retry initialization",
+  );
+  assert.match(
+    app.elements.loopInitializationStatus.textContent,
+    /failed after creating part.*No loop ran.*Retry/i,
+  );
+});
+
+test("plain initialization failure keeps authoring locked and offers an exact retry without assuming success", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: {
+      workspaceRoot: "C:/workspace",
+      initialized: false,
+      initializationState: "uninitialized",
+    },
+  }));
+  server.on("POST", "/api/workspace/init", () => ({
+    status: 500,
+    body: { detail: "The workspace root is temporarily unavailable." },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.initializeLoopsWorkspaceButton.click();
+
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  assert.equal(app.elements.loopInitializationPanel.hidden, false);
+  assert.equal(
+    app.elements.initializeLoopsWorkspaceButton.textContent,
+    "Initialize workspace",
+  );
+  assert.equal(app.elements.initializeLoopsWorkspaceButton.disabled, false);
+  assert.match(
+    app.elements.loopInitializationStatus.textContent,
+    /failed before the workspace became ready.*Nothing is unlocked.*no loop ran.*temporarily unavailable/i,
+  );
+  assert.doesNotMatch(
+    app.elements.loopInitializationAnnouncement.textContent,
+    /completed|already initialized/i,
+  );
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/workspace/init",
+    ).length,
+    1,
+  );
+  assert.equal(
+    server.calls.some((call) => call.url === "/api/loops"),
+    false,
+  );
+});
+
+test("a disconnect during initialization ignores stale completion and reconciles exact status on reconnect", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let initialized = false;
+  let releaseInitialization;
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: {
+      workspaceRoot: "C:/workspace",
+      initialized,
+      initializationState: initialized ? "initialized" : "uninitialized",
+    },
+  }));
+  server.on(
+    "POST",
+    "/api/workspace/init",
+    () =>
+      new Promise((resolve) => {
+        releaseInitialization = () => {
+          initialized = true;
+          resolve({
+            status: 200,
+            body: {
+              workspaceRoot: "C:/workspace",
+              initialized: true,
+              initializationState: "initialized",
+              initializationOutcome: "initialized",
+            },
+          });
+        };
+      }),
+  );
+  const app = await loadLoopBuilder({ server });
+
+  const attempt = app.elements.initializeLoopsWorkspaceButton.click();
+  await flushAsyncWork();
+  app.window.embodySenseLoopBuilder.suspendSession();
+  releaseInitialization();
+  await attempt;
+
+  assert.match(
+    app.elements.loopInitializationStatus.textContent,
+    /disconnected.*No completion is assumed/i,
+  );
+  assert.equal(app.elements.createLoopButton.disabled, true);
+
+  await app.window.embodySenseLoopBuilder.rehydrateSession({
+    signal: new AbortController().signal,
+    workspaceRoot: "C:/workspace",
+  });
+  app.window.embodySenseLoopBuilder.resumeSession();
+
+  assert.equal(app.elements.loopInitializationPanel.hidden, true);
+  assert.equal(app.elements.createLoopButton.disabled, false);
+  assert.match(
+    app.elements.loopInitializationAnnouncement.textContent,
+    /Connection restored.*authoritative Loops state is loaded/i,
+  );
 });
 
 test("initialization refresh queues behind a stale activation status read", async () => {

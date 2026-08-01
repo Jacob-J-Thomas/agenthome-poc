@@ -7,6 +7,7 @@ namespace EmbodySense.Core.Startup.Workspace.Models;
 /// <param name="AgentPath">The derived durable <c>.agent</c> directory.</param>
 /// <param name="WorkspacePath">The governed working area, currently equal to <paramref name="RootPath"/>.</param>
 /// <param name="IsInitialized">Whether the agent directory, role document, and permissions document all exist.</param>
+/// <param name="HasPartialScaffold">Whether an incomplete <c>.agent</c> scaffold exists and requires repair.</param>
 /// <param name="EventsLogPath">The canonical append-only audit event path.</param>
 /// <param name="PermissionsPath">The canonical directory permission document path.</param>
 /// <param name="TasksPath">The canonical durable task directory.</param>
@@ -18,6 +19,7 @@ public sealed record WorkspaceStatusSnapshot(
     string AgentPath,
     string WorkspacePath,
     bool IsInitialized,
+    bool HasPartialScaffold,
     string EventsLogPath,
     string PermissionsPath,
     string TasksPath,

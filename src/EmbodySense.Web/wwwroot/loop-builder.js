@@ -15,6 +15,12 @@ let loopBuilderRecoveryQueued = false;
 let loopBuilderSessionAvailable =
   window.embodySenseSession?.getState?.().connected ?? true;
 let loopBuilderSessionAbortController = new AbortController();
+let workspaceStatusSnapshot = null;
+let workspaceInitializationInFlight = false;
+let workspaceInitializationGeneration = 0;
+let workspaceInitializationPhase = "idle";
+let workspaceInitializationMessage = "";
+let workspaceAuthoringHydrated = false;
 let dirty = false;
 let currentView = "builder";
 let recentRuns = [];
@@ -79,6 +85,8 @@ let pendingInvocationStorageKey = null;
 let pendingInvocationRegistryLockName = null;
 const maximumPendingInvocationRequests = 100;
 const pendingInvocationRequests = new Map();
+const workspaceInitializationLockNamePrefix =
+  "embodysense.workspace-initialization.v1";
 
 const signalRRecordSeparator = "\u001e";
 const signalRKeepAliveMilliseconds = 10000;
@@ -113,6 +121,9 @@ const elements = {
   inspectorTitle: document.getElementById("inspectorTitle"),
   invocationPrompt: document.getElementById("invocationPrompt"),
   invocationPromptField: document.getElementById("invocationPromptField"),
+  initializeWorkspaceButton: document.getElementById(
+    "initializeLoopsWorkspaceButton",
+  ),
   invokeButton: document.getElementById("invokeButton"),
   invokeError: document.getElementById("invokeError"),
   invokeLimits: document.getElementById("invokeLimits"),
@@ -123,6 +134,15 @@ const elements = {
   loopsView: document.getElementById("loopsView"),
   loopSearch: document.getElementById("loopSearch"),
   loopSettingsButton: document.getElementById("loopSettingsButton"),
+  initializationAnnouncement: document.getElementById(
+    "loopInitializationAnnouncement",
+  ),
+  initializationPanel: document.getElementById("loopInitializationPanel"),
+  initializationRoot: document.getElementById("loopInitializationRoot"),
+  initializationStatus: document.getElementById("loopInitializationStatus"),
+  declineInitializationButton: document.getElementById(
+    "declineLoopsInitializationButton",
+  ),
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
   roleId: document.getElementById("roleId"),
@@ -289,6 +309,8 @@ async function refreshWorkspaceCore(
     const requestOptions = { signal, suppressRecovery };
     const status = await requestJson("/api/status", requestOptions);
     if (signal?.aborted) return false;
+    workspaceStatusSnapshot = status;
+    renderWorkspaceInitialization();
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
     } catch {
@@ -314,8 +336,9 @@ async function refreshWorkspaceCore(
       ? "Initialized"
       : "Needs initialization";
     if (!status.initialized) {
+      workspaceAuthoringHydrated = false;
       showBanner(
-        "Initialize the workspace from Chat before creating loops.",
+        "Complete workspace initialization before creating loops.",
         "notice",
       );
       setInteractive(false);
@@ -328,6 +351,8 @@ async function refreshWorkspaceCore(
     const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded === false) return false;
     renderAll();
+    workspaceAuthoringHydrated = true;
+    renderWorkspaceInitialization();
     return true;
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
@@ -337,7 +362,203 @@ async function refreshWorkspaceCore(
   }
 }
 
+function initializationState(status = workspaceStatusSnapshot) {
+  if (status?.initialized) return "initialized";
+  return status?.initializationState === "partial"
+    ? "partial"
+    : "uninitialized";
+}
+
+function renderWorkspaceInitialization() {
+  const state = initializationState();
+  const hydrated = state === "initialized" && workspaceAuthoringHydrated;
+  elements.initializationRoot.textContent =
+    workspaceStatusSnapshot?.workspaceRoot ?? "the configured workspace";
+  elements.initializationPanel.hidden = hydrated;
+  elements.initializationPanel.setAttribute(
+    "aria-busy",
+    workspaceInitializationInFlight ? "true" : "false",
+  );
+
+  if (hydrated) return;
+
+  if (workspaceInitializationPhase === "running") {
+    elements.initializationStatus.textContent =
+      "Initialization is in progress. Authoring remains locked until authoritative workspace, role, catalog, and run state are loaded.";
+  } else if (workspaceInitializationMessage) {
+    elements.initializationStatus.textContent = workspaceInitializationMessage;
+  } else if (state === "partial") {
+    elements.initializationStatus.textContent =
+      "This workspace has an incomplete .agent scaffold. Retry initialization to repair the missing required files; existing protected seed documents will remain unchanged.";
+  } else if (state === "initialized") {
+    elements.initializationStatus.textContent =
+      "The workspace is initialized, but Loops has not finished loading authoritative role and catalog state. Retry hydration.";
+  } else if (!loopBuilderSessionAvailable) {
+    elements.initializationStatus.textContent =
+      "The browser session is disconnected. Reconnect before initializing; no completion is assumed.";
+  } else {
+    elements.initializationStatus.textContent =
+      "Review the effects above, then initialize when you are ready.";
+  }
+
+  elements.initializationStatus.classList.toggle(
+    "error",
+    ["failed", "partial", "disconnected"].includes(
+      workspaceInitializationPhase,
+    ) || state === "partial",
+  );
+  elements.initializeWorkspaceButton.textContent =
+    state === "partial"
+      ? "Retry initialization"
+      : state === "initialized"
+        ? "Retry Loops hydration"
+        : "Initialize workspace";
+  elements.initializeWorkspaceButton.disabled =
+    workspaceInitializationInFlight || !loopBuilderSessionAvailable;
+  elements.declineInitializationButton.disabled =
+    workspaceInitializationInFlight || !loopBuilderSessionAvailable;
+}
+
+function setWorkspaceInitializationOutcome(phase, message) {
+  workspaceInitializationPhase = phase;
+  workspaceInitializationMessage = message;
+  elements.initializationAnnouncement.textContent = message;
+  renderWorkspaceInitialization();
+}
+
+function declineLoopsInitialization() {
+  setWorkspaceInitializationOutcome(
+    "declined",
+    "Initialization declined. Nothing was changed, and no loop ran. You can initialize this workspace later.",
+  );
+}
+
+async function initializeLoopsWorkspace() {
+  if (workspaceInitializationInFlight || !loopBuilderSessionAvailable) return;
+  const generation = ++workspaceInitializationGeneration;
+  workspaceInitializationInFlight = true;
+  workspaceInitializationPhase = "running";
+  workspaceInitializationMessage = "";
+  renderWorkspaceInitialization();
+
+  const initializeUnderLock = async () => {
+    const currentStatus = await requestJson("/api/status");
+    if (generation !== workspaceInitializationGeneration) return;
+    workspaceStatusSnapshot = currentStatus;
+    if (currentStatus.initialized) {
+      await completeWorkspaceInitialization(generation, "already-initialized");
+      return;
+    }
+
+    const result = await requestJson("/api/workspace/init", {
+      method: "POST",
+      body: "{}",
+    });
+    if (generation !== workspaceInitializationGeneration) return;
+    workspaceStatusSnapshot = result;
+    if (!result.initialized) {
+      const partial = initializationState(result) === "partial";
+      setWorkspaceInitializationOutcome(
+        partial ? "partial" : "failed",
+        partial
+          ? "Initialization stopped after creating part of the workspace scaffold. No loop ran. Retry to repair the missing required files."
+          : "Initialization did not produce a complete workspace. Nothing is unlocked, and no loop ran. Retry when ready.",
+      );
+      return;
+    }
+
+    await completeWorkspaceInitialization(
+      generation,
+      result.initializationOutcome ?? "initialized",
+    );
+  };
+
+  try {
+    const lockName = `${workspaceInitializationLockNamePrefix}:${workspaceStatusSnapshot?.workspaceRoot ?? "configured-workspace"}`;
+    if (navigator.locks?.request)
+      await navigator.locks.request(
+        lockName,
+        { mode: "exclusive" },
+        initializeUnderLock,
+      );
+    else await initializeUnderLock();
+  } catch (error) {
+    if (generation !== workspaceInitializationGeneration) return;
+    if (!loopBuilderSessionAvailable || error?.name === "AbortError") {
+      setWorkspaceInitializationOutcome(
+        "disconnected",
+        "The browser disconnected during initialization. No completion is assumed. Reconnect to load authoritative workspace state before retrying.",
+      );
+    } else {
+      await reconcileWorkspaceInitializationFailure(generation, error);
+    }
+  } finally {
+    if (generation === workspaceInitializationGeneration) {
+      workspaceInitializationInFlight = false;
+      renderWorkspaceInitialization();
+    }
+  }
+}
+
+async function completeWorkspaceInitialization(generation, outcome) {
+  const refreshed = await refreshWorkspace();
+  if (generation !== workspaceInitializationGeneration) return;
+  if (
+    refreshed === false ||
+    !workspaceStatusSnapshot?.initialized ||
+    !workspaceAuthoringHydrated
+  ) {
+    setWorkspaceInitializationOutcome(
+      "failed",
+      "The workspace reports initialized, but Loops could not hydrate authoritative role, catalog, and run state. Authoring remains locked; retry hydration.",
+    );
+    return;
+  }
+
+  const message =
+    outcome === "already-initialized"
+      ? "This workspace was already initialized. Authoritative role, catalog, and run state are now loaded; no loop ran."
+      : "Workspace initialization completed. Authoritative role, catalog, and run state are loaded; no loop ran.";
+  setWorkspaceInitializationOutcome("succeeded", message);
+  elements.createLoopButton.focus?.();
+}
+
+async function reconcileWorkspaceInitializationFailure(generation, error) {
+  try {
+    const status = await requestJson("/api/status", {
+      suppressRecovery: true,
+    });
+    if (generation !== workspaceInitializationGeneration) return;
+    workspaceStatusSnapshot = status;
+    if (status.initialized) {
+      await completeWorkspaceInitialization(generation, "already-initialized");
+      return;
+    }
+
+    const partial = initializationState(status) === "partial";
+    setWorkspaceInitializationOutcome(
+      partial ? "partial" : "failed",
+      partial
+        ? "Initialization failed after creating part of the .agent scaffold. No loop ran. Retry to repair the missing required files."
+        : `Initialization failed before the workspace became ready. Nothing is unlocked, and no loop ran. ${error.message}`,
+    );
+  } catch {
+    setWorkspaceInitializationOutcome(
+      "disconnected",
+      "Initialization could not be verified because the browser session is unavailable. No completion is assumed. Reconnect to load authoritative workspace state.",
+    );
+  }
+}
+
 function bindStaticEvents() {
+  elements.initializeWorkspaceButton.addEventListener(
+    "click",
+    initializeLoopsWorkspace,
+  );
+  elements.declineInitializationButton.addEventListener(
+    "click",
+    declineLoopsInitialization,
+  );
   elements.createLoopButton.addEventListener("click", createLoop);
   elements.builderTab.addEventListener("click", () => switchView("builder"));
   elements.runsTab.addEventListener("click", () => switchView("runs"));
@@ -5219,6 +5440,16 @@ function waitForLoopBuilderOperation(operation, signal) {
 
 function suspendSession() {
   loopBuilderSessionAvailable = false;
+  if (workspaceInitializationInFlight) {
+    workspaceInitializationGeneration++;
+    workspaceInitializationInFlight = false;
+    setWorkspaceInitializationOutcome(
+      "disconnected",
+      "The browser disconnected during initialization. No completion is assumed. Reconnect to load authoritative workspace state before retrying.",
+    );
+  } else {
+    renderWorkspaceInitialization();
+  }
   runEvidenceRequestGeneration++;
   if (selectedRunRefreshTimer != null) {
     window.clearTimeout(selectedRunRefreshTimer);
@@ -5239,6 +5470,25 @@ function resumeSession() {
   if (loopBuilderSessionAbortController.signal.aborted)
     loopBuilderSessionAbortController = new AbortController();
   loopBuilderSessionAvailable = true;
+  if (workspaceInitializationPhase === "disconnected") {
+    if (workspaceStatusSnapshot?.initialized && workspaceAuthoringHydrated)
+      setWorkspaceInitializationOutcome(
+        "succeeded",
+        "Connection restored. The workspace is initialized and authoritative Loops state is loaded; no loop ran.",
+      );
+    else if (initializationState() === "partial")
+      setWorkspaceInitializationOutcome(
+        "partial",
+        "Connection restored. Authoritative status shows an incomplete .agent scaffold. Retry initialization to repair it; no loop ran.",
+      );
+    else
+      setWorkspaceInitializationOutcome(
+        "idle",
+        "Connection restored. Authoritative status shows that this workspace is not initialized. Review the effects and retry when ready.",
+      );
+  } else {
+    renderWorkspaceInitialization();
+  }
   if (loopBuilderSurfaceActive && !loopBuilderEventsBound) void activate();
   else scheduleSelectedRunRefresh();
 }

@@ -289,6 +289,46 @@ public sealed class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
+    public async Task Loops_deep_link_deliberately_initializes_an_empty_workspace_without_creating_or_running_a_custom_loop()
+    {
+        using var workspace = new TestWorkspace();
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
+        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl + "/?view=loops");
+
+        try
+        {
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && !document.getElementById('loopInitializationPanel').hidden");
+            Assert.Equal(workspace.RootPath, await browser.EvaluateStringAsync("document.getElementById('loopInitializationRoot').textContent"));
+            var explanation = await browser.EvaluateStringAsync("document.getElementById('loopInitializationPanel').textContent");
+            Assert.Contains(".agent/", explanation, StringComparison.Ordinal);
+            Assert.Contains("private/", explanation, StringComparison.Ordinal);
+            Assert.Contains("protected seed documents", explanation, StringComparison.Ordinal);
+            Assert.Contains("No custom loop is created", explanation, StringComparison.Ordinal);
+            Assert.Contains("no loop or model inference runs", explanation, StringComparison.Ordinal);
+            Assert.True(await browser.EvaluateBooleanAsync("!document.getElementById('initializeLoopsWorkspaceButton').disabled"));
+
+            await ClickAsync(browser, "#initializeLoopsWorkspaceButton");
+            await browser.WaitForExpressionAsync("document.getElementById('loopInitializationPanel').hidden && !document.getElementById('createLoopButton').disabled");
+            await browser.WaitForExpressionAsync("document.getElementById('loopList').textContent.includes('System loop')");
+
+            Assert.True(File.Exists(workspace.File(".agent", "ROLE.md")));
+            Assert.True(File.Exists(workspace.File(".agent", "permissions.json")));
+            Assert.Equal(0, await GetCustomDefinitionCountAsync(workspace.RootPath));
+            var customRunPath = workspace.File(".agent", "loops", "runs", "custom");
+            Assert.False(Directory.Exists(customRunPath) && Directory.EnumerateFiles(customRunPath, "*", SearchOption.AllDirectories).Any());
+            Assert.Contains("initialization completed", await browser.EvaluateStringAsync("document.getElementById('loopInitializationAnnouncement').textContent"), StringComparison.OrdinalIgnoreCase);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Loops_deep_link_deliberately_initializes_an_empty_workspace_without_creating_or_running_a_custom_loop), browser, app);
+            throw;
+        }
+    }
+
+    [InstalledBrowserFact]
     public async Task Incompatible_runtime_is_visible_and_restores_chat_controls_after_rejection()
     {
         using var workspace = new TestWorkspace();
