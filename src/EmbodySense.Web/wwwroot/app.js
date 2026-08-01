@@ -270,6 +270,7 @@ async function runSessionRecoveryAttempt(generation) {
   sessionRecoveryAttempts++;
   let candidate = null;
   let candidateEvents = null;
+  let candidateInstalled = false;
   const abortController = new AbortController();
   sessionRecoveryAbortController = abortController;
   const timeoutId = window.setTimeout(() => {
@@ -306,6 +307,14 @@ async function runSessionRecoveryAttempt(generation) {
       abortController.signal,
     );
     ensureWorkspaceDidNotChange(nextStatus.workspaceRoot);
+    if (hub === null && sessionWorkspaceRoot === null) {
+      hub = candidate;
+      sessionGenerationId = session.generationId;
+      sessionWorkspaceRoot = nextStatus.workspaceRoot;
+      applyStatus(nextStatus);
+      candidateInstalled = true;
+    }
+
     let transcriptHydrationError = null;
     const [nextConfiguration, currentTranscript, pendingApprovals] =
       await Promise.all([
@@ -364,12 +373,14 @@ async function runSessionRecoveryAttempt(generation) {
       );
     }
 
-    const previousHub = hub;
-    previousHub?.stop();
-    hub = candidate;
-    sessionGenerationId = session.generationId;
-    sessionWorkspaceRoot = nextStatus.workspaceRoot;
-    applyStatus(nextStatus);
+    if (!candidateInstalled) {
+      const previousHub = hub;
+      previousHub?.stop();
+      hub = candidate;
+      sessionGenerationId = session.generationId;
+      sessionWorkspaceRoot = nextStatus.workspaceRoot;
+      applyStatus(nextStatus);
+    }
     configuration = nextConfiguration;
     renderConfiguration();
     if (Array.isArray(currentTranscript)) replaceTranscript(currentTranscript);
@@ -382,6 +393,7 @@ async function runSessionRecoveryAttempt(generation) {
     candidateEvents.promote();
     sessionRecoveryAttempts = 0;
     applyConnectedState();
+    elements.refreshConfigButton.disabled = false;
     window.embodySenseLoopBuilder?.resumeSession?.();
     return true;
   } catch (caughtError) {

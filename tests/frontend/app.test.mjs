@@ -167,6 +167,24 @@ test("transcript hydration failure leaves the connected chat usable", async () =
   );
 });
 
+test("fresh boot promotes authenticated chat while configuration hydration remains in flight", async () => {
+  let releaseConfiguration;
+  const configurationGate = new Promise((resolve) => {
+    releaseConfiguration = resolve;
+  });
+  const app = await loadApp({ configurationGate });
+
+  assert.equal(app.elements.workspaceStatus.textContent, "Initialized");
+  assert.equal(app.elements.clientStatus.textContent, "Web primary");
+  assert.equal(app.elements.sendButton.disabled, false);
+  assert.equal(app.elements.refreshConfigButton.disabled, true);
+
+  releaseConfiguration();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(app.elements.refreshConfigButton.disabled, false);
+});
+
 test("boot hydrates the complete active runtime transcript instead of the bounded configuration snapshot", async () => {
   const activeTranscript = Array.from({ length: 201 }, (_, index) => ({
     role: index % 2 === 0 ? "user" : "assistant",
@@ -1244,6 +1262,7 @@ function createFetch(overrides = {}, calls = []) {
     }
 
     if (url === "/api/configuration") {
+      if (overrides.configurationGate) await overrides.configurationGate;
       return jsonResponse(configuration);
     }
 

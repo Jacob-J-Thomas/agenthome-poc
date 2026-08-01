@@ -1,7 +1,6 @@
 using EmbodySense.Web;
 using EmbodySense.Core.Startup.Configuration.Models;
 using EmbodySense.Core.Startup.Governance;
-using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
@@ -279,39 +278,4 @@ public sealed class WebApiControllerTests
         return port;
     }
 
-    private sealed class RecordingLoggerProvider : ILoggerProvider
-    {
-        private readonly ConcurrentQueue<string> _messages = [];
-
-        public IReadOnlyCollection<string> Messages => _messages.ToArray();
-
-        public ILogger CreateLogger(string categoryName)
-        {
-            return new RecordingLogger(categoryName, _messages);
-        }
-
-        public void Dispose()
-        {
-        }
-
-        private sealed class RecordingLogger(string categoryName, ConcurrentQueue<string> messages) : ILogger
-        {
-            public IDisposable? BeginScope<TState>(TState state)
-                where TState : notnull
-            {
-                return null;
-            }
-
-            public bool IsEnabled(LogLevel logLevel)
-            {
-                return true;
-            }
-
-            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-            {
-                var renderedException = exception is null ? string.Empty : $"{Environment.NewLine}{exception}";
-                messages.Enqueue($"{categoryName}: {formatter(state, exception)}{renderedException}");
-            }
-        }
-    }
 }
