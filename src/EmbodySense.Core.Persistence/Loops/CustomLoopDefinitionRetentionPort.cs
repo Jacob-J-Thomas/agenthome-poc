@@ -37,13 +37,14 @@ public sealed class CustomLoopDefinitionRetentionPort : ICustomLoopReceiptRetent
     public Task<CustomLoopReceiptOperationLookupResult> LookupOperationAsync(string operationId, CancellationToken cancellationToken = default) => _store.LookupReceiptOperationAsync(ArtifactClass, operationId, cancellationToken);
 
     /// <inheritdoc />
-    public Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken = default)
+    public Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default)
     {
-        if (request.ArtifactClass != ArtifactClass)
+        ArgumentNullException.ThrowIfNull(command);
+        if (command.ArtifactClass != ArtifactClass)
         {
-            throw new ArgumentException("Cleanup request artifact class does not match this retention port.", nameof(request));
+            throw new ArgumentException("Cleanup command artifact class does not match this retention port.", nameof(command));
         }
 
-        return _store.CleanupReceiptRetentionAsync(request, cancellationToken);
+        return _store.CleanupReceiptRetentionAsync(command, cancellationToken);
     }
 }

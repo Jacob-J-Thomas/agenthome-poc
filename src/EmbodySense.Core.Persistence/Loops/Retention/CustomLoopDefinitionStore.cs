@@ -54,7 +54,7 @@ public sealed partial class CustomLoopDefinitionStore
             return operationProofExhaustion;
         }
 
-        if (mutation.Kind != CustomLoopDefinitionMutationKind.Delete)
+        if (mutation.Kind != CustomLoopDefinitionMutationKind.Delete || mutation.PriorDefinition is null)
         {
             return CustomLoopReceiptQuotaExhaustionReason.None;
         }
@@ -166,6 +166,12 @@ public sealed partial class CustomLoopDefinitionStore
     /// <returns>The class-specific retention port.</returns>
     public ICustomLoopReceiptRetentionPort CreateReceiptRetentionPort(CustomLoopReceiptArtifactClass artifactClass) => new CustomLoopDefinitionRetentionPort(this, artifactClass);
 
+    internal Task<CustomLoopReceiptCleanupResult> CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default)
+    {
+        var observedAtUtc = _timeProvider.GetUtcNow().ToUniversalTime();
+        return CleanupReceiptRetentionAsync(CustomLoopReceiptCleanupRequestFactory.Create(command, observedAtUtc), cancellationToken);
+    }
+
     /// <summary>
     /// Inspects bounded receipt usage, exact replay, compact proof, and cleanup posture for one authoring class.
     /// </summary>
@@ -206,7 +212,8 @@ public sealed partial class CustomLoopDefinitionStore
             if (File.Exists(operationPath))
             {
                 var artifact = await ReadRetentionArtifactAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, operationPath, cancellationToken);
-                if (artifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt || artifact.Operation!.Kind == CustomLoopDefinitionMutationKind.Delete)
+                if (artifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
+                    || artifact.Operation is { Kind: CustomLoopDefinitionMutationKind.Delete, Outcome: CustomLoopDefinitionStoreStatus.Deleted })
                 {
                     var ledgerWithExact = await ReadProofLedgerAsync(cancellationToken);
                     var retainedProof = ledgerWithExact?.ExpiredOperations.SingleOrDefault(item => item.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt && string.Equals(item.OperationId, safeOperationId, StringComparison.Ordinal));
@@ -225,7 +232,8 @@ public sealed partial class CustomLoopDefinitionStore
             var ledger = await ReadProofLedgerAsync(cancellationToken);
             var proof = ledger?.ExpiredOperations.SingleOrDefault(item => item.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
                 && string.Equals(item.OperationId, safeOperationId, StringComparison.Ordinal)
-                && (artifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt || item.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete));
+                && (artifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
+                    || item is { DefinitionMutationKind: CustomLoopDefinitionMutationKind.Delete, DefinitionMutationOutcome: CustomLoopDefinitionStoreStatus.Deleted }));
             var result = proof is null
                 ? new CustomLoopReceiptOperationLookupResult(artifactClass, safeOperationId, CustomLoopReceiptOperationLookupStatus.Unknown, null, "No full receipt or compact expiry proof recognizes this operation identity.")
                 : new CustomLoopReceiptOperationLookupResult(artifactClass, safeOperationId, CustomLoopReceiptOperationLookupStatus.Expired, proof, "Exact replay expired; compact proof permanently reserves this operation identity.");
@@ -511,6 +519,20 @@ public sealed partial class CustomLoopDefinitionStore
 
         if (journal.Stage == CustomLoopReceiptCleanupStage.ProofLedgerWritten)
         {
+            try
+            {
+                if (!await ProofLedgerMatchesJournalAsync(journal, ownerToken))
+                {
+                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Corrupt, "Committed compact proof is missing, changed, or incomplete; every remaining raw artifact was preserved.", ownerToken);
+                    return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: journal.Detail);
+                }
+            }
+            catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+            {
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Corrupt, "Committed compact proof could not be revalidated before raw evidence removal.", ownerToken);
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Compact proof failed closed: {exception.GetType().Name}.");
+            }
+
             foreach (var candidate in journal.Candidates)
             {
                 var path = GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId);
@@ -682,6 +704,24 @@ public sealed partial class CustomLoopDefinitionStore
         }
 
         return verified;
+    }
+
+    private async Task<bool> ProofLedgerMatchesJournalAsync(CustomLoopReceiptCleanupJournal journal, CancellationToken cancellationToken)
+    {
+        if (journal.ProofLedgerHash is null)
+        {
+            return false;
+        }
+
+        var ledger = await ReadProofLedgerAsync(cancellationToken);
+        if (ledger is null || !string.Equals(CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(ledger), journal.ProofLedgerHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return journal.Candidates.All(candidate => candidate.ExpiredOperationProof is { } proof
+            && ledger.ExpiredOperations.Contains(proof)
+            && (candidate.DefinitionLineageProof is null || ledger.DefinitionLineage.Contains(candidate.DefinitionLineageProof)));
     }
 
     private async Task<CustomLoopReceiptProofLedger?> ReadProofLedgerAsync(CancellationToken cancellationToken)
@@ -860,13 +900,20 @@ public sealed partial class CustomLoopDefinitionStore
 
     private static CustomLoopExpiredOperationProof ToExpiredProof(CustomLoopDefinitionMutationOperationRecord operation, string outcomeHash, CustomLoopDefinitionLineageProof? lineage)
     {
-        var deleteBindingHash = operation.Kind == CustomLoopDefinitionMutationKind.Delete
+        var successfulDelete = operation.Kind == CustomLoopDefinitionMutationKind.Delete && operation.Outcome == CustomLoopDefinitionStoreStatus.Deleted;
+        var deleteBindingHash = successfulDelete
             ? CustomLoopReceiptRetentionContractCodec.ComputeDeleteLineageBindingHash(operation.RequestHash, outcomeHash, lineage ?? throw new FormatException($"Delete receipt `{operation.OperationId}` is missing its canonical lineage proof."))
             : null;
+        if (!successfulDelete && lineage is not null)
+        {
+            throw new FormatException($"Non-deleting receipt `{operation.OperationId}` cannot own deleted lineage proof.");
+        }
+
         return new CustomLoopExpiredOperationProof(
             CustomLoopExpiredOperationProof.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
             operation.Kind,
+            operation.Outcome,
             deleteBindingHash,
             operation.OperationId,
             operation.RequestHash,
@@ -878,11 +925,15 @@ public sealed partial class CustomLoopDefinitionStore
     private static CustomLoopExpiredOperationProof ToAdmissionExpiredProof(CustomLoopDefinitionMutationRequest mutation)
     {
         var completedAtUtc = GetMaximumAdmissionProofTimestampUtc();
+        var outcome = mutation.Kind == CustomLoopDefinitionMutationKind.Delete && mutation.PriorDefinition is null
+            ? CustomLoopDefinitionStoreStatus.NotFound
+            : MaximumAdmissionOutcome(mutation.Kind);
         return new CustomLoopExpiredOperationProof(
             CustomLoopExpiredOperationProof.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
             mutation.Kind,
-            mutation.Kind == CustomLoopDefinitionMutationKind.Delete ? new string('0', CustomLoopLimits.Sha256HexCharacters) : null,
+            outcome,
+            outcome == CustomLoopDefinitionStoreStatus.Deleted ? new string('0', CustomLoopLimits.Sha256HexCharacters) : null,
             mutation.OperationId,
             mutation.RequestHash,
             new string('0', CustomLoopLimits.Sha256HexCharacters),
@@ -894,16 +945,29 @@ public sealed partial class CustomLoopDefinitionStore
     {
         var operation = artifact.Operation!;
         var completedAtUtc = operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted ? operation.UpdatedAtUtc : GetMaximumAdmissionProofTimestampUtc();
+        var outcome = operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted ? operation.Outcome : MaximumAdmissionOutcome(operation.Kind);
         return new CustomLoopExpiredOperationProof(
             CustomLoopExpiredOperationProof.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
             operation.Kind,
-            operation.Kind == CustomLoopDefinitionMutationKind.Delete ? new string('0', CustomLoopLimits.Sha256HexCharacters) : null,
+            outcome,
+            outcome == CustomLoopDefinitionStoreStatus.Deleted ? new string('0', CustomLoopLimits.Sha256HexCharacters) : null,
             operation.OperationId,
             operation.RequestHash,
             operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted ? artifact.Hash : new string('0', CustomLoopLimits.Sha256HexCharacters),
             completedAtUtc,
             completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration);
+    }
+
+    private static CustomLoopDefinitionStoreStatus MaximumAdmissionOutcome(CustomLoopDefinitionMutationKind kind)
+    {
+        return kind switch
+        {
+            CustomLoopDefinitionMutationKind.Create => CustomLoopDefinitionStoreStatus.LimitExceeded,
+            CustomLoopDefinitionMutationKind.Update => CustomLoopDefinitionStoreStatus.NotFound,
+            CustomLoopDefinitionMutationKind.Delete => CustomLoopDefinitionStoreStatus.Deleted,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Mutation kind has no valid retention-proof outcome.")
+        };
     }
 
     private static CustomLoopDefinitionLineageProof ToAdmissionLineageProof(CustomLoopDefinitionMutationRequest mutation)
@@ -1159,11 +1223,15 @@ public sealed partial class CustomLoopDefinitionStore
     private static bool ProofMatchesOperation(CustomLoopExpiredOperationProof proof, CustomLoopDefinitionRetentionArtifact artifact, CustomLoopDefinitionLineageProof? lineage)
     {
         var operation = artifact.Operation!;
-        var deleteBindingMatches = operation.Kind != CustomLoopDefinitionMutationKind.Delete
-            ? proof.DeleteLineageBindingHash is null
-            : lineage is not null
-                && string.Equals(proof.DeleteLineageBindingHash, CustomLoopReceiptRetentionContractCodec.ComputeDeleteLineageBindingHash(operation.RequestHash, artifact.Hash, lineage), StringComparison.Ordinal);
+        var successfulDelete = operation.Kind == CustomLoopDefinitionMutationKind.Delete && operation.Outcome == CustomLoopDefinitionStoreStatus.Deleted;
+        var deleteBindingMatches = successfulDelete
+            ? operation.ResultTombstone is { } tombstone
+                && lineage is { } retainedLineage
+                && retainedLineage == ToLineageProof(operation, tombstone)
+                && string.Equals(proof.DeleteLineageBindingHash, CustomLoopReceiptRetentionContractCodec.ComputeDeleteLineageBindingHash(operation.RequestHash, artifact.Hash, retainedLineage), StringComparison.Ordinal)
+            : proof.DeleteLineageBindingHash is null && lineage is null;
         return proof.DefinitionMutationKind == operation.Kind
+            && proof.DefinitionMutationOutcome == operation.Outcome
             && deleteBindingMatches
             && string.Equals(proof.OperationId, operation.OperationId, StringComparison.Ordinal)
             && string.Equals(proof.RequestHash, operation.RequestHash, StringComparison.Ordinal)

@@ -87,6 +87,36 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Failed_delete_receipt_compacts_without_fabricating_deleted_lineage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var mutation = new CustomLoopDefinitionMutationRequest(
+            CustomLoopDefinitionMutationKind.Delete,
+            "delete-missing",
+            new string('a', CustomLoopLimits.Sha256HexCharacters),
+            "loop-missing",
+            "default-assistant",
+            1,
+            null,
+            null,
+            _createdAtUtc);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.NotFound, (await store.DeleteAsync(mutation.LoopId, 1, mutation.OperationId, mutation.RequestedAtUtc, mutation)).Status);
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync(mutation.OperationId));
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, (await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-failed-delete"))).Status);
+
+        var ledger = CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(await File.ReadAllBytesAsync(paths.CustomLoopReceiptProofLedgerPath));
+        var proof = Assert.Single(ledger.ExpiredOperations);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.NotFound, proof.DefinitionMutationOutcome);
+        Assert.Null(proof.DeleteLineageBindingHash);
+        Assert.Empty(ledger.DefinitionLineage);
+        Assert.Equal(CustomLoopReceiptOperationLookupStatus.Expired, (await store.LookupReceiptOperationAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, mutation.OperationId)).Status);
+        Assert.Equal(CustomLoopReceiptOperationLookupStatus.Unknown, (await store.LookupReceiptOperationAsync(CustomLoopReceiptArtifactClass.DefinitionTombstone, mutation.OperationId)).Status);
+    }
+
+    [Fact]
     public void Admission_accounts_for_retained_and_outstanding_raw_proof_obligations_and_preserves_the_exact_reason()
     {
         var countBudget = new CustomLoopReceiptRetentionBudget(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, 10, 1_000, 1, 100, 2, 100);
@@ -482,6 +512,30 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Recovery_never_removes_raw_evidence_when_the_committed_proof_ledger_is_missing()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var operationId = await CreateExpiredUpdateAsync(store);
+        var artifactPath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, operationId + ".json");
+        var candidate = await CreateCandidateAsync(paths, operationId, new string('a', CustomLoopLimits.Sha256HexCharacters), _createdAtUtc.AddDays(1));
+        var staleOwnershipAtUtc = _observedAtUtc.AddMinutes(-2);
+        var ledger = ProofLedger(staleOwnershipAtUtc, candidate);
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-missing-ledger-crash");
+        var journal = CleanupJournal(request, staleOwnershipAtUtc, CustomLoopReceiptCleanupStage.ProofLedgerWritten, [candidate], CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(ledger));
+        await WriteCleanupJournalAsync(paths, journal);
+
+        var recovered = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-missing-ledger"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, recovered.BlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStage.Degraded, recovered.Journal!.Stage);
+        Assert.True(File.Exists(artifactPath));
+        Assert.False(File.Exists(paths.CustomLoopReceiptProofLedgerPath));
+    }
+
+    [Fact]
     public async Task Same_id_compact_lineage_that_disagrees_with_a_raw_tombstone_is_corrupt_workspace_state()
     {
         using var workspace = new TestWorkspace();
@@ -508,6 +562,30 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         var exception = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(definition.Id));
 
         Assert.Contains("conflicts with its retained compact lineage", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Role_changed_compact_lineage_cannot_match_its_raw_delete_receipt_even_with_a_recomputed_binding()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var definition = CreateDefinition("loop-role-lineage-conflict");
+        await CreateCommittedAsync(store, definition);
+        var deletedAtUtc = _createdAtUtc.AddDays(1);
+        var deletion = Mutation(CustomLoopDefinitionMutationKind.Delete, "delete-role-lineage-conflict", null, definition, 1, deletedAtUtc);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Deleted, (await store.DeleteAsync(definition.Id, 1, deletion.OperationId, deletedAtUtc, deletion)).Status);
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync(deletion.OperationId));
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, (await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionTombstone, "cleanup-role-lineage-conflict"))).Status);
+        var ledger = CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(await File.ReadAllBytesAsync(paths.CustomLoopReceiptProofLedgerPath));
+        var changedLineage = Assert.Single(ledger.DefinitionLineage) with { RoleId = "different-role" };
+        var deleteProof = Assert.Single(ledger.ExpiredOperations);
+        var changedProof = deleteProof with { DeleteLineageBindingHash = CustomLoopReceiptRetentionContractCodec.ComputeDeleteLineageBindingHash(deleteProof.RequestHash, deleteProof.OutcomeHash, changedLineage) };
+        await WriteProofLedgerAsync(paths, ledger with { DefinitionLineage = [changedLineage], ExpiredOperations = [changedProof] });
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.LookupReceiptOperationAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, deletion.OperationId));
+
+        Assert.Contains("conflicts with its retained compact proof", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -580,6 +658,7 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
             CustomLoopExpiredOperationProof.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
             CustomLoopDefinitionMutationKind.Update,
+            CustomLoopDefinitionStoreStatus.Updated,
             null,
             operationId,
             requestHash,
