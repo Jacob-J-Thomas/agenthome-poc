@@ -83,3 +83,27 @@ Initial Windows evidence on 2026-07-31 used Debug configuration, SDK 10.0.302, r
 | Quota | 3.743-5.203 s | 981,043,448-981,054,672 |
 
 This is a repeated single-host baseline, not an agreed product regression threshold. It establishes a separate allocation-amplification concern for codec-backed reads while also showing that warm monitor projection is not the hot path. Follow-up [#230](https://github.com/Jacob-J-Thomas/agenthome-poc/issues/230) owns that product investigation. The required Windows CI run supplies a second host through its detailed persistence-test output, and the scheduled stress workflow supplies the retained adversarial CI baseline. Do not fold the optimization into this verifier-contract change.
+
+## Maximum artifact codec allocation design
+
+Issue [#230](https://github.com/Jacob-J-Thomas/agenthome-poc/issues/230) replaces the maximum artifact's full raw-run `JsonNode` projection with a content-id projection. Large content is registered in canonical first-use order before the bounded projection is serialized, repeated tool protocol fields are compared through their typed records, strict UTF-8 decoding uses returned array-pool buffers, and canonical UTF-8/base64 round trips are compared through fixed-size stack scratch. The artifact schema, public size limits, table hashes, reference shapes, and emitted canonical bytes are unchanged.
+
+Decode no longer constructs a second expanded projection solely to re-encode it. It instead combines the same semantic validator with streaming duplicate-property rejection, exact schema-property order and serializer-omission rules, typed primitive and compact tool-enum spelling checks, explicit first-use order for all four registries, structural/content hash checks, and a streaming comparison between canonical JSON tokens and the persisted bytes. This still rejects alternate whitespace, escaping, property order, enum casing, serializer-ignored fields, table/reference order, missing LF termination, malformed UTF-8/base64, unknown properties, and semantically invalid reconstructed runs.
+
+Repeated Windows Release measurements on 2026-07-31 used the same SDK/runtime/host and 15,283,889-byte maximum fixture as the baseline above. The final measurements use precise process-allocation counters; three fresh test processes produced stable codec maxima and included any shared-pool growth charged to each operation. Representative before/after deltas and elapsed times were:
+
+| Phase | Before | After |
+| --- | ---: | ---: |
+| Canonical serialization | 1,015,006,648 bytes / 3.288 s | 521,098,280-521,152,112 bytes / 2.717-5.170 s |
+| Canonical deserialization | 857,798,544 bytes / 3.003 s | 486,334,264-488,629,280 bytes / 1.278-2.429 s |
+| Canonical reserialization | 608,557,856 bytes / 2.042 s | 484,874,992-484,885,848 bytes / 1.177-1.915 s |
+| Cold monitor repair/projection | 2,507,458,232 bytes / 6.697 s | 552,260,232-554,563,208 bytes / 1.083-1.570 s |
+| Warm monitor projection | 16,392 bytes / 0.004 s | 92,144-94,768 bytes / 0.027-0.035 s |
+| Verified list projection | 978,259,944 bytes / 2.986 s | 205,160 bytes / 0.056 s |
+| Full artifact reload | 1,248,669,872 bytes / 3.095 s | 520,848,120-523,140,984 bytes / 1.042-1.261 s |
+| Trace inspection/hash | 978,135,648 bytes / 3.646 s | 250,363,640-520,992,184 bytes / 1.007-1.228 s |
+| Trace quota projection | 1,248,659,176 bytes / 4.269 s | 247,058,704-500,795,448 bytes / 1.185-1.401 s |
+
+The required maximum test enforces 512 MiB for direct serialize, deserialize, and reserialize operations and every public read/projection phase, including full artifact reload. Cold index repair has a separate 1 GiB ceiling because it validates the artifact and rebuilds derived evidence. These are conservative process-wide allocation deltas, so they include any shared-pool growth charged to the measured operation.
+
+Cancellation remains fail-closed at the async store boundary. Synchronous validation and projection do not claim cooperative mid-codec cancellation; every rented buffer is cleared and returned in `finally`. Fresh index repair reuses the already validated summary only after a second bounded file read matches the exact artifact hash. Warm monitor reads also stream and compare the current artifact hash before trusting a previously verified summary, so same-metadata replacement is detected even before watcher delivery. Normal monitor/list paths retain watcher change-version, identity-ambiguity, metadata, hash, and mutation-lock checks; concurrent CAS behavior is unchanged.

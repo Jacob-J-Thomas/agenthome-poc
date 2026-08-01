@@ -28,6 +28,8 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 [Collection(BoundedVerificationCollection.Name)]
 public sealed class CustomLoopRunArtifactMaximumShapeTests
 {
+    private const long MaximumCodecOrReadAllocatedBytes = 512L * 1024 * 1024;
+    private const long MaximumColdRepairAllocatedBytes = 1024L * 1024 * 1024;
     private static readonly DateTimeOffset _now = new(2026, 7, 17, 12, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions _canonicalJsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false, MaxDepth = 64 };
     private readonly ITestOutputHelper _output;
@@ -46,40 +48,40 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         var validation = probe.Run(Production("final run validation", 5, 60), () => CustomLoopRunValidator.Validate(terminal));
         AssertMaximumExecutionContract(fixture, terminal, validation);
 
-        var encoded = probe.Run(Production("canonical serialization", 10, 120), () => CustomLoopRunArtifactSerializer.Serialize(terminal));
+        var encoded = probe.Run(Production("canonical serialization", 10, 120, MaximumCodecOrReadAllocatedBytes), () => CustomLoopRunArtifactSerializer.Serialize(terminal));
         _output.WriteLine($"MAX_ARTIFACT_BYTES={encoded.Length}");
         Assert.True(encoded.Length <= 15 * 1024 * 1024, $"Maximum production artifact was {encoded.Length:N0} bytes.");
         Assert.True(encoded.Length <= CustomLoopLimits.MaxRunTraceUtf8Bytes);
-        var hydrated = probe.Run(Production("canonical deserialization", 10, 120), () => CustomLoopRunArtifactSerializer.Deserialize(encoded));
+        var hydrated = probe.Run(Production("canonical deserialization", 10, 120, MaximumCodecOrReadAllocatedBytes), () => CustomLoopRunArtifactSerializer.Deserialize(encoded));
         Assert.Equal(terminal.Id, hydrated.Id);
         Assert.Equal(terminal.Events.Length, hydrated.Events.Length);
         Assert.Equal(terminal.FinalOutput, hydrated.FinalOutput);
-        var reencoded = probe.Run(Production("canonical reserialization", 10, 120), () => CustomLoopRunArtifactSerializer.Serialize(hydrated));
+        var reencoded = probe.Run(Production("canonical reserialization", 10, 120, MaximumCodecOrReadAllocatedBytes), () => CustomLoopRunArtifactSerializer.Serialize(hydrated));
         Assert.Equal(encoded, reencoded);
 
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var artifactPath = await probe.RunAsync(Amplification("maximum artifact fixture materialization", 10, 60), () => WriteArtifactAsync(paths, terminal, encoded));
         var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
-        var monitor = await probe.RunAsync(Production("cold monitor index repair and projection", 30, 120), () => restarted.GetMonitorAsync(terminal.Id));
+        var monitor = await probe.RunAsync(Production("cold monitor index repair and projection", 30, 120, MaximumColdRepairAllocatedBytes), () => restarted.GetMonitorAsync(terminal.Id));
         Assert.Equal(terminal.Id, monitor?.Summary.Id);
         Assert.Equal(terminal.Status, monitor?.Summary.Status);
         Assert.Equal(terminal.UpdatedAtUtc, monitor?.Summary.UpdatedAtUtc);
-        var warmMonitor = await probe.RunAsync(Production("warm monitor projection", 2, 30), () => restarted.GetMonitorAsync(terminal.Id));
+        var warmMonitor = await probe.RunAsync(Production("warm monitor projection", 2, 30, MaximumCodecOrReadAllocatedBytes), () => restarted.GetMonitorAsync(terminal.Id));
         Assert.Equal(monitor, warmMonitor);
-        var page = await probe.RunAsync(Production("list projection", 5, 60), () => restarted.ListPageAsync(new CustomLoopRunPageRequest(1)));
+        var page = await probe.RunAsync(Production("list projection", 5, 60, MaximumCodecOrReadAllocatedBytes), () => restarted.ListPageAsync(new CustomLoopRunPageRequest(1)));
         Assert.Equal(terminal.Id, Assert.Single(page.Items).Id);
-        var publicReload = await probe.RunAsync(Production("full artifact reload", 15, 120), () => restarted.GetAsync(terminal.Id));
+        var publicReload = await probe.RunAsync(Production("full artifact reload", 15, 120, MaximumCodecOrReadAllocatedBytes), () => restarted.GetAsync(terminal.Id));
         Assert.NotNull(publicReload);
         Assert.Equal(terminal.Id, publicReload.Id);
         Assert.Equal(terminal.Events.Length, publicReload.Events.Length);
         Assert.Equal(terminal.FinalOutput, publicReload.FinalOutput);
         Assert.Equal(encoded, await File.ReadAllBytesAsync(artifactPath));
-        var inspection = await probe.RunAsync(Production("trace inspection and hash", 15, 120), () => restarted.InspectTraceAsync(terminal.Id));
+        var inspection = await probe.RunAsync(Production("trace inspection and hash", 15, 120, MaximumCodecOrReadAllocatedBytes), () => restarted.InspectTraceAsync(terminal.Id));
         Assert.NotNull(inspection);
         Assert.Equal(encoded.Length, inspection.PersistedArtifactUtf8Bytes);
         Assert.Equal(Convert.ToHexString(SHA256.HashData(encoded)).ToLowerInvariant(), inspection.PersistedArtifactHash);
-        var quota = await probe.RunAsync(Production("trace quota projection", 15, 120), () => restarted.GetTraceQuotaAsync());
+        var quota = await probe.RunAsync(Production("trace quota projection", 15, 120, MaximumCodecOrReadAllocatedBytes), () => restarted.GetTraceQuotaAsync());
         Assert.Equal(encoded.Length, quota.ActualTraceUtf8Bytes);
         Assert.Equal(encoded.Length + CustomLoopLimits.MaxTraceControlEventUtf8Bytes, quota.AccountedTraceUtf8Bytes);
         Assert.Equal(1, quota.ActiveReservationCount);
@@ -408,9 +410,9 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         return string.Join(Environment.NewLine, errors.Select(error => $"{error.Code}:{error.Field}:{error.Message}"));
     }
 
-    private static VerificationPhaseBudget Production(string name, int proposedSeconds, int diagnosticSeconds)
+    private static VerificationPhaseBudget Production(string name, int proposedSeconds, int diagnosticSeconds, long? maximumAllocatedBytes = null)
     {
-        return new VerificationPhaseBudget(name, VerificationPhaseClassification.ProductionBoundary, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds));
+        return new VerificationPhaseBudget(name, VerificationPhaseClassification.ProductionBoundary, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds), maximumAllocatedBytes);
     }
 
     private static VerificationPhaseBudget Amplification(string name, int proposedSeconds, int diagnosticSeconds)
@@ -440,17 +442,17 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
     {
         var cases = new[]
         {
-            (Table: "content", Reference: "$content"),
-            (Table: "contextBlocks", Reference: "$contextBlock"),
-            (Table: "authorities", Reference: "$authority"),
-            (Table: "toolRequests", Reference: "$toolRequest")
+            (Table: "content", Reference: "$content", Rejection: "content table is not in canonical first-use order"),
+            (Table: "contextBlocks", Reference: "$contextBlock", Rejection: "context-block table is not in canonical first-use order"),
+            (Table: "authorities", Reference: "$authority", Rejection: "authority table is not in canonical first-use order"),
+            (Table: "toolRequests", Reference: "$toolRequest", Rejection: "tool-request table is not in canonical first-use order")
         };
         foreach (var testCase in cases)
         {
             var mutated = SwapFirstTwoTableRowsAndReferences(encoded, testCase.Table, testCase.Reference);
             Assert.NotEqual(encoded, mutated);
             var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(mutated));
-            Assert.Contains("not the one canonical hydrate-and-reproject encoding", exception.Message, StringComparison.Ordinal);
+            Assert.Contains(testCase.Rejection, exception.Message, StringComparison.Ordinal);
             var restored = SwapFirstTwoTableRowsAndReferences(mutated, testCase.Table, testCase.Reference);
             Assert.Equal(encoded, restored);
             Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(CustomLoopRunArtifactSerializer.Deserialize(restored)));

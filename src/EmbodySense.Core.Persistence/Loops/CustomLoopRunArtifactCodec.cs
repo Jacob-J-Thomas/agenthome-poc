@@ -1,9 +1,13 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using System.Security.Cryptography;
+using System.Buffers;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
+using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Persistence.Loops.Models;
 
@@ -88,9 +92,8 @@ internal static class CustomLoopRunArtifactCodec
     /// <param name="utf8Json">The utf8 JSON.</param>
     /// <param name="path">The path.</param>
     /// <returns>The reconstructed custom-loop run.</returns>
-    internal static CustomLoopRunRecord DecodeDepthValidated(byte[] utf8Json, string path)
+    internal static CustomLoopRunRecord DecodeDepthValidated(ReadOnlyMemory<byte> utf8Json, string path)
     {
-        ArgumentNullException.ThrowIfNull(utf8Json);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         return Parse(utf8Json, requireCanonical: true, validateDepth: false, path: path).Run;
     }
@@ -108,22 +111,20 @@ internal static class CustomLoopRunArtifactCodec
             && string.Equals(kind.GetString(), ArtifactKind, StringComparison.Ordinal);
     }
 
-    // TODO(#230): Bound maximum-artifact decode/reprojection allocation without weakening duplicate-property, depth, hash, semantic, or exact canonical-byte checks.
-    private static ParsedEnvelope Parse(byte[] utf8Json, bool requireCanonical, bool validateDepth = true, string? path = null)
+    private static ParsedEnvelope Parse(ReadOnlyMemory<byte> utf8Json, bool requireCanonical, bool validateDepth = true, string? path = null)
     {
         if (validateDepth)
         {
-            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, _jsonOptions.MaxDepth, "Custom-loop run artifact", path);
+            CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json.Span, _jsonOptions.MaxDepth, "Custom-loop run artifact", path);
         }
 
         JsonObject root;
         try
         {
-            // JsonNode can collapse duplicate properties. Reject them with JsonDocument first so no
+            // JsonNode can collapse duplicate properties. Reject them in one streaming pass first so no
             // alternate persisted spelling can hydrate to an apparently unambiguous run.
-            using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
-            RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
-            root = JsonNode.Parse(utf8Json, documentOptions: new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth }) as JsonObject
+            RejectDuplicateProperties(utf8Json.Span);
+            root = JsonNode.Parse(utf8Json.Span, documentOptions: new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth }) as JsonObject
                 ?? throw new FormatException("The custom-loop live-run envelope was empty.");
         }
         catch (JsonException exception)
@@ -140,11 +141,35 @@ internal static class CustomLoopRunArtifactCodec
             throw new FormatException("The custom-loop live-run envelope kind, schema version, projection version, or encoding is unsupported.");
         }
 
+        var compactProjection = RequireObject(root, "run");
+        if (RequireInt32(compactProjection, "schemaVersion") != CustomLoopRunRecord.CurrentSchemaVersion)
+        {
+            throw new FormatException($"The hydrated custom-loop run violates its semantic limits. schemaVersion: Run schema version must be {CustomLoopRunRecord.CurrentSchemaVersion}. Pre-1.0 artifacts from another schema are unsupported; remove and recreate the affected development artifact.");
+        }
+
+        if (requireCanonical)
+        {
+            ValidateProjectionPropertyOrder(compactProjection, typeof(CustomLoopRunRecord));
+            using var canonical = new CanonicalJsonByteComparer(utf8Json[..^1]);
+            using (var writer = new Utf8JsonWriter(canonical))
+            {
+                root.WriteTo(writer, _jsonOptions);
+            }
+
+            if (utf8Json.Span[^1] != (byte)'\n' || !canonical.IsEqual)
+            {
+                throw new FormatException($"The custom-loop live-run envelope is not the one canonical encoding (first differing byte {canonical.FirstDifference}, canonical length {canonical.Length + 1}, persisted length {utf8Json.Length}).");
+            }
+
+        }
+
         var contentEntries = ParseContentEntries(RequireArray(root, "content"));
         var contents = new ContentRegistry(contentEntries);
         var blockEntries = ParseStructuralEntries(RequireArray(root, "contextBlocks"), "b", "contextBlock", "context-block");
         var authorityEntries = ParseStructuralEntries(RequireArray(root, "authorities"), "a", "authority", "authority");
         var requestEntries = ParseStructuralEntries(RequireArray(root, "toolRequests"), "q", "toolRequest", "tool-request");
+        ValidateStructuralPayloadPropertyOrder(blockEntries, typeof(CustomLoopContextBlock));
+        ValidateStructuralPayloadPropertyOrder(authorityEntries, typeof(CustomLoopToolAuthoritySnapshot));
         ResolveStructuralContent(blockEntries, contents);
         ResolveStructuralContent(authorityEntries, contents);
         ResolveStructuralContent(requestEntries, contents);
@@ -152,7 +177,12 @@ internal static class CustomLoopRunArtifactCodec
         var authorities = new StructuralRegistry("a", "authority", authorityEntries);
         var requests = new StructuralRegistry("q", "tool-request", requestEntries);
         ValidateToolRequestTable(requestEntries, authorities);
-        var hydratedProjection = RequireObject(root, "run").DeepClone().AsObject();
+        if (requireCanonical)
+        {
+            ValidateCanonicalStructuralReferenceOrder(compactProjection, blockEntries.Count, authorityEntries.Count, requestEntries.Count);
+        }
+
+        var hydratedProjection = compactProjection;
         ExpandContextBlocks(hydratedProjection, blocks);
         ResolveContentReferences(hydratedProjection, contents);
         ExpandToolEvidence(hydratedProjection, authorities, requests);
@@ -181,40 +211,332 @@ internal static class CustomLoopRunArtifactCodec
 
         if (requireCanonical)
         {
-            // Hydrate and project again, then compare exact bytes. Semantic equivalence is insufficient:
-            // this rejects malleable table ordering, references, escaping, and newline variants.
-            var reprojectedContents = new ContentRegistry([]);
-            var reprojectedBlocks = new StructuralRegistry("b", "context-block", []);
-            var reprojectedAuthorities = new StructuralRegistry("a", "authority", []);
-            var reprojectedRequests = new StructuralRegistry("q", "tool-request", []);
-            var reprojectedRun = Project(run, reprojectedContents, reprojectedBlocks, reprojectedAuthorities, reprojectedRequests);
-            var canonical = SerializeEnvelope(reprojectedContents, reprojectedBlocks.Entries, reprojectedAuthorities.Entries, reprojectedRequests.Entries, reprojectedRun);
-            reprojectedContents.RequireEverySeedReferenced();
-            reprojectedBlocks.RequireEverySeedReferenced();
-            reprojectedAuthorities.RequireEverySeedReferenced();
-            reprojectedRequests.RequireEverySeedReferenced();
-            if (!canonical.AsSpan().SequenceEqual(utf8Json))
-            {
-                var firstDifference = FirstDifference(canonical, utf8Json);
-                throw new FormatException($"The custom-loop live-run envelope is not the one canonical hydrate-and-reproject encoding (first differing byte {firstDifference}, canonical length {canonical.Length}, persisted length {utf8Json.Length}).");
-            }
+            ValidateCanonicalContentReferenceOrder(run, contentEntries);
+            ValidateCanonicalStringSpellings(utf8Json.Span);
         }
 
         return new ParsedEnvelope(run, contentEntries, blockEntries, authorityEntries, requestEntries);
     }
 
-    private static int FirstDifference(byte[] left, byte[] right)
+    internal static bool IsEnvelope(ReadOnlySpan<byte> utf8Json)
     {
-        var sharedLength = Math.Min(left.Length, right.Length);
-        for (var index = 0; index < sharedLength; index++)
+        var reader = new Utf8JsonReader(utf8Json, new JsonReaderOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
+        while (reader.Read())
         {
-            if (left[index] != right[index])
+            if (reader.TokenType == JsonTokenType.PropertyName && reader.CurrentDepth == 1 && reader.ValueTextEquals("artifactKind"))
             {
-                return index;
+                return reader.Read() && reader.TokenType == JsonTokenType.String && reader.ValueTextEquals(ArtifactKind);
             }
         }
 
-        return sharedLength;
+        return false;
+    }
+
+    private static void ValidateCanonicalContentReferenceOrder(CustomLoopRunRecord run, IReadOnlyList<ContentEntry> contentEntries)
+    {
+        var contentIds = contentEntries.ToDictionary(entry => entry.Text, entry => entry.Id, StringComparer.Ordinal);
+        var seenContent = new HashSet<string>(StringComparer.Ordinal);
+        var nextContent = 0;
+        void Content(string? text)
+        {
+            if (text is null || !contentIds.TryGetValue(text, out var id))
+            {
+                return;
+            }
+
+            if (seenContent.Add(id) && !string.Equals(id, IndexedId("c", nextContent++), StringComparison.Ordinal))
+            {
+                throw new FormatException("The content table is not in canonical first-use order.");
+            }
+        }
+
+        Content(run.AdmittedDefinition.DisplayName);
+        Content(run.AdmittedDefinition.Description);
+        Content(run.AdmittedDefinition.TriggerPolicy.PresetPrompt);
+        foreach (var step in run.AdmittedDefinition.InferenceSteps)
+        {
+            Content(step.Name);
+            Content(step.Instruction);
+        }
+
+        Content(run.AdmittedDefinition.ExitPolicy.DecisionInstruction);
+        Content(run.TriggerPrompt);
+        foreach (var source in run.ContextSnapshot.SourceManifest)
+        {
+            Content(source.SourceId);
+            Content(source.SourcePath);
+            Content(source.Content);
+            Content(source.TruncationReason);
+            Content(source.OmissionReason);
+        }
+
+        foreach (var output in run.Checkpoint.EarlierRetainedOutputs)
+        {
+            Content(output.Content);
+        }
+
+        Content(run.Checkpoint.PreviousIterationResult?.Content);
+        Content(run.Checkpoint.CurrentIterationResult?.Content);
+        var knownRequests = new HashSet<(int RequestOrdinal, string RequestCorrelationId)>();
+        foreach (var runEvent in run.Events)
+        {
+            Content(runEvent.Detail);
+            Content(runEvent.CanonicalOutput);
+            foreach (var block in runEvent.ContextBlocks)
+            {
+                Content(block.SourceId);
+                Content(block.OmissionReason);
+                Content(block.Content);
+                Content(block.SourceVersion);
+            }
+
+            Content(runEvent.ToolAuthority?.Detail);
+            if (runEvent.ToolEvidence is not { } evidence)
+            {
+                continue;
+            }
+
+            Content(evidence.Authority.Detail);
+            var requestKey = ToolRequestKey(evidence);
+            var ownsRequest = evidence.Phase == CustomLoopToolEvidencePhase.RequestReserved || evidence.Phase == CustomLoopToolEvidencePhase.IntegrityFailed && !knownRequests.Contains(requestKey);
+            if (ownsRequest)
+            {
+                Content(evidence.TargetPath);
+                Content(evidence.Content);
+                Content(evidence.Pattern);
+                Content(evidence.ResolvedTarget);
+                knownRequests.Add(requestKey);
+            }
+
+            if (evidence.Phase == CustomLoopToolEvidencePhase.GovernanceDecided && evidence.Governance is { } governance)
+            {
+                Content(governance.AuthorityDetail);
+                Content(governance.PermissionMatchedPath);
+                Content(governance.PermissionDetail);
+                Content(governance.ApprovalDecisionBy);
+                Content(governance.ApprovalDetail);
+            }
+
+            if (evidence.Phase == CustomLoopToolEvidencePhase.OutcomeObserved && !evidence.ReturnedToModel)
+            {
+                Content(evidence.CanonicalResultReturnedToModel);
+            }
+        }
+
+        Content(run.FinalOutput);
+        Content(run.FailureDetail);
+        if (nextContent != contentEntries.Count)
+        {
+            throw new FormatException("The content table contains an unreferenced or noncanonical entry.");
+        }
+    }
+
+    private static void ValidateCanonicalStructuralReferenceOrder(JsonObject compactProjection, int blockEntryCount, int authorityEntryCount, int requestEntryCount)
+    {
+        var compactEvents = RequireArray(compactProjection, "events");
+        ValidateFirstUseReferences(compactEvents.SelectMany(item => RequireArray(item!.AsObject(), "contextBlocks").Select(reference => RequireString(reference!.AsObject(), BlockReferenceProperty))), "b", blockEntryCount, "context-block");
+        ValidateFirstUseReferences(compactEvents.Select(item => item!.AsObject()["toolAuthority"]).OfType<JsonObject>().Select(reference => RequireString(reference, AuthorityReferenceProperty)), "a", authorityEntryCount, "authority");
+        ValidateFirstUseReferences(compactEvents.Select(item => item!.AsObject()["toolEvidence"]).OfType<JsonObject>().Select(evidence => RequireReference(evidence, "toolRequest", ToolRequestReferenceProperty)), "q", requestEntryCount, "tool-request");
+        foreach (var evidence in compactEvents.Select(item => item!.AsObject()["toolEvidence"]).OfType<JsonObject>().Where(evidence => RequireInt32(evidence, "shape") == 2))
+        {
+            ValidateProjectionPropertyOrder(RequireObject(evidence, "governance"), typeof(ToolGovernanceEvidence));
+        }
+    }
+
+    private static void ValidateStructuralPayloadPropertyOrder(IEnumerable<StructuralEntry> entries, Type projectedType)
+    {
+        foreach (var entry in entries)
+        {
+            ValidateProjectionPropertyOrder(entry.Value, projectedType);
+        }
+    }
+
+    private static void ValidateFirstUseReferences(IEnumerable<string> references, string prefix, int entryCount, string description)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var next = 0;
+        foreach (var reference in references)
+        {
+            if (seen.Add(reference) && !string.Equals(reference, IndexedId(prefix, next++), StringComparison.Ordinal))
+            {
+                throw new FormatException($"The {description} table is not in canonical first-use order.");
+            }
+        }
+
+        if (next != entryCount)
+        {
+            throw new FormatException($"The canonical {description} table contains an unreferenced or noncanonical entry.");
+        }
+    }
+
+    private static void ValidateProjectionPropertyOrder(JsonNode? node, Type projectedType)
+    {
+        projectedType = Nullable.GetUnderlyingType(projectedType) ?? projectedType;
+        if (node is JsonValue value)
+        {
+            ValidateCanonicalPrimitiveValue(value, projectedType);
+            return;
+        }
+
+        if (node is JsonArray array)
+        {
+            var elementType = projectedType.IsArray ? projectedType.GetElementType() : projectedType.IsGenericType ? projectedType.GetGenericArguments().FirstOrDefault() : null;
+            if (elementType is not null)
+            {
+                foreach (var item in array)
+                {
+                    ValidateProjectionPropertyOrder(item, elementType);
+                }
+            }
+
+            return;
+        }
+
+        if (node is not JsonObject owner
+            || owner.ContainsKey(ContentReferenceProperty)
+            || owner.ContainsKey(BlockReferenceProperty)
+            || owner.ContainsKey(AuthorityReferenceProperty)
+            || owner.ContainsKey(ToolRequestReferenceProperty)
+            || projectedType == typeof(CustomLoopToolTraceEvidence) && owner.ContainsKey("shape"))
+        {
+            return;
+        }
+
+        var typeInfo = _jsonOptions.GetTypeInfo(projectedType);
+        if (typeInfo.Kind != JsonTypeInfoKind.Object)
+        {
+            return;
+        }
+
+        using var actual = owner.GetEnumerator();
+        var hasActual = actual.MoveNext();
+        foreach (var property in typeInfo.Properties)
+        {
+            if (hasActual && string.Equals(actual.Current.Key, property.Name, StringComparison.Ordinal))
+            {
+                if (IsOmittedByCanonicalSerializer(property, actual.Current.Value))
+                {
+                    throw new FormatException($"The projected `{projectedType.Name}` field `{property.Name}` is omitted by the canonical serializer.");
+                }
+
+                ValidateProjectionPropertyOrder(actual.Current.Value, property.PropertyType);
+                hasActual = actual.MoveNext();
+                continue;
+            }
+
+            if (property.ShouldSerialize is null)
+            {
+                throw new FormatException($"The projected `{projectedType.Name}` fields are not in canonical serializer order.");
+            }
+        }
+
+        if (hasActual)
+        {
+            throw new FormatException($"The projected `{projectedType.Name}` fields are not in canonical serializer order.");
+        }
+    }
+
+    private static bool IsOmittedByCanonicalSerializer(JsonPropertyInfo property, JsonNode? value)
+    {
+        var ignore = property.AttributeProvider?.GetCustomAttributes(typeof(JsonIgnoreAttribute), inherit: true).OfType<JsonIgnoreAttribute>().SingleOrDefault();
+        return ignore?.Condition switch
+        {
+            JsonIgnoreCondition.Always => true,
+            JsonIgnoreCondition.WhenWritingNull => value is null,
+            JsonIgnoreCondition.WhenWritingDefault => IsDefaultValue(value, property.PropertyType),
+            _ => false
+        };
+    }
+
+    private static bool IsDefaultValue(JsonNode? node, Type valueType)
+    {
+        if (node is null)
+        {
+            return true;
+        }
+
+        if (!valueType.IsValueType || Nullable.GetUnderlyingType(valueType) is not null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return Equals(node.Deserialize(valueType, _jsonOptions), Activator.CreateInstance(valueType));
+        }
+        catch (JsonException exception)
+        {
+            throw new FormatException($"The projected `{valueType.Name}` value is malformed.", exception);
+        }
+    }
+
+    private static void ValidateCanonicalStringSpellings(ReadOnlySpan<byte> utf8Json)
+    {
+        var reader = new Utf8JsonReader(utf8Json, new JsonReaderOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
+        var encoder = _jsonOptions.Encoder ?? JavaScriptEncoder.Default;
+        while (reader.Read())
+        {
+            if (reader.TokenType is not (JsonTokenType.PropertyName or JsonTokenType.String))
+            {
+                continue;
+            }
+
+            var rawValue = reader.ValueSpan;
+            if (IsTriviallyCanonicalStringValue(rawValue, encoder))
+            {
+                continue;
+            }
+
+            var decoded = reader.GetString() ?? throw new FormatException("A JSON property name or string token was unexpectedly null.");
+            var canonical = JsonEncodedText.Encode(decoded, encoder).EncodedUtf8Bytes;
+            if (!rawValue.SequenceEqual(canonical))
+            {
+                throw new FormatException("The custom-loop live-run envelope contains a string that does not use its canonical serializer spelling.");
+            }
+        }
+    }
+
+    private static bool IsTriviallyCanonicalStringValue(ReadOnlySpan<byte> rawValue, JavaScriptEncoder encoder)
+    {
+        foreach (var value in rawValue)
+        {
+            if (value >= 0x80 || value == (byte)'\\' || encoder.WillEncode((char)value))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void ValidateCanonicalPrimitiveValue(JsonValue value, Type projectedType)
+    {
+        if (projectedType == typeof(string) || projectedType == typeof(JsonNode) || projectedType == typeof(JsonElement))
+        {
+            return;
+        }
+
+        try
+        {
+            var typed = value.Deserialize(projectedType, _jsonOptions);
+            var canonical = JsonSerializer.SerializeToNode(typed, projectedType, _jsonOptions) ?? throw new FormatException($"The projected `{projectedType.Name}` value was empty.");
+            if (!SerializeNode(value).AsSpan().SequenceEqual(SerializeNode(canonical)))
+            {
+                throw new FormatException($"The projected `{projectedType.Name}` value does not use its canonical serializer spelling.");
+            }
+        }
+        catch (JsonException exception)
+        {
+            throw new FormatException($"The projected `{projectedType.Name}` value is malformed.", exception);
+        }
+    }
+
+    private static byte[] Terminate(byte[] content)
+    {
+        var terminated = new byte[content.Length + 1];
+        content.CopyTo(terminated, 0);
+        terminated[^1] = (byte)'\n';
+        return terminated;
     }
 
     private static JsonObject Project(CustomLoopRunRecord run, ContentRegistry contents, StructuralRegistry blocks, StructuralRegistry authorities, StructuralRegistry requests)
@@ -222,7 +544,7 @@ internal static class CustomLoopRunArtifactCodec
         JsonObject projection;
         try
         {
-            projection = JsonSerializer.SerializeToNode(run, _jsonOptions)?.AsObject()
+            projection = JsonSerializer.SerializeToNode(PrepareRunForProjection(run, contents), _jsonOptions)?.AsObject()
                 ?? throw new InvalidOperationException("The custom-loop run could not be projected.");
         }
         catch (JsonException exception)
@@ -230,98 +552,157 @@ internal static class CustomLoopRunArtifactCodec
             throw CustomLoopJsonDepthPolicy.SerializationDepthException("Custom-loop run artifact", _jsonOptions.MaxDepth, exception);
         }
 
-        ProjectDefinition(RequireObject(projection, "admittedDefinition"), contents);
-        ReferenceProperty(projection, "triggerPrompt", contents);
-        ProjectContextSnapshot(RequireObject(projection, "contextSnapshot"), contents);
-        ProjectCheckpoint(RequireObject(projection, "checkpoint"), contents);
-        CompactToolEvidence(projection, contents, blocks, authorities, requests);
-        ReferenceProperty(projection, "finalOutput", contents);
-        ReferenceProperty(projection, "failureDetail", contents);
+        ProjectPreparedDefinition(RequireObject(projection, "admittedDefinition"));
+        ReferenceIdentifierProperty(projection, "triggerPrompt");
+        ProjectPreparedContextSnapshot(RequireObject(projection, "contextSnapshot"));
+        ProjectPreparedCheckpoint(RequireObject(projection, "checkpoint"));
+        CompactToolEvidence(projection, run.Events, contents, blocks, authorities, requests);
+        ReferenceIdentifierProperty(projection, "finalOutput");
+        ReferenceIdentifierProperty(projection, "failureDetail");
         return projection;
     }
 
-    private static void ProjectDefinition(JsonObject definition, ContentRegistry contents)
+    private static CustomLoopRunRecord PrepareRunForProjection(CustomLoopRunRecord run, ContentRegistry contents)
     {
-        ReferenceProperty(definition, "displayName", contents);
-        ReferenceProperty(definition, "description", contents);
-        var trigger = RequireObject(definition, "triggerPolicy");
-        ReferenceProperty(trigger, "presetPrompt", contents);
+        var definition = run.AdmittedDefinition with
+        {
+            DisplayName = contents.Reference(run.AdmittedDefinition.DisplayName),
+            Description = contents.Reference(run.AdmittedDefinition.Description),
+            TriggerPolicy = run.AdmittedDefinition.TriggerPolicy with { PresetPrompt = contents.Reference(run.AdmittedDefinition.TriggerPolicy.PresetPrompt) },
+            InferenceSteps = run.AdmittedDefinition.InferenceSteps.Select(step => step with { Name = contents.Reference(step.Name), Instruction = contents.Reference(step.Instruction) }).ToArray(),
+            ExitPolicy = run.AdmittedDefinition.ExitPolicy with { DecisionInstruction = contents.Reference(run.AdmittedDefinition.ExitPolicy.DecisionInstruction) }
+        };
+        var triggerPromptId = contents.Reference(run.TriggerPrompt);
+        var contextSnapshot = run.ContextSnapshot with
+        {
+            SourceManifest = run.ContextSnapshot.SourceManifest.Select(source => source with
+            {
+                SourceId = contents.Reference(source.SourceId),
+                SourcePath = contents.Reference(source.SourcePath),
+                Content = contents.Reference(source.Content),
+                TruncationReason = ReferenceIdentifier(source.TruncationReason, contents),
+                OmissionReason = ReferenceIdentifier(source.OmissionReason, contents)
+            }).ToArray()
+        };
+        var checkpoint = run.Checkpoint with
+        {
+            EarlierRetainedOutputs = run.Checkpoint.EarlierRetainedOutputs.Select(output => output with { Content = contents.Reference(output.Content) }).ToArray(),
+            PreviousIterationResult = PrepareRetainedOutput(run.Checkpoint.PreviousIterationResult, contents),
+            CurrentIterationResult = PrepareRetainedOutput(run.Checkpoint.CurrentIterationResult, contents)
+        };
+        var knownRequests = new HashSet<(int RequestOrdinal, string RequestCorrelationId)>();
+        var events = run.Events.Select(item => PrepareEventForProjection(item, contents, knownRequests)).ToArray();
+        return run with
+        {
+            AdmittedDefinition = definition,
+            TriggerPrompt = triggerPromptId,
+            ContextSnapshot = contextSnapshot,
+            Checkpoint = checkpoint,
+            Events = events,
+            FinalOutput = ReferenceIdentifier(run.FinalOutput, contents),
+            FailureDetail = ReferenceIdentifier(run.FailureDetail, contents)
+        };
+    }
+
+    private static CustomLoopRetainedOutput? PrepareRetainedOutput(CustomLoopRetainedOutput? output, ContentRegistry contents)
+    {
+        return output is null ? null : output with { Content = contents.Reference(output.Content) };
+    }
+
+    private static string? ReferenceIdentifier(string? content, ContentRegistry contents)
+    {
+        return content is null ? null : contents.Reference(content);
+    }
+
+    private static CustomLoopRunEvent PrepareEventForProjection(CustomLoopRunEvent runEvent, ContentRegistry contents, HashSet<(int RequestOrdinal, string RequestCorrelationId)> knownRequests)
+    {
+        var detailId = contents.Reference(runEvent.Detail);
+        var canonicalOutputId = ReferenceIdentifier(runEvent.CanonicalOutput, contents);
+        foreach (var block in runEvent.ContextBlocks)
+        {
+            _ = contents.Reference(block.SourceId);
+            _ = ReferenceIdentifier(block.OmissionReason, contents);
+            _ = contents.Reference(block.Content);
+            _ = ReferenceIdentifier(block.SourceVersion, contents);
+        }
+
+        _ = ReferenceIdentifier(runEvent.ToolAuthority?.Detail, contents);
+        if (runEvent.ToolEvidence is { } evidence)
+        {
+            _ = contents.Reference(evidence.Authority.Detail);
+            var requestKey = ToolRequestKey(evidence);
+            var ownsRequest = evidence.Phase == CustomLoopToolEvidencePhase.RequestReserved || evidence.Phase == CustomLoopToolEvidencePhase.IntegrityFailed && !knownRequests.Contains(requestKey);
+            if (ownsRequest)
+            {
+                _ = contents.Reference(evidence.TargetPath);
+                _ = ReferenceIdentifier(evidence.Content, contents);
+                _ = ReferenceIdentifier(evidence.Pattern, contents);
+                _ = ReferenceIdentifier(evidence.ResolvedTarget, contents);
+                knownRequests.Add(requestKey);
+            }
+
+            if (evidence.Phase == CustomLoopToolEvidencePhase.GovernanceDecided && evidence.Governance is { } governance)
+            {
+                _ = contents.Reference(governance.AuthorityDetail);
+                _ = ReferenceIdentifier(governance.PermissionMatchedPath, contents);
+                _ = ReferenceIdentifier(governance.PermissionDetail, contents);
+                _ = ReferenceIdentifier(governance.ApprovalDecisionBy, contents);
+                _ = ReferenceIdentifier(governance.ApprovalDetail, contents);
+            }
+
+            if (evidence.Phase == CustomLoopToolEvidencePhase.OutcomeObserved && !evidence.ReturnedToModel)
+            {
+                _ = ReferenceIdentifier(evidence.CanonicalResultReturnedToModel, contents);
+            }
+        }
+
+        return runEvent with { Detail = detailId, ContextBlocks = [], CanonicalOutput = canonicalOutputId, ToolAuthority = null, ToolEvidence = null };
+    }
+
+    private static void ProjectPreparedDefinition(JsonObject definition)
+    {
+        ReferenceIdentifierProperty(definition, "displayName");
+        ReferenceIdentifierProperty(definition, "description");
+        ReferenceIdentifierProperty(RequireObject(definition, "triggerPolicy"), "presetPrompt");
         foreach (var item in RequireArray(definition, "inferenceSteps"))
         {
             var step = item?.AsObject() ?? throw new FormatException("Inference-step projection entries must be objects.");
-            ReferenceProperty(step, "name", contents);
-            ReferenceProperty(step, "instruction", contents);
+            ReferenceIdentifierProperty(step, "name");
+            ReferenceIdentifierProperty(step, "instruction");
         }
 
-        var exit = RequireObject(definition, "exitPolicy");
-        ReferenceProperty(exit, "decisionInstruction", contents);
+        ReferenceIdentifierProperty(RequireObject(definition, "exitPolicy"), "decisionInstruction");
     }
 
-    private static void ProjectContextSnapshot(JsonObject snapshot, ContentRegistry contents)
+    private static void ProjectPreparedContextSnapshot(JsonObject snapshot)
     {
         foreach (var item in RequireArray(snapshot, "sourceManifest"))
         {
             var source = item?.AsObject() ?? throw new FormatException("Context-manifest projection entries must be objects.");
-            ReferenceProperty(source, "sourceId", contents);
-            ReferenceProperty(source, "sourcePath", contents);
-            ReferenceProperty(source, "content", contents);
-            ReferenceProperty(source, "truncationReason", contents);
-            ReferenceProperty(source, "omissionReason", contents);
+            ReferenceIdentifierProperty(source, "sourceId");
+            ReferenceIdentifierProperty(source, "sourcePath");
+            ReferenceIdentifierProperty(source, "content");
+            ReferenceIdentifierProperty(source, "truncationReason");
+            ReferenceIdentifierProperty(source, "omissionReason");
         }
     }
 
-    private static void ProjectCheckpoint(JsonObject checkpoint, ContentRegistry contents)
+    private static void ProjectPreparedCheckpoint(JsonObject checkpoint)
     {
         foreach (var item in RequireArray(checkpoint, "earlierRetainedOutputs"))
         {
-            ProjectRetainedOutput(item?.AsObject(), contents);
+            ProjectPreparedRetainedOutput(item?.AsObject());
         }
 
-        ProjectRetainedOutput(checkpoint["previousIterationResult"] as JsonObject, contents);
-        ProjectRetainedOutput(checkpoint["currentIterationResult"] as JsonObject, contents);
+        ProjectPreparedRetainedOutput(checkpoint["previousIterationResult"] as JsonObject);
+        ProjectPreparedRetainedOutput(checkpoint["currentIterationResult"] as JsonObject);
     }
 
-    private static void ProjectRetainedOutput(JsonObject? output, ContentRegistry contents)
+    private static void ProjectPreparedRetainedOutput(JsonObject? output)
     {
         if (output is not null)
         {
-            ReferenceProperty(output, "content", contents);
-        }
-    }
-
-    private static void ProjectEvents(JsonArray events, ContentRegistry contents, StructuralRegistry blocks)
-    {
-        foreach (var item in events)
-        {
-            var runEvent = item?.AsObject() ?? throw new FormatException("Run-event projection entries must be objects.");
-            ReferenceProperty(runEvent, "detail", contents);
-            ReferenceProperty(runEvent, "canonicalOutput", contents);
-            var contextBlocks = RequireArray(runEvent, "contextBlocks");
-            var references = new JsonArray();
-            foreach (var blockItem in contextBlocks)
-            {
-                var block = blockItem?.AsObject() ?? throw new FormatException("Context-block projection entries must be objects.");
-                references.Add(new JsonObject { [BlockReferenceProperty] = blocks.Reference(block) });
-            }
-
-            runEvent["contextBlocks"] = references;
-            if (runEvent["toolEvidence"] is JsonObject evidence)
-            {
-                ProjectToolEvidence(evidence, contents);
-            }
-        }
-    }
-
-    private static void ProjectToolEvidence(JsonObject evidence, ContentRegistry contents)
-    {
-        var shape = RequireInt32(evidence, "shape");
-        if (shape == 2)
-        {
-            ProjectGovernance(RequireObject(evidence, "governance"), contents);
-        }
-        else if (shape == 3)
-        {
-            ReferenceProperty(evidence, "canonicalResultReturnedToModel", contents);
+            ReferenceIdentifierProperty(output, "content");
         }
     }
 
@@ -378,66 +759,86 @@ internal static class CustomLoopRunArtifactCodec
         }
     }
 
-    private static void CompactToolEvidence(JsonObject projection, ContentRegistry contents, StructuralRegistry blocks, StructuralRegistry authorities, StructuralRegistry requests)
+    private static void ReferenceIdentifierProperty(JsonObject owner, string propertyName)
+    {
+        if (owner[propertyName] is null)
+        {
+            return;
+        }
+
+        owner[propertyName] = new JsonObject { [ContentReferenceProperty] = RequireString(owner, propertyName) };
+    }
+
+    private static void CompactToolEvidence(JsonObject projection, IReadOnlyList<CustomLoopRunEvent> sourceEvents, ContentRegistry contents, StructuralRegistry blocks, StructuralRegistry authorities, StructuralRegistry requests)
     {
         // This state machine preserves the append-only reservation -> governance -> outcome ->
         // returned/integrity protocol while deduplicating repeated request and authority material.
         var states = new Dictionary<(int RequestOrdinal, string RequestCorrelationId), ToolProjectionState>();
         var reservationCorrelationIds = new HashSet<string>(StringComparer.Ordinal);
         var standaloneIntegrityProjected = false;
-        foreach (var item in RequireArray(projection, "events"))
+        var projectedEvents = RequireArray(projection, "events");
+        if (projectedEvents.Count != sourceEvents.Count)
         {
-            var runEvent = item?.AsObject() ?? throw new FormatException("Run-event projection entries must be objects.");
-            ReferenceProperty(runEvent, "detail", contents);
-            ReferenceProperty(runEvent, "canonicalOutput", contents);
+            throw new FormatException("The projected event count did not match the source run.");
+        }
+
+        for (var eventIndex = 0; eventIndex < projectedEvents.Count; eventIndex++)
+        {
+            var runEvent = projectedEvents[eventIndex]?.AsObject() ?? throw new FormatException("Run-event projection entries must be objects.");
+            var sourceEvent = sourceEvents[eventIndex];
+            ReferenceIdentifierProperty(runEvent, "detail");
+            ReferenceIdentifierProperty(runEvent, "canonicalOutput");
             var contextBlockReferences = new JsonArray();
-            foreach (var blockItem in RequireArray(runEvent, "contextBlocks"))
+            foreach (var sourceBlock in sourceEvent.ContextBlocks)
             {
-                var block = blockItem?.AsObject() ?? throw new FormatException("Context-block projection entries must be objects.");
+                var block = SerializeObject(sourceBlock, "context block");
                 ProjectContextBlock(block.DeepClone().AsObject(), contents);
                 contextBlockReferences.Add(new JsonObject { [BlockReferenceProperty] = blocks.Reference(block) });
             }
 
             runEvent["contextBlocks"] = contextBlockReferences;
-            var eventAuthority = runEvent["toolAuthority"] as JsonObject;
-            if (runEvent["toolEvidence"] is not JsonObject evidence)
+            var eventAuthority = sourceEvent.ToolAuthority;
+            var evidence = sourceEvent.ToolEvidence;
+            if (evidence is null)
             {
                 if (eventAuthority is not null)
                 {
-                    ProjectAuthority(eventAuthority.DeepClone().AsObject(), contents);
-                    runEvent["toolAuthority"] = ReferenceObject(AuthorityReferenceProperty, authorities.Reference(eventAuthority));
+                    var authorityNode = SerializeObject(eventAuthority, "tool authority");
+                    ProjectAuthority(authorityNode.DeepClone().AsObject(), contents);
+                    runEvent["toolAuthority"] = ReferenceObject(AuthorityReferenceProperty, authorities.Reference(authorityNode));
                 }
 
                 continue;
             }
 
             var requestKey = ToolRequestKey(evidence);
-            var phase = RequireString(evidence, "phase");
-            var returned = RequireBoolean(evidence, "returnedToModel");
-            var sequence = RequireInt64(runEvent, "sequence");
+            var phase = evidence.Phase;
+            var returned = evidence.ReturnedToModel;
+            var sequence = sourceEvent.Sequence;
             if (eventAuthority is null)
             {
                 throw new FormatException("Tool evidence requires an event authority snapshot before compact projection.");
             }
 
-            var evidenceAuthority = RequireObject(evidence, "authority");
-            if (!JsonNode.DeepEquals(eventAuthority, evidenceAuthority))
+            var evidenceAuthority = evidence.Authority;
+            if (!eventAuthority.Matches(evidenceAuthority))
             {
                 throw new FormatException("Tool event authority must exactly match its evidence authority before compact projection.");
             }
 
-            ProjectAuthority(evidenceAuthority.DeepClone().AsObject(), contents);
-            var authorityId = authorities.Reference(evidenceAuthority);
+            var evidenceAuthorityNode = SerializeObject(evidenceAuthority, "tool authority");
+            ProjectAuthority(evidenceAuthorityNode.DeepClone().AsObject(), contents);
+            var authorityId = authorities.Reference(evidenceAuthorityNode);
 
             JsonObject compact;
-            if (string.Equals(phase, "requestReserved", StringComparison.Ordinal))
+            if (phase == CustomLoopToolEvidencePhase.RequestReserved)
             {
                 if (states.ContainsKey(requestKey)
-                    || !reservationCorrelationIds.Add(RequireString(evidence, "requestCorrelationId"))
+                    || !reservationCorrelationIds.Add(evidence.RequestCorrelationId)
                     || returned
-                    || evidence["governance"] is not null
-                    || evidence["outcome"] is not null
-                    || evidence["canonicalResultReturnedToModel"] is not null)
+                    || evidence.Governance is not null
+                    || evidence.Outcome is not null
+                    || evidence.CanonicalResultReturnedToModel is not null)
                 {
                     throw new FormatException("A tool request reservation must be the unique exact request-and-authority owner.");
                 }
@@ -448,22 +849,22 @@ internal static class CustomLoopRunArtifactCodec
                 compact = new JsonObject
                 {
                     ["shape"] = 1,
-                    ["phase"] = Clone(evidence, "phase"),
+                    ["phase"] = EnumNode(evidence.Phase),
                     ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, requestId),
-                    ["brokerRequestId"] = Clone(evidence, "brokerRequestId")
+                    ["brokerRequestId"] = evidence.BrokerRequestId
                 };
-                states.Add(requestKey, new ToolProjectionState(evidence.DeepClone().AsObject(), evidenceAuthority.DeepClone().AsObject(), authorityId, requestId));
+                states.Add(requestKey, new ToolProjectionState(evidence, evidenceAuthority, authorityId, requestId));
             }
-            else if (string.Equals(phase, "integrityFailed", StringComparison.Ordinal) && !states.ContainsKey(requestKey))
+            else if (phase == CustomLoopToolEvidencePhase.IntegrityFailed && !states.ContainsKey(requestKey))
             {
                 if (standaloneIntegrityProjected
                     || returned
-                    || evidence["brokerRequestId"] is not null
-                    || evidence["governance"] is not null
-                    || evidence["outcome"] is not null
-                    || evidence["canonicalResultReturnedToModel"] is not null
-                    || evidence["canonicalResultHash"] is not null
-                    || evidence["canonicalResultCharacterCount"] is not null)
+                    || evidence.BrokerRequestId is not null
+                    || evidence.Governance is not null
+                    || evidence.Outcome is not null
+                    || evidence.CanonicalResultReturnedToModel is not null
+                    || evidence.CanonicalResultHash is not null
+                    || evidence.CanonicalResultCharacterCount is not null)
                 {
                     throw new FormatException("A standalone tool integrity record may contain only the exact non-actuating request-and-authority evidence.");
                 }
@@ -475,11 +876,11 @@ internal static class CustomLoopRunArtifactCodec
                 compact = new JsonObject
                 {
                     ["shape"] = 6,
-                    ["phase"] = Clone(evidence, "phase"),
+                    ["phase"] = EnumNode(evidence.Phase),
                     ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, requestId),
-                    ["brokerRequestId"] = Clone(evidence, "brokerRequestId")
+                    ["brokerRequestId"] = evidence.BrokerRequestId
                 };
-                states.Add(requestKey, new ToolProjectionState(evidence.DeepClone().AsObject(), evidenceAuthority.DeepClone().AsObject(), authorityId, requestId)
+                states.Add(requestKey, new ToolProjectionState(evidence, evidenceAuthority, authorityId, requestId)
                 {
                     IntegrityFailed = true
                 });
@@ -497,41 +898,41 @@ internal static class CustomLoopRunArtifactCodec
                 }
 
                 RequireRepeatedRequest(evidence, state.Request);
-                if (!string.Equals(phase, "governanceDecided", StringComparison.Ordinal)
+                if (phase != CustomLoopToolEvidencePhase.GovernanceDecided
                     && !string.Equals(state.AuthorityId, authorityId, StringComparison.Ordinal))
                 {
                     throw new FormatException("Tool evidence after governance references a different authority table entry than the refreshed request.");
                 }
 
-                if (string.Equals(phase, "governanceDecided", StringComparison.Ordinal))
+                if (phase == CustomLoopToolEvidencePhase.GovernanceDecided)
                 {
-                    var governance = RequireObject(evidence, "governance");
-                    if (state.Governance is not null || state.Outcome is not null || returned || evidence["outcome"] is not null || evidence["canonicalResultReturnedToModel"] is not null)
+                    var governance = evidence.Governance ?? throw new FormatException("A governance event must contain governance evidence.");
+                    if (state.Governance is not null || state.Outcome is not null || returned || evidence.Outcome is not null || evidence.CanonicalResultReturnedToModel is not null)
                     {
                         throw new FormatException("A governance event must be the request's unique governance owner and cannot duplicate an outcome or returned result.");
                     }
 
-                    var projectedGovernance = governance.DeepClone().AsObject();
+                    var projectedGovernance = SerializeObject(governance, "tool governance");
                     ProjectGovernance(projectedGovernance, contents);
                     compact = new JsonObject
                     {
                         ["shape"] = 2,
-                        ["phase"] = Clone(evidence, "phase"),
+                        ["phase"] = EnumNode(evidence.Phase),
                         ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, state.RequestId),
-                        ["brokerRequestId"] = Clone(evidence, "brokerRequestId"),
+                        ["brokerRequestId"] = evidence.BrokerRequestId,
                         ["governance"] = projectedGovernance
                     };
-                    state.Authority = evidenceAuthority.DeepClone().AsObject();
+                    state.Authority = evidenceAuthority;
                     state.AuthorityId = authorityId;
-                    state.Governance = governance.DeepClone().AsObject();
-                    state.BrokerRequestId = Clone(evidence, "brokerRequestId");
+                    state.Governance = governance;
+                    state.BrokerRequestId = evidence.BrokerRequestId;
                 }
-                else if (string.Equals(phase, "outcomeObserved", StringComparison.Ordinal) && !returned)
+                else if (phase == CustomLoopToolEvidencePhase.OutcomeObserved && !returned)
                 {
                     if (state.Governance is null
                         || state.Outcome is not null
-                        || !JsonNode.DeepEquals(state.Governance, evidence["governance"])
-                        || !JsonNode.DeepEquals(state.BrokerRequestId, evidence["brokerRequestId"]))
+                        || state.Governance != evidence.Governance
+                        || !string.Equals(state.BrokerRequestId, evidence.BrokerRequestId, StringComparison.Ordinal))
                     {
                         throw new FormatException("A tool outcome must be the unique outcome owner and reference the exact governance decision.");
                     }
@@ -539,24 +940,24 @@ internal static class CustomLoopRunArtifactCodec
                     compact = new JsonObject
                     {
                         ["shape"] = 3,
-                        ["phase"] = Clone(evidence, "phase"),
+                        ["phase"] = EnumNode(evidence.Phase),
                         ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, state.RequestId),
-                        ["brokerRequestId"] = Clone(evidence, "brokerRequestId"),
-                        ["outcome"] = Clone(evidence, "outcome"),
-                        ["canonicalResultReturnedToModel"] = Clone(evidence, "canonicalResultReturnedToModel"),
-                        ["canonicalResultHash"] = Clone(evidence, "canonicalResultHash"),
-                        ["canonicalResultCharacterCount"] = Clone(evidence, "canonicalResultCharacterCount")
+                        ["brokerRequestId"] = evidence.BrokerRequestId,
+                        ["outcome"] = evidence.Outcome is null ? null : EnumNode(evidence.Outcome.Value),
+                        ["canonicalResultReturnedToModel"] = evidence.CanonicalResultReturnedToModel,
+                        ["canonicalResultHash"] = evidence.CanonicalResultHash,
+                        ["canonicalResultCharacterCount"] = evidence.CanonicalResultCharacterCount
                     };
-                    state.Outcome = compact.DeepClone().AsObject();
+                    state.Outcome = evidence;
                     state.OutcomeSequence = sequence;
                     ReferenceProperty(compact, "canonicalResultReturnedToModel", contents);
                 }
-                else if (string.Equals(phase, "outcomeObserved", StringComparison.Ordinal) && returned)
+                else if (phase == CustomLoopToolEvidencePhase.OutcomeObserved && returned)
                 {
                     if (state.Outcome is null
                         || state.OutcomeSequence is null
                         || state.Returned
-                        || !JsonNode.DeepEquals(state.BrokerRequestId, evidence["brokerRequestId"]))
+                        || !string.Equals(state.BrokerRequestId, evidence.BrokerRequestId, StringComparison.Ordinal))
                     {
                         throw new FormatException("A returned-to-model marker must be unique and requires one earlier exact durable outcome.");
                     }
@@ -565,24 +966,24 @@ internal static class CustomLoopRunArtifactCodec
                     compact = new JsonObject
                     {
                         ["shape"] = 4,
-                        ["phase"] = Clone(evidence, "phase"),
+                        ["phase"] = EnumNode(evidence.Phase),
                         ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, state.RequestId),
-                        ["brokerRequestId"] = Clone(evidence, "brokerRequestId"),
+                        ["brokerRequestId"] = evidence.BrokerRequestId,
                         ["outcomeSequence"] = state.OutcomeSequence.Value
                     };
                     state.Returned = true;
                 }
-                else if (string.Equals(phase, "integrityFailed", StringComparison.Ordinal))
+                else if (phase == CustomLoopToolEvidencePhase.IntegrityFailed)
                 {
                     compact = new JsonObject
                     {
                         ["shape"] = 5,
-                        ["phase"] = Clone(evidence, "phase"),
+                        ["phase"] = EnumNode(evidence.Phase),
                         ["toolRequest"] = ReferenceObject(ToolRequestReferenceProperty, state.RequestId),
-                        ["brokerRequestId"] = Clone(evidence, "brokerRequestId"),
-                        ["hasGovernance"] = evidence["governance"] is not null,
-                        ["hasOutcome"] = evidence["outcome"] is not null,
-                        ["hasCanonicalResult"] = evidence["canonicalResultReturnedToModel"] is not null
+                        ["brokerRequestId"] = evidence.BrokerRequestId,
+                        ["hasGovernance"] = evidence.Governance is not null,
+                        ["hasOutcome"] = evidence.Outcome is not null,
+                        ["hasCanonicalResult"] = evidence.CanonicalResultReturnedToModel is not null
                     };
                     RequireIntegrityReferences(evidence, state);
                     state.IntegrityFailed = true;
@@ -624,6 +1025,7 @@ internal static class CustomLoopRunArtifactCodec
             }
 
             var shape = RequireInt32(compact, "shape");
+            ValidateCanonicalEnumProperty<CustomLoopToolEvidencePhase>(compact, "phase");
             var requestId = RequireReference(compact, "toolRequest", ToolRequestReferenceProperty);
             var request = requests.Resolve(requestId);
             ValidateToolRequest(request);
@@ -701,6 +1103,7 @@ internal static class CustomLoopRunArtifactCodec
                 else if (shape == 3)
                 {
                     RequireProperties(compact, "shape", "phase", "toolRequest", "brokerRequestId", "outcome", "canonicalResultReturnedToModel", "canonicalResultHash", "canonicalResultCharacterCount");
+                    ValidateCanonicalEnumProperty<ToolExecutionOutcome>(compact, "outcome", allowNull: true);
                     if (state.Governance is null
                         || state.OutcomeEvidence is not null
                         || !JsonNode.DeepEquals(state.BrokerRequestId, compact["brokerRequestId"])
@@ -774,20 +1177,25 @@ internal static class CustomLoopRunArtifactCodec
         }
     }
 
-    private static JsonObject ToolRequest(JsonObject evidence, string authorityId)
+    private static JsonObject ToolRequest(CustomLoopToolTraceEvidence evidence, string authorityId)
     {
         return new JsonObject
         {
             ["authority"] = ReferenceObject(AuthorityReferenceProperty, authorityId),
-            ["requestOrdinal"] = Clone(evidence, "requestOrdinal"),
-            ["requestCorrelationId"] = Clone(evidence, "requestCorrelationId"),
-            ["command"] = Clone(evidence, "command"),
-            ["targetPath"] = Clone(evidence, "targetPath"),
-            ["content"] = Clone(evidence, "content"),
-            ["pattern"] = Clone(evidence, "pattern"),
-            ["resolvedTarget"] = Clone(evidence, "resolvedTarget"),
-            ["reservedUtf8Bytes"] = Clone(evidence, "reservedUtf8Bytes")
+            ["requestOrdinal"] = evidence.RequestOrdinal,
+            ["requestCorrelationId"] = evidence.RequestCorrelationId,
+            ["command"] = EnumNode(evidence.Command),
+            ["targetPath"] = evidence.TargetPath,
+            ["content"] = evidence.Content,
+            ["pattern"] = evidence.Pattern,
+            ["resolvedTarget"] = evidence.ResolvedTarget,
+            ["reservedUtf8Bytes"] = evidence.ReservedUtf8Bytes
         };
+    }
+
+    private static (int RequestOrdinal, string RequestCorrelationId) ToolRequestKey(CustomLoopToolTraceEvidence source)
+    {
+        return (source.RequestOrdinal, source.RequestCorrelationId);
     }
 
     private static (int RequestOrdinal, string RequestCorrelationId) ToolRequestKey(JsonObject source)
@@ -829,41 +1237,63 @@ internal static class CustomLoopRunArtifactCodec
         };
     }
 
-    private static void RequireRepeatedRequest(JsonObject evidence, JsonObject request)
+    private static void RequireRepeatedRequest(CustomLoopToolTraceEvidence evidence, CustomLoopToolTraceEvidence request)
     {
-        foreach (var property in new[] { "requestOrdinal", "requestCorrelationId", "command", "targetPath", "content", "pattern", "resolvedTarget", "reservedUtf8Bytes" })
+        if (evidence.RequestOrdinal != request.RequestOrdinal
+            || !string.Equals(evidence.RequestCorrelationId, request.RequestCorrelationId, StringComparison.Ordinal)
+            || evidence.Command != request.Command
+            || !string.Equals(evidence.TargetPath, request.TargetPath, StringComparison.Ordinal)
+            || !string.Equals(evidence.Content, request.Content, StringComparison.Ordinal)
+            || !string.Equals(evidence.Pattern, request.Pattern, StringComparison.Ordinal)
+            || !string.Equals(evidence.ResolvedTarget, request.ResolvedTarget, StringComparison.Ordinal)
+            || evidence.ReservedUtf8Bytes != request.ReservedUtf8Bytes)
         {
-            if (!JsonNode.DeepEquals(evidence[property], request[property]))
-            {
-                throw new FormatException($"Tool evidence structurally duplicated a mismatched request field `{property}`.");
-            }
+            throw new FormatException("Tool evidence structurally duplicated mismatched request fields.");
         }
     }
 
-    private static void RequireRepeatedOutcome(JsonObject evidence, ToolProjectionState state)
+    private static void RequireRepeatedOutcome(CustomLoopToolTraceEvidence evidence, ToolProjectionState state)
     {
-        if (!JsonNode.DeepEquals(evidence["governance"], state.Governance)
-            || !JsonNode.DeepEquals(evidence["outcome"], state.Outcome?["outcome"])
-            || !JsonNode.DeepEquals(evidence["canonicalResultReturnedToModel"], state.Outcome?["canonicalResultReturnedToModel"])
-            || !JsonNode.DeepEquals(evidence["canonicalResultHash"], state.Outcome?["canonicalResultHash"])
-            || !JsonNode.DeepEquals(evidence["canonicalResultCharacterCount"], state.Outcome?["canonicalResultCharacterCount"]))
+        if (state.Outcome is null
+            || evidence.Governance != state.Governance
+            || evidence.Outcome != state.Outcome.Outcome
+            || !string.Equals(evidence.CanonicalResultReturnedToModel, state.Outcome.CanonicalResultReturnedToModel, StringComparison.Ordinal)
+            || !string.Equals(evidence.CanonicalResultHash, state.Outcome.CanonicalResultHash, StringComparison.Ordinal)
+            || evidence.CanonicalResultCharacterCount != state.Outcome.CanonicalResultCharacterCount)
         {
             throw new FormatException("The returned-to-model marker structurally duplicated a mismatched governance or outcome payload.");
         }
     }
 
-    private static void RequireIntegrityReferences(JsonObject evidence, ToolProjectionState state)
+    private static void RequireIntegrityReferences(CustomLoopToolTraceEvidence evidence, ToolProjectionState state)
     {
-        if (evidence["governance"] is not null && !JsonNode.DeepEquals(evidence["governance"], state.Governance)
-            || evidence["outcome"] is not null && !JsonNode.DeepEquals(evidence["outcome"], state.Outcome?["outcome"])
-            || evidence["canonicalResultReturnedToModel"] is not null && (!JsonNode.DeepEquals(evidence["canonicalResultReturnedToModel"], state.Outcome?["canonicalResultReturnedToModel"])
-                || !JsonNode.DeepEquals(evidence["canonicalResultHash"], state.Outcome?["canonicalResultHash"])
-                || !JsonNode.DeepEquals(evidence["canonicalResultCharacterCount"], state.Outcome?["canonicalResultCharacterCount"]))
-            || evidence["canonicalResultReturnedToModel"] is null && (evidence["canonicalResultHash"] is not null || evidence["canonicalResultCharacterCount"] is not null)
-            || evidence["brokerRequestId"] is not null && !JsonNode.DeepEquals(evidence["brokerRequestId"], state.BrokerRequestId))
+        if (evidence.Governance is not null && evidence.Governance != state.Governance
+            || evidence.Outcome is not null && evidence.Outcome != state.Outcome?.Outcome
+            || evidence.CanonicalResultReturnedToModel is not null && (!string.Equals(evidence.CanonicalResultReturnedToModel, state.Outcome?.CanonicalResultReturnedToModel, StringComparison.Ordinal)
+                || !string.Equals(evidence.CanonicalResultHash, state.Outcome?.CanonicalResultHash, StringComparison.Ordinal)
+                || evidence.CanonicalResultCharacterCount != state.Outcome?.CanonicalResultCharacterCount)
+            || evidence.CanonicalResultReturnedToModel is null && (evidence.CanonicalResultHash is not null || evidence.CanonicalResultCharacterCount is not null)
+            || evidence.BrokerRequestId is not null && !string.Equals(evidence.BrokerRequestId, state.BrokerRequestId, StringComparison.Ordinal))
         {
             throw new FormatException("Tool integrity evidence may reference only the exact earlier governance and outcome evidence.");
         }
+    }
+
+    private static JsonObject SerializeObject<T>(T value, string description)
+    {
+        try
+        {
+            return JsonSerializer.SerializeToNode(value, _jsonOptions)?.AsObject() ?? throw new FormatException($"The {description} projection was empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new FormatException($"The {description} projection could not be serialized.", exception);
+        }
+    }
+
+    private static JsonNode EnumNode<T>(T value) where T : struct, Enum
+    {
+        return JsonSerializer.SerializeToNode(value, _jsonOptions) ?? throw new FormatException("An enum projection was empty.");
     }
 
     private static JsonObject ReferenceObject(string propertyName, string id)
@@ -882,6 +1312,21 @@ internal static class CustomLoopRunArtifactCodec
     {
         RequireProperties(request, "authority", "requestOrdinal", "requestCorrelationId", "command", "targetPath", "content", "pattern", "resolvedTarget", "reservedUtf8Bytes");
         _ = RequireReference(request, "authority", AuthorityReferenceProperty);
+        ValidateCanonicalEnumProperty<ToolCommand>(request, "command");
+    }
+
+    private static void ValidateCanonicalEnumProperty<TEnum>(JsonObject owner, string propertyName, bool allowNull = false) where TEnum : struct, Enum
+    {
+        if (owner[propertyName] is JsonValue value)
+        {
+            ValidateCanonicalPrimitiveValue(value, typeof(TEnum));
+            return;
+        }
+
+        if (!allowNull || owner[propertyName] is not null)
+        {
+            throw new FormatException($"Enum field `{propertyName}` is missing or malformed.");
+        }
     }
 
     private static void ValidateToolRequestTable(IReadOnlyList<StructuralEntry> entries, StructuralRegistry authorities)
@@ -911,6 +1356,11 @@ internal static class CustomLoopRunArtifactCodec
             }
 
             var references = RequireArray(runEvent, "contextBlocks");
+            if (references.Count == 0)
+            {
+                continue;
+            }
+
             var expanded = new JsonArray();
             foreach (var referenceItem in references)
             {
@@ -936,15 +1386,16 @@ internal static class CustomLoopRunArtifactCodec
                 throw new FormatException("A content reference cannot be resolved without its containing property.");
             }
 
-            foreach (var property in owner.ToArray())
+            for (var index = 0; index < owner.Count; index++)
             {
-                if (property.Value is JsonObject reference && reference.Count == 1 && reference.ContainsKey(ContentReferenceProperty))
+                var value = owner.GetAt(index).Value;
+                if (value is JsonObject reference && reference.Count == 1 && reference.ContainsKey(ContentReferenceProperty))
                 {
-                    owner[property.Key] = contents.Resolve(RequireString(reference, ContentReferenceProperty));
+                    owner.SetAt(index, contents.Resolve(RequireString(reference, ContentReferenceProperty)));
                 }
                 else
                 {
-                    ResolveContentReferences(property.Value, contents);
+                    ResolveContentReferences(value, contents);
                 }
             }
         }
@@ -983,45 +1434,93 @@ internal static class CustomLoopRunArtifactCodec
             var base64 = RequireString(entry, "base64");
             // Cross-check canonical base64, strict UTF-8 round-trip, ordered id, both character/byte
             // counts, and the raw-byte hash so table references cannot alias different content.
-            byte[] bytes;
+            var decoded = ArrayPool<byte>.Shared.Rent(Math.Max(1, base64.Length / 4 * 3));
             try
             {
-                bytes = Convert.FromBase64String(base64);
-            }
-            catch (FormatException exception)
-            {
-                throw new FormatException("A content-table entry is not strict base64.", exception);
-            }
+                if (!Convert.TryFromBase64String(base64, decoded, out var decodedLength))
+                {
+                    throw new FormatException("A content-table entry is not strict base64.");
+                }
 
-            if (!string.Equals(Convert.ToBase64String(bytes), base64, StringComparison.Ordinal))
-            {
-                throw new FormatException("A content-table entry does not use canonical base64.");
-            }
+                var bytes = decoded.AsSpan(0, decodedLength);
+                if (!Base64RoundTrips(bytes, base64.AsSpan()))
+                {
+                    throw new FormatException("A content-table entry does not use canonical base64.");
+                }
 
-            string text;
-            try
-            {
-                text = StrictUtf8.GetString(bytes);
-            }
-            catch (DecoderFallbackException exception)
-            {
-                throw new FormatException("A content-table entry is not strict UTF-8.", exception);
-            }
+                string text;
+                try
+                {
+                    text = StrictUtf8.GetString(bytes);
+                }
+                catch (DecoderFallbackException exception)
+                {
+                    throw new FormatException("A content-table entry is not strict UTF-8.", exception);
+                }
 
-            var actualHash = Hash(bytes);
-            if (!StrictUtf8.GetBytes(text).AsSpan().SequenceEqual(bytes)
-                || utf16Characters != text.Length
-                || utf8Bytes != bytes.Length
-                || !string.Equals(hash, actualHash, StringComparison.Ordinal)
-                || !string.Equals(id, IndexedId("c", index), StringComparison.Ordinal))
-            {
-                throw new FormatException("A content-table entry has mismatched id, hash, UTF-16 count, or raw UTF-8 byte count.");
-            }
+                var actualHash = Hash(bytes);
+                if (!StrictUtf8RoundTrips(text, bytes) || utf16Characters != text.Length
+                    || utf8Bytes != bytes.Length
+                    || !string.Equals(hash, actualHash, StringComparison.Ordinal)
+                    || !string.Equals(id, IndexedId("c", index), StringComparison.Ordinal))
+                {
+                    throw new FormatException("A content-table entry has mismatched id, hash, UTF-16 count, or raw UTF-8 byte count.");
+                }
 
-            entries.Add(new ContentEntry(id, hash, utf16Characters, utf8Bytes, base64, text, bytes));
+                entries.Add(new ContentEntry(id, hash, utf16Characters, utf8Bytes, base64, text));
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(decoded, clearArray: true);
+            }
         }
 
         return entries;
+    }
+
+    private static bool Base64RoundTrips(ReadOnlySpan<byte> bytes, ReadOnlySpan<char> expected)
+    {
+        const int BytesPerChunk = 3072;
+        Span<char> scratch = stackalloc char[BytesPerChunk / 3 * 4];
+        var byteOffset = 0;
+        var characterOffset = 0;
+        while (byteOffset < bytes.Length)
+        {
+            var byteCount = Math.Min(BytesPerChunk, bytes.Length - byteOffset);
+            if (!Convert.TryToBase64Chars(bytes.Slice(byteOffset, byteCount), scratch, out var charactersWritten)
+                || charactersWritten > expected.Length - characterOffset
+                || !scratch[..charactersWritten].SequenceEqual(expected.Slice(characterOffset, charactersWritten)))
+            {
+                return false;
+            }
+
+            byteOffset += byteCount;
+            characterOffset += charactersWritten;
+        }
+
+        return characterOffset == expected.Length;
+    }
+
+    private static bool StrictUtf8RoundTrips(string text, ReadOnlySpan<byte> expected)
+    {
+        var encoder = StrictUtf8.GetEncoder();
+        var remaining = text.AsSpan();
+        var expectedOffset = 0;
+        Span<byte> scratch = stackalloc byte[4096];
+        var completed = false;
+        while (!completed)
+        {
+            encoder.Convert(remaining, scratch, flush: true, out var charactersUsed, out var bytesUsed, out completed);
+            if (bytesUsed > expected.Length - expectedOffset || !scratch[..bytesUsed].SequenceEqual(expected.Slice(expectedOffset, bytesUsed)))
+            {
+                return false;
+            }
+
+            remaining = remaining[charactersUsed..];
+            expectedOffset += bytesUsed;
+        }
+
+        return expectedOffset == expected.Length;
     }
 
     private static IReadOnlyList<StructuralEntry> ParseStructuralEntries(JsonArray items, string prefix, string valueProperty, string description)
@@ -1037,7 +1536,7 @@ internal static class CustomLoopRunArtifactCodec
             RequireProperties(entry, "id", "sha256", valueProperty);
             var id = RequireString(entry, "id");
             var hash = RequireString(entry, "sha256");
-            var value = RequireObject(entry, valueProperty).DeepClone().AsObject();
+            var value = RequireObject(entry, valueProperty);
             var bytes = SerializeNode(value);
             var actualHash = Hash(bytes);
             if (!string.Equals(hash, actualHash, StringComparison.Ordinal) || !string.Equals(id, IndexedId(prefix, index), StringComparison.Ordinal))
@@ -1084,15 +1583,12 @@ internal static class CustomLoopRunArtifactCodec
             ["contextBlocks"] = blockArray,
             ["authorities"] = authorityArray,
             ["toolRequests"] = requestArray,
-            ["run"] = projection.DeepClone()
+            ["run"] = projection
         };
         var content = SerializeNode(envelope);
         // Persist exactly one trailing LF. Canonical readback compares this byte too, rejecting both
         // unterminated files and alternate whitespace after the envelope.
-        var terminated = new byte[content.Length + 1];
-        content.CopyTo(terminated, 0);
-        terminated[^1] = (byte)'\n';
-        return terminated;
+        return Terminate(content);
     }
 
     private static JsonArray ProjectStructuralTable(IReadOnlyList<StructuralEntry> entries, string valueProperty, Action<JsonObject> projectContent)
@@ -1188,39 +1684,37 @@ internal static class CustomLoopRunArtifactCodec
 
     private static void RequireProperties(JsonObject owner, params string[] expected)
     {
-        var expectedSet = expected.ToHashSet(StringComparer.Ordinal);
         var actual = owner.Select(property => property.Key).ToArray();
-        if (actual.Length != expected.Length || actual.Any(property => !expectedSet.Contains(property)))
+        if (!actual.SequenceEqual(expected, StringComparer.Ordinal))
         {
-            throw new FormatException($"Codec object fields must be exactly: {string.Join(", ", expected)}.");
+            throw new FormatException($"Codec object fields must be exactly and canonically ordered as: {string.Join(", ", expected)}.");
         }
     }
 
-    private static void RejectDuplicateProperties(JsonElement element, string path, HashSet<string> scratch)
+    private static void RejectDuplicateProperties(ReadOnlySpan<byte> utf8Json)
     {
-        if (element.ValueKind == JsonValueKind.Object)
+        var objects = new Stack<HashSet<string>>();
+        var available = new Stack<HashSet<string>>();
+        var reader = new Utf8JsonReader(utf8Json, new JsonReaderOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
+        while (reader.Read())
         {
-            scratch.Clear();
-            foreach (var property in element.EnumerateObject())
+            if (reader.TokenType == JsonTokenType.StartObject)
             {
-                if (!scratch.Add(property.Name))
+                objects.Push(available.TryPop(out var names) ? names : new HashSet<string>(StringComparer.Ordinal));
+            }
+            else if (reader.TokenType == JsonTokenType.PropertyName)
+            {
+                var propertyName = reader.GetString() ?? throw new FormatException("A JSON property name was null.");
+                if (!objects.Peek().Add(propertyName))
                 {
-                    throw new FormatException($"JSON object `{path}` contains duplicate property `{property.Name}`.");
+                    throw new FormatException($"A JSON object contains duplicate property `{propertyName}`.");
                 }
             }
-
-            foreach (var property in element.EnumerateObject())
+            else if (reader.TokenType == JsonTokenType.EndObject)
             {
-                RejectDuplicateProperties(property.Value, path + "." + property.Name, new HashSet<string>(StringComparer.Ordinal));
-            }
-        }
-        else if (element.ValueKind == JsonValueKind.Array)
-        {
-            var index = 0;
-            foreach (var item in element.EnumerateArray())
-            {
-                RejectDuplicateProperties(item, $"{path}[{index}]", new HashSet<string>(StringComparer.Ordinal));
-                index++;
+                var names = objects.Pop();
+                names.Clear();
+                available.Push(names);
             }
         }
     }
@@ -1268,18 +1762,18 @@ internal static class CustomLoopRunArtifactCodec
         IReadOnlyList<StructuralEntry> AuthorityEntries,
         IReadOnlyList<StructuralEntry> RequestEntries);
 
-    private sealed class ToolProjectionState(JsonObject request, JsonObject authority, string authorityId, string requestId)
+    private sealed class ToolProjectionState(CustomLoopToolTraceEvidence request, CustomLoopToolAuthoritySnapshot authority, string authorityId, string requestId)
     {
         /// <summary>
         /// Gets the request JSON object.
         /// </summary>
         /// <value>The request JSON object.</value>
-        public JsonObject Request { get; } = request;
+        public CustomLoopToolTraceEvidence Request { get; } = request;
         /// <summary>
         /// Gets the authority JSON object.
         /// </summary>
         /// <value>The authority JSON object.</value>
-        public JsonObject Authority { get; set; } = authority;
+        public CustomLoopToolAuthoritySnapshot Authority { get; set; } = authority;
         /// <summary>
         /// Gets the authority ID.
         /// </summary>
@@ -1294,17 +1788,17 @@ internal static class CustomLoopRunArtifactCodec
         /// Gets the governance JSON object.
         /// </summary>
         /// <value>The governance JSON object.</value>
-        public JsonObject? Governance { get; set; }
+        public ToolGovernanceEvidence? Governance { get; set; }
         /// <summary>
         /// Gets the broker request ID JSON node.
         /// </summary>
         /// <value>The broker request ID JSON node.</value>
-        public JsonNode? BrokerRequestId { get; set; }
+        public string? BrokerRequestId { get; set; }
         /// <summary>
         /// Gets the outcome JSON object.
         /// </summary>
         /// <value>The outcome JSON object.</value>
-        public JsonObject? Outcome { get; set; }
+        public CustomLoopToolTraceEvidence? Outcome { get; set; }
         /// <summary>
         /// Gets the outcome sequence.
         /// </summary>

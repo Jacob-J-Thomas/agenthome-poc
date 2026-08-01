@@ -80,7 +80,7 @@ internal sealed class VerificationPhaseProbe
     private PhaseObservation Start(VerificationPhaseBudget budget)
     {
         ValidateBudget(budget);
-        var observation = new PhaseObservation(Stopwatch.StartNew(), GC.GetTotalAllocatedBytes(precise: false));
+        var observation = new PhaseObservation(Stopwatch.StartNew(), GC.GetTotalAllocatedBytes(precise: true));
         Write("VERIFY_TEST_PHASE_START", new
         {
             test = _testName,
@@ -89,6 +89,7 @@ internal sealed class VerificationPhaseProbe
             classification = budget.Classification.ToString(),
             proposedBudgetMilliseconds = (long)budget.ProposedBudget.TotalMilliseconds,
             diagnosticBoundMilliseconds = (long)budget.DiagnosticBound.TotalMilliseconds,
+            budget.MaximumAllocatedBytes,
             startedAtUtc = DateTimeOffset.UtcNow,
             lastCompletedPhase = _lastCompletedPhase
         });
@@ -98,13 +99,18 @@ internal sealed class VerificationPhaseProbe
     private void Complete(VerificationPhaseBudget budget, PhaseObservation observation)
     {
         observation.Stopwatch.Stop();
+        var allocatedBytes = Math.Max(0, GC.GetTotalAllocatedBytes(precise: true) - observation.StartAllocatedBytes);
         if (observation.Stopwatch.Elapsed > budget.DiagnosticBound)
         {
             throw new TimeoutException($"Verification phase `{budget.Name}` completed in {observation.Stopwatch.Elapsed} after exceeding its diagnostic bound of {budget.DiagnosticBound}. Last completed phase: `{_lastCompletedPhase}`.");
         }
 
+        if (budget.MaximumAllocatedBytes is { } maximumAllocatedBytes && allocatedBytes > maximumAllocatedBytes)
+        {
+            throw new InvalidOperationException($"Verification phase `{budget.Name}` allocated approximately {allocatedBytes:N0} bytes, exceeding its {maximumAllocatedBytes:N0}-byte maximum. Last completed phase: `{_lastCompletedPhase}`.");
+        }
+
         _lastCompletedPhase = budget.Name;
-        var allocatedBytes = Math.Max(0, GC.GetTotalAllocatedBytes(precise: false) - observation.StartAllocatedBytes);
         Write("VERIFY_TEST_PHASE_COMPLETE", new
         {
             test = _testName,
@@ -115,6 +121,7 @@ internal sealed class VerificationPhaseProbe
             allocatedBytes,
             proposedBudgetMilliseconds = (long)budget.ProposedBudget.TotalMilliseconds,
             diagnosticBoundMilliseconds = (long)budget.DiagnosticBound.TotalMilliseconds,
+            budget.MaximumAllocatedBytes,
             completedAtUtc = DateTimeOffset.UtcNow,
             lastCompletedPhase = _lastCompletedPhase
         });
@@ -180,6 +187,11 @@ internal sealed class VerificationPhaseProbe
         if (budget.ProposedBudget <= TimeSpan.Zero || budget.DiagnosticBound < budget.ProposedBudget)
         {
             throw new ArgumentOutOfRangeException(nameof(budget), "Verification phase budgets must be positive and diagnostic bounds cannot be lower than proposed budgets.");
+        }
+
+        if (budget.MaximumAllocatedBytes is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(budget), "Verification phase allocation bounds must be positive when supplied.");
         }
     }
 

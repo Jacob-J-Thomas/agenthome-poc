@@ -4,4 +4,5 @@ internal sealed record VerificationPhaseBudget(
     string Name,
     VerificationPhaseClassification Classification,
     TimeSpan ProposedBudget,
-    TimeSpan DiagnosticBound);
+    TimeSpan DiagnosticBound,
+    long? MaximumAllocatedBytes = null);
