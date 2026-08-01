@@ -70,16 +70,8 @@ internal sealed class CapabilityDependencyResolutionContext
             return;
         }
 
-        if (!_ranges.TryGetValue(dependency.CapabilityId.Value, out var ranges))
-        {
-            ranges = [];
-            _ranges.Add(dependency.CapabilityId.Value, ranges);
-        }
-
-        if (!ranges.Any(item => item.Equals(dependency.CompatibleVersionRange)))
-        {
-            ranges.Add(dependency.CompatibleVersionRange);
-        }
+        var ranges = _ranges.TryGetValue(dependency.CapabilityId.Value, out var existingRanges) ? existingRanges : [];
+        var candidateRanges = ranges.Any(item => item.Equals(dependency.CompatibleVersionRange)) ? ranges : [.. ranges, dependency.CompatibleVersionRange];
 
         var group = _candidates.Where(item => item.Entry?.Descriptor?.Id is not null && item.Entry.Descriptor.Id.Equals(dependency.CapabilityId)).ToArray();
         if (group.Length == 0)
@@ -88,7 +80,13 @@ internal sealed class CapabilityDependencyResolutionContext
             return;
         }
 
-        var compatible = group.Where(item => ranges.All(range => range.Contains(item.Entry.Descriptor.Version))).ToArray();
+        if (group.Any(candidate => !HasValidCandidateShape(candidate)))
+        {
+            Fail(subjectId, dependency.CapabilityId, dependency.CompatibleVersionRange, optional, CapabilityDependencyResolutionOutcome.Invalid, "A catalog candidate has incomplete or invalid descriptor, lifecycle, or artifact evidence.");
+            return;
+        }
+
+        var compatible = group.Where(item => candidateRanges.All(range => range.Contains(item.Entry.Descriptor.Version))).ToArray();
         if (compatible.Length == 0)
         {
             ObserveUnavailable(subjectId, dependency, optional, CapabilityDependencyResolutionOutcome.Incompatible, "No catalog candidate satisfies the declared compatible-version range.");
@@ -121,6 +119,22 @@ internal sealed class CapabilityDependencyResolutionContext
                 Fail(subjectId, dependency.CapabilityId, dependency.CompatibleVersionRange, optional, CapabilityDependencyResolutionOutcome.Invalid, "The selected candidate dependency manifest belongs to another capability.");
                 return;
             }
+            if (!HasMatchingArtifactEvidence(candidate.Dependencies.Artifact, candidate.Artifact))
+            {
+                Fail(subjectId, dependency.CapabilityId, dependency.CompatibleVersionRange, optional, CapabilityDependencyResolutionOutcome.Invalid, "The selected candidate dependency manifest artifact evidence conflicts with the resolved artifact.");
+                return;
+            }
+        }
+
+        if (!ranges.Any(item => item.Equals(dependency.CompatibleVersionRange)))
+        {
+            if (!_ranges.TryGetValue(dependency.CapabilityId.Value, out ranges))
+            {
+                ranges = [];
+                _ranges.Add(dependency.CapabilityId.Value, ranges);
+            }
+
+            ranges.Add(dependency.CompatibleVersionRange);
         }
 
         var pin = new CapabilityResolvedPin(candidate.Entry.Lifecycle.DescriptorIdentity, candidate.Entry.Descriptor.Implementation, candidate.Entry.Descriptor.Provenance, candidate.Artifact);
@@ -147,9 +161,30 @@ internal sealed class CapabilityDependencyResolutionContext
 
     private static bool IsResolvable(CapabilityDependencyCatalogCandidate candidate)
     {
+        if (!HasValidCandidateShape(candidate) || !CapabilityDescriptorIdentity.TryCreate(candidate.Entry.Descriptor, out var computedIdentity, out _) || !candidate.Entry.Lifecycle.DescriptorIdentity.Equals(computedIdentity))
+        {
+            return false;
+        }
+
         var lifecycle = candidate.Entry.Lifecycle;
         var declaredIntegrity = candidate.Entry.Descriptor.Provenance.Integrity;
         return lifecycle.Declaration == CapabilityDeclarationState.Declared && lifecycle.Installation == CapabilityInstallationState.Installed && lifecycle.Health is CapabilityHealthState.Healthy or CapabilityHealthState.Degraded && lifecycle.Retirement != CapabilityRetirementState.Removed && lifecycle.Trust == CapabilityTrustState.Verified && (candidate.Artifact.Checksum is null || declaredIntegrity is null || candidate.Artifact.Checksum.FixedTimeEquals(declaredIntegrity));
+    }
+
+    private static bool HasValidCandidateShape(CapabilityDependencyCatalogCandidate candidate)
+    {
+        return candidate?.Entry?.Descriptor is not null
+            && candidate.Entry.Lifecycle is not null
+            && candidate.Artifact is not null
+            && CapabilityDescriptorIdentity.TryCreate(candidate.Entry.Descriptor, out _, out var descriptorValidation)
+            && descriptorValidation.IsValid
+            && CapabilityLifecycleSnapshotValidator.Validate(candidate.Entry.Lifecycle).IsValid;
+    }
+
+    private static bool HasMatchingArtifactEvidence(CapabilityDependencyArtifactMetadata manifestArtifact, CapabilityDependencyArtifactMetadata candidateArtifact)
+    {
+        return (manifestArtifact.Checksum is null || manifestArtifact.Checksum.FixedTimeEquals(candidateArtifact.Checksum))
+            && (manifestArtifact.Signature is null || string.Equals(manifestArtifact.Signature, candidateArtifact.Signature, StringComparison.Ordinal));
     }
 
     private void ObserveUnavailable(CapabilityId subjectId, CapabilityDependency dependency, bool optional, CapabilityDependencyResolutionOutcome requiredOutcome, string detail)
