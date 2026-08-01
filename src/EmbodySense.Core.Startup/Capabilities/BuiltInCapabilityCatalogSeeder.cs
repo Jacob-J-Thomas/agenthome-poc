@@ -42,6 +42,7 @@ public sealed class BuiltInCapabilityCatalogSeeder
 
     private static async Task SeedDescriptorAsync(CapabilityCatalogService service, CapabilityDescriptor descriptor, CancellationToken cancellationToken)
     {
+        var bootstrap = false;
         for (var attempt = 0; attempt < MaximumConvergenceAttempts; attempt++)
         {
             var (existing, catalogRevision) = await FindAsync(service, descriptor.Id, cancellationToken);
@@ -54,8 +55,14 @@ public sealed class BuiltInCapabilityCatalogSeeder
                 }
 
                 RequireCommitted(declared, descriptor.Id);
+                if (declared.Status != CapabilityCatalogMutationStatus.Applied)
+                {
+                    continue;
+                }
+
                 existing = declared.Entry;
                 catalogRevision = declared.CatalogRevision!.Value;
+                bootstrap = true;
             }
             else if (!CapabilityDescriptorHash.TryCompute(existing.Descriptor, out var existingHash, out _) || !CapabilityDescriptorHash.TryCompute(descriptor, out var expectedHash, out _) || !existingHash!.Equals(expectedHash))
             {
@@ -65,6 +72,11 @@ public sealed class BuiltInCapabilityCatalogSeeder
             if (existing!.Lifecycle.Retirement == CapabilityRetirementState.Removed)
             {
                 throw new InvalidOperationException($"Built-in capability `{descriptor.Id.Value}` is retained as removed and cannot be resurrected automatically.");
+            }
+
+            if (!bootstrap)
+            {
+                return;
             }
 
             if (existing.Lifecycle.Installation != CapabilityInstallationState.Installed)
