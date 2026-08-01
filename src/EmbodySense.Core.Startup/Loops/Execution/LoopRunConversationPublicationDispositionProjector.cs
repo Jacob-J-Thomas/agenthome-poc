@@ -26,7 +26,7 @@ internal static class LoopRunConversationPublicationDispositionProjector
 
         if (terminalEvents.Length > 1)
         {
-            var dispositions = terminalEvents.Select(item => TerminalDisposition(run, item)).Distinct(StringComparer.Ordinal).ToArray();
+            var dispositions = terminalEvents.Select(item => TerminalDisposition(run.InvokingConversation is not null, item)).Distinct(StringComparer.Ordinal).ToArray();
             var conflicting = dispositions.Length > 1;
             return Snapshot(
                 operationId,
@@ -39,7 +39,7 @@ internal static class LoopRunConversationPublicationDispositionProjector
                 events);
         }
 
-        var disposition = TerminalDisposition(run, terminalEvents[0]);
+        var disposition = TerminalDisposition(run.InvokingConversation is not null, terminalEvents[0]);
         return disposition switch
         {
             "Published" => Snapshot(operationId, disposition, "The canonical output was durably published to the invoking conversation.", true, false, events),
@@ -50,19 +50,19 @@ internal static class LoopRunConversationPublicationDispositionProjector
         };
     }
 
-    private static string TerminalDisposition(CustomLoopRunRecord run, CustomLoopRunEvent terminalEvent)
+    private static string TerminalDisposition(bool hasInvokingConversation, CustomLoopRunEvent terminalEvent)
     {
         if (terminalEvent.PublishedToInvokingConversation == true)
         {
             return terminalEvent.Detail.Contains("already committed", StringComparison.Ordinal) ? "AlreadyPublished" : "Published";
         }
 
-        if (run.InvokingConversation is null)
+        if (!hasInvokingConversation && terminalEvent.Detail.Contains("omitted because admission bound no invoking conversation", StringComparison.Ordinal))
         {
             return "OmittedNoInvokingConversation";
         }
 
-        return run.Status == CustomLoopRunStatus.Failed ? "DefinitelyFailed" : "Uncertain";
+        return terminalEvent.Detail.Contains("definitely failed", StringComparison.Ordinal) ? "DefinitelyFailed" : "Uncertain";
     }
 
     private static LoopRunConversationPublicationDispositionSnapshot Snapshot(string operationId, string disposition, string detail, bool isDefinite, bool hasIntegrityWarning, IReadOnlyList<CustomLoopRunEvent> events)
