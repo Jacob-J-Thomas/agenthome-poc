@@ -254,6 +254,21 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 }
 
                 var observedResponse = exception.Response;
+                if (string.IsNullOrWhiteSpace(observedResponse.OutputText))
+                {
+                    var emptyOutputDetail = $"{exception.Message} The provider completed successfully but returned no usable assistant output.";
+                    turn = await AdvanceAsync(
+                        turn,
+                        DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
+                        emptyOutputDetail,
+                        DefaultConversationTurnBoundary.ProviderOutcomeObserved,
+                        CancellationToken.None,
+                        providerOutcome: DefaultConversationProviderOutcome.ObservedFailure,
+                        providerResponseId: observedResponse.ProviderResponseId);
+                    turn = await FinalizeAsync(turn, LoopRunStatus.Failed, emptyOutputDetail, CancellationToken.None);
+                    return DefaultConversationLoopTurnResult.Failed(emptyOutputDetail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+                }
+
                 var observedAssistantMessage = new DefaultConversationTurnMessage(DefaultConversationTurnProtocol.CreateAssistantMessageId(turn.TurnId), LlmMessageRole.Assistant, observedResponse.OutputText);
                 var detail = exception.Message;
                 turn = await AdvanceAsync(
@@ -291,6 +306,21 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             if (!dispatchStarted)
             {
                 throw new InvalidOperationException("The inference adapter returned without invoking the required provider-dispatch boundary callback.");
+            }
+
+            if (string.IsNullOrWhiteSpace(response.OutputText))
+            {
+                const string Detail = "The provider completed successfully but returned no usable assistant output.";
+                turn = await AdvanceAsync(
+                    turn,
+                    DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
+                    Detail,
+                    DefaultConversationTurnBoundary.ProviderOutcomeObserved,
+                    CancellationToken.None,
+                    providerOutcome: DefaultConversationProviderOutcome.ObservedFailure,
+                    providerResponseId: response.ProviderResponseId);
+                turn = await FinalizeAsync(turn, LoopRunStatus.Failed, Detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.Failed(Detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
             }
 
             var assistantMessage = new DefaultConversationTurnMessage(DefaultConversationTurnProtocol.CreateAssistantMessageId(turn.TurnId), LlmMessageRole.Assistant, response.OutputText);
