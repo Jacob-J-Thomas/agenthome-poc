@@ -255,6 +255,7 @@ public sealed class CustomLoopReceiptRetentionContractTests
 
     [Theory]
     [InlineData(CustomLoopReceiptCleanupStage.IntentPersisted)]
+    [InlineData(CustomLoopReceiptCleanupStage.IntentAuditStarted)]
     [InlineData(CustomLoopReceiptCleanupStage.IntentAuditRecorded)]
     [InlineData(CustomLoopReceiptCleanupStage.ProofLedgerWritten)]
     [InlineData(CustomLoopReceiptCleanupStage.ArtifactsRemoved)]

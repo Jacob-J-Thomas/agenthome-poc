@@ -524,7 +524,7 @@ public static class CustomLoopReceiptRetentionContractValidator
 
         var validOutcome = journal.Stage switch
         {
-            CustomLoopReceiptCleanupStage.IntentPersisted or CustomLoopReceiptCleanupStage.IntentAuditRecorded or CustomLoopReceiptCleanupStage.ProofLedgerWritten or CustomLoopReceiptCleanupStage.ArtifactsRemoved or CustomLoopReceiptCleanupStage.OutcomeAuditStarted => journal.Outcome == CustomLoopReceiptCleanupOutcome.Unknown,
+            CustomLoopReceiptCleanupStage.IntentPersisted or CustomLoopReceiptCleanupStage.IntentAuditStarted or CustomLoopReceiptCleanupStage.IntentAuditRecorded or CustomLoopReceiptCleanupStage.ProofLedgerWritten or CustomLoopReceiptCleanupStage.ArtifactsRemoved or CustomLoopReceiptCleanupStage.OutcomeAuditStarted => journal.Outcome == CustomLoopReceiptCleanupOutcome.Unknown,
             CustomLoopReceiptCleanupStage.Completed => journal.Outcome == (journal.Candidates.Length == 0 ? CustomLoopReceiptCleanupOutcome.NothingEligible : CustomLoopReceiptCleanupOutcome.Succeeded),
             CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable && journal.Candidates.Length > 0,
             CustomLoopReceiptCleanupStage.AbandonedConflict => journal.Outcome == CustomLoopReceiptCleanupOutcome.Conflict,

@@ -39,6 +39,7 @@ Every class posture reports a count and aggregate bytes for every category, incl
 - `Unaudited`: the terminal outcome is not durably audit-marked.
 - `Degraded`: readable evidence carries an integrity or recovery warning.
 - `Compactable`: complete, audited, unambiguous, ownership-resolved evidence is outside the replay horizon.
+- `RetainedLiveLineage`: an expired Create receipt remains the required raw lineage of a live definition and is not compactable.
 - `RetainedLineage`: compact definition lineage or non-reuse proof.
 - `ExpiredIdempotency`: compact expired-operation fingerprint proof.
 - `Corrupt`: canonical validation failed.
@@ -56,13 +57,14 @@ A governed cleanup request binds the artifact class, operation ID, actor, surfac
 The durable schema-1 journal advances through explicit stages:
 
 1. `IntentPersisted`: immutable candidate IDs, hashes, sizes, compact proof, and bounded cross-process owner are durable before mutation.
-2. `IntentAuditRecorded`: the governed intent is durably audited.
-3. `ProofLedgerWritten`: a canonical replacement proof ledger is atomically written and hash-verified.
-4. `ArtifactsRemoved`: each candidate is hash-revalidated and the selected raw artifacts are removed as one attributed batch.
-5. `OutcomeAuditStarted`: the single bounded outcome-audit attempt is durably marked.
-6. `Completed` or `CommittedWithAuditWarning`: completion is durable, with an explicit warning if the bounded audit attempt could not be confirmed.
+2. `IntentAuditStarted`: the single bounded intent-audit attempt is durably marked before the append-only audit mutation.
+3. `IntentAuditRecorded`: the governed intent is durably audited.
+4. `ProofLedgerWritten`: a canonical replacement proof ledger is atomically written and hash-verified.
+5. `ArtifactsRemoved`: each candidate is hash-revalidated and the selected raw artifacts are removed as one attributed batch.
+6. `OutcomeAuditStarted`: the single bounded outcome-audit attempt is durably marked.
+7. `Completed` or `CommittedWithAuditWarning`: completion is durable, with an explicit warning if the bounded audit attempt could not be confirmed.
 
-`AbandonedConflict` means a candidate changed or disappeared and nothing is attributed to that batch. `Degraded` means recovery cannot advance safely; if degradation occurs after artifact removal, the journal retains the proof-ledger hash plus the full immutable candidate count and byte attribution rather than erasing committed-removal evidence. A cleanup implementation must resume from the last durable stage under a fresh bounded owner; it must not infer a later stage from missing files, repeat an uncertain audit append, or delete evidence when corruption, audit availability, ownership, or attribution is unresolved.
+`IntentAuditStarted` and `OutcomeAuditStarted` do not claim that their append-only audit write was atomic with the journal. On recovery, either stage is treated as an uncertain prior append and is not retried. `AbandonedConflict` means a candidate changed or disappeared and nothing is attributed to that batch. `Degraded` means recovery cannot advance safely; if degradation occurs after artifact removal, the journal retains the proof-ledger hash plus the full immutable candidate count and byte attribution rather than erasing committed-removal evidence. A cleanup implementation must resume from the last durable stage under a fresh bounded owner; it must not infer a later stage from missing files, repeat an uncertain audit append, or delete evidence when corruption, audit availability, ownership, or attribution is unresolved.
 
 ## Architecture boundary
 

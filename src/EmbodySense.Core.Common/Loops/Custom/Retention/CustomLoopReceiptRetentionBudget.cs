@@ -125,4 +125,29 @@ public sealed record CustomLoopReceiptRetentionBudget(
             ? CustomLoopReceiptQuotaExhaustionReason.ProofByteLimit
             : CustomLoopReceiptQuotaExhaustionReason.None;
     }
+
+    /// <summary>
+    /// Identifies the exact compact-proof boundary after accounting for retained proofs, raw artifacts that still owe proofs, and prospective proofs.
+    /// </summary>
+    /// <param name="retainedCount">The retained compact-proof entry count.</param>
+    /// <param name="retainedUtf8Bytes">The retained compact-proof bytes, including separators within the retained group.</param>
+    /// <param name="outstandingRawProofCount">The raw-artifact proof obligations that are not yet represented by compact proofs.</param>
+    /// <param name="outstandingRawProofUtf8Bytes">The bytes required by those outstanding compact proofs, including separators within that group.</param>
+    /// <param name="prospectiveProofCount">The prospective compact-proof entry count.</param>
+    /// <param name="prospectiveProofUtf8Bytes">The prospective compact-proof bytes, including separators within that group.</param>
+    /// <returns>The compact-proof boundary preventing admission, or <see cref="CustomLoopReceiptQuotaExhaustionReason.None"/>.</returns>
+    public CustomLoopReceiptQuotaExhaustionReason GetProofAdmissionExhaustionReason(int retainedCount, long retainedUtf8Bytes, int outstandingRawProofCount, long outstandingRawProofUtf8Bytes, int prospectiveProofCount, long prospectiveProofUtf8Bytes)
+    {
+        var outstandingSeparatorBytes = retainedCount > 0 && outstandingRawProofCount > 0 ? 1 : 0;
+        var outstandingExhaustion = GetProofExhaustionReason(retainedCount, retainedUtf8Bytes, outstandingRawProofCount, checked(outstandingRawProofUtf8Bytes + outstandingSeparatorBytes));
+        if (outstandingExhaustion != CustomLoopReceiptQuotaExhaustionReason.None)
+        {
+            return outstandingExhaustion;
+        }
+
+        var currentCount = checked(retainedCount + outstandingRawProofCount);
+        var currentUtf8Bytes = checked(retainedUtf8Bytes + outstandingRawProofUtf8Bytes + outstandingSeparatorBytes);
+        var prospectiveSeparatorBytes = currentCount > 0 && prospectiveProofCount > 0 ? 1 : 0;
+        return GetProofExhaustionReason(currentCount, currentUtf8Bytes, prospectiveProofCount, checked(prospectiveProofUtf8Bytes + prospectiveSeparatorBytes));
+    }
 }

@@ -94,6 +94,17 @@ public sealed class CustomLoopReceiptRetentionPolicyTests
     }
 
     [Fact]
+    public void Proof_admission_accounts_for_outstanding_raw_obligations_and_group_separators()
+    {
+        var countBudget = new CustomLoopReceiptRetentionBudget(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, 10, 1_000, 1, 100, 2, 1_000);
+        var byteBudget = countBudget with { MaximumProofCount = 10, MaximumProofUtf8Bytes = 31 };
+
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ProofCountLimit, countBudget.GetProofAdmissionExhaustionReason(1, 10, 1, 10, 1, 10));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ProofByteLimit, byteBudget.GetProofAdmissionExhaustionReason(1, 10, 1, 10, 1, 10));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.None, byteBudget.GetProofAdmissionExhaustionReason(1, 9, 1, 9, 1, 9));
+    }
+
+    [Fact]
     public void ExactReplayDuration_has_inclusive_expiry_and_deterministic_cutoff()
     {
         var completedAtUtc = _now - CustomLoopReceiptRetentionPolicy.ExactReplayDuration;

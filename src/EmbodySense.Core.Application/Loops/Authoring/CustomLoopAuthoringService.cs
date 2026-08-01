@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -737,8 +738,23 @@ public sealed class CustomLoopAuthoringService
             CustomLoopDefinitionStoreStatus.Conflict => new CustomLoopAuthoringResult(CustomLoopAuthoringStatus.Conflict, null, [], result.Conflict, "The loop definition changed; reload before saving."),
             CustomLoopDefinitionStoreStatus.OperationConflict => Result(CustomLoopAuthoringStatus.Conflict, null, "The mutation operation id was reused for a different authorized request."),
             CustomLoopDefinitionStoreStatus.NotFound => Result(CustomLoopAuthoringStatus.NotFound, null, "The loop definition does not exist."),
-            CustomLoopDefinitionStoreStatus.LimitExceeded => Result(CustomLoopAuthoringStatus.LimitExceeded, null, "The workspace custom-loop definition limit was reached."),
+            CustomLoopDefinitionStoreStatus.LimitExceeded => Result(CustomLoopAuthoringStatus.LimitExceeded, null, DescribeLimitExceeded(result.RetentionExhaustionReason)),
             _ => throw new InvalidOperationException($"Unsupported custom-loop definition store status `{result.Status}`.")
+        };
+    }
+
+    private static string DescribeLimitExceeded(CustomLoopReceiptQuotaExhaustionReason reason)
+    {
+        return reason switch
+        {
+            CustomLoopReceiptQuotaExhaustionReason.None => "The workspace custom-loop definition limit was reached.",
+            CustomLoopReceiptQuotaExhaustionReason.ArtifactCountLimit => "The absolute authoring-receipt artifact-count quota was reached; no mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ArtifactByteLimit => "The absolute authoring-receipt byte quota was reached; no mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactCountLimit => "Only receipt slots reserved for completing pending mutations remain; no new mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactByteLimit => "Only receipt bytes reserved for completing pending mutations remain; no new mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ProofCountLimit => "The compact authoring-proof count quota cannot preserve another operation identity; no mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ProofByteLimit => "The compact authoring-proof byte quota cannot preserve another operation identity; no mutation was admitted.",
+            _ => throw new InvalidOperationException($"Unsupported receipt-retention exhaustion reason `{reason}`.")
         };
     }
 

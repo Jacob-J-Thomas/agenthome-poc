@@ -53,6 +53,53 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Expired_create_receipt_for_a_live_definition_is_retained_as_live_lineage_not_reported_compactable()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var definition = CreateDefinition("loop-live-create-lineage");
+        await CreateCommittedAsync(store, definition);
+
+        var posture = await store.InspectReceiptRetentionAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+        var cleanup = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-live-create-lineage"));
+
+        Assert.Equal(1, posture.Categories.Single(item => item.Category == CustomLoopReceiptArtifactCategory.RetainedLiveLineage).ArtifactCount);
+        Assert.Equal(0, posture.Categories.Single(item => item.Category == CustomLoopReceiptArtifactCategory.Compactable).ArtifactCount);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, cleanup.Status);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, definition.LastMutationOperationId + ".json")));
+    }
+
+    [Fact]
+    public async Task Tombstone_lookup_never_accepts_an_update_receipt_or_its_compact_proof()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var operationId = await CreateExpiredUpdateAsync(store);
+
+        var rawLookup = await store.LookupReceiptOperationAsync(CustomLoopReceiptArtifactClass.DefinitionTombstone, operationId);
+        Assert.Equal(CustomLoopReceiptOperationLookupStatus.Unknown, rawLookup.Status);
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, (await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-update-for-tombstone-lookup"))).Status);
+        var compactLookup = await store.LookupReceiptOperationAsync(CustomLoopReceiptArtifactClass.DefinitionTombstone, operationId);
+        Assert.Equal(CustomLoopReceiptOperationLookupStatus.Unknown, compactLookup.Status);
+    }
+
+    [Fact]
+    public void Admission_accounts_for_retained_and_outstanding_raw_proof_obligations_and_preserves_the_exact_reason()
+    {
+        var countBudget = new CustomLoopReceiptRetentionBudget(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, 10, 1_000, 1, 100, 2, 100);
+        var countReason = countBudget.GetProofAdmissionExhaustionReason(1, 10, 1, 10, 1, 10);
+        var byteBudget = countBudget with { MaximumProofCount = 10, MaximumProofUtf8Bytes = 31 };
+        var byteReason = byteBudget.GetProofAdmissionExhaustionReason(1, 10, 1, 10, 1, 10);
+
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ProofCountLimit, countReason);
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ProofByteLimit, byteReason);
+        Assert.Equal(byteReason, CustomLoopDefinitionStoreResult.LimitExceeded(byteReason).RetentionExhaustionReason);
+    }
+
+    [Fact]
     public async Task Tombstone_compaction_preserves_deleted_lineage_and_prevents_loop_identity_reuse()
     {
         using var workspace = new TestWorkspace();
@@ -75,6 +122,37 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         Assert.NotNull(reuse.Tombstone);
         Assert.Equal(definition.Id, reuse.Tombstone!.LoopId);
         Assert.Null(await store.GetAsync(definition.Id));
+    }
+
+    [Fact]
+    public async Task Compatibility_delete_persists_a_delete_receipt_that_allows_tombstone_compaction()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var definition = CreateDefinition("loop-compat-delete");
+        await CreateCommittedAsync(store, definition);
+
+        var deleted = await store.DeleteAsync(definition.Id, definition.DefinitionVersion, "delete-compat", _createdAtUtc.AddDays(1));
+        var operation = await store.GetMutationOperationAsync("delete-compat");
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Deleted, deleted.Status);
+        Assert.NotNull(operation.Operation);
+        Assert.Equal(CustomLoopDefinitionMutationKind.Delete, operation.Operation!.Kind);
+        var priorDefinition = Assert.IsType<CustomLoopDefinition>(operation.Operation.PriorDefinition);
+        Assert.Equal(definition.Id, priorDefinition.Id);
+        Assert.Equal(definition.DefinitionVersion, priorDefinition.DefinitionVersion);
+        Assert.Equal(definition.ContentHash, priorDefinition.ContentHash);
+        Assert.True(CustomLoopDefinitionContentHash.Matches(priorDefinition));
+        Assert.Equal(CustomLoopDefinitionStoreStatus.AlreadyDeleted, (await store.DeleteAsync(definition.Id, definition.DefinitionVersion, "delete-compat", _createdAtUtc.AddDays(2))).Status);
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync("delete-compat"));
+
+        var cleanup = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionTombstone, "cleanup-compat-delete"));
+        var receiptCleanup = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-compat-delete-receipt"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, cleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, receiptCleanup.Status);
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopDefinitionTombstonesPath, definition.Id + ".json")));
+        Assert.Equal(CustomLoopReceiptOperationLookupStatus.Expired, (await store.LookupReceiptOperationAsync(CustomLoopReceiptArtifactClass.DefinitionTombstone, "delete-compat")).Status);
     }
 
     [Fact]
@@ -211,6 +289,25 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Retention_inventory_fails_closed_on_subdirectories_before_selecting_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var operationId = await CreateExpiredUpdateAsync(store);
+        var unexpectedDirectory = Path.Combine(paths.CustomLoopDefinitionOperationsPath, "nested");
+        Directory.CreateDirectory(unexpectedDirectory);
+        await File.WriteAllTextAsync(Path.Combine(unexpectedDirectory, "hidden.json"), "{}");
+
+        var cleanup = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-nested-artifact"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, cleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, cleanup.BlockReason);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, operationId + ".json")));
+        Assert.True(Directory.Exists(unexpectedDirectory));
+    }
+
+    [Fact]
     public async Task Corrupt_tombstone_posture_exposes_corrupt_evidence_instead_of_a_healthy_block_reason()
     {
         using var workspace = new TestWorkspace();
@@ -289,7 +386,7 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
-    public async Task Future_dated_request_cannot_extend_cleanup_ownership_and_the_interrupted_intent_recovers_on_trusted_time()
+    public async Task Future_dated_request_cannot_extend_cleanup_ownership_and_the_interrupted_intent_fails_closed_on_trusted_time()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -310,15 +407,45 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
 
         Assert.Equal(_observedAtUtc, durableIntent.OwnershipAcquiredAtUtc);
         Assert.True(durableIntent.OwnershipAcquiredAtUtc < durableIntent.Request.RequestedAtUtc);
+        Assert.Equal(CustomLoopReceiptCleanupStage.IntentAuditStarted, durableIntent.Stage);
 
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => interrupted);
         clock.Advance(CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1));
         var recovered = await new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), clock).CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-future-crash"));
 
-        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.AuditUnavailable, recovered.Status);
         Assert.Equal(clock.GetUtcNow(), recovered.Journal!.OwnershipAcquiredAtUtc);
-        Assert.False(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, operationId + ".json")));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, operationId + ".json")));
+    }
+
+    [Fact]
+    public async Task Recovery_after_durable_intent_audit_append_does_not_duplicate_the_uncertain_event()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var audit = new AppendedIntentThenBlockedAuditLog();
+        var clock = new MutableTimeProvider(_observedAtUtc);
+        var store = new CustomLoopDefinitionStore(paths, audit, clock);
+        var operationId = await CreateExpiredUpdateAsync(store);
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-intent-audit-crash");
+        using var cancellation = new CancellationTokenSource();
+
+        var interrupted = store.CleanupReceiptRetentionAsync(request, cancellation.Token);
+        await audit.IntentAppended.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var started = CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(await File.ReadAllBytesAsync(paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath));
+        Assert.Equal(CustomLoopReceiptCleanupStage.IntentAuditStarted, started.Stage);
+        Assert.Single(audit.Events);
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => interrupted);
+        clock.Advance(CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1));
+        var recovered = await new CustomLoopDefinitionStore(paths, audit, clock).CleanupReceiptRetentionAsync(request);
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.AuditUnavailable, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStage.Degraded, recovered.Journal!.Stage);
+        Assert.Equal(1, audit.Events.Count(item => item.Action == AuditSchema.Actions.LoopDefinitionReceiptRetentionIntent));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, operationId + ".json")));
     }
 
     [Fact]
@@ -371,7 +498,10 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, (await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionTombstone, "cleanup-lineage-conflict"))).Status);
         var ledger = CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(await File.ReadAllBytesAsync(paths.CustomLoopReceiptProofLedgerPath));
         var lineage = Assert.Single(ledger.DefinitionLineage);
-        var conflictingLedger = ledger with { DefinitionLineage = ImmutableArray.Create(lineage with { LastDefinitionHash = new string('0', CustomLoopLimits.Sha256HexCharacters) }) };
+        var conflictingLineage = lineage with { LastDefinitionHash = new string('0', CustomLoopLimits.Sha256HexCharacters) };
+        var deleteProof = Assert.Single(ledger.ExpiredOperations);
+        var conflictingProof = deleteProof with { DeleteLineageBindingHash = CustomLoopReceiptRetentionContractCodec.ComputeDeleteLineageBindingHash(deleteProof.RequestHash, deleteProof.OutcomeHash, conflictingLineage) };
+        var conflictingLedger = ledger with { DefinitionLineage = [conflictingLineage], ExpiredOperations = [conflictingProof] };
         await WriteProofLedgerAsync(paths, conflictingLedger);
         await File.WriteAllBytesAsync(tombstonePath, tombstoneBytes);
 
@@ -449,6 +579,8 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         var proof = new CustomLoopExpiredOperationProof(
             CustomLoopExpiredOperationProof.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
+            CustomLoopDefinitionMutationKind.Update,
+            null,
             operationId,
             requestHash,
             artifactHash,
@@ -615,5 +747,24 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         }
 
         public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<AuditEvent>>([]);
+    }
+
+    private sealed class AppendedIntentThenBlockedAuditLog : IAuditLog
+    {
+        public List<AuditEvent> Events { get; } = [];
+        public TaskCompletionSource IntentAppended { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseIntent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+        {
+            Events.Add(auditEvent);
+            if (auditEvent.Action == AuditSchema.Actions.LoopDefinitionReceiptRetentionIntent)
+            {
+                IntentAppended.TrySetResult();
+                await ReleaseIntent.Task.WaitAsync(cancellationToken);
+            }
+        }
+
+        public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<AuditEvent>>(Events.TakeLast(limit).ToArray());
     }
 }
