@@ -453,6 +453,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         {
             cancellationToken.ThrowIfCancellationRequested();
             await beforeTransportWrite(CancellationToken.None);
+            // TODO(#269): Bound this post-checkpoint transport write and preserve ambiguous-dispatch recovery semantics.
             await transport.WriteLineAsync(message.ToJsonString(), CancellationToken.None);
             return;
         }
