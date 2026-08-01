@@ -668,7 +668,7 @@ public sealed class CustomLoopLifecycleService
         var command = new CustomLoopReceiptCleanupCommand(
             CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
-            $"control-receipt-retention-{Guid.NewGuid():N}",
+            $"control-receipt-retention-{pending.RequestHash}",
             pending.Actor,
             _surface,
             CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,

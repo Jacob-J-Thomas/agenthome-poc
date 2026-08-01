@@ -156,14 +156,19 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
                 }
             }
 
+            var admission = await GetNewOperationAdmissionAsync(operation, cancellationToken);
+            if (admission.ProofExhaustionReason != CustomLoopReceiptQuotaExhaustionReason.None)
+            {
+                return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.QuotaExceeded, null);
+            }
+
             var lease = TryAcquireOperationOwnership(operation.OperationId) ?? throw new InvalidOperationException("The new custom-loop control operation could not acquire its bounded execution ownership.");
             try
             {
                 var owned = WithOwnership(operation, lease, operation.Detail);
                 var json = SerializeBounded(owned);
-                var usage = await ReadRawUsageAsync(cancellationToken, operation.OperationId);
                 var budget = CustomLoopReceiptRetentionPolicy.GetBudget(ArtifactClass);
-                if (!budget.CanAccountArtifacts(usage.Count, usage.Utf8Bytes, 1, Encoding.UTF8.GetByteCount(json), integrityPreservingCompletion: false))
+                if (!budget.CanAccountArtifacts(admission.RawArtifactCount, admission.RawArtifactUtf8Bytes, 1, Encoding.UTF8.GetByteCount(json), integrityPreservingCompletion: false))
                 {
                     lease.Dispose();
                     return new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.QuotaExceeded, null);
@@ -353,6 +358,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             DateTimeOffset? newestExpiry = null;
             try
             {
+                using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_retentionRoot);
                 var now = TrustedUtcNow();
                 var artifacts = await ReadAllOperationArtifactsAsync(cancellationToken);
                 foreach (var artifact in artifacts)
@@ -405,6 +411,12 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
                 {
                     blockReason = DetermineBlockReason(categories, exhaustionReason);
                 }
+            }
+            catch (InvalidOperationException exception) when (exception.InnerException is IOException)
+            {
+                AddUsage(categories, CustomLoopReceiptArtifactCategory.OwnershipUnresolved, 1);
+                blockReason = CustomLoopReceiptCleanupBlockReason.OwnershipUnresolved;
+                detail = "Another process owns the lifecycle-control receipt retention mutation lease, so cleanup-history inspection did not reclaim temporary artifacts.";
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -930,8 +942,26 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
 
         var paths = ReadBoundedOperationStoragePaths(allowedOrphanOwnerOperationId);
         ValidateOperationStorageForRead(paths, allowedOrphanOwnerOperationId);
+        var budget = CustomLoopReceiptRetentionPolicy.GetBudget(ArtifactClass);
+        var preflightBytes = 0L;
+        foreach (var path in paths.Where(path => string.Equals(Path.GetExtension(path), ".json", StringComparison.Ordinal)))
+        {
+            var length = _pathGuard.GetFileLength(_root, path);
+            if (length > MaximumArtifactBytes)
+            {
+                throw new FormatException($"Lifecycle-control receipt `{path}` exceeds the maximum artifact size of {MaximumArtifactBytes} bytes.");
+            }
+
+            if (length > budget.MaximumArtifactUtf8Bytes - preflightBytes)
+            {
+                throw new FormatException("Lifecycle-control receipt storage exceeds its aggregate UTF-8 byte ceiling.");
+            }
+
+            preflightBytes = checked(preflightBytes + length);
+        }
 
         var artifacts = new List<(CustomLoopControlOperation Operation, byte[] Bytes, string Path)>();
+        var loadedBytes = 0L;
         foreach (var path in paths.Where(path => string.Equals(Path.GetExtension(path), ".json", StringComparison.Ordinal)))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -941,7 +971,18 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
                 throw new FormatException($"Lifecycle-control receipt filename `{Path.GetFileName(path)}` is not a canonical operation identity.");
             }
 
-            var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, MaximumArtifactBytes, "Custom-loop control operation", cancellationToken);
+            var remainingBytes = budget.MaximumArtifactUtf8Bytes - loadedBytes;
+            if (remainingBytes < 1)
+            {
+                throw new FormatException("Lifecycle-control receipt storage exceeds its aggregate UTF-8 byte ceiling.");
+            }
+
+            var bytes = await _pathGuard.ReadAllBytesAsync(_root, path, Math.Min(MaximumArtifactBytes, remainingBytes), "Custom-loop control operation", cancellationToken);
+            loadedBytes = checked(loadedBytes + bytes.LongLength);
+            if (loadedBytes > budget.MaximumArtifactUtf8Bytes)
+            {
+                throw new FormatException("Lifecycle-control receipt storage exceeds its aggregate UTF-8 byte ceiling.");
+            }
             CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(bytes, _jsonOptions.MaxDepth, "Custom-loop control operation", path);
             CustomLoopControlOperation? operation;
             try
@@ -963,6 +1004,49 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
 
         return artifacts;
+    }
+
+    private async Task<(CustomLoopReceiptQuotaExhaustionReason ProofExhaustionReason, int RawArtifactCount, long RawArtifactUtf8Bytes)> GetNewOperationAdmissionAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken)
+    {
+        var artifacts = await ReadAllOperationArtifactsAsync(cancellationToken);
+        var budget = CustomLoopReceiptRetentionPolicy.GetBudget(ArtifactClass);
+        var rawArtifactUtf8Bytes = artifacts.Sum(item => item.Bytes.LongLength);
+
+        var ledger = await ReadProofLedgerAsync(cancellationToken);
+        var retainedProofs = ledger?.ExpiredOperations.Where(item => item.ArtifactClass == ArtifactClass).OrderBy(item => item.OperationId, StringComparer.Ordinal).ToArray() ?? [];
+        var retainedProofsById = retainedProofs.ToDictionary(item => item.OperationId, StringComparer.Ordinal);
+        var outstandingProofs = new List<CustomLoopExpiredOperationProof>();
+        foreach (var artifact in artifacts)
+        {
+            if (retainedProofsById.ContainsKey(artifact.Operation.OperationId))
+            {
+                throw new FormatException($"Lifecycle-control operation `{artifact.Operation.OperationId}` has contradictory raw and compact expiry evidence.");
+            }
+
+            outstandingProofs.Add(CreateConservativeProof(artifact.Operation));
+        }
+
+        var retainedProofBytes = MeasureProofBytes(retainedProofs);
+        var outstandingProofBytes = MeasureProofBytes(outstandingProofs);
+        var prospectiveProofBytes = CustomLoopReceiptRetentionContractCodec.MeasureExpiredOperationProofUtf8Bytes(CreateConservativeProof(operation));
+        var proofExhaustionReason = budget.GetProofAdmissionExhaustionReason(retainedProofs.Length, retainedProofBytes, outstandingProofs.Count, outstandingProofBytes, 1, prospectiveProofBytes);
+        return (proofExhaustionReason, artifacts.Count, rawArtifactUtf8Bytes);
+    }
+
+    private static CustomLoopExpiredOperationProof CreateConservativeProof(CustomLoopControlOperation operation)
+    {
+        var completedAtUtc = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).AddTicks(1);
+        return new CustomLoopExpiredOperationProof(
+            CustomLoopExpiredOperationProof.CurrentSchemaVersion,
+            CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
+            null,
+            null,
+            null,
+            operation.OperationId,
+            operation.RequestHash,
+            new string('f', CustomLoopLimits.Sha256HexCharacters),
+            completedAtUtc,
+            completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration);
     }
 
     private async Task<(int Count, long Utf8Bytes)> ReadRawUsageAsync(CancellationToken cancellationToken, string? allowedOrphanOwnerOperationId = null)
