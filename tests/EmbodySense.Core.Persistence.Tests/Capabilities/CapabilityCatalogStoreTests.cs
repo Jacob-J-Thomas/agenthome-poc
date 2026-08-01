@@ -543,6 +543,36 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Recreated_workspace_at_the_same_path_rejects_retained_catalog_reads_and_mutations()
+    {
+        using var workspace = new TestWorkspace();
+        using var trustRoot = new TestWorkspace();
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var descriptor = CapabilityCatalogTestData.Descriptor();
+        var originalIdentity = CapabilityCatalogWorkspaceIdentity.Create(paths.RootPath);
+        var declared = await new CapabilityCatalogService(new CapabilityCatalogStore(paths, provider)).DeclareAsync(descriptor, 0, "declare-before-workspace-replacement");
+
+        Assert.Equal(CapabilityCatalogMutationStatus.Applied, declared.Status);
+        var retainedPair = await CapturePairAsync(paths);
+        Directory.Delete(workspace.RootPath, recursive: true);
+        Directory.CreateDirectory(workspace.RootPath);
+        var replacementIdentity = CapabilityCatalogWorkspaceIdentity.Create(paths.RootPath);
+        await RestorePairAsync(paths, retainedPair);
+
+        var replacementStore = new CapabilityCatalogStore(paths, provider);
+        var read = await replacementStore.ReadAsync(null, 10);
+        var mutation = await new CapabilityCatalogService(replacementStore).DeclareAsync(descriptor, 0, "declare-after-workspace-replacement");
+
+        Assert.NotEqual(originalIdentity, replacementIdentity);
+        Assert.Equal(CapabilityCatalogReadStatus.Unavailable, read.Status);
+        Assert.Null(read.Page);
+        Assert.Equal(CapabilityCatalogMutationStatus.Unavailable, mutation.Status);
+        Assert.True(File.Exists(provider.GetAnchorPath(originalIdentity)));
+        Assert.False(File.Exists(provider.GetAnchorPath(replacementIdentity)));
+    }
+
+    [Fact]
     public async Task Crash_after_initial_anchor_creation_can_restart_from_empty_but_anchor_advance_failure_recovers_prior_read_only()
     {
         using var workspace = new TestWorkspace();

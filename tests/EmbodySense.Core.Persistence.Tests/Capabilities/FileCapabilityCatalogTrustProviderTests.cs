@@ -172,6 +172,19 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void Workspace_identity_changes_when_the_directory_is_recreated_at_the_same_path()
+    {
+        using var workspace = new TestWorkspace();
+        var originalIdentity = CapabilityCatalogWorkspaceIdentity.Create(workspace.RootPath);
+
+        Directory.Delete(workspace.RootPath, recursive: true);
+        Directory.CreateDirectory(workspace.RootPath);
+        var replacementIdentity = CapabilityCatalogWorkspaceIdentity.Create(workspace.RootPath);
+
+        Assert.NotEqual(originalIdentity, replacementIdentity);
+    }
+
+    [Fact]
     public async Task Unix_workspace_lifetime_identity_rejects_retained_anchor_when_device_and_inode_are_reused()
     {
         using var trustRoot = new TestWorkspace();
@@ -194,6 +207,12 @@ public sealed class FileCapabilityCatalogTrustProviderTests
         var replacementLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b4:00000004");
 
         Assert.NotEqual(originalLifetime, replacementLifetime);
+    }
+
+    [Fact]
+    public void Workspace_identity_digest_rejects_missing_physical_identity_material()
+    {
+        Assert.Throws<ArgumentException>(() => CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(" "));
     }
 
     [Fact]

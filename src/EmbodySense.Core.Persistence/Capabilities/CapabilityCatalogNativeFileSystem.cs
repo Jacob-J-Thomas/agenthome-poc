@@ -177,13 +177,9 @@ internal static class CapabilityCatalogNativeFileSystem
                 throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
             }
 
-            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial(
-                "linux",
-                information.DeviceMajor,
-                information.DeviceMinor,
-                (information.Mask & StatxInode) != 0 ? information.Inode : null,
-                (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Seconds : null,
-                (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Nanoseconds : null);
+            ulong? inode = (information.Mask & StatxInode) != 0 ? information.Inode : null;
+            CapabilityCatalogStatxTimestamp? birthTime = (information.Mask & StatxBirthTime) != 0 ? information.BirthTime : null;
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", information.DeviceMajor, information.DeviceMinor, inode, birthTime?.Seconds, birthTime?.Nanoseconds);
         }
 
         if (OperatingSystem.IsMacOS())
@@ -193,13 +189,7 @@ internal static class CapabilityCatalogNativeFileSystem
                 throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
             }
 
-            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial(
-                "macos",
-                information.Device,
-                0,
-                information.Inode,
-                information.BirthTime.Seconds,
-                information.BirthTime.Nanoseconds);
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", information.Device, 0, information.Inode, information.BirthTime.Seconds, information.BirthTime.Nanoseconds);
         }
 
         throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows, Linux, and macOS.");
