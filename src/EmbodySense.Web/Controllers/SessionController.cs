@@ -42,6 +42,6 @@ public sealed class SessionController : ControllerBase
             return Unauthorized();
         }
 
-        return Ok(new WebSessionInfo(_sessionSecurity.Token));
+        return Ok(new WebSessionInfo(_sessionSecurity.Token, _sessionSecurity.ChatRequestScope));
     }
 }

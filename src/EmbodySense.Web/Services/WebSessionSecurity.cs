@@ -36,12 +36,22 @@ public sealed class WebSessionSecurity
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
 
         Token = token;
+        ChatRequestScope = CreateToken();
     }
 
     /// <summary>
     /// Gets the process-local opaque bearer token.
     /// </summary>
     public string Token { get; }
+
+    /// <summary>
+    /// Gets a non-secret process-session scope used to partition bounded browser chat-request state.
+    /// </summary>
+    /// <remarks>
+    /// This identity is deliberately independent from the bearer token. It changes with the Web process session,
+    /// so persisted request state cannot cross into a different authenticated session at the same localhost origin.
+    /// </remarks>
+    public string ChatRequestScope { get; }
 
     /// <summary>
     /// Determines whether a request host is one of the accepted loopback spellings.

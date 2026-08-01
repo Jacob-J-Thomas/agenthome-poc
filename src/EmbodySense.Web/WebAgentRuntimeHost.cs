@@ -30,6 +30,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly WorkspaceStatusReader _statusReader;
     private readonly WorkspaceConfigurationReader _configurationReader;
     private readonly LoopRunInspectionFacade _loopRuns;
+    private readonly DefaultConversationRequestReconciliationReader _conversationRequests;
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
@@ -101,6 +102,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         _statusReader = new WorkspaceStatusReader();
         _configurationReader = new WorkspaceConfigurationReader();
         _loopRuns = new LoopRunInspectionFacade(options.WorkingDirectory, WorkspaceActors.Web, AgentRuntimeSurface.Web.Id);
+        _conversationRequests = new DefaultConversationRequestReconciliationReader(options.WorkingDirectory);
     }
 
     /// <summary>
@@ -438,7 +440,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// </param>
     /// <param name="cancellationToken">The caller token used to cancel gate waits, runtime work, and event writes.</param>
     /// <param name="requestId">An optional browser-owned idempotency identity.</param>
-    /// <returns>A task that completes after the terminal event is written.</returns>
+    /// <returns>The conclusive runtime disposition after the terminal event is written.</returns>
     /// <exception cref="ArgumentException">The message is null, empty, or whitespace.</exception>
     /// <exception cref="OperationCanceledException">
     /// Caller cancellation interrupts the turn. Cancellation requested through <see cref="CancelCurrentTurn"/>
@@ -449,7 +451,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// the retained runtime for disposal so its session is not reused after an ambiguous cancellation boundary.
     /// Expected Codex compatibility failures are projected as bounded failure events.
     /// </remarks>
-    public async Task SendMessageAsync(
+    public async Task<AgentRuntimeTurnResult> SendMessageAsync(
         string message,
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
         string? ownerConnectionId = null,
@@ -469,7 +471,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             if (AgentRuntime.TryHandleStaticRuntimeCommand(message, out var staticCommandResult))
             {
                 await WriteTurnResultAsync(staticCommandResult, writeEventAsync, cancellationToken);
-                return;
+                return staticCommandResult;
             }
 
             var runtime = await GetConversationRuntimeAsync(turnCancellation.Token);
@@ -487,15 +489,20 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
             discardRuntime = turnResult.IsCancelled;
             await WriteTurnResultAsync(turnResult, writeEventAsync, cancellationToken);
+            return turnResult;
         }
         catch (OperationCanceledException) when (turnCancellation.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
             discardRuntime = true;
-            await writeEventAsync(WebStreamEvent.Cancelled("Message cancelled."), cancellationToken);
+            var result = AgentRuntimeTurnResult.MessageCancelled("Message cancelled.");
+            await WriteTurnResultAsync(result, writeEventAsync, cancellationToken);
+            return result;
         }
         catch (CodexRuntimeUnavailableException exception)
         {
-            await writeEventAsync(WebStreamEvent.Failure(exception.Message), cancellationToken);
+            var result = AgentRuntimeTurnResult.MessageFailed(exception.Message);
+            await WriteTurnResultAsync(result, writeEventAsync, cancellationToken);
+            return result;
         }
         finally
         {
@@ -505,6 +512,30 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 await DiscardRuntimeAsync();
             }
 
+            _turnGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reconciles one exact browser-owned request against durable default-conversation evidence.
+    /// </summary>
+    /// <param name="message">The exact canonical message retained by the browser.</param>
+    /// <param name="requestId">The exact request identity retained with the message.</param>
+    /// <param name="cancellationToken">The token used to cancel gate waits and durable recovery.</param>
+    /// <returns>A bounded disposition that contains no transcript, provider, approval, or private runtime payload.</returns>
+    public async Task<DefaultConversationRequestReconciliationSnapshot> ReconcileMessageAsync(
+        string message,
+        string requestId,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureWorkspaceInitialized("reconciling a browser chat request");
+        await _turnGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await _conversationRequests.ReadAsync(requestId, message, cancellationToken);
+        }
+        finally
+        {
             _turnGate.Release();
         }
     }

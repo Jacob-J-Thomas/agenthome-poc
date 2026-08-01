@@ -38,6 +38,7 @@ public sealed class BrowserFlowTests
             await SubmitMessageAsync(browser, "browser-first-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
+            await AssertChatRequestRegistryEmptyAsync(browser);
 
             app.AssertHealthy();
             browser.BeginExpectedServerRestart();
@@ -58,6 +59,7 @@ public sealed class BrowserFlowTests
             await SubmitMessageAsync(browser, "browser-second-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-second-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
+            await AssertChatRequestRegistryEmptyAsync(browser);
 
             var conversationEvidence = await ReadConversationEvidenceAsync(workspace);
             Assert.Contains("browser-first-turn", conversationEvidence, StringComparison.Ordinal);
@@ -357,6 +359,12 @@ public sealed class BrowserFlowTests
     {
         var jsonMessage = JsonSerializer.Serialize(message);
         await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); const send = document.getElementById('sendButton'); const cancel = document.getElementById('cancelButton'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); if (input.value !== '' || !send.disabled || cancel.disabled) throw new Error('The browser did not synchronously accept the submitted turn.'); })()");
+    }
+
+    private static async Task AssertChatRequestRegistryEmptyAsync(HeadlessBrowserSession browser)
+    {
+        const string Expression = "(() => { const raw = localStorage.getItem('embodysense.chat-requests.v1'); if (!raw) return false; const registry = JSON.parse(raw); return Object.keys(registry).sort().join(',') === 'entries,schemaVersion,scope' && registry.schemaVersion === 1 && /^[0-9a-f]{64}$/.test(registry.scope) && Array.isArray(registry.entries) && registry.entries.length === 0 && !raw.includes('access_token'); })()";
+        Assert.True(await browser.EvaluateBooleanAsync(Expression));
     }
 
     private static async Task InvokeLoopAsync(HeadlessBrowserSession browser, string prompt)

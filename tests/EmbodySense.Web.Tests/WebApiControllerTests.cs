@@ -58,6 +58,8 @@ public sealed class WebApiControllerTests
             var missingApprovalResponse = await client.SendAsync(missingApproval);
 
             Assert.False(before!.Initialized);
+            Assert.Equal(64, session!.ChatRequestScope.Length);
+            Assert.NotEqual(session.Token, session.ChatRequestScope);
             Assert.True(beforeResponse.Headers.TryGetValues("Content-Security-Policy", out var csp));
             Assert.Equal("default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'", csp.Single());
             Assert.DoesNotContain("ws://", csp.Single(), StringComparison.Ordinal);
