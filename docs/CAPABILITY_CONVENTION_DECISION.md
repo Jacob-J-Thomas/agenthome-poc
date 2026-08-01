@@ -35,9 +35,11 @@ Schema 1 therefore uses established conventions for version meaning, ranges, sch
 
 ## Descriptor and authority boundary
 
-`CapabilityDescriptor` contains only stable identity, exact version, implementation identity, safe provenance, compatibility, purpose, input/output schemas, resource limits, side-effect class, and declarations of data, egress, and secret-reference needs.
+`CapabilityDescriptor` contains only stable identity, exact version, implementation identity, structurally bounded provenance, compatibility, purpose, input/output schemas, resource limits, side-effect class, and declarations of data, egress, and secret-reference needs.
 
-It has no metadata bag and no fields for trusted, authorized, enabled, installed, assigned, granted, approved, or private configuration. The closed JSON reader rejects every unknown field, including a field attempting to smuggle those claims or a secret value. Source URIs reject user information, query strings, and fragments; secret requirements contain names only.
+It has no metadata bag and no fields for trusted, authorized, enabled, installed, assigned, granted, approved, secret values, or private configuration. The closed JSON reader rejects every unknown field, including a dedicated field attempting to smuggle one of those claims. Source URIs reject user information, query strings, and fragments; secret requirements contain names only.
+
+That closed shape is an authority boundary, not a content-classification or redaction guarantee. `purpose` and valid JSON Schema annotations such as `default`, `examples`, `title`, and `description` are caller-supplied bounded text and may contain sensitive material. Catalogs, logs, audit projections, and user interfaces must therefore continue to treat descriptors as untrusted and potentially secret-bearing until an applicable redaction and retention policy has processed them; this contract must not be used to label arbitrary descriptor text as secret-free.
 
 Existence, installation, enablement, health, retirement, and server verification are separate axes in `CapabilityLifecycleSnapshot`. That server-owned snapshot still contains no loop assignment or authority. Grants and delegation remain owned by #187, and secret-value resolution remains owned by #188.
 
@@ -53,7 +55,7 @@ All strings, collections, schemas, recursion, numeric resource declarations, and
 - dependency resolution and admission;
 - installation, artifact retrieval, executable hosting, signatures, and marketplaces;
 - loop assignment, grants, approvals, and authority evaluation;
-- secret values and private implementation configuration;
+- dedicated secret-value fields and private implementation configuration; arbitrary sensitive text inside purpose or schema annotations is not detected or classified by this contract;
 - domain-specific trigger, node, actuator, context, model, observation, or evaluation semantics;
 - migration or compatibility readers beyond schema version 1;
 - changes to `LoopCapabilityIds`, runtime composition, persistence, Startup, CLI, Web, or API surfaces.

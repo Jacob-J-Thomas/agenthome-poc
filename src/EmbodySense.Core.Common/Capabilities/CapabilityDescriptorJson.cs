@@ -63,7 +63,7 @@ public static class CapabilityDescriptorJson
     }
 
     /// <summary>
-    /// Parses closed descriptor JSON, rejecting unknown authority, trust, configuration, or secret-value fields.
+    /// Parses closed descriptor JSON, rejecting unknown fields including dedicated authority, trust, configuration, or secret-value properties. Bounded free-form text and JSON Schema annotations remain untrusted content rather than a secret-free projection.
     /// </summary>
     /// <param name="json">The candidate descriptor JSON.</param>
     /// <param name="descriptor">The parsed descriptor when successful.</param>

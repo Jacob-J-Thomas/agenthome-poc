@@ -112,6 +112,19 @@ public sealed class CapabilityDescriptorTests
     }
 
     [Fact]
+    public void Validation_results_snapshot_errors_before_caller_mutation()
+    {
+        var errors = new List<CapabilityContractError> { new("invalid", "field", "message") };
+        var validation = new CapabilityContractValidationResult(errors);
+
+        errors.Clear();
+
+        Assert.False(validation.IsValid);
+        Assert.Single(validation.Errors);
+        Assert.Throws<NotSupportedException>(() => ((IList<CapabilityContractError>)validation.Errors).Clear());
+    }
+
+    [Fact]
     public void Descriptor_shape_cannot_self_grant_lifecycle_trust_assignment_or_authority()
     {
         var forbidden = new[] { "Trust", "Trusted", "Authorized", "Authority", "Enabled", "Installed", "Assigned", "Granted", "Approved", "SecretValue", "Configuration", "Metadata" };
