@@ -257,6 +257,27 @@ public sealed class WorkspacePaths
     /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
     public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
 
+    /// <summary>Gets the safe public credential-registry directory.</summary>
+    public string CredentialRegistryPath => Path.Combine(AgentPath, "credentials");
+
+    /// <summary>Gets the canonical safe public credential-registry artifact path.</summary>
+    public string CredentialRegistryDocumentPath => Path.Combine(CredentialRegistryPath, "registry.json");
+
+    /// <summary>Gets the last independently proved safe public credential-registry artifact path.</summary>
+    public string CredentialRegistryProofPath => Path.Combine(CredentialRegistryPath, "registry.proved.json");
+
+    /// <summary>Gets the private opaque credential-provider locator directory.</summary>
+    public string CredentialRegistryPrivatePath => Path.Combine(WorkspacePrivatePath, "credentials");
+
+    /// <summary>Gets the canonical private opaque credential-provider locator artifact path.</summary>
+    public string CredentialRegistryPrivateDocumentPath => Path.Combine(CredentialRegistryPrivatePath, "locators.json");
+
+    /// <summary>Gets the last independently proved private credential-provider locator artifact path.</summary>
+    public string CredentialRegistryPrivateProofPath => Path.Combine(CredentialRegistryPrivatePath, "locators.proved.json");
+
+    /// <summary>Gets the cross-process credential-registry mutation lock path.</summary>
+    public string CredentialRegistryLockPath => Path.Combine(CredentialRegistryPath, ".registry.lock");
+
     /// <summary>
     /// Gets the permissions path.
     /// </summary>

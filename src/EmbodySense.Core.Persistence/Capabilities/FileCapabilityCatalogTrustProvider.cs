@@ -45,6 +45,9 @@ public sealed class FileCapabilityCatalogTrustProvider : ICapabilityCatalogTrust
     /// <summary>Gets the cross-process trust-root lock path.</summary>
     public string TrustLockPath => Path.Combine(RootPath, ".capability-catalog-trust.lock");
 
+    /// <inheritdoc />
+    public int MaximumAuthenticationTagUtf8Bytes => AuthenticationTagPrefix.Length + SHA256.HashSizeInBytes * 2;
+
     /// <summary>Creates the default provider beneath the current server account's local application data.</summary>
     public static FileCapabilityCatalogTrustProvider CreateDefault()
     {
