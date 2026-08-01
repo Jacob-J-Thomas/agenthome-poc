@@ -16,9 +16,15 @@ const loopsRedirectSource = fs.readFileSync(
   "utf8",
 );
 const recordSeparator = "\u001e";
-const chatRequestStorageKey = "embodysense.chat-requests.v1";
+const chatRequestStorageKeyPrefix = "embodysense.chat-requests.v1";
 const chatRequestScope = "a".repeat(64);
 const chatRequestId = "chat-11111111-1111-4111-8111-111111111111";
+
+function chatRequestStorageKeyFor(scope = chatRequestScope) {
+  return `${chatRequestStorageKeyPrefix}.${scope}`;
+}
+
+const chatRequestStorageKey = chatRequestStorageKeyFor();
 
 test("the shared shell owns primary navigation while Builder and Runs stay local to Loops", () => {
   assert.match(indexSource, /class="app-rail"/);
@@ -728,6 +734,169 @@ test("concurrent tabs coordinate the same unresolved canonical message through o
   );
 });
 
+test("a stale tab re-reconciles its retained identity instead of allocating a second request after another tab clears storage", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(chatRequestRegistry("stale tab")),
+  });
+  const locks = new FakeLockManager();
+  const reconciliations = new Map([
+    [
+      chatRequestId,
+      {
+        status: "not-found",
+        retrySameRequest: true,
+        releaseRequestIdentity: false,
+      },
+    ],
+  ]);
+  const first = await loadApp({
+    localStorage: storage,
+    locks,
+    reconciliations,
+  });
+  const second = await loadApp({
+    localStorage: storage,
+    locks,
+    reconciliations,
+    randomUUID: () => "22222222-2222-4222-8222-222222222222",
+  });
+
+  reconciliations.set(chatRequestId, {
+    status: "completed",
+    retrySameRequest: false,
+    releaseRequestIdentity: true,
+  });
+  await vm.runInContext("reconcilePendingChatRequest()", first.context);
+  await flushAsyncWork();
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+
+  second.elements.messageInput.value = "stale tab";
+  await second.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.equal(second.socket.sentInvocations("SendMessage").length, 0);
+  assert.deepEqual(
+    second.socket.sentInvocations("ReconcileMessage").at(-1).arguments,
+    ["stale tab", chatRequestId],
+  );
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+});
+
+test("retry-permitted reconciliation restores an exact retained identity before a later user retry dispatches it", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(
+      chatRequestRegistry("restored retry"),
+    ),
+  });
+  const reconciliations = new Map([
+    [
+      chatRequestId,
+      {
+        status: "not-found",
+        retrySameRequest: true,
+        releaseRequestIdentity: false,
+      },
+    ],
+  ]);
+  const app = await loadApp({
+    localStorage: storage,
+    reconciliations,
+    randomUUID: () => "22222222-2222-4222-8222-222222222222",
+    sendMessageError: "connection lost",
+  });
+
+  await vm.runInContext(
+    `releaseChatRequest({ requestId: "${chatRequestId}", message: "restored retry" })`,
+    app.context,
+  );
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+
+  await vm.runInContext("reconcilePendingChatRequest()", app.context);
+  await flushAsyncWork();
+
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.deepEqual(JSON.parse(storage.getItem(chatRequestStorageKey)).entries, [
+    { requestId: chatRequestId, message: "restored retry" },
+  ]);
+
+  app.elements.messageInput.value = "restored retry";
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    assertSingle(app.socket.sentInvocations("SendMessage")).arguments,
+    ["restored retry", chatRequestId],
+  );
+});
+
+test("workspace-scoped registries retain unresolved identities across an A to B to A switch", async () => {
+  const workspaceB = "b".repeat(64);
+  const workspaceBKey = chatRequestStorageKeyFor(workspaceB);
+  const storage = new FakeLocalStorage();
+  const locks = new FakeLockManager();
+  const first = await loadApp({
+    localStorage: storage,
+    locks,
+    sendMessageError: "connection lost",
+  });
+  first.elements.messageInput.value = "workspace A request";
+  await first.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  const second = await loadApp({
+    localStorage: storage,
+    locks,
+    chatRequestScope: workspaceB,
+    randomUUID: () => "22222222-2222-4222-8222-222222222222",
+    sendMessageError: "connection lost",
+  });
+  second.elements.messageInput.value = "workspace B request";
+  await second.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(JSON.parse(storage.getItem(chatRequestStorageKey)).entries, [
+    { requestId: chatRequestId, message: "workspace A request" },
+  ]);
+  assert.deepEqual(JSON.parse(storage.getItem(workspaceBKey)).entries, [
+    {
+      requestId: "chat-22222222-2222-4222-8222-222222222222",
+      message: "workspace B request",
+    },
+  ]);
+
+  const returned = await loadApp({
+    localStorage: storage,
+    locks,
+    sendMessageError: "connection lost",
+  });
+  returned.elements.messageInput.value = "workspace A request";
+  await returned.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    assertSingle(returned.socket.sentInvocations("SendMessage")).arguments,
+    ["workspace A request", chatRequestId],
+  );
+  assert.deepEqual(JSON.parse(storage.getItem(chatRequestStorageKey)).entries, [
+    { requestId: chatRequestId, message: "workspace A request" },
+  ]);
+  assert.deepEqual(JSON.parse(storage.getItem(workspaceBKey)).entries, [
+    {
+      requestId: "chat-22222222-2222-4222-8222-222222222222",
+      message: "workspace B request",
+    },
+  ]);
+});
+
 for (const terminalStatus of ["completed", "rejected"]) {
   test(`durable ${terminalStatus} reconciliation retires browser request state without dispatch`, async () => {
     const storage = new FakeLocalStorage({
@@ -1112,7 +1281,10 @@ function createFetch(overrides) {
   };
   return async (url) => {
     if (url === "/api/session") {
-      return jsonResponse({ token: "test-token", chatRequestScope });
+      return jsonResponse({
+        token: "test-token",
+        chatRequestScope: overrides.chatRequestScope ?? chatRequestScope,
+      });
     }
 
     if (url === "/api/status") {

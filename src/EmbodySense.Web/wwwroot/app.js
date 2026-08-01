@@ -6,6 +6,9 @@ let activeAppView = "chat";
 let activeAgentMessage = null;
 let hub = null;
 let chatRequestScope = "";
+let chatRequestStorageKey = "";
+let chatRequestStorageLockName = "";
+let chatRequestRetryEntry = null;
 let chatRequestStorageReady = false;
 let chatRequestStorageError = "";
 let chatRequestDispatchBlocked = false;
@@ -18,8 +21,7 @@ const maxSynchronizedConversationOperations = 128;
 const maxConversationSynchronizationRetries = 40;
 const initialConversationSynchronizationRetryMilliseconds = 25;
 const maxConversationSynchronizationRetryMilliseconds = 1000;
-const chatRequestStorageKey = "embodysense.chat-requests.v1";
-const chatRequestStorageLockName = "embodysense.chat-requests.v1";
+const chatRequestStorageKeyPrefix = "embodysense.chat-requests.v1";
 const chatRequestRegistrySchemaVersion = 1;
 const maxPendingChatRequests = 1;
 const maxPendingChatMessageCharacters = 24000;
@@ -141,6 +143,7 @@ async function boot() {
   const session = await fetchJson("/api/session");
   sessionToken = session.token;
   chatRequestScope = session.chatRequestScope;
+  configureChatRequestStorageScope();
   try {
     await initializeChatRequestStorage();
     chatRequestStorageReady = true;
@@ -356,7 +359,10 @@ async function initializeChatRequestStorage() {
   validateChatRequestEnvironment();
   await withChatRequestRegistry((registry) => {
     if (registry.scope !== chatRequestScope) {
-      return createEmptyChatRequestRegistry();
+      throw chatRequestError(
+        "Pending chat browser state belongs to a different workspace scope.",
+        "storage-corrupt",
+      );
     }
 
     return registry;
@@ -371,6 +377,7 @@ async function reserveChatRequest(message) {
     );
   }
 
+  const retryEntry = getChatRequestRetryEntry();
   return await withChatRequestRegistry((registry) => {
     const existing = registry.entries[0];
     if (existing) {
@@ -382,6 +389,17 @@ async function reserveChatRequest(message) {
       }
 
       return { registry, result: existing };
+    }
+
+    if (retryEntry) {
+      throw chatRequestError(
+        retryEntry.message === message
+          ? "The retained chat identity was changed by another tab. Reconciliation must run again before retrying it."
+          : "A retained chat identity was changed by another tab. Reconcile it before sending a different message.",
+        retryEntry.message === message
+          ? "reconciliation-required"
+          : "pending-conflict",
+      );
     }
 
     const requestId = `chat-${globalThis.crypto.randomUUID()}`;
@@ -420,11 +438,14 @@ async function reconcilePendingChatRequest() {
     return;
   }
 
+  entry ??= getChatRequestRetryEntry();
   if (!entry) {
     chatRequestDispatchBlocked = false;
     refreshChatControls();
     return;
   }
+
+  retainChatRequestRetryEntry(entry);
 
   let reconciliation;
   try {
@@ -451,6 +472,7 @@ async function reconcilePendingChatRequest() {
   ) {
     try {
       await releaseChatRequest(entry);
+      clearChatRequestRetryEntry(entry);
     } catch (error) {
       failChatRequestStorage(error);
       appendMessage("error", chatRequestStorageError);
@@ -502,6 +524,18 @@ async function reconcilePendingChatRequest() {
     return;
   }
 
+  try {
+    await restoreChatRequestRetryEntry(entry);
+  } catch (error) {
+    chatRequestDispatchBlocked = true;
+    refreshChatControls();
+    appendMessage(
+      "error",
+      `The retained chat identity could not be restored safely. ${error.message}`,
+    );
+    return;
+  }
+
   elements.messageInput.value = entry.message;
   chatRequestDispatchBlocked = false;
   refreshChatControls();
@@ -511,6 +545,66 @@ async function reconcilePendingChatRequest() {
       ? "A prior message is still being reconciled. Retrying it will reuse the same request identity and cannot automatically redispatch an outcome-unknown provider attempt."
       : "A prior message did not reach durable admission. Retrying it will reuse the same request identity.",
   );
+}
+
+function configureChatRequestStorageScope() {
+  if (!/^[0-9a-f]{64}$/.test(chatRequestScope)) {
+    throw chatRequestError(
+      "Durable, cross-tab browser storage is unavailable.",
+      "storage-unavailable",
+    );
+  }
+
+  chatRequestStorageKey = `${chatRequestStorageKeyPrefix}.${chatRequestScope}`;
+  chatRequestStorageLockName = `${chatRequestStorageKeyPrefix}.${chatRequestScope}`;
+  chatRequestRetryEntry = null;
+}
+
+function getChatRequestRetryEntry() {
+  return chatRequestRetryEntry?.scope === chatRequestScope
+    ? chatRequestRetryEntry.entry
+    : null;
+}
+
+function retainChatRequestRetryEntry(entry) {
+  chatRequestRetryEntry = {
+    scope: chatRequestScope,
+    entry: { requestId: entry.requestId, message: entry.message },
+  };
+}
+
+function clearChatRequestRetryEntry(entry) {
+  const retryEntry = getChatRequestRetryEntry();
+  if (
+    retryEntry?.requestId === entry.requestId &&
+    retryEntry.message === entry.message
+  ) {
+    chatRequestRetryEntry = null;
+  }
+}
+
+async function restoreChatRequestRetryEntry(entry) {
+  await withChatRequestRegistry((registry) => {
+    const current = registry.entries[0];
+    if (!current) {
+      return {
+        ...registry,
+        entries: [{ requestId: entry.requestId, message: entry.message }],
+      };
+    }
+
+    if (
+      current.requestId === entry.requestId &&
+      current.message === entry.message
+    ) {
+      return registry;
+    }
+
+    throw chatRequestError(
+      "A different chat identity is already retained in this workspace scope.",
+      "pending-conflict",
+    );
+  });
 }
 
 async function hydrateCurrentTranscript() {
@@ -1451,6 +1545,8 @@ elements.messageForm.addEventListener("submit", async (event) => {
     ) {
       failChatRequestStorage(error);
       appendMessage("error", chatRequestStorageError);
+    } else if (error.chatRequestCode === "reconciliation-required") {
+      await reconcilePendingChatRequest();
     } else {
       appendMessage("error", error.message);
     }
@@ -1496,6 +1592,7 @@ elements.messageForm.addEventListener("submit", async (event) => {
 
       terminalResultReceived = true;
       await releaseChatRequest(request);
+      clearChatRequestRetryEntry(request);
     }
   } catch (error) {
     if (terminalResultReceived) {
