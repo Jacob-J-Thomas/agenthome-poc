@@ -1,6 +1,6 @@
 # Custom-loop receipt-retention contract
 
-This document defines the schema-1 contract shared by custom-loop definition mutation receipts, definition tombstones, and lifecycle-control receipts. It is an implementation contract derived from the visibility, replay, recovery, concurrency, and human-authority axioms; it is not a roadmap or a claim that filesystem cleanup and Web projection are already implemented.
+This document defines the schema-1 contract shared by custom-loop definition mutation receipts, definition tombstones, and lifecycle-control receipts. It is an implementation contract derived from the visibility, replay, recovery, concurrency, and human-authority axioms; the current filesystem implementation covers lifecycle-control receipts only and does not imply that definition/tombstone cleanup or Web projection is implemented.
 
 ## Capacity and reservation
 
@@ -18,7 +18,7 @@ Compact proof is deliberately finite. If it cannot accept every required operati
 
 ## Exact replay and expiry
 
-Exact replay is promised for 30 days from a receipt's terminal UTC timestamp. A receipt is expired when the observation time is greater than or equal to `completedAtUtc + 30 days`; equality is expired. Pending receipts have no expiry and are never cleanup candidates.
+Exact replay is promised for 30 days from a receipt's terminal UTC timestamp. A receipt is expired when the trusted `TimeProvider` observation is greater than or equal to `completedAtUtc + 30 days`; equality is expired. Caller-supplied request time and replay cutoff are conservative request bounds only: a value ahead of the trusted clock is rejected and can never accelerate expiry or cleanup ownership. Pending receipts have no expiry and are never cleanup candidates.
 
 Operation lookup has three meanings:
 
@@ -54,16 +54,21 @@ A governed cleanup request binds the artifact class, operation ID, actor, surfac
 The durable schema-1 journal advances through explicit stages:
 
 1. `IntentPersisted`: immutable candidate IDs, hashes, sizes, compact proof, and bounded cross-process owner are durable before mutation.
-2. `IntentAuditRecorded`: the governed intent is durably audited.
-3. `ProofLedgerWritten`: a canonical replacement proof ledger is atomically written and hash-verified.
-4. `ArtifactsRemoved`: each candidate is hash-revalidated and the selected raw artifacts are removed as one attributed batch.
-5. `OutcomeAuditStarted`: the single bounded outcome-audit attempt is durably marked.
-6. `Completed` or `CommittedWithAuditWarning`: completion is durable, with an explicit warning if the bounded audit attempt could not be confirmed.
+2. `IntentAuditStarted`: the one bounded intent-audit append is durably marked before it is attempted. On recovery, an exact actor/action/target/request-hash audit record from the bounded tail confirms the append; otherwise cleanup preserves raw receipts and does not repeat an uncertain append.
+3. `IntentAuditRecorded`: the governed intent is durably audited.
+4. `ProofLedgerWritten`: a canonical replacement proof ledger is atomically written and hash-verified. An exact already-durable candidate proof is idempotent recovery evidence, not new quota use. Raw removal then follows canonical candidate-ID order, and this same stage durably records the exact removed prefix count and byte sum after each deletion.
+5. `ArtifactsRemoved`: every candidate belongs to the durably attributed canonical prefix and the selected raw artifacts are confirmed removed as one immutable batch.
+6. `OutcomeAuditStarted`: the single bounded outcome-audit attempt is durably marked.
+7. `Completed` or `CommittedWithAuditWarning`: completion is durable, with an explicit warning if the bounded audit attempt could not be confirmed.
 
-`AbandonedConflict` means a candidate changed or disappeared and nothing is attributed to that batch. `Degraded` means recovery cannot advance safely; if degradation occurs after artifact removal, the journal retains the proof-ledger hash plus the full immutable candidate count and byte attribution rather than erasing committed-removal evidence. A cleanup implementation must resume from the last durable stage under a fresh bounded owner; it must not infer a later stage from missing files, repeat an uncertain audit append, or delete evidence when corruption, audit availability, ownership, or attribution is unresolved.
+`AbandonedConflict` means a candidate changed or disappeared before proof commit and nothing is attributed to that batch. `Degraded` means recovery cannot advance safely; if degradation occurs after artifact removal, the journal retains the proof-ledger hash plus the exact canonical candidate-prefix count and byte attribution rather than erasing committed-removal evidence. After proof commit, recovery may reconstruct only a contiguous missing prefix in canonical candidate-ID order, first persisting its exact count and byte sum before further cleanup; a gap, restoration contradiction, content change, or proof mismatch fails closed. A cleanup implementation must resume from the last durable stage under a fresh bounded owner; it must not infer terminal completion from arbitrary missing files, repeat an uncertain audit append, or delete evidence when corruption, audit availability, ownership, or attribution is unresolved. Once the bounded ownership window expires, normal lifecycle admission recovers or safely terminalizes the stale journal before continuing, so an abandoned cleanup owner cannot become a permanent control-plane lock.
+
+Lifecycle-control admission makes cleanup reachable without a background scheduler: when normal admission reaches its raw receipt reservation, the application issues one governed bounded cleanup request and retries the same receipt admission once only after cleanup committed. Pending and in-window receipts still fail closed at quota. Live Startup composition supplies the same durable audit log and runtime surface to both the lifecycle store and this cleanup path.
+
+The filesystem adapter treats atomic-write temporaries and per-operation owner locks as bounded internal artifacts. Under the shared mutation lease it removes only structurally recognized abandoned temporaries, reclaims orphaned inactive owner locks, and removes a completed receipt's inactive owner lock when compacting that receipt. Unrecognized files, active owner locks, and simultaneous raw-plus-compact evidence fail closed.
 
 ## Architecture boundary
 
 `Core.Common` owns dependency-free categories, budgets, exact replay policy, and quota/block reasons. `Core.Application` owns schema-1 proof, journal, posture, validation, deterministic canonical hashing/equality, and the class-specific `ICustomLoopReceiptRetentionPort` for inspection, exact/expired/unknown lookup, and bounded governed cleanup.
 
-Concrete filesystem mutation, cleanup scheduling, Startup composition, API/UI projection, and browser behavior are intentionally outside this foundation and must implement these contracts without introducing schema migration or legacy compatibility readers.
+`CustomLoopControlOperationStore` implements the lifecycle-control filesystem adapter, including trusted-time eligibility, compact proof, governed audit, canonical-prefix removal, and restart recovery. `CustomLoopLifecycleService` and `AgentRuntimeFactory` connect quota admission to that governed adapter for the live runtime. Definition-receipt and tombstone adapters, background cleanup scheduling, API/UI projection, and browser behavior remain outside this slice and must implement these contracts without introducing schema migration or legacy compatibility readers.

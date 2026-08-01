@@ -165,6 +165,7 @@ public sealed class CustomLoopReceiptRetentionContractTests
 
     [Theory]
     [InlineData(CustomLoopReceiptCleanupStage.IntentPersisted)]
+    [InlineData(CustomLoopReceiptCleanupStage.IntentAuditStarted)]
     [InlineData(CustomLoopReceiptCleanupStage.IntentAuditRecorded)]
     [InlineData(CustomLoopReceiptCleanupStage.ProofLedgerWritten)]
     [InlineData(CustomLoopReceiptCleanupStage.ArtifactsRemoved)]
@@ -198,6 +199,11 @@ public sealed class CustomLoopReceiptRetentionContractTests
         CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(degradedAfterRemoval);
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(degradedAfterRemoval with { ProofLedgerHash = null }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(degradedAfterRemoval with { RemovedArtifactCount = 1 }));
+        var partialRemoval = Journal(CustomLoopReceiptCleanupStage.ProofLedgerWritten, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, candidateCount: 2) with { RemovedArtifactCount = 1, RemovedArtifactUtf8Bytes = 100 };
+        CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(partialRemoval);
+        CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(partialRemoval with { Stage = CustomLoopReceiptCleanupStage.Degraded, Outcome = CustomLoopReceiptCleanupOutcome.Degraded });
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(partialRemoval with { RemovedArtifactUtf8Bytes = 101 }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(partialRemoval with { Stage = CustomLoopReceiptCleanupStage.IntentAuditRecorded, ProofLedgerHash = null }));
         Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal("null"u8));
         Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal("{"u8));
         Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(new byte[checked((int)CustomLoopReceiptRetentionPolicy.MaxCleanupJournalUtf8Bytes + 1)]));

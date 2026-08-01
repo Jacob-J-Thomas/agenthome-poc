@@ -4,8 +4,12 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using System.Text;
 
@@ -30,6 +34,8 @@ public sealed class CustomLoopLifecycleService
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly TimeProvider _timeProvider;
+    private readonly ICustomLoopReceiptRetentionPort? _receiptRetention;
+    private readonly string _surface;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopLifecycleService"/> type.
@@ -42,6 +48,8 @@ public sealed class CustomLoopLifecycleService
     /// <param name="auditLog">The audit log.</param>
     /// <param name="executionGate">The execution gate.</param>
     /// <param name="timeProvider">The time provider.</param>
+    /// <param name="receiptRetention">The optional governed lifecycle-control receipt retention port.</param>
+    /// <param name="surface">The canonical runtime surface attributed to retention cleanup.</param>
     public CustomLoopLifecycleService(
         ICustomLoopRunStore runStore,
         ICustomLoopControlOperationStore operationStore,
@@ -50,7 +58,9 @@ public sealed class CustomLoopLifecycleService
         ICustomLoopExecutionCancellationSignal cancellationSignal,
         IAuditLog auditLog,
         ICustomLoopWorkspaceExecutionGate executionGate,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ICustomLoopReceiptRetentionPort? receiptRetention = null,
+        string? surface = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _operationStore = operationStore ?? throw new ArgumentNullException(nameof(operationStore));
@@ -60,6 +70,12 @@ public sealed class CustomLoopLifecycleService
         _auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _receiptRetention = receiptRetention;
+        _surface = surface ?? "runtime";
+        if (!CustomLoopArtifactIdentifier.IsValid(_surface))
+        {
+            throw new ArgumentException("Lifecycle-control receipt retention requires a canonical runtime surface.", nameof(surface));
+        }
     }
 
     /// <summary>
@@ -141,9 +157,26 @@ public sealed class CustomLoopLifecycleService
             return Result(CustomLoopControlStatus.Failed, null, operationId, $"The control-operation receipt could not be started safely: {SafeExceptionClass(exception)}.");
         }
 
+        CustomLoopReceiptCleanupResult? retentionAttempt = null;
+        if (begun.Status == CustomLoopControlOperationStoreStatus.QuotaExceeded && _receiptRetention is not null)
+        {
+            (begun, retentionAttempt) = await RetryBeginAfterGovernedRetentionAsync(pending, begun, cancellationToken);
+        }
+
         if (begun.Status == CustomLoopControlOperationStoreStatus.Conflict)
         {
             return Result(CustomLoopControlStatus.Conflict, null, operationId, "The operation id is already bound to different control-request content.");
+        }
+
+        if (begun.Status == CustomLoopControlOperationStoreStatus.QuotaExceeded)
+        {
+            var status = retentionAttempt?.Status == CustomLoopReceiptCleanupStatus.OperationInProgress ? CustomLoopControlStatus.OperationInProgress : CustomLoopControlStatus.Failed;
+            return Result(status, null, operationId, RetentionFailureDetail(retentionAttempt));
+        }
+
+        if (begun.Status == CustomLoopControlOperationStoreStatus.Expired)
+        {
+            return Result(CustomLoopControlStatus.Failed, null, operationId, "The lifecycle-control operation id has an expired receipt fingerprint, so exact replay is unavailable and the identity cannot be reused for another lifecycle mutation.");
         }
 
         var operation = begun.Operation ?? pending;
@@ -628,6 +661,64 @@ public sealed class CustomLoopLifecycleService
         {
             return Result(CustomLoopControlStatus.NeedsReview, run, operation.OperationId, $"The lifecycle outcome may be durable, but its idempotency receipt failed: {SafeExceptionClass(exception)}.");
         }
+    }
+
+    private async Task<(CustomLoopControlOperationStoreResult StoreResult, CustomLoopReceiptCleanupResult? CleanupResult)> RetryBeginAfterGovernedRetentionAsync(CustomLoopControlOperation pending, CustomLoopControlOperationStoreResult quotaResult, CancellationToken cancellationToken)
+    {
+        var now = UtcNow();
+        var request = new CustomLoopReceiptCleanupRequest(
+            CustomLoopReceiptCleanupRequest.CurrentSchemaVersion,
+            CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
+            $"control-receipt-retention-{Guid.NewGuid():N}",
+            pending.Actor,
+            _surface,
+            now,
+            CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(now),
+            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
+            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes);
+        CustomLoopReceiptCleanupResult cleanup;
+        try
+        {
+            cleanup = await _receiptRetention!.CleanupAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return (quotaResult, null);
+        }
+
+        if (cleanup.Status is not (CustomLoopReceiptCleanupStatus.Pruned or CustomLoopReceiptCleanupStatus.Replayed or CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning))
+        {
+            return (quotaResult, cleanup);
+        }
+
+        try
+        {
+            return (await _operationStore.BeginAsync(pending, cancellationToken), cleanup);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return (quotaResult, cleanup);
+        }
+    }
+
+    private static string RetentionFailureDetail(CustomLoopReceiptCleanupResult? cleanup)
+    {
+        return cleanup?.Status switch
+        {
+            CustomLoopReceiptCleanupStatus.OperationInProgress => "A governed lifecycle-control receipt cleanup is inside its bounded ownership window; no run read, lifecycle mutation, cancellation signal, or provider dispatch was attempted.",
+            CustomLoopReceiptCleanupStatus.AuditUnavailable => "Expired lifecycle-control receipts were eligible, but governed retention audit integrity was unavailable; no run read, lifecycle mutation, cancellation signal, or provider dispatch was attempted.",
+            CustomLoopReceiptCleanupStatus.Corrupt or CustomLoopReceiptCleanupStatus.Degraded or CustomLoopReceiptCleanupStatus.Invalid or CustomLoopReceiptCleanupStatus.CleanupConflict => "Lifecycle-control receipt retention evidence is corrupt, ambiguous, invalid, or conflicted and requires operator review; no lifecycle side effect was attempted.",
+            CustomLoopReceiptCleanupStatus.QuotaExhausted => "Lifecycle-control compact proof capacity is exhausted, so raw receipt cleanup cannot safely free admission capacity; no lifecycle side effect was attempted.",
+            _ => "The bounded lifecycle-control receipt capacity is exhausted and no expired audited receipt could be compacted; no run read, lifecycle mutation, cancellation signal, or provider dispatch was attempted."
+        };
     }
 
     private static CustomLoopRunRecord CreateTransition(CustomLoopRunRecord run, CustomLoopRunStatus status, string eventId, string detail, DateTimeOffset now)

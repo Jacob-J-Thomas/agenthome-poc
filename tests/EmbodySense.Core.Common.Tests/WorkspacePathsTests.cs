@@ -21,6 +21,9 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-create-operations"), paths.CustomLoopDefinitionOperationsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs"), paths.LoopRunsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom"), paths.CustomLoopRunsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-retention"), paths.CustomLoopReceiptRetentionPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-retention", "lifecycle-control"), paths.CustomLoopControlReceiptCleanupPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-retention", "proof-ledger.json"), paths.CustomLoopReceiptProofLedgerPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom-trace-deletion-operations"), paths.CustomLoopTraceDeletionOperationsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "default-conversation.json"), paths.DefaultConversationLoopDefinitionPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "memory", "conversations", ".workspace-turn.lock"), paths.ConversationTurnLockPath);

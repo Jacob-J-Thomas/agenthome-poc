@@ -466,19 +466,19 @@ public static class CustomLoopReceiptRetentionContractValidator
             or CustomLoopReceiptCleanupStage.OutcomeAuditStarted
             or CustomLoopReceiptCleanupStage.Completed
             or CustomLoopReceiptCleanupStage.CommittedWithAuditWarning;
-        var expectedRemovedCount = removalCommitted ? journal.Candidates.Length : 0;
-        var expectedRemovedBytes = removalCommitted ? journal.Candidates.Sum(item => item.ArtifactUtf8Bytes) : 0;
-        var degradedRemovalIsCanonical = journal.Stage == CustomLoopReceiptCleanupStage.Degraded
-            && (journal.RemovedArtifactCount == 0 && journal.RemovedArtifactUtf8Bytes == 0
-                || journal.RemovedArtifactCount == journal.Candidates.Length && journal.RemovedArtifactUtf8Bytes == journal.Candidates.Sum(item => item.ArtifactUtf8Bytes));
-        if (!degradedRemovalIsCanonical && (journal.RemovedArtifactCount != expectedRemovedCount || journal.RemovedArtifactUtf8Bytes != expectedRemovedBytes))
+        var removalProgressAllowed = journal.Stage is CustomLoopReceiptCleanupStage.ProofLedgerWritten or CustomLoopReceiptCleanupStage.Degraded;
+        var expectedRemovedCount = removalCommitted ? journal.Candidates.Length : removalProgressAllowed ? journal.RemovedArtifactCount : 0;
+        var canonicalCandidates = journal.Candidates.OrderBy(item => item.ArtifactId, StringComparer.Ordinal).ToArray();
+        var validProgressCount = expectedRemovedCount >= 0 && expectedRemovedCount <= canonicalCandidates.Length;
+        var expectedRemovedBytes = validProgressCount ? canonicalCandidates.Take(expectedRemovedCount).Sum(item => item.ArtifactUtf8Bytes) : -1;
+        if (!validProgressCount || journal.RemovedArtifactCount != expectedRemovedCount || journal.RemovedArtifactUtf8Bytes != expectedRemovedBytes)
         {
-            throw new ArgumentException("Cleanup journal removal accounting does not match its durable stage and immutable candidates.", nameof(journal));
+            throw new ArgumentException("Cleanup journal removal accounting must equal the canonical immutable-candidate prefix allowed by its durable stage.", nameof(journal));
         }
 
         var validOutcome = journal.Stage switch
         {
-            CustomLoopReceiptCleanupStage.IntentPersisted or CustomLoopReceiptCleanupStage.IntentAuditRecorded or CustomLoopReceiptCleanupStage.ProofLedgerWritten or CustomLoopReceiptCleanupStage.ArtifactsRemoved or CustomLoopReceiptCleanupStage.OutcomeAuditStarted => journal.Outcome == CustomLoopReceiptCleanupOutcome.Unknown,
+            CustomLoopReceiptCleanupStage.IntentPersisted or CustomLoopReceiptCleanupStage.IntentAuditStarted or CustomLoopReceiptCleanupStage.IntentAuditRecorded or CustomLoopReceiptCleanupStage.ProofLedgerWritten or CustomLoopReceiptCleanupStage.ArtifactsRemoved or CustomLoopReceiptCleanupStage.OutcomeAuditStarted => journal.Outcome == CustomLoopReceiptCleanupOutcome.Unknown,
             CustomLoopReceiptCleanupStage.Completed => journal.Outcome == (journal.Candidates.Length == 0 ? CustomLoopReceiptCleanupOutcome.NothingEligible : CustomLoopReceiptCleanupOutcome.Succeeded),
             CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable && journal.Candidates.Length > 0,
             CustomLoopReceiptCleanupStage.AbandonedConflict => journal.Outcome == CustomLoopReceiptCleanupOutcome.Conflict,

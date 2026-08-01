@@ -270,7 +270,7 @@ public sealed class AgentRuntimeFactory
             var customDefinitionStore = new CustomLoopDefinitionStore(paths);
             var customInvocationOperations = new CustomLoopInvocationOperationStore(paths);
             var customInvocationReceiptRetention = new CustomLoopInvocationReceiptRetentionService(customInvocationOperations, auditLog);
-            var customControlOperations = new CustomLoopControlOperationStore(paths);
+            var customControlOperations = new CustomLoopControlOperationStore(paths, auditLog);
             var customToolAuthority = new CustomLoopToolAuthorityProvider(loopDefinitionStore);
             var customToolEvidence = new CustomLoopRunToolEvidenceSink(customRunStore);
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority);
@@ -278,7 +278,7 @@ public sealed class AgentRuntimeFactory
             var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
             var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(effectiveOptions, _approvalPrompt, customToolAuthority, customToolEvidence);
             var customRunner = new CustomLoopOrderedRunner(customRunStore, new CustomLoopContextResolver(), customInferenceExecutor, customPublisher, auditLog, customToolAuthority, attemptCancellationBroker: customExecutionGate);
-            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, customRunner, customInferenceExecutor, customRunner, auditLog, customExecutionGate);
+            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, customRunner, customInferenceExecutor, customRunner, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,

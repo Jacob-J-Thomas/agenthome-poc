@@ -174,6 +174,24 @@ public sealed class WorkspacePaths
     public string CustomLoopControlOperationsPath => Path.Combine(LoopRunsPath, "custom-control-operations");
 
     /// <summary>
+    /// Gets the shared custom-loop receipt-retention path.
+    /// </summary>
+    /// <value>The path that owns the schema-1 proof ledger and class-specific cleanup journals.</value>
+    public string CustomLoopReceiptRetentionPath => Path.Combine(LoopsPath, "receipt-retention");
+
+    /// <summary>
+    /// Gets the lifecycle-control receipt cleanup journal path.
+    /// </summary>
+    /// <value>The path that owns the one active lifecycle-control cleanup journal.</value>
+    public string CustomLoopControlReceiptCleanupPath => Path.Combine(CustomLoopReceiptRetentionPath, "lifecycle-control");
+
+    /// <summary>
+    /// Gets the shared custom-loop receipt compact proof-ledger path.
+    /// </summary>
+    /// <value>The path for the canonical schema-1 compact proof ledger.</value>
+    public string CustomLoopReceiptProofLedgerPath => Path.Combine(CustomLoopReceiptRetentionPath, "proof-ledger.json");
+
+    /// <summary>
     /// Gets the custom loop invocation operations path.
     /// </summary>
     /// <value>The custom loop invocation operations path.</value>

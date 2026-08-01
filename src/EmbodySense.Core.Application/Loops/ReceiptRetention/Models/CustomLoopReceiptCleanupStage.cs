@@ -16,12 +16,17 @@ public enum CustomLoopReceiptCleanupStage
     IntentPersisted,
 
     /// <summary>
+    /// The bounded cleanup intent-audit append was durably started but cannot yet be treated as confirmed.
+    /// </summary>
+    IntentAuditStarted,
+
+    /// <summary>
     /// The cleanup intent audit is durably recorded.
     /// </summary>
     IntentAuditRecorded,
 
     /// <summary>
-    /// The replacement compact proof ledger is durably written and verified.
+    /// The replacement compact proof ledger is durable; removal fields track its exact canonical candidate prefix.
     /// </summary>
     ProofLedgerWritten,
 
