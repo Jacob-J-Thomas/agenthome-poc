@@ -257,6 +257,18 @@ public sealed class WorkspacePaths
     /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
     public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
 
+    /// <summary>Gets the governed authority-profile persistence directory.</summary>
+    public string AuthorityProfilesPath => Path.Combine(AgentPath, "authority-profiles");
+
+    /// <summary>Gets the current canonical authority-profile artifact path.</summary>
+    public string AuthorityProfilesDocumentPath => Path.Combine(AuthorityProfilesPath, "profiles.json");
+
+    /// <summary>Gets the independently proved fallback authority-profile artifact path.</summary>
+    public string AuthorityProfilesProofPath => Path.Combine(AuthorityProfilesPath, "profiles.proved.json");
+
+    /// <summary>Gets the cross-process authority-profile mutation lock path.</summary>
+    public string AuthorityProfilesLockPath => Path.Combine(AuthorityProfilesPath, ".profiles.lock");
+
     /// <summary>
     /// Gets the permissions path.
     /// </summary>
