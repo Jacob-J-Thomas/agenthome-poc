@@ -5,5 +5,4 @@ public sealed record CredentialUseRequest(
     CredentialCapabilityBinding Binding,
     CredentialContractHash BindingHash,
     CredentialScope RequestedScope,
-    CredentialAuthorityProof AuthorityProof,
-    DateTimeOffset RequestedAtUtc);
+    CredentialAuthorityProof AuthorityProof);

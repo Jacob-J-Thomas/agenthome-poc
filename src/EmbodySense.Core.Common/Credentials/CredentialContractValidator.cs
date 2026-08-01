@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Credentials.Models;
 
@@ -45,6 +46,7 @@ public static class CredentialContractValidator
         RequireToken(scope.WorkspaceId, "$.workspaceId", required: true, errors);
         RequireToken(scope.RoleId, "$.roleId", required: false, errors);
         RequireToken(scope.LoopId, "$.loopId", required: false, errors);
+        Require(scope.LoopId is null || scope.RoleId is not null, CredentialContractErrorCode.AmbiguousLoopScope, "$.loopId", errors);
         Require(scope.LoopRevision is null || scope.LoopRevision >= 0 && scope.LoopId is not null, CredentialContractErrorCode.InvalidLoopRevision, "$.loopRevision", errors);
         RequireToken(scope.NodeId, "$.nodeId", required: false, errors);
         Require(scope.NodeId is null || scope.LoopId is not null, CredentialContractErrorCode.AmbiguousNodeScope, "$.nodeId", errors);
@@ -128,8 +130,8 @@ public static class CredentialContractValidator
         return CredentialContractValidationResult.FromErrors(errors);
     }
 
-    /// <summary>Validates exact binding, proof, scope, and time relationships before trusted verification.</summary>
-    public static CredentialContractValidationResult Validate(CredentialUseRequest? request)
+    /// <summary>Validates exact binding, proof, scope, and time relationships at verifier-observed trusted UTC.</summary>
+    public static CredentialContractValidationResult Validate(CredentialUseRequest? request, DateTimeOffset observedAtUtc)
     {
         var errors = new List<CredentialContractError>();
         if (request is null)
@@ -141,7 +143,7 @@ public static class CredentialContractValidator
         Merge(Validate(request.Binding), "$.binding", errors);
         Merge(Validate(request.RequestedScope), "$.requestedScope", errors);
         Merge(Validate(request.AuthorityProof), "$.authorityProof", errors);
-        Require(CredentialContractText.IsUtc(request.RequestedAtUtc), CredentialContractErrorCode.InvalidTimestamp, "$.requestedAtUtc", errors);
+        Require(CredentialContractText.IsUtc(observedAtUtc), CredentialContractErrorCode.InvalidTimestamp, "$.observedAtUtc", errors);
         if (request.Binding is not null && request.BindingHash is not null && request.AuthorityProof is not null && CredentialContractJson.TryHash(request.Binding, out var bindingHash, out _))
         {
             Require(bindingHash!.FixedTimeEquals(request.BindingHash), CredentialContractErrorCode.BindingHashMismatch, "$.bindingHash", errors);
@@ -154,8 +156,8 @@ public static class CredentialContractValidator
 
         Require(request.Binding?.ReferenceId is not null && request.AuthorityProof?.ReferenceId is not null && request.Binding.ReferenceId.Equals(request.AuthorityProof.ReferenceId), CredentialContractErrorCode.ProofReferenceMismatch, "$.authorityProof.referenceId", errors);
         Require(request.Binding?.Scope is not null && request.AuthorityProof?.GrantedScope is not null && request.RequestedScope is not null && CredentialScopeRules.IsNarrowerThanOrEqual(request.RequestedScope, request.Binding.Scope) && CredentialScopeRules.IsNarrowerThanOrEqual(request.RequestedScope, request.AuthorityProof.GrantedScope), CredentialContractErrorCode.CredentialScopeMismatch, "$.requestedScope", errors);
-        Require(request.AuthorityProof is not null && request.RequestedAtUtc >= request.AuthorityProof.IssuedAtUtc && request.RequestedAtUtc < request.AuthorityProof.ExpiresAtUtc, CredentialContractErrorCode.CredentialProofExpired, "$.requestedAtUtc", errors);
-        Require(request.RequestedScope is not null && (request.RequestedScope.NotBeforeUtc is null || request.RequestedAtUtc >= request.RequestedScope.NotBeforeUtc) && (request.RequestedScope.NotAfterUtc is null || request.RequestedAtUtc < request.RequestedScope.NotAfterUtc), CredentialContractErrorCode.CredentialRequestedOutsideScope, "$.requestedAtUtc", errors);
+        Require(request.AuthorityProof is not null && observedAtUtc >= request.AuthorityProof.IssuedAtUtc && observedAtUtc < request.AuthorityProof.ExpiresAtUtc, CredentialContractErrorCode.CredentialProofExpired, "$.observedAtUtc", errors);
+        Require(request.RequestedScope is not null && (request.RequestedScope.NotBeforeUtc is null || observedAtUtc >= request.RequestedScope.NotBeforeUtc) && (request.RequestedScope.NotAfterUtc is null || observedAtUtc < request.RequestedScope.NotAfterUtc), CredentialContractErrorCode.CredentialRequestedOutsideScope, "$.observedAtUtc", errors);
         return CredentialContractValidationResult.FromErrors(errors);
     }
 
@@ -177,7 +179,7 @@ public static class CredentialContractValidator
     private static void ValidateCapability(Capabilities.CapabilityDescriptorIdentity? capability, CapabilityImplementationIdentity? implementation, List<CredentialContractError> errors, string path)
     {
         Require(capability?.Id is not null && capability.Version is not null && capability.Hash is not null, CredentialContractErrorCode.InvalidCapabilityIdentity, path, errors);
-        Require(implementation?.ProviderId is not null && CredentialContractText.IsToken(implementation.ImplementationId), CredentialContractErrorCode.InvalidCapabilityImplementation, path + ".implementation", errors);
+        Require(implementation is { ProviderId: not null } && CapabilityIdentifierRules.IsProviderId(implementation.ProviderId.Value) && CapabilityIdentifierRules.IsPath(implementation.ImplementationId, CapabilityContractLimits.MaxImplementationIdCharacters), CredentialContractErrorCode.InvalidCapabilityImplementation, path + ".implementation", errors);
     }
 
     private static void RequireSchema(int schemaVersion, List<CredentialContractError> errors) => Require(schemaVersion == 1, CredentialContractErrorCode.UnsupportedSchemaVersion, "$.schemaVersion", errors);

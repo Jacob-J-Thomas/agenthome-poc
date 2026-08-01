@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
+using EmbodySense.Core.Common.Capabilities.Models;
 
 namespace EmbodySense.Core.Common.Tests;
 
@@ -41,16 +42,21 @@ public sealed class CredentialScopeContractTests
     public void Missing_ambiguous_and_nonoverlapping_scope_proof_fails_closed()
     {
         var missingWorkspace = CredentialContractTestData.Scope() with { WorkspaceId = null };
+        var orphanLoop = CredentialContractTestData.Scope() with { RoleId = null };
         var orphanRevision = CredentialContractTestData.Scope() with { LoopId = null, LoopRevision = 4 };
         var orphanTarget = CredentialContractTestData.Scope() with { Service = null };
         var missingImplementation = CredentialContractTestData.Scope() with { Implementation = null };
+        var noncanonicalImplementation = CredentialContractTestData.Scope();
+        noncanonicalImplementation = noncanonicalImplementation with { Implementation = new CapabilityImplementationIdentity(noncanonicalImplementation.Implementation!.ProviderId, "http//call") };
         var future = CredentialContractTestData.Scope(notBefore: CredentialContractTestData.Now.AddHours(2), notAfter: CredentialContractTestData.Now.AddHours(3));
         var past = CredentialContractTestData.Scope(notBefore: CredentialContractTestData.Now.AddHours(-3), notAfter: CredentialContractTestData.Now.AddHours(-2));
 
         Assert.False(CredentialContractValidator.Validate(missingWorkspace).IsValid);
+        Assert.Contains(CredentialContractValidator.Validate(orphanLoop).Errors, error => error.Code == CredentialContractErrorCode.AmbiguousLoopScope);
         Assert.False(CredentialContractValidator.Validate(orphanRevision).IsValid);
         Assert.False(CredentialContractValidator.Validate(orphanTarget).IsValid);
         Assert.False(CredentialContractValidator.Validate(missingImplementation).IsValid);
+        Assert.Contains(CredentialContractValidator.Validate(noncanonicalImplementation).Errors, error => error.Code == CredentialContractErrorCode.InvalidCapabilityImplementation);
         Assert.False(CredentialScopeRules.TryIntersect(future, past, out _, out var error));
         Assert.Equal(CredentialContractErrorCode.CredentialScopeTimeConflict, error?.Code);
     }

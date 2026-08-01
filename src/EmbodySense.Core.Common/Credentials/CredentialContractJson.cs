@@ -368,7 +368,7 @@ public static class CredentialContractJson
     {
         identity = null;
         implementation = null;
-        if (dto is null || !CapabilityId.TryParse(dto.Id, out var id, out _) || !CapabilityVersion.TryParse(dto.Version, out var version, out _) || !CapabilityDescriptorHash.TryParse(dto.DescriptorHash, out var hash, out _) || !CapabilityProviderId.TryParse(dto.ProviderId, out var provider, out _) || !CredentialContractText.IsToken(dto.ImplementationId))
+        if (dto is null || !CapabilityId.TryParse(dto.Id, out var id, out _) || !CapabilityVersion.TryParse(dto.Version, out var version, out _) || !CapabilityDescriptorHash.TryParse(dto.DescriptorHash, out var hash, out _) || !CapabilityProviderId.TryParse(dto.ProviderId, out var provider, out _) || !CapabilityIdentifierRules.IsPath(dto.ImplementationId, CapabilityContractLimits.MaxImplementationIdCharacters))
         {
             return false;
         }

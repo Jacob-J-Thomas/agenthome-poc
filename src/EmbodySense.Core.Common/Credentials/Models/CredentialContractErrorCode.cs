@@ -37,6 +37,8 @@ public enum CredentialContractErrorCode
     InvalidScopeDimension,
     /// <summary>A loop revision is invalid or ambiguous.</summary>
     InvalidLoopRevision,
+    /// <summary>A loop scope lacks its required contextual role.</summary>
+    AmbiguousLoopScope,
     /// <summary>A node lacks a containing loop.</summary>
     AmbiguousNodeScope,
     /// <summary>Capability identity and implementation are incomplete.</summary>

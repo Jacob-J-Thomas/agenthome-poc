@@ -106,12 +106,13 @@ public sealed class CredentialPortContractTests
         var placeholder = CredentialContractHash.Compute("placeholder");
         var unsigned = new CredentialAuthorityProof(1, Id("proof-1"), binding.ReferenceId, bindingHash!, binding.Scope, "user-1", Id("run-1"), 7, _credentialNow.AddMinutes(-5), _credentialNow.AddMinutes(5), CredentialProvider("org.embodysense.authority"), placeholder);
         var proof = unsigned with { Authenticator = Sign(unsigned, signingKey) };
-        var request = new CredentialUseRequest(binding, bindingHash!, binding.Scope, proof, _credentialNow);
-        var verifier = new SecureFakeAuthorityVerifier(signingKey);
+        var request = new CredentialUseRequest(binding, bindingHash!, binding.Scope, proof);
+        var verifier = new SecureFakeAuthorityVerifier(signingKey, new FixedTimeProvider(_credentialNow));
 
         Assert.True((await verifier.VerifyAsync(request, CancellationToken.None)).Accepted);
         Assert.False((await verifier.VerifyAsync(request with { AuthorityProof = proof with { AuthorityRevision = 8 } }, CancellationToken.None)).Accepted);
         Assert.False((await verifier.VerifyAsync(request with { AuthorityProof = proof with { Authenticator = placeholder } }, CancellationToken.None)).Accepted);
+        Assert.False((await new SecureFakeAuthorityVerifier(signingKey, new FixedTimeProvider(proof.ExpiresAtUtc)).VerifyAsync(request, CancellationToken.None)).Accepted);
     }
 
     private static CredentialProviderMutationRequest Mutation() => new("workspace-1", Reference(), Provider(), Id("operation-create"), 16);
@@ -173,13 +174,14 @@ public sealed class CredentialPortContractTests
         }
     }
 
-    private sealed class SecureFakeAuthorityVerifier(byte[] signingKey) : ICredentialAuthorityProofVerifier
+    private sealed class SecureFakeAuthorityVerifier(byte[] signingKey, TimeProvider timeProvider) : ICredentialAuthorityProofVerifier
     {
         private readonly byte[] _signingKey = signingKey.ToArray();
+        private readonly TimeProvider _timeProvider = timeProvider;
 
         public ValueTask<CredentialAuthorityVerificationResult> VerifyAsync(CredentialUseRequest request, CancellationToken cancellationToken)
         {
-            if (cancellationToken.IsCancellationRequested || !CredentialContractValidator.Validate(request).IsValid)
+            if (cancellationToken.IsCancellationRequested || !CredentialContractValidator.Validate(request, _timeProvider.GetUtcNow()).IsValid)
             {
                 return ValueTask.FromResult(CredentialAuthorityVerificationResult.Reject(CredentialFailure.FromCode(CredentialFailureCode.Unauthorized)));
             }
@@ -188,6 +190,11 @@ public sealed class CredentialPortContractTests
             var result = expected.FixedTimeEquals(request.AuthorityProof.Authenticator) ? CredentialAuthorityVerificationResult.Accept() : CredentialAuthorityVerificationResult.Reject(CredentialFailure.FromCode(CredentialFailureCode.Unauthorized));
             return ValueTask.FromResult(result);
         }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => value;
     }
 
     private sealed class SecureFakeProvider : ICredentialValueProvider

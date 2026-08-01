@@ -57,35 +57,34 @@ public sealed class CredentialBindingProofEvidenceTests
         var binding = CredentialContractTestData.Binding();
         Assert.True(CredentialContractJson.TryHash(binding, out var hash, out _));
         var proof = CredentialContractTestData.Proof(binding);
-        var valid = new CredentialUseRequest(binding, hash!, binding.Scope, proof, CredentialContractTestData.Now);
-        Assert.True(CredentialContractValidator.Validate(valid).IsValid);
+        var valid = new CredentialUseRequest(binding, hash!, binding.Scope, proof);
+        Assert.True(CredentialContractValidator.Validate(valid, CredentialContractTestData.Now).IsValid);
 
         var forgedHash = valid with { BindingHash = CredentialContractHash.Compute("forged") };
         var forgedReference = valid with { AuthorityProof = proof with { ReferenceId = CredentialContractTestData.ReferenceId("credential-2") } };
         var widenedScope = valid with { RequestedScope = binding.Scope with { RoleId = null } };
-        var expired = valid with { RequestedAtUtc = proof.ExpiresAtUtc };
         var longProof = proof with { ExpiresAtUtc = proof.IssuedAtUtc + CredentialContractLimits.MaxProofLifetime + TimeSpan.FromTicks(1) };
 
-        Assert.Contains(CredentialContractValidator.Validate(forgedHash).Errors, error => error.Code == CredentialContractErrorCode.BindingHashMismatch);
-        Assert.Contains(CredentialContractValidator.Validate(forgedReference).Errors, error => error.Code == CredentialContractErrorCode.ProofReferenceMismatch);
-        Assert.Contains(CredentialContractValidator.Validate(widenedScope).Errors, error => error.Code == CredentialContractErrorCode.CredentialScopeMismatch);
-        Assert.Contains(CredentialContractValidator.Validate(expired).Errors, error => error.Code == CredentialContractErrorCode.CredentialProofExpired);
+        Assert.Contains(CredentialContractValidator.Validate(forgedHash, CredentialContractTestData.Now).Errors, error => error.Code == CredentialContractErrorCode.BindingHashMismatch);
+        Assert.Contains(CredentialContractValidator.Validate(forgedReference, CredentialContractTestData.Now).Errors, error => error.Code == CredentialContractErrorCode.ProofReferenceMismatch);
+        Assert.Contains(CredentialContractValidator.Validate(widenedScope, CredentialContractTestData.Now).Errors, error => error.Code == CredentialContractErrorCode.CredentialScopeMismatch);
+        Assert.Contains(CredentialContractValidator.Validate(valid, proof.ExpiresAtUtc).Errors, error => error.Code == CredentialContractErrorCode.CredentialProofExpired);
         Assert.Contains(CredentialContractValidator.Validate(longProof).Errors, error => error.Code == CredentialContractErrorCode.InvalidProofLifetime);
     }
 
     [Fact]
-    public void Request_time_must_be_inside_the_requested_narrowed_scope()
+    public void Verifier_observed_time_must_be_inside_the_requested_narrowed_scope()
     {
         var broadScope = CredentialContractTestData.Scope(notBefore: CredentialContractTestData.Now.AddHours(-2), notAfter: CredentialContractTestData.Now.AddHours(2));
         var binding = CredentialContractTestData.Binding(broadScope);
         Assert.True(CredentialContractJson.TryHash(binding, out var bindingHash, out _));
         var proof = CredentialContractTestData.Proof(binding);
         var futureScope = broadScope with { NotBeforeUtc = CredentialContractTestData.Now.AddMinutes(30), NotAfterUtc = CredentialContractTestData.Now.AddHours(1) };
-        var beforeWindow = new CredentialUseRequest(binding, bindingHash!, futureScope, proof, CredentialContractTestData.Now);
-        var afterWindow = beforeWindow with { RequestedScope = broadScope with { NotBeforeUtc = CredentialContractTestData.Now.AddHours(-1), NotAfterUtc = CredentialContractTestData.Now }, RequestedAtUtc = CredentialContractTestData.Now };
+        var beforeWindow = new CredentialUseRequest(binding, bindingHash!, futureScope, proof);
+        var afterWindow = beforeWindow with { RequestedScope = broadScope with { NotBeforeUtc = CredentialContractTestData.Now.AddHours(-1), NotAfterUtc = CredentialContractTestData.Now } };
 
-        Assert.Contains(CredentialContractValidator.Validate(beforeWindow).Errors, error => error.Code == CredentialContractErrorCode.CredentialRequestedOutsideScope);
-        Assert.Contains(CredentialContractValidator.Validate(afterWindow).Errors, error => error.Code == CredentialContractErrorCode.CredentialRequestedOutsideScope);
+        Assert.Contains(CredentialContractValidator.Validate(beforeWindow, CredentialContractTestData.Now).Errors, error => error.Code == CredentialContractErrorCode.CredentialRequestedOutsideScope);
+        Assert.Contains(CredentialContractValidator.Validate(afterWindow, CredentialContractTestData.Now).Errors, error => error.Code == CredentialContractErrorCode.CredentialRequestedOutsideScope);
     }
 
     [Fact]
@@ -95,7 +94,7 @@ public sealed class CredentialBindingProofEvidenceTests
         var proof = CredentialContractTestData.Proof(binding);
         var evidence = CredentialContractTestData.Evidence(binding);
         Assert.True(CredentialContractJson.TryHash(binding, out var bindingHash, out _));
-        var request = new CredentialUseRequest(binding, bindingHash!, binding.Scope, proof, CredentialContractTestData.Now);
+        var request = new CredentialUseRequest(binding, bindingHash!, binding.Scope, proof);
         var malformed = new Func<CredentialContractValidationResult>[]
         {
             () => CredentialContractValidator.Validate(binding with { ReferenceId = null! }),
@@ -104,10 +103,10 @@ public sealed class CredentialBindingProofEvidenceTests
             () => CredentialContractValidator.Validate(proof with { ReferenceId = null! }),
             () => CredentialContractValidator.Validate(proof with { GrantedScope = null! }),
             () => CredentialContractValidator.Validate(evidence with { UsedScope = null! }),
-            () => CredentialContractValidator.Validate(request with { Binding = null! }),
-            () => CredentialContractValidator.Validate(request with { BindingHash = null! }),
-            () => CredentialContractValidator.Validate(request with { RequestedScope = null! }),
-            () => CredentialContractValidator.Validate(request with { AuthorityProof = null! })
+            () => CredentialContractValidator.Validate(request with { Binding = null! }, CredentialContractTestData.Now),
+            () => CredentialContractValidator.Validate(request with { BindingHash = null! }, CredentialContractTestData.Now),
+            () => CredentialContractValidator.Validate(request with { RequestedScope = null! }, CredentialContractTestData.Now),
+            () => CredentialContractValidator.Validate(request with { AuthorityProof = null! }, CredentialContractTestData.Now)
         };
 
         foreach (var validate in malformed)
@@ -187,6 +186,7 @@ public sealed class CredentialBindingProofEvidenceTests
         Assert.True(CredentialContractJson.TrySerialize(binding, out var json, out _));
         Assert.False(CredentialContractJson.TryDeserializeBinding(json!.Replace("\"workspace-1\"", "\"workspace\\u002d1\"", StringComparison.Ordinal), out _, out var noncanonical));
         Assert.Equal(CredentialContractErrorCode.NoncanonicalCredentialJson, Assert.Single(noncanonical.Errors).Code);
+        Assert.False(CredentialContractJson.TryDeserializeBinding(json.Replace(binding.Implementation.ImplementationId, "http//call", StringComparison.Ordinal), out _, out _));
         Assert.False(CredentialContractJson.TryDeserializeBinding("{", out _, out _));
         Assert.False(CredentialContractJson.TryDeserializeBinding(new string('x', CredentialContractLimits.MaxCanonicalJsonCharacters + 1), out _, out _));
         Assert.False(CredentialContractJson.TryDeserializeBinding(json.Replace("workspace-1", "workspace\u202e", StringComparison.Ordinal), out _, out _));
