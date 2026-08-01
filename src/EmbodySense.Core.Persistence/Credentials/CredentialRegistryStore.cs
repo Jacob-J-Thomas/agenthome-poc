@@ -403,7 +403,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
 
         if (mutation.Kind == CredentialRegistryMutationKind.Register)
         {
-            if (mutation.Reference is null || mutation.Binding is null || mutation.ConsentReference is null || mutation.Health is null || mutation.ProviderLocator is null || !mutation.Reference.Id.Equals(mutation.ReferenceId) || !mutation.Binding.ReferenceId.Equals(mutation.ReferenceId) || !string.Equals(mutation.Reference.ProviderId.Value, mutation.Binding.Implementation.ProviderId.Value, StringComparison.Ordinal) || !CredentialContractJson.TrySerialize(mutation.Reference, out _, out _) || !CredentialContractJson.TrySerialize(mutation.Binding, out _, out _))
+            if (mutation.Reference is null || mutation.Binding is null || mutation.ConsentReference is null || mutation.Health is null || mutation.ProviderLocator is null || !Enum.IsDefined(mutation.Health.Value) || !mutation.Reference.Id.Equals(mutation.ReferenceId) || !mutation.Binding.ReferenceId.Equals(mutation.ReferenceId) || !string.Equals(mutation.Reference.ProviderId.Value, mutation.Binding.Implementation.ProviderId.Value, StringComparison.Ordinal) || !CredentialContractJson.TrySerialize(mutation.Reference, out _, out _) || !CredentialContractJson.TrySerialize(mutation.Binding, out _, out _))
             {
                 return false;
             }

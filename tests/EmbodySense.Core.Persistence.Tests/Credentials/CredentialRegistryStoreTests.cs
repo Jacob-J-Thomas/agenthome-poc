@@ -431,6 +431,31 @@ public sealed class CredentialRegistryStoreTests
         Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
     }
 
+    [Fact]
+    public async Task Undefined_registration_health_is_rejected_without_poisoning_later_valid_registration()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+
+        var invalid = await store.MutateAsync(Register(0) with { Health = (CredentialProviderHealthStatus)999 });
+
+        Assert.Equal(CredentialRegistryMutationStatus.Invalid, invalid.Status);
+        Assert.Equal(CredentialFailureCode.InvalidRequest, invalid.Failure!.Code);
+        Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
+        Assert.False(File.Exists(paths.CredentialRegistryPrivateDocumentPath));
+        Assert.False(File.Exists(paths.CredentialRegistryProofPath));
+        Assert.False(File.Exists(paths.CredentialRegistryPrivateProofPath));
+
+        var valid = await store.MutateAsync(Register(0));
+
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, valid.Status);
+        var read = await store.ReadAsync();
+        Assert.True(read.Succeeded);
+        Assert.Equal(1, read.RegistryRevision);
+        Assert.Equal(CredentialProviderHealthStatus.Available, Assert.Single(read.Entries).Health);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
