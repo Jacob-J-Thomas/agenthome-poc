@@ -508,7 +508,33 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
-    public async Task GenerateAsync_conservatively_reports_dispatch_when_the_turn_write_fails()
+    public async Task GenerateAsync_marks_durable_dispatch_when_the_turn_transport_write_fails()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteFailure = line => line.Contains("\"method\":\"turn/start\"", StringComparison.Ordinal) ? new IOException("turn write failed") : null
+        };
+        var durableDispatchStarted = false;
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ =>
+            {
+                durableDispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.Equal("turn write failed", exception.Message);
+        Assert.True(durableDispatchStarted);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_preserves_legacy_dispatch_notification_when_the_turn_write_fails()
     {
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
@@ -523,6 +549,57 @@ public sealed class CodexAppServerInferenceTests
 
         Assert.Equal("turn write failed", exception.Message);
         Assert.True(providerRequestStarted);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_does_not_mark_durable_dispatch_when_cancelled_before_the_turn_transport_write()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            AfterWrite = line =>
+            {
+                if (IsThreadStart(line))
+                {
+                    cancellation.Cancel();
+                }
+            }
+        };
+        var client = CreateClient(transport);
+        var durableDispatchStarted = false;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            cancellation.Token,
+            _ =>
+            {
+                durableDispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.False(durableDispatchStarted);
+        Assert.DoesNotContain(transport.Writes, IsTurnStart);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_does_not_write_the_turn_when_the_durable_boundary_callback_fails()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""));
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ => Task.FromException(new IOException("durable checkpoint unavailable"))));
+
+        Assert.Equal("durable checkpoint unavailable", exception.Message);
+        Assert.DoesNotContain(transport.Writes, IsTurnStart);
     }
 
     [Fact]
@@ -697,6 +774,8 @@ public sealed class CodexAppServerInferenceTests
 
         public Func<string, Exception?>? WriteFailure { get; init; }
 
+        public Action<string>? AfterWrite { get; init; }
+
         public bool Disposed { get; private set; }
 
         public ValueTask DisposeAsync()
@@ -718,6 +797,7 @@ public sealed class CodexAppServerInferenceTests
             }
 
             Writes.Add(line);
+            AfterWrite?.Invoke(line);
             return Task.CompletedTask;
         }
     }

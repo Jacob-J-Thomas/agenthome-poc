@@ -245,9 +245,9 @@ public sealed class LoopAuthoringFacade
     {
         var graph = definition.Graph;
         var executionBlocker = DefaultConversationLoopGraphContract.GetExecutionBlocker(definition);
-        var executionSemantics = executionBlocker is null ? SystemLoopExecutionSemantics.ValidatedRunnerContract : SystemLoopExecutionSemantics.Unknown;
+        var executionSemantics = executionBlocker is null ? SystemLoopExecutionSemantics.AuthorityTopologyOnly : SystemLoopExecutionSemantics.Unknown;
         var executionDetail = executionBlocker is null
-            ? "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor."
+            ? "The dedicated runner accepts this system-owned graph as its authority topology, but it does not certify the nodes and edges as an exact execution-order contract. The hard-coded transaction assembles context before durable user acceptance, publishes the user message before provider inference, then observes and publishes the assistant message; nodes are not dispatched independently by a generic graph executor."
             : $"The dedicated runner rejects this persisted graph contract: {executionBlocker}";
         return new SystemLoopDefinitionSnapshot(
             definition.SchemaVersion,
