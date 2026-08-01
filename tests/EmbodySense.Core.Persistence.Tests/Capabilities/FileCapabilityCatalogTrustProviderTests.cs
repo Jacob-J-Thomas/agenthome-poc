@@ -163,6 +163,31 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public async Task Unix_workspace_lifetime_identity_rejects_retained_anchor_when_device_and_inode_are_reused()
+    {
+        using var trustRoot = new TestWorkspace();
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+        var oldWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b3:00000004");
+        var reusedWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b4:00000004");
+        var digest = Digest("reused-unix-workspace-artifact");
+
+        Assert.NotEqual(oldWorkspaceIdentity, reusedWorkspaceIdentity);
+        await provider.InitializeAsync(oldWorkspaceIdentity, 0, digest);
+        var copiedArtifactTag = await provider.AuthenticateArtifactAsync(oldWorkspaceIdentity, 0, digest);
+
+        await Assert.ThrowsAsync<IOException>(() => provider.VerifyArtifactAsync(reusedWorkspaceIdentity, 0, digest, copiedArtifactTag));
+    }
+
+    [Fact]
+    public void Unix_workspace_lifetime_identity_changes_when_only_birth_time_changes()
+    {
+        var originalLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b3:00000004");
+        var replacementLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity("linux:00000001:00000002:0000000000000003:0000000065f1a2b4:00000004");
+
+        Assert.NotEqual(originalLifetime, replacementLifetime);
+    }
+
+    [Fact]
     public async Task Provider_retains_anchors_without_eviction_and_rejects_a_root_over_its_byte_quota()
     {
         using var trustRoot = new TestWorkspace();

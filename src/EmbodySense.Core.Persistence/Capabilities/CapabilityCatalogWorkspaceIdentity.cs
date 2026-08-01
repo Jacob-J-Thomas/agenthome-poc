@@ -16,7 +16,12 @@ public static class CapabilityCatalogWorkspaceIdentity
         return CreateFromPhysicalIdentity(session.PhysicalIdentityMaterial);
     }
 
-    internal static string CreateFromPhysicalIdentity(string physicalIdentityMaterial)
+    /// <summary>Computes the canonical workspace identity digest from opaque physical directory identity material.</summary>
+    /// <remarks>This pure mapping does not inspect a directory or establish that its input is trustworthy. Production callers source the material from a retained directory handle; the public mapping also provides a deterministic lifetime-regression seam.</remarks>
+    /// <param name="physicalIdentityMaterial">Opaque physical directory identity material, including a lifetime discriminator.</param>
+    /// <returns>The canonical workspace identity digest used to bind server-owned trust.</returns>
+    /// <exception cref="ArgumentException"><paramref name="physicalIdentityMaterial" /> is null, empty, or whitespace.</exception>
+    public static string CreateFromPhysicalIdentity(string physicalIdentityMaterial)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(physicalIdentityMaterial);
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes("embodysense-capability-workspace-physical-v1\n" + physicalIdentityMaterial));
