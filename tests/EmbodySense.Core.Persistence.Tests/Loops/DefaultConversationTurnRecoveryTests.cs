@@ -17,6 +17,7 @@ using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;

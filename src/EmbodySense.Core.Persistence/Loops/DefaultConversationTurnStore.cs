@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
 

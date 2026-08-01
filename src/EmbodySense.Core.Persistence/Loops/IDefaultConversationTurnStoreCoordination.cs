@@ -1,3 +1,5 @@
+using EmbodySense.Core.Persistence.Loops.Models;
+
 namespace EmbodySense.Core.Persistence.Loops;
 
 /// <summary>

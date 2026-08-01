@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Persistence.Loops;
+namespace EmbodySense.Core.Persistence.Loops.Models;
 
 /// <summary>
 /// Identifies the active-turn-set operation currently holding the workspace coordination lease.
