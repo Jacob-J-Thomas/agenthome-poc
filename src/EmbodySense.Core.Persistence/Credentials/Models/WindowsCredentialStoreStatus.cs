@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Persistence.Credentials;
+namespace EmbodySense.Core.Persistence.Credentials.Models;
 
 internal enum WindowsCredentialStoreStatus
 {

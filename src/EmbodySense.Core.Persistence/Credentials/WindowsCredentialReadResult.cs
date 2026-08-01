@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using EmbodySense.Core.Persistence.Credentials.Models;
 
 namespace EmbodySense.Core.Persistence.Credentials;
 

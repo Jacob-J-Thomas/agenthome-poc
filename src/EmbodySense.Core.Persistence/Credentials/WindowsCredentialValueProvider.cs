@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Credentials;
 using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
+using EmbodySense.Core.Persistence.Credentials.Models;
 
 namespace EmbodySense.Core.Persistence.Credentials;
 
@@ -15,13 +16,9 @@ public sealed class WindowsCredentialValueProvider : ICredentialValueProvider
     private readonly IWindowsCredentialStore _store;
 
     /// <summary>Creates a provider backed by the current user's Windows Credential Manager.</summary>
-    public WindowsCredentialValueProvider() : this(new WindowsCredentialStore())
+    public WindowsCredentialValueProvider()
     {
-    }
-
-    internal WindowsCredentialValueProvider(IWindowsCredentialStore store)
-    {
-        _store = store ?? throw new ArgumentNullException(nameof(store));
+        _store = new WindowsCredentialStore();
     }
 
     /// <inheritdoc />

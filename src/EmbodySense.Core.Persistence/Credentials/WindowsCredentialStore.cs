@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
 using System.Security.Cryptography;
+using EmbodySense.Core.Persistence.Credentials.Models;
 
 namespace EmbodySense.Core.Persistence.Credentials;
 
@@ -168,20 +168,4 @@ internal sealed class WindowsCredentialStore : IWindowsCredentialStore
     [DllImport("advapi32.dll")]
     private static extern void CredFree(IntPtr buffer);
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct NativeCredential
-    {
-        public int Flags;
-        public int Type;
-        [MarshalAs(UnmanagedType.LPWStr)] public string? TargetName;
-        [MarshalAs(UnmanagedType.LPWStr)] public string? Comment;
-        public FILETIME LastWritten;
-        public int CredentialBlobSize;
-        public IntPtr CredentialBlob;
-        public int Persist;
-        public int AttributeCount;
-        public IntPtr Attributes;
-        [MarshalAs(UnmanagedType.LPWStr)] public string? TargetAlias;
-        [MarshalAs(UnmanagedType.LPWStr)] public string? UserName;
-    }
 }

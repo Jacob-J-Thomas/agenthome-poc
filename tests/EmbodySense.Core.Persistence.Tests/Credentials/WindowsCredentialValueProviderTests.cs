@@ -69,7 +69,7 @@ public sealed class WindowsCredentialValueProviderTests
         var original = Encoding.UTF8.GetBytes("original-fake-canary");
         var replacement = Encoding.UTF8.GetBytes("replacement-fake-canary");
         Assert.True((await provider.CreateAsync(requests.Mutation with { ValueByteLength = original.Length }, destination => Copy(original, destination), CancellationToken.None)).Succeeded);
-        var target = CredentialProviderTarget.Derive(requests.Mutation.WorkspaceId, requests.Mutation.ReferenceId);
+        var target = SecureFakeCredentialValueProvider.DeriveTarget(requests.Mutation.WorkspaceId, requests.Mutation.ReferenceId);
         provider.Store.EnqueueWrite(provider.Store.MutateThenFail);
 
         var failed = await provider.ReplaceAsync(requests.Mutation with { ValueByteLength = replacement.Length }, destination => Copy(replacement, destination), CancellationToken.None);
@@ -91,7 +91,7 @@ public sealed class WindowsCredentialValueProviderTests
         var replacement = Encoding.UTF8.GetBytes("replacement-uncertain");
         Assert.True((await provider.CreateAsync(requests.Mutation with { ValueByteLength = original.Length }, destination => Copy(original, destination), CancellationToken.None)).Succeeded);
         provider.Store.EnqueueWrite(provider.Store.MutateThenFail);
-        provider.Store.EnqueueWrite((_, _) => WindowsCredentialStoreStatus.Unavailable);
+        provider.Store.EnqueueWrite((_, _) => ScriptedCredentialStoreStatus.Unavailable);
 
         var result = await provider.ReplaceAsync(requests.Mutation with { ValueByteLength = replacement.Length }, destination => Copy(replacement, destination), CancellationToken.None);
 
@@ -115,7 +115,7 @@ public sealed class WindowsCredentialValueProviderTests
             callbackInvoked = true;
             return 9;
         }, CancellationToken.None);
-        provider.Store.EnqueueRead(WindowsCredentialStoreStatus.Corrupt);
+        provider.Store.EnqueueRead(ScriptedCredentialStoreStatus.Corrupt);
         var corruptHealth = await provider.GetHealthAsync(requests.Use, CancellationToken.None);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
@@ -144,13 +144,13 @@ public sealed class WindowsCredentialValueProviderTests
 
         using var preserved = new SecureFakeCredentialValueProvider();
         Assert.True((await preserved.CreateAsync(requests.Mutation with { ValueByteLength = value.Length }, destination => Copy(value, destination), CancellationToken.None)).Succeeded);
-        preserved.Store.EnqueueDelete(_ => WindowsCredentialStoreStatus.Unavailable);
+        preserved.Store.EnqueueDelete(_ => ScriptedCredentialStoreStatus.Unavailable);
         var preservedResult = await preserved.DeleteAsync(requests.Delete, CancellationToken.None);
         Assert.Equal(CredentialFailureCode.Unavailable, preservedResult.Failure?.Code);
 
         using var uncertain = new SecureFakeCredentialValueProvider();
         Assert.True((await uncertain.CreateAsync(requests.Mutation with { ValueByteLength = value.Length }, destination => Copy(value, destination), CancellationToken.None)).Succeeded);
-        uncertain.Store.EnqueueRead(WindowsCredentialStoreStatus.Unavailable);
+        uncertain.Store.EnqueueRead(ScriptedCredentialStoreStatus.Unavailable);
         var uncertainResult = await uncertain.DeleteAsync(requests.Delete, CancellationToken.None);
         Assert.Equal(CredentialFailureCode.OutcomeUncertain, uncertainResult.Failure?.Code);
     }
@@ -191,7 +191,7 @@ public sealed class WindowsCredentialValueProviderTests
         var requests = Requests("workspace-canary-" + Guid.NewGuid().ToString("N"), "credential-canary-" + Guid.NewGuid().ToString("N"));
         var canaryText = "secret-value-" + Guid.NewGuid().ToString("N");
         var canary = Encoding.UTF8.GetBytes(canaryText);
-        var target = CredentialProviderTarget.Derive(requests.Mutation.WorkspaceId, requests.Mutation.ReferenceId);
+        var target = SecureFakeCredentialValueProvider.DeriveTarget(requests.Mutation.WorkspaceId, requests.Mutation.ReferenceId);
         var create = await provider.CreateAsync(requests.Mutation with { ValueByteLength = canary.Length }, destination => Copy(canary, destination), CancellationToken.None);
         var callbackFailure = await provider.UseAsync(requests.Use, new ThrowingCredentialConsumer(), CancellationToken.None);
         var projections = string.Join('\n', create, callbackFailure, JsonSerializer.Serialize(create), JsonSerializer.Serialize(callbackFailure), Environment.CommandLine, string.Join('\n', Environment.GetEnvironmentVariables().Values.Cast<object>()));

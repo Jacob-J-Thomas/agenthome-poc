@@ -1,14 +1,13 @@
 using System.Security.Cryptography;
-using EmbodySense.Core.Persistence.Credentials;
 
 namespace EmbodySense.Core.Persistence.Tests.Credentials;
 
-internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, IDisposable
+internal sealed class ScriptedWindowsCredentialStore : IDisposable
 {
     private readonly Dictionary<string, byte[]> _values = new(StringComparer.Ordinal);
-    private readonly Queue<Func<string, byte[], WindowsCredentialStoreStatus>> _writes = new();
-    private readonly Queue<Func<string, WindowsCredentialStoreStatus>> _deletes = new();
-    private readonly Queue<WindowsCredentialStoreStatus> _reads = new();
+    private readonly Queue<Func<string, byte[], ScriptedCredentialStoreStatus>> _writes = new();
+    private readonly Queue<Func<string, ScriptedCredentialStoreStatus>> _deletes = new();
+    private readonly Queue<ScriptedCredentialStoreStatus> _reads = new();
     private readonly object _sync = new();
 
     internal ScriptedWindowsCredentialStore(bool isSupported = true, int maxValueByteLength = 2_560)
@@ -20,33 +19,33 @@ internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, 
     public bool IsSupported { get; }
     public int MaxValueByteLength { get; }
 
-    public WindowsCredentialStoreStatus Probe(string target)
+    public ScriptedCredentialStoreStatus Probe(string target)
     {
         lock (_sync)
         {
-            if (_reads.TryDequeue(out var scripted) && scripted != WindowsCredentialStoreStatus.Success)
+            if (_reads.TryDequeue(out var scripted) && scripted != ScriptedCredentialStoreStatus.Success)
             {
                 return scripted;
             }
 
-            return _values.ContainsKey(target) ? WindowsCredentialStoreStatus.Success : WindowsCredentialStoreStatus.Missing;
+            return _values.ContainsKey(target) ? ScriptedCredentialStoreStatus.Success : ScriptedCredentialStoreStatus.Missing;
         }
     }
 
-    public WindowsCredentialReadResult Read(string target)
+    public ScriptedCredentialReadResult Read(string target)
     {
         lock (_sync)
         {
-            if (_reads.TryDequeue(out var scripted) && scripted != WindowsCredentialStoreStatus.Success)
+            if (_reads.TryDequeue(out var scripted) && scripted != ScriptedCredentialStoreStatus.Success)
             {
-                return scripted == WindowsCredentialStoreStatus.Missing ? WindowsCredentialReadResult.Missing() : WindowsCredentialReadResult.Failed(scripted);
+                return scripted == ScriptedCredentialStoreStatus.Missing ? ScriptedCredentialReadResult.Missing() : ScriptedCredentialReadResult.Failed(scripted);
             }
 
-            return _values.TryGetValue(target, out var value) ? WindowsCredentialReadResult.Found(value.ToArray()) : WindowsCredentialReadResult.Missing();
+            return _values.TryGetValue(target, out var value) ? ScriptedCredentialReadResult.Found(value.ToArray()) : ScriptedCredentialReadResult.Missing();
         }
     }
 
-    public WindowsCredentialStoreStatus Write(string target, byte[] value)
+    public ScriptedCredentialStoreStatus Write(string target, byte[] value)
     {
         lock (_sync)
         {
@@ -56,11 +55,11 @@ internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, 
             }
 
             Set(target, value);
-            return WindowsCredentialStoreStatus.Success;
+            return ScriptedCredentialStoreStatus.Success;
         }
     }
 
-    public WindowsCredentialStoreStatus Delete(string target)
+    public ScriptedCredentialStoreStatus Delete(string target)
     {
         lock (_sync)
         {
@@ -69,7 +68,7 @@ internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, 
                 return scripted(target);
             }
 
-            return Remove(target) ? WindowsCredentialStoreStatus.Success : WindowsCredentialStoreStatus.Missing;
+            return Remove(target) ? ScriptedCredentialStoreStatus.Success : ScriptedCredentialStoreStatus.Missing;
         }
     }
 
@@ -89,7 +88,7 @@ internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, 
         }
     }
 
-    internal void EnqueueRead(WindowsCredentialStoreStatus status)
+    internal void EnqueueRead(ScriptedCredentialStoreStatus status)
     {
         lock (_sync)
         {
@@ -97,7 +96,7 @@ internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, 
         }
     }
 
-    internal void EnqueueWrite(Func<string, byte[], WindowsCredentialStoreStatus> operation)
+    internal void EnqueueWrite(Func<string, byte[], ScriptedCredentialStoreStatus> operation)
     {
         lock (_sync)
         {
@@ -105,7 +104,7 @@ internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, 
         }
     }
 
-    internal void EnqueueDelete(Func<string, WindowsCredentialStoreStatus> operation)
+    internal void EnqueueDelete(Func<string, ScriptedCredentialStoreStatus> operation)
     {
         lock (_sync)
         {
@@ -113,16 +112,16 @@ internal sealed class ScriptedWindowsCredentialStore : IWindowsCredentialStore, 
         }
     }
 
-    internal WindowsCredentialStoreStatus MutateThenFail(string target, byte[] value)
+    internal ScriptedCredentialStoreStatus MutateThenFail(string target, byte[] value)
     {
         Set(target, value);
-        return WindowsCredentialStoreStatus.Unavailable;
+        return ScriptedCredentialStoreStatus.Unavailable;
     }
 
-    internal WindowsCredentialStoreStatus RemoveThenFail(string target)
+    internal ScriptedCredentialStoreStatus RemoveThenFail(string target)
     {
         Remove(target);
-        return WindowsCredentialStoreStatus.Unavailable;
+        return ScriptedCredentialStoreStatus.Unavailable;
     }
 
     public void Dispose()

@@ -1,3 +1,5 @@
+using EmbodySense.Core.Persistence.Credentials.Models;
+
 namespace EmbodySense.Core.Persistence.Credentials;
 
 internal interface IWindowsCredentialStore
