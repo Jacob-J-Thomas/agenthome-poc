@@ -53,7 +53,11 @@ internal sealed class CustomLoopReceiptCleanupHistoryStore(CustomLoopArtifactPat
 
         _pathGuard.PrepareRoot(_root);
         var path = _pathGuard.GetFilePath(_root, journal.Request.OperationId + ".json");
-        await _pathGuard.WriteTextAtomicallyAsync(_root, path, Encoding.UTF8.GetString(bytes), cancellationToken);
+        if (!await _pathGuard.WriteTextAtomicallyIfAbsentAsync(_root, path, Encoding.UTF8.GetString(bytes), cancellationToken))
+        {
+            throw new FormatException($"Cleanup history operation `{journal.Request.OperationId}` was created concurrently; existing immutable evidence was preserved.");
+        }
+
         return CustomLoopReceiptQuotaExhaustionReason.None;
     }
 
