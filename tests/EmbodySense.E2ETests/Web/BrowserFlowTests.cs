@@ -35,10 +35,14 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
             await ClickAsync(browser, "#loopsNav");
-            await browser.WaitForExpressionAsync("!document.getElementById('createLoopButton').disabled");
+            await browser.WaitForExpressionAsync("!document.getElementById('createLoopButton').disabled && document.getElementById('saveState').textContent === 'System managed'");
             await ClickAsync(browser, "#createLoopButton");
             await browser.WaitForExpressionAsync("!document.getElementById('loopDescription').disabled");
             await SetValueAsync(browser, "#loopDescription", "unsaved restart draft");
+            var draftStored = await browser.EvaluateBooleanAsync("Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index))).some(value => value && value.includes('unsaved restart draft'))");
+            var saveState = await browser.EvaluateStringAsync("document.getElementById('saveState').textContent");
+            var validationState = await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent");
+            Assert.True(draftStored, $"The unsaved draft was not stored. Save state: {saveState}. Validation: {validationState}");
             await ClickAsync(browser, "#chatNav");
 
             app.AssertHealthy();
@@ -52,12 +56,14 @@ public sealed class BrowserFlowTests
             app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            Assert.True(await browser.EvaluateBooleanAsync("Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index))).some(value => value && value.includes('unsaved restart draft'))"), "The unsaved draft storage was cleared during host recovery.");
             browser.EndExpectedServerRestart();
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.agent')).filter(message => message.textContent.includes('browser response: browser-first-turn')).length"));
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
             await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("document.getElementById('loopDescription').value === 'unsaved restart draft'");
             Assert.Equal("unsaved restart draft", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
             Assert.False(await browser.EvaluateBooleanAsync("document.getElementById('saveButton').disabled"));
             await ClickAsync(browser, "#chatNav");
