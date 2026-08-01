@@ -183,6 +183,54 @@ public sealed class CapabilityDependencyResolverTests
     }
 
     [Fact]
+    public void Resolver_does_not_retain_an_omitted_optional_range_that_conflicts_with_a_later_required_dependency()
+    {
+        var optionalParent = Manifest("org.example/b", [], [Dependency("org.example/z", "[1.0.0,2.0.0)")]);
+        var result = new CapabilityDependencyResolver().Resolve(
+            Manifest("org.example/skill", [Dependency("org.example/b", "*"), Dependency("org.example/z", "[1.0.0,3.0.0)")]),
+            [Candidate("org.example/b", "1.0.0", optionalParent), Candidate("org.example/z", "2.5.0")]);
+
+        Assert.True(result.IsResolved);
+        Assert.Equal("2.5.0", result.Selected.Single(item => item.DescriptorIdentity.Id.Value == "org.example/z").DescriptorIdentity.Version.Value);
+        Assert.Contains(result.Evidence, item => item.SubjectId.Value == "org.example/b" && item.DependencyId.Value == "org.example/z" && item.IsOptional && item.Outcome == CapabilityDependencyResolutionOutcome.OmittedOptional);
+        Assert.Contains(result.Evidence, item => item.SubjectId.Value == "org.example/skill" && item.DependencyId.Value == "org.example/z" && !item.IsOptional && item.Outcome == CapabilityDependencyResolutionOutcome.Selected);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void Resolver_rejects_transitive_manifest_with_mismatched_artifact_evidence(bool checksumMismatch, bool signatureMismatch)
+    {
+        var candidateArtifact = Artifact("candidate artifact", "candidate-signature");
+        var manifestArtifact = new CapabilityDependencyArtifactMetadata(checksumMismatch ? CapabilityIntegrityDigest.Compute("other artifact"u8) : candidateArtifact.Checksum, signatureMismatch ? "other-signature" : candidateArtifact.Signature);
+        var transitive = Manifest("org.example/a", [Dependency("org.example/b", "*")]) with { Artifact = manifestArtifact };
+
+        var result = new CapabilityDependencyResolver().Resolve(
+            Manifest("org.example/skill", [Dependency("org.example/a", "*")]),
+            [Candidate("org.example/a", "1.0.0", transitive, artifact: candidateArtifact), Candidate("org.example/b", "1.0.0")]);
+
+        Assert.False(result.IsResolved);
+        Assert.Empty(result.Selected);
+        var evidence = Assert.Single(result.Evidence);
+        Assert.Equal(CapabilityDependencyResolutionOutcome.Invalid, evidence.Outcome);
+        Assert.Equal("org.example/a", evidence.DependencyId.Value);
+    }
+
+    [Fact]
+    public void Resolver_traverses_transitive_manifest_with_matching_artifact_evidence()
+    {
+        var artifact = Artifact("candidate artifact", "candidate-signature");
+        var transitive = Manifest("org.example/a", [Dependency("org.example/b", "*")]) with { Artifact = artifact };
+
+        var result = new CapabilityDependencyResolver().Resolve(
+            Manifest("org.example/skill", [Dependency("org.example/a", "*")]),
+            [Candidate("org.example/a", "1.0.0", transitive, artifact: artifact), Candidate("org.example/b", "1.0.0")]);
+
+        Assert.True(result.IsResolved);
+        Assert.Equal(["org.example/a", "org.example/b"], result.Selected.Select(item => item.DescriptorIdentity.Id.Value));
+    }
+
+    [Fact]
     public void Resolver_treats_maximum_depth_as_the_dependency_edge_bound()
     {
         var depth = new CapabilityDependencyResolver(new CapabilityDependencyResolutionLimits(1, 8, 8));
@@ -209,12 +257,12 @@ public sealed class CapabilityDependencyResolverTests
         Assert.Contains("count", evidence.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static CapabilityDependencyCatalogCandidate Candidate(string id, string version, CapabilityDependencyManifest? dependencies = null, CapabilityTrustState trust = CapabilityTrustState.Verified, CapabilityHealthState health = CapabilityHealthState.Healthy, string source = "file:///catalog")
+    private static CapabilityDependencyCatalogCandidate Candidate(string id, string version, CapabilityDependencyManifest? dependencies = null, CapabilityTrustState trust = CapabilityTrustState.Verified, CapabilityHealthState health = CapabilityHealthState.Healthy, string source = "file:///catalog", CapabilityDependencyArtifactMetadata? artifact = null)
     {
         var descriptor = Descriptor(id, version, source);
         Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out _));
         var lifecycle = new CapabilityLifecycleSnapshot(1, identity!, CapabilityDeclarationState.Declared, CapabilityInstallationState.Installed, CapabilityEnablementState.Disabled, health, CapabilityRetirementState.Active, trust);
-        return new CapabilityDependencyCatalogCandidate(new CapabilityCatalogEntry(descriptor, lifecycle, 1, DateTimeOffset.UnixEpoch, "test"), dependencies, new CapabilityDependencyArtifactMetadata(null, null));
+        return new CapabilityDependencyCatalogCandidate(new CapabilityCatalogEntry(descriptor, lifecycle, 1, DateTimeOffset.UnixEpoch, "test"), dependencies, artifact ?? new CapabilityDependencyArtifactMetadata(null, null));
     }
 
     private static CapabilityDescriptor Descriptor(string id, string version, string source)
@@ -230,6 +278,8 @@ public sealed class CapabilityDependencyResolverTests
     private static CapabilityDependencyManifest Manifest(string id, IReadOnlyList<CapabilityDependency> required, IReadOnlyList<CapabilityDependency>? optional = null) => new(1, CapabilityDependencyManifestKind.Skill, Id(id), required, optional ?? [], new CapabilityDependencyArtifactMetadata(null, null));
 
     private static CapabilityDependency Dependency(string id, string range) => new(Id(id), Range(range));
+
+    private static CapabilityDependencyArtifactMetadata Artifact(string content, string signature) => new(CapabilityIntegrityDigest.Compute(System.Text.Encoding.UTF8.GetBytes(content)), signature);
 
     private static CapabilityId Id(string value)
     {
