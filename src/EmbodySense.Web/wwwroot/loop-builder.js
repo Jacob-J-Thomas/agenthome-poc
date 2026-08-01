@@ -49,6 +49,11 @@ let newLoopDraftCommitState = null;
 let newLoopDraftFailureDetail = null;
 let pendingCreateRequest = null;
 const newLoopDraftStorageKeyPrefix = "embodysense.unsaved-loop-draft.v1";
+const supportedCustomToolAssignments = Object.freeze([
+  "list",
+  "read",
+  "search",
+]);
 let newLoopDraftStorageKey = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
@@ -779,8 +784,7 @@ function isStoredDraftShape(candidate, roleId) {
     candidate.inferenceSteps.length >= 1 &&
     candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
     candidate.inferenceSteps.every(isStoredInferenceStep) &&
-    Array.isArray(candidate.toolAssignments) &&
-    candidate.toolAssignments.every((value) => typeof value === "string") &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
     isStoredExitPolicy(candidate.exitPolicy)
   );
 }
@@ -806,8 +810,7 @@ function isStoredDefinitionInput(candidate) {
     candidate.inferenceSteps.length >= 1 &&
     candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
     candidate.inferenceSteps.every(isStoredInferenceStep) &&
-    Array.isArray(candidate.toolAssignments) &&
-    candidate.toolAssignments.every((value) => typeof value === "string") &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
     isStoredExitPolicy(candidate.exitPolicy)
   );
 }
@@ -873,6 +876,17 @@ function isStoredExitPolicy(candidate) {
     Number.isInteger(candidate.maxAdditionalIterations) &&
     typeof candidate.decisionInstruction === "string" &&
     isStoredNodeContextPolicy(candidate.contextPolicy)
+  );
+}
+
+function isStoredToolAssignments(candidate) {
+  return (
+    Array.isArray(candidate) &&
+    candidate.length <= supportedCustomToolAssignments.length &&
+    candidate.every((value) =>
+      supportedCustomToolAssignments.includes(value),
+    ) &&
+    new Set(candidate).size === candidate.length
   );
 }
 
@@ -2747,11 +2761,22 @@ function renderLoopInspector() {
       "Assignments allow inference nodes to request governed capabilities. Permission, approval, and audit policy still decide whether each request may execute. Exit decisions are always tool-less.",
     ),
   );
-  for (const assignment of catalog.tools?.customAssignable ?? []) {
+  const assignableTools = catalog.tools?.customAssignable ?? [];
+  const staleAssignments = [
+    ...new Set(
+      draft.toolAssignments.filter(
+        (assignment) => !assignableTools.includes(assignment),
+      ),
+    ),
+  ];
+  for (const assignment of [...assignableTools, ...staleAssignments]) {
+    const isStaleAssignment = staleAssignments.includes(assignment);
     authority.append(
       checkboxRow(
         capitalize(assignment),
-        `Allow inference nodes to request the governed ${assignment} command.`,
+        isStaleAssignment
+          ? `This assignment is outside the current role authority. Uncheck it before saving the draft.`
+          : `Allow inference nodes to request the governed ${assignment} command.`,
         draft.toolAssignments.includes(assignment),
         (checked) => {
           if (!canMutateDraft()) return;

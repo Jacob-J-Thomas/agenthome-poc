@@ -836,6 +836,65 @@ test("loop settings expose inherited provider, model, tools, and context default
   );
 });
 
+test("a restored draft exposes stale tool assignments so reduced authority can be repaired", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+
+  await firstView.elements.createLoopButton.click();
+  await firstView.elements.loopSettingsButton.click();
+  const assignedSearch = findControlByLabel(
+    firstView.elements.inspectorContent,
+    "Search",
+    "input",
+  );
+  assignedSearch.checked = true;
+  await assignedSearch.change();
+
+  server.catalog.tools.customAssignable = ["read"];
+  const restoredView = await loadLoopBuilder({ server, sessionStorage });
+  await restoredView.elements.loopSettingsButton.click();
+  const staleSearch = findControlByLabel(
+    restoredView.elements.inspectorContent,
+    "Search",
+    "input",
+  );
+
+  assert.equal(staleSearch.checked, true);
+  assert.match(
+    restoredView.elements.inspectorContent.textContent,
+    /Search.*outside the current role authority.*Uncheck it before saving/s,
+  );
+
+  staleSearch.checked = false;
+  await staleSearch.change();
+
+  const storedDraft = JSON.parse([...sessionStorage.values.values()][0]);
+  assert.deepEqual(storedDraft.draft.toolAssignments, []);
+  assert.equal(restoredView.elements.saveButton.disabled, false);
+});
+
+test("a restored draft rejects duplicate tool assignments instead of rendering ambiguous authority controls", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+
+  await firstView.elements.createLoopButton.click();
+  const [storageKey, storedValue] = [...sessionStorage.values.entries()][0];
+  const storedDraft = JSON.parse(storedValue);
+  storedDraft.draft.toolAssignments = ["search", "search"];
+  sessionStorage.setItem(storageKey, JSON.stringify(storedDraft));
+
+  const restoredView = await loadLoopBuilder({ server, sessionStorage });
+
+  assert.equal(sessionStorage.values.size, 0);
+  assert.equal(restoredView.elements.saveState.textContent, "System managed");
+  assert.doesNotMatch(
+    restoredView.elements.loopList.textContent,
+    /Untitled loop/,
+  );
+});
+
 test("initial and user-requested run evidence failures remain visibly unavailable", async () => {
   const initialServer = new FakeFetchServer(createCatalog());
   initialServer.on("GET", "/api/loop-runs?maximumCount=50", () => ({
