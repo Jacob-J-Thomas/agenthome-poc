@@ -5,7 +5,7 @@ namespace EmbodySense.Core.Persistence.Capabilities;
 /// <summary>Validates that server-owned capability trust state is physically disjoint from governed workspace storage.</summary>
 internal static class CapabilityCatalogTrustRootTopology
 {
-    /// <summary>Rejects equality or containment in either direction after lexical normalization and available link resolution.</summary>
+    /// <summary>Rejects equality or containment in either direction after lexical, link, and Windows physical-identity checks.</summary>
     /// <param name="workspaceRootPath">The governed workspace root.</param>
     /// <param name="trustRootPath">The server-owned capability trust root.</param>
     /// <exception cref="InvalidOperationException">Thrown when either root contains the other.</exception>
@@ -18,12 +18,70 @@ internal static class CapabilityCatalogTrustRootTopology
             throw OverlapException();
         }
 
+        if (OperatingSystem.IsWindows())
+        {
+            if (WindowsPhysicalOverlap(workspaceRoot, trustRoot))
+            {
+                throw OverlapException();
+            }
+
+            return;
+        }
+
         var physicalWorkspaceRoot = ResolveExistingLinks(workspaceRoot);
         var physicalTrustRoot = ResolveExistingLinks(trustRoot);
         if (Overlaps(physicalWorkspaceRoot, physicalTrustRoot))
         {
             throw OverlapException();
         }
+    }
+
+    private static bool WindowsPhysicalOverlap(string workspaceRoot, string trustRoot)
+    {
+        var workspaceAncestors = GetExistingWindowsAncestors(workspaceRoot);
+        var trustAncestors = GetExistingWindowsAncestors(trustRoot);
+        return workspaceAncestors.Any(workspace => trustAncestors.Any(trust => string.Equals(workspace.Identity, trust.Identity, StringComparison.Ordinal) && RelativeTailsOverlap(workspace.RelativeTail, trust.RelativeTail)));
+    }
+
+    private static IReadOnlyList<(string Identity, string RelativeTail)> GetExistingWindowsAncestors(string path)
+    {
+        var ancestors = new List<(string Identity, string RelativeTail)>();
+        var tailSegments = new List<string>();
+        var current = path;
+        for (var depth = 0; depth <= 32; depth++)
+        {
+            if (CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var identity))
+            {
+                ancestors.Add((identity, string.Join(Path.DirectorySeparatorChar, tailSegments)));
+            }
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+            {
+                return ancestors;
+            }
+
+            tailSegments.Insert(0, Path.GetFileName(current));
+            current = parent;
+        }
+
+        throw new IOException("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
+    }
+
+    private static bool RelativeTailsOverlap(string first, string second)
+    {
+        if (string.Equals(first, second, StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(first) || string.IsNullOrEmpty(second))
+        {
+            return true;
+        }
+
+        return IsRelativeDescendant(first, second) || IsRelativeDescendant(second, first);
+    }
+
+    private static bool IsRelativeDescendant(string candidate, string ancestor)
+    {
+        return candidate.StartsWith(ancestor + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || candidate.StartsWith(ancestor + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveExistingLinks(string path, int resolutionDepth = 0)

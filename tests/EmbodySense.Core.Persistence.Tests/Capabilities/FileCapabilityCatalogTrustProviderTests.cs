@@ -49,7 +49,7 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
-    public void File_backed_catalog_rejects_Windows_case_and_extended_path_aliases()
+    public void File_backed_catalog_rejects_Windows_case_extended_device_and_available_short_path_aliases()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -62,6 +62,16 @@ public sealed class FileCapabilityCatalogTrustProviderTests
 
         var extendedProvider = new FileCapabilityCatalogTrustProvider(@"\\?\" + root.RootPath);
         Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.RootPath), extendedProvider));
+
+        var deviceProvider = new FileCapabilityCatalogTrustProvider(@"\\.\" + root.RootPath);
+        Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.RootPath), deviceProvider));
+
+        var shortPath = WindowsPathAliases.TryGetShortPath(root.RootPath);
+        if (shortPath is not null && !string.Equals(shortPath, root.RootPath, StringComparison.OrdinalIgnoreCase))
+        {
+            var shortPathProvider = new FileCapabilityCatalogTrustProvider(shortPath);
+            Assert.Throws<InvalidOperationException>(() => new CapabilityCatalogStore(new WorkspacePaths(root.RootPath), shortPathProvider));
+        }
     }
 
     [Fact]

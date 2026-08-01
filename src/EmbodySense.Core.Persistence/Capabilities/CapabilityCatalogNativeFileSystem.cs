@@ -157,6 +157,50 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
+    public static bool TryGetExistingWindowsDirectoryIdentity(string fullPath, out string identity)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
+        identity = string.Empty;
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        var handle = CreateFile(fullPath, 0, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            if (error is ErrorFileNotFound or ErrorPathNotFound)
+            {
+                return false;
+            }
+
+            throw NativeIOException("The capability catalog root topology could not inspect an existing directory", error);
+        }
+
+        using (handle)
+        {
+            if (!GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileAttributeTagInfo, out CapabilityCatalogFileAttributeTagInfo attributes, (uint)Marshal.SizeOf<CapabilityCatalogFileAttributeTagInfo>()))
+            {
+                throw NativeIOException("The capability catalog root topology could not inspect an existing directory", Marshal.GetLastPInvokeError());
+            }
+
+            if ((attributes.FileAttributes & FileAttributeDirectory) == 0)
+            {
+                return false;
+            }
+
+            if (!GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileIdInfo, out CapabilityCatalogFileIdInfo information, (uint)Marshal.SizeOf<CapabilityCatalogFileIdInfo>()))
+            {
+                throw NativeIOException("The capability catalog root topology could not inspect an existing directory", Marshal.GetLastPInvokeError());
+            }
+
+            identity = $"{information.VolumeSerialNumber:x16}:{information.FileId:N}";
+            return true;
+        }
+    }
+
     public static string GetPhysicalIdentityMaterial(SafeFileHandle directory)
     {
         if (OperatingSystem.IsWindows())
