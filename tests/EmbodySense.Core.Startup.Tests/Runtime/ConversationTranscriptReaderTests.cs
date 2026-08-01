@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.Execution;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Common.Inference;

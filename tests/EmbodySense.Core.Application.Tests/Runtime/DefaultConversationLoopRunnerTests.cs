@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Loops.Execution;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops.Execution.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops;
@@ -175,16 +176,78 @@ public sealed class DefaultConversationLoopRunnerTests
     }
 
     [Fact]
+    public async Task RunTurnAsync_persists_a_conclusive_terminal_provider_failure_without_quarantine_or_review()
+    {
+        var client = new RecordingInferenceClient("unused") { Failure = new LlmInferenceTerminalFailureException("provider rejected the turn", "provider-turn-1") };
+        var memory = new RecordingConversationMemoryStore();
+        var runs = new RecordingLoopRunStore();
+        var turns = new RecordingDefaultConversationTurnStore();
+        var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
+        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns);
+        const string RequestId = "terminal-provider-failure";
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        var turn = await turns.LoadAsync(DefaultConversationTurnProtocol.CreateTurnId(RequestId));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.Equal("provider rejected the turn", result.FailureDetail);
+        Assert.True(result.UserMessageAccepted);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.NotNull(turn);
+        Assert.Equal(DefaultConversationProviderOutcome.ObservedFailure, turn.ProviderOutcome);
+        Assert.Equal("provider-turn-1", turn.ProviderResponseId);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, turn.Checkpoint);
+        Assert.Equal(LoopRunStatus.Failed, turn.Run.Status);
+        Assert.Null(turn.AssistantMessage);
+        Assert.Collection(memory.Messages, message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+        Assert.Collection(
+            runs.Saved,
+            run => Assert.Equal(LoopRunStatus.Started, run.Status),
+            run => Assert.Equal(LoopRunStatus.Failed, run.Status));
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_retains_an_observed_response_for_review_when_completion_audit_fails()
+    {
+        var response = new LlmInferenceResponse("observed answer", LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-turn-2");
+        var client = new RecordingInferenceClient("unused")
+        {
+            Failure = new LlmInferenceObservedResponseException("completion audit failed after provider success", response, new IOException("audit unavailable"))
+        };
+        var memory = new RecordingConversationMemoryStore();
+        var runs = new RecordingLoopRunStore();
+        var turns = new RecordingDefaultConversationTurnStore();
+        var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
+        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns);
+        const string RequestId = "observed-response-audit-failure";
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        var turn = await turns.LoadAsync(DefaultConversationTurnProtocol.CreateTurnId(RequestId));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.NeedsReview, result.Status);
+        Assert.Contains("completion audit failed", result.FailureDetail, StringComparison.Ordinal);
+        Assert.True(result.UserMessageAccepted);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.NotNull(turn);
+        Assert.Equal(DefaultConversationProviderOutcome.ObservedWithAuditFailure, turn.ProviderOutcome);
+        Assert.Equal("provider-turn-2", turn.ProviderResponseId);
+        Assert.Equal("observed answer", turn.AssistantMessage!.Content);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, turn.Checkpoint);
+        Assert.Equal(LoopRunStatus.NeedsReview, turn.Run.Status);
+        Assert.Collection(memory.Messages, message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+    }
+
+    [Fact]
     public async Task RunTurnAsync_replays_a_completed_caller_request_without_provider_redispatch_or_duplicate_publication()
     {
         var client = new RecordingInferenceClient("completed response");
         var memory = new RecordingConversationMemoryStore();
         var state = new ConversationRuntimeState();
         var runner = new DefaultConversationLoopRunner(client, state, memory);
-        const string requestId = "caller-request-1";
+        const string RequestId = "caller-request-1";
 
-        var first = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: requestId));
-        var replay = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: requestId));
+        var first = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        var replay = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
 
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, first.Status);
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, replay.Status);
@@ -197,15 +260,45 @@ public sealed class DefaultConversationLoopRunnerTests
             message => Assert.Equal((LlmMessageRole.Assistant, "completed response"), (message.Role, message.Content)));
     }
 
+    [Theory]
+    [InlineData(DefaultConversationTurnBoundary.TurnAdmitted)]
+    [InlineData(DefaultConversationTurnBoundary.RunStartCheckpointed)]
+    public async Task RunTurnAsync_replays_terminal_preacceptance_failures_without_marking_the_user_message_accepted(DefaultConversationTurnBoundary failureBoundary)
+    {
+        var client = new RecordingInferenceClient("must not run");
+        var memory = new RecordingConversationMemoryStore();
+        var state = new ConversationRuntimeState();
+        var runner = new DefaultConversationLoopRunner(
+            client,
+            state,
+            memory,
+            LoopDefinition.CreateDefaultConversation(),
+            new RecordingLoopRunStore(),
+            RuntimeSurfaceId.Web,
+            failpoint: new GenericFailureFailpoint(failureBoundary));
+        const string RequestId = "preacceptance-replay";
+
+        var failed = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        var replayed = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, failed.Status);
+        Assert.False(failed.UserMessageAccepted);
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, replayed.Status);
+        Assert.False(replayed.UserMessageAccepted);
+        Assert.Empty(client.Requests);
+        Assert.Empty(memory.Messages);
+        Assert.Empty(state.Messages);
+    }
+
     [Fact]
     public async Task RunTurnAsync_rejects_reuse_of_a_caller_request_for_a_different_payload()
     {
         var client = new RecordingInferenceClient("completed response");
         var runner = new DefaultConversationLoopRunner(client, new ConversationRuntimeState(), new RecordingConversationMemoryStore());
-        const string requestId = "caller-request-2";
+        const string RequestId = "caller-request-2";
 
-        Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("first", requestId: requestId))).Status);
-        var conflict = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("different", requestId: requestId));
+        Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("first", requestId: RequestId))).Status);
+        var conflict = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("different", requestId: RequestId));
 
         Assert.Equal(DefaultConversationLoopTurnStatus.Failed, conflict.Status);
         Assert.Contains("already used for a different", conflict.FailureDetail, StringComparison.Ordinal);
@@ -724,6 +817,58 @@ public sealed class DefaultConversationLoopRunnerTests
             cancellationToken.ThrowIfCancellationRequested();
             QuarantineCount++;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingDefaultConversationTurnStore : IDefaultConversationTurnStore
+    {
+        public DefaultConversationTurnRecord? Record { get; private set; }
+
+        public Task<DefaultConversationTurnStoreResult> CreateAsync(DefaultConversationTurnRecord record, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Record is null)
+            {
+                Record = record;
+                return Task.FromResult(new DefaultConversationTurnStoreResult(DefaultConversationTurnStoreStatus.Created, record));
+            }
+
+            var status = Record.LifecycleVersion == record.LifecycleVersion && Record.Checkpoint == record.Checkpoint
+                ? DefaultConversationTurnStoreStatus.Replay
+                : DefaultConversationTurnStoreStatus.Conflict;
+            return Task.FromResult(new DefaultConversationTurnStoreResult(status, Record));
+        }
+
+        public Task<DefaultConversationTurnStoreResult> UpdateAsync(DefaultConversationTurnRecord record, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Record is null || Record.LifecycleVersion != expectedLifecycleVersion || record.LifecycleVersion != expectedLifecycleVersion + 1)
+            {
+                return Task.FromResult(new DefaultConversationTurnStoreResult(DefaultConversationTurnStoreStatus.Conflict, Record));
+            }
+
+            Record = record;
+            return Task.FromResult(new DefaultConversationTurnStoreResult(DefaultConversationTurnStoreStatus.Updated, record));
+        }
+
+        public Task<DefaultConversationTurnRecord?> LoadAsync(string turnId, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(string.Equals(Record?.TurnId, turnId, StringComparison.Ordinal) ? Record : null);
+        }
+
+        public Task<IReadOnlyList<DefaultConversationTurnRecord>> ListIncompleteAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            IReadOnlyList<DefaultConversationTurnRecord> records = Record is not null && Record.Checkpoint < DefaultConversationTurnCheckpoint.Terminal ? [Record] : [];
+            return Task.FromResult(records);
+        }
+
+        public Task<IReadOnlyList<DefaultConversationTurnRecord>> ListNeedsReviewAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            IReadOnlyList<DefaultConversationTurnRecord> records = Record is not null && Record.Run.Status == LoopRunStatus.NeedsReview && Record.ReviewResolution is null ? [Record] : [];
+            return Task.FromResult(records);
         }
     }
 

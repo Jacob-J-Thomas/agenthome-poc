@@ -21,7 +21,7 @@ public enum DefaultConversationTurnCheckpoint
     ProviderDispatchPrepared,
     /// <summary>The provider turn/start transport-write boundary was reached, so the external outcome is unknown until observed.</summary>
     ProviderDispatchStarted,
-    /// <summary>The exact assistant output and provider outcome were durably observed.</summary>
+    /// <summary>A terminal provider outcome was durably observed, including exact assistant output for success.</summary>
     ProviderOutcomeObserved,
     /// <summary>The assistant-message transcript publication intent was persisted.</summary>
     AssistantPublicationPrepared,

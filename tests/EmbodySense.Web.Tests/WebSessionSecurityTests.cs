@@ -16,13 +16,26 @@ public sealed class WebSessionSecurityTests
     }
 
     [Fact]
+    public void Cookie_name_is_stable_per_port_and_distinct_between_local_web_hosts()
+    {
+        var first = new WebSessionSecurity("first-secret", "first-generation", 4378);
+        var restarted = new WebSessionSecurity("replacement-secret", "replacement-generation", 4378);
+        var second = new WebSessionSecurity("second-secret", "second-generation", 4379);
+
+        Assert.Equal(first.CookieName, restarted.CookieName);
+        Assert.NotEqual(first.CookieName, second.CookieName);
+        Assert.Equal("EmbodySense.Session.4378", first.CookieName);
+        Assert.Throws<ArgumentOutOfRangeException>(() => WebSessionSecurity.GetCookieName(0));
+    }
+
+    [Fact]
     public void HasValidToken_accepts_cookie_or_header_and_rejects_query_token()
     {
         var session = new WebSessionSecurity("secret", "generation");
         var header = CreateContext(HttpMethods.Post, "/api/workspace/init");
         header.Request.Headers[WebSessionSecurity.HeaderName] = "secret";
         var cookie = CreateContext(HttpMethods.Get, "/hubs/session");
-        cookie.Request.Headers.Cookie = $"{WebSessionSecurity.CookieName}=secret";
+        cookie.Request.Headers.Cookie = $"{session.CookieName}=secret";
         var query = CreateContext(HttpMethods.Get, "/hubs/session");
         query.Request.QueryString = QueryString.Create("access_token", "secret");
         var apiQuery = CreateContext(HttpMethods.Get, "/api/configuration");

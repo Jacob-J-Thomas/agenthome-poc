@@ -58,6 +58,24 @@ public sealed class ConversationMemoryStoreTests
     }
 
     [Fact]
+    public async Task LoadCurrentConversationAsync_requires_explicit_cleanup_for_the_superseded_identityless_shape()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.ConversationMemoryPath);
+        var legacyEntry = """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-31T00:00:00Z","role":"user","content":"legacy prompt"}""";
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, legacyEntry);
+        var store = new ConversationMemoryStore(paths);
+
+        var exception = await Assert.ThrowsAsync<ConversationTranscriptCleanupRequiredException>(() => store.LoadCurrentConversationSnapshotAsync());
+
+        Assert.Equal(paths.CurrentConversationPath, exception.TranscriptPath);
+        Assert.Contains("Back up and remove this transcript file", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Automatic migration", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(legacyEntry, await File.ReadAllTextAsync(paths.CurrentConversationPath));
+    }
+
+    [Fact]
     public async Task LoadConversationAsync_reads_current_saved_and_archived_transcripts_and_rejects_missing_ids()
     {
         using var workspace = new TestWorkspace();

@@ -155,7 +155,7 @@ public sealed class WebClientFlowTests
         try
         {
             await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, null));
-            await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, $"{WebSessionSecurity.CookieName}=wrong-token"));
+            await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, $"{WebSessionSecurity.GetCookieName(options.Port)}=wrong-token"));
         }
         finally
         {

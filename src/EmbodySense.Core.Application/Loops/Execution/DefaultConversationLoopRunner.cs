@@ -10,6 +10,7 @@ using EmbodySense.Core.Application.Context;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Memory.Models;
@@ -226,21 +227,67 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.ProviderDispatchPrepared, "Stable provider attempt and correlation identities prepared; provider turn/start transport-write boundary not yet reached.", DefaultConversationTurnBoundary.ProviderDispatchPrepared, request.CancellationToken);
             var inferenceRequest = new LlmInferenceRequest(inferenceMessages, instructionContext: instructionContext, correlation: CreateInferenceCorrelation(turn, availableToolCommands));
             var dispatchStarted = false;
-            var response = await _inferenceClient.GenerateAsync(
-                inferenceRequest,
-                request.ResponseChunkHandler,
-                request.CancellationToken,
-                async token =>
+            LlmInferenceResponse response;
+            try
+            {
+                response = await _inferenceClient.GenerateAsync(
+                    inferenceRequest,
+                    request.ResponseChunkHandler,
+                    request.CancellationToken,
+                    async token =>
+                    {
+                        turn = await AdvanceAsync(
+                            turn,
+                            DefaultConversationTurnCheckpoint.ProviderDispatchStarted,
+                            "Provider adapter reached the irreversible turn/start transport boundary; outcome is unknown until a terminal response is durably observed.",
+                            DefaultConversationTurnBoundary.ProviderDispatchStarted,
+                            token,
+                            providerOutcome: DefaultConversationProviderOutcome.OutcomeUnknown);
+                        dispatchStarted = true;
+                    });
+            }
+            catch (LlmInferenceObservedResponseException exception)
+            {
+                if (!dispatchStarted)
                 {
-                    turn = await AdvanceAsync(
-                        turn,
-                        DefaultConversationTurnCheckpoint.ProviderDispatchStarted,
-                        "Provider adapter reached the irreversible turn/start transport boundary; outcome is unknown until a terminal response is durably observed.",
-                        DefaultConversationTurnBoundary.ProviderDispatchStarted,
-                        token,
-                        providerOutcome: DefaultConversationProviderOutcome.OutcomeUnknown);
-                    dispatchStarted = true;
-                });
+                    throw new InvalidOperationException("The inference adapter reported an observed provider response without invoking the required provider-dispatch boundary callback.", exception);
+                }
+
+                var observedResponse = exception.Response;
+                var observedAssistantMessage = new DefaultConversationTurnMessage(DefaultConversationTurnProtocol.CreateAssistantMessageId(turn.TurnId), LlmMessageRole.Assistant, observedResponse.OutputText);
+                var detail = exception.Message;
+                turn = await AdvanceAsync(
+                    turn,
+                    DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
+                    detail,
+                    DefaultConversationTurnBoundary.ProviderOutcomeObserved,
+                    CancellationToken.None,
+                    providerOutcome: DefaultConversationProviderOutcome.ObservedWithAuditFailure,
+                    assistantMessage: observedAssistantMessage,
+                    providerResponseId: observedResponse.ProviderResponseId);
+                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.NeedsReview(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+            }
+            catch (LlmInferenceTerminalFailureException exception)
+            {
+                if (!dispatchStarted)
+                {
+                    throw new InvalidOperationException("The inference adapter reported a terminal provider failure without invoking the required provider-dispatch boundary callback.", exception);
+                }
+
+                var detail = exception.Message;
+                turn = await AdvanceAsync(
+                    turn,
+                    DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
+                    detail,
+                    DefaultConversationTurnBoundary.ProviderOutcomeObserved,
+                    CancellationToken.None,
+                    providerOutcome: DefaultConversationProviderOutcome.ObservedFailure,
+                    providerResponseId: exception.ProviderResponseId);
+                turn = await FinalizeAsync(turn, LoopRunStatus.Failed, detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.Failed(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+            }
+
             if (!dispatchStarted)
             {
                 throw new InvalidOperationException("The inference adapter returned without invoking the required provider-dispatch boundary callback.");
@@ -299,7 +346,8 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             return cancelled ? DefaultConversationLoopTurnResult.Cancelled(detail) : DefaultConversationLoopTurnResult.Failed(detail, runIdentity: runIdentity);
         }
 
-        if (turn.Checkpoint >= DefaultConversationTurnCheckpoint.ProviderDispatchStarted && turn.ProviderOutcome != DefaultConversationProviderOutcome.Observed)
+        if (turn.Checkpoint >= DefaultConversationTurnCheckpoint.ProviderDispatchStarted
+            && turn.ProviderOutcome is not (DefaultConversationProviderOutcome.Observed or DefaultConversationProviderOutcome.ObservedWithAuditFailure or DefaultConversationProviderOutcome.ObservedFailure))
         {
             var quarantineDetail = await QuarantineProviderAsync();
             var ambiguity = $"Provider attempt `{turn.ProviderAttemptId}` with correlation `{turn.ProviderCorrelationId}` reached the irreversible turn/start transport-write boundary, but no terminal outcome was durably observed. Automatic redispatch is forbidden; inspect provider and audit evidence before retrying as a new turn. {quarantineDetail} Observed adapter detail: {detail}";
@@ -311,6 +359,18 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         {
             var recoveryDetail = $"Assistant outcome was durably observed, but publication or terminal synchronization did not complete: {detail}. Restart recovery can repair only the retained idempotent publication; provider redispatch is forbidden.";
             return DefaultConversationLoopTurnResult.Failed(recoveryDetail, acceptedMessages, runIdentity, userMessageAccepted);
+        }
+
+        if (turn.ProviderOutcome == DefaultConversationProviderOutcome.ObservedWithAuditFailure)
+        {
+            var auditFailureDetail = await TryFinalizeWithEvidenceAsync(turn, LoopRunStatus.NeedsReview, detail);
+            return DefaultConversationLoopTurnResult.NeedsReview(auditFailureDetail, acceptedMessages, runIdentity, userMessageAccepted);
+        }
+
+        if (turn.ProviderOutcome == DefaultConversationProviderOutcome.ObservedFailure)
+        {
+            var observedFailureDetail = await TryFinalizeWithEvidenceAsync(turn, LoopRunStatus.Failed, detail);
+            return DefaultConversationLoopTurnResult.Failed(observedFailureDetail, acceptedMessages, runIdentity, userMessageAccepted);
         }
 
         if (turn.Checkpoint is DefaultConversationTurnCheckpoint.UserMessageAccepted or DefaultConversationTurnCheckpoint.UserPublicationPrepared)
@@ -503,7 +563,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             return DefaultConversationLoopTurnResult.Failed($"Request `{request.RequestId}` is already admitted as turn `{record.TurnId}` at checkpoint `{record.Checkpoint}`. Restart reconciliation must classify it before any retry.", runIdentity: runIdentity);
         }
 
-        var userAccepted = record.Checkpoint >= DefaultConversationTurnCheckpoint.UserMessageAccepted;
+        var userAccepted = record.Transitions.Any(transition => transition.Checkpoint == DefaultConversationTurnCheckpoint.UserMessageAccepted);
         if (record.Checkpoint == DefaultConversationTurnCheckpoint.ReviewResolved)
         {
             return DefaultConversationLoopTurnResult.Failed(record.ReviewResolution?.Detail ?? "The idempotently replayed turn was explicitly abandoned after review.", runIdentity: runIdentity, userMessageAccepted: userAccepted);

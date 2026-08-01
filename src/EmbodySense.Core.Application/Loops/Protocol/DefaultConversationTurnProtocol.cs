@@ -6,7 +6,7 @@ using EmbodySense.Core.Common.Loops.Models;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace EmbodySense.Core.Application.Loops.Execution;
+namespace EmbodySense.Core.Application.Loops.Protocol;
 
 /// <summary>
 /// Creates and advances canonical default-conversation turn protocol values.

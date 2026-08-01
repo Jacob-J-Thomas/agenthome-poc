@@ -378,7 +378,7 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
-    public async Task SendMessageAsync_surfaces_ambiguous_provider_failure_as_needs_review_event()
+    public async Task SendMessageAsync_surfaces_a_conclusive_terminal_provider_failure_as_an_error_event()
     {
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, "provider down");
@@ -393,10 +393,9 @@ public sealed class WebAgentRuntimeHostTests
         });
 
         var streamEvent = Assert.Single(events);
-        Assert.Equal("needs_review", streamEvent.Type);
-        Assert.Contains("Codex app-server turn failed: provider down", streamEvent.Text, StringComparison.Ordinal);
-        Assert.Contains("Automatic redispatch is forbidden", streamEvent.Text, StringComparison.Ordinal);
-        Assert.Null(streamEvent.Error);
+        Assert.Equal("error", streamEvent.Type);
+        Assert.Contains("Codex app-server turn failed: provider down", streamEvent.Error, StringComparison.Ordinal);
+        Assert.Null(streamEvent.Text);
     }
 
     [Fact]

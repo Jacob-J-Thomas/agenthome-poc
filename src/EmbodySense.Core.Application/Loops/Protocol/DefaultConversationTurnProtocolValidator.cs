@@ -4,7 +4,7 @@ using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Runtime;
 
-namespace EmbodySense.Core.Application.Loops.Execution;
+namespace EmbodySense.Core.Application.Loops.Protocol;
 
 /// <summary>
 /// Validates the closed version-1 default-conversation protocol independently of its persistence adapter.
@@ -109,11 +109,21 @@ public static class DefaultConversationTurnProtocolValidator
         {
             < DefaultConversationTurnCheckpoint.ProviderDispatchStarted => DefaultConversationProviderOutcome.DefinitelyNotStarted,
             DefaultConversationTurnCheckpoint.ProviderDispatchStarted => DefaultConversationProviderOutcome.OutcomeUnknown,
-            _ => DefaultConversationProviderOutcome.Observed
+            _ => record.ProviderOutcome
         };
+        if (operationalCheckpoint >= DefaultConversationTurnCheckpoint.ProviderOutcomeObserved)
+        {
+            Require(record.ProviderOutcome is DefaultConversationProviderOutcome.Observed or DefaultConversationProviderOutcome.ObservedWithAuditFailure or DefaultConversationProviderOutcome.ObservedFailure, "Default-conversation observed provider outcome classification was invalid.");
+        }
+
         Require(record.ProviderOutcome == expectedOutcome, "Default-conversation provider outcome did not match the exact durable transition path.");
-        Require((record.AssistantMessage is not null) == (expectedOutcome == DefaultConversationProviderOutcome.Observed), "Default-conversation assistant evidence must exist exactly when a provider outcome was observed.");
-        Require(record.ProviderResponseId is null || expectedOutcome == DefaultConversationProviderOutcome.Observed && !string.IsNullOrWhiteSpace(record.ProviderResponseId) && string.Equals(record.ProviderResponseId, record.ProviderResponseId.Trim(), StringComparison.Ordinal), "Default-conversation provider response identity did not match observed outcome evidence.");
+        var successfulOutcome = record.ProviderOutcome is DefaultConversationProviderOutcome.Observed or DefaultConversationProviderOutcome.ObservedWithAuditFailure;
+        Require((record.AssistantMessage is not null) == successfulOutcome, "Default-conversation assistant evidence must exist exactly for a successful observed provider outcome.");
+        Require(record.ProviderResponseId is null || (record.ProviderOutcome is DefaultConversationProviderOutcome.Observed or DefaultConversationProviderOutcome.ObservedWithAuditFailure or DefaultConversationProviderOutcome.ObservedFailure && !string.IsNullOrWhiteSpace(record.ProviderResponseId) && string.Equals(record.ProviderResponseId, record.ProviderResponseId.Trim(), StringComparison.Ordinal)), "Default-conversation provider response identity did not match observed outcome evidence.");
+        if (record.ProviderOutcome is DefaultConversationProviderOutcome.ObservedWithAuditFailure or DefaultConversationProviderOutcome.ObservedFailure)
+        {
+            Require(operationalCheckpoint == DefaultConversationTurnCheckpoint.ProviderOutcomeObserved, "A conclusive provider outcome with failed completion bookkeeping cannot advance into assistant publication.");
+        }
     }
 
     private static void ValidateTerminalEvidence(DefaultConversationTurnRecord record)
@@ -147,11 +157,15 @@ public static class DefaultConversationTurnProtocolValidator
         switch (record.Run.Status)
         {
             case LoopRunStatus.Completed:
-                Require(operationalCheckpoint == DefaultConversationTurnCheckpoint.TranscriptSynchronized && record.Run.FailureDetail is null && record.ReviewDetail is null, "Completed default-conversation evidence requires a synchronized observed transcript and no failure detail.");
+                Require(operationalCheckpoint == DefaultConversationTurnCheckpoint.TranscriptSynchronized && record.ProviderOutcome == DefaultConversationProviderOutcome.Observed && record.Run.FailureDetail is null && record.ReviewDetail is null, "Completed default-conversation evidence requires a synchronized successfully observed transcript and no failure detail.");
                 break;
             case LoopRunStatus.Failed:
+                var definitelyPreDispatch = operationalCheckpoint < DefaultConversationTurnCheckpoint.ProviderDispatchStarted;
+                var terminalProviderFailure = operationalCheckpoint == DefaultConversationTurnCheckpoint.ProviderOutcomeObserved && record.ProviderOutcome == DefaultConversationProviderOutcome.ObservedFailure;
+                Require((definitelyPreDispatch || terminalProviderFailure) && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && record.ReviewDetail is null, "Failed default-conversation evidence must be definitively pre-dispatch or retain a conclusive terminal provider failure.");
+                break;
             case LoopRunStatus.Cancelled:
-                Require(operationalCheckpoint < DefaultConversationTurnCheckpoint.ProviderDispatchStarted && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && record.ReviewDetail is null, "Failed or cancelled default-conversation evidence must be definitively pre-dispatch and retain failure detail.");
+                Require(operationalCheckpoint < DefaultConversationTurnCheckpoint.ProviderDispatchStarted && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && record.ReviewDetail is null, "Cancelled default-conversation evidence must be definitively pre-dispatch and retain failure detail.");
                 break;
             case LoopRunStatus.NeedsReview:
                 Require(operationalCheckpoint != DefaultConversationTurnCheckpoint.TranscriptSynchronized && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && string.Equals(record.ReviewDetail, record.Run.FailureDetail, StringComparison.Ordinal), "Needs-review evidence must retain one exact actionable detail and cannot claim a synchronized transcript.");
@@ -184,7 +198,7 @@ public static class DefaultConversationTurnProtocolValidator
             DefaultConversationTurnCheckpoint.UserPublished => to is DefaultConversationTurnCheckpoint.ProviderDispatchPrepared or DefaultConversationTurnCheckpoint.TerminalPrepared,
             DefaultConversationTurnCheckpoint.ProviderDispatchPrepared => to is DefaultConversationTurnCheckpoint.ProviderDispatchStarted or DefaultConversationTurnCheckpoint.TerminalPrepared,
             DefaultConversationTurnCheckpoint.ProviderDispatchStarted => to is DefaultConversationTurnCheckpoint.ProviderOutcomeObserved or DefaultConversationTurnCheckpoint.TerminalPrepared,
-            DefaultConversationTurnCheckpoint.ProviderOutcomeObserved => to == DefaultConversationTurnCheckpoint.AssistantPublicationPrepared,
+            DefaultConversationTurnCheckpoint.ProviderOutcomeObserved => to is DefaultConversationTurnCheckpoint.AssistantPublicationPrepared or DefaultConversationTurnCheckpoint.TerminalPrepared,
             DefaultConversationTurnCheckpoint.AssistantPublicationPrepared => to is DefaultConversationTurnCheckpoint.AssistantPublished or DefaultConversationTurnCheckpoint.TerminalPrepared,
             DefaultConversationTurnCheckpoint.AssistantPublished => to is DefaultConversationTurnCheckpoint.TranscriptSynchronized or DefaultConversationTurnCheckpoint.TerminalPrepared,
             DefaultConversationTurnCheckpoint.TranscriptSynchronized => to == DefaultConversationTurnCheckpoint.TerminalPrepared,

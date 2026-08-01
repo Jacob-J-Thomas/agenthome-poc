@@ -93,20 +93,20 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         try
         {
 
-        await EnsureThreadAsync(request, cancellationToken);
+            await EnsureThreadAsync(request, cancellationToken);
 
-        var requestId = NextRequestId();
-        var userText = _contextBuilder.CreateTurnInput(request);
-        if (providerRequestStarting is not null)
-        {
-            await providerRequestStarting(cancellationToken);
-        }
+            var requestId = NextRequestId();
+            var userText = _contextBuilder.CreateTurnInput(request);
+            if (providerRequestStarting is not null)
+            {
+                await providerRequestStarting(cancellationToken);
+            }
 
-        _providerRequestStarted?.Invoke();
-        await SendRequestAsync("turn/start", requestId, new JsonObject
-        {
-            ["threadId"] = _threadId,
-            ["input"] = new JsonArray
+            _providerRequestStarted?.Invoke();
+            await SendRequestAsync("turn/start", requestId, new JsonObject
+            {
+                ["threadId"] = _threadId,
+                ["input"] = new JsonArray
             {
                 new JsonObject
                 {
@@ -114,73 +114,73 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                     ["text"] = userText
                 }
             }
-        }, cancellationToken);
+            }, cancellationToken);
 
-        var streamedText = new StringBuilder();
-        string? turnId = null;
-        string? completedText = null;
-        var turnStartResponseReceived = false;
-        var turnCompleted = false;
+            var streamedText = new StringBuilder();
+            string? turnId = null;
+            string? completedText = null;
+            var turnStartResponseReceived = false;
+            var turnCompleted = false;
 
-        while (!turnStartResponseReceived || !turnCompleted)
-        {
-            using var messageDocument = await ReadMessageAsync(cancellationToken);
-            var message = messageDocument.RootElement;
-
-            // App-server requests may interleave with the turn/start response and notifications.
-            // Answer them immediately so the protocol cannot deadlock while this turn awaits completion.
-            if (IsServerRequest(message))
+            while (!turnStartResponseReceived || !turnCompleted)
             {
-                await HandleServerRequestAsync(message, cancellationToken);
-                continue;
-            }
+                using var messageDocument = await ReadMessageAsync(cancellationToken);
+                var message = messageDocument.RootElement;
 
-            if (IsResponse(message, requestId))
-            {
-                ThrowIfError(message);
-                turnStartResponseReceived = true;
-                turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
-                continue;
-            }
+                // App-server requests may interleave with the turn/start response and notifications.
+                // Answer them immediately so the protocol cannot deadlock while this turn awaits completion.
+                if (IsServerRequest(message))
+                {
+                    await HandleServerRequestAsync(message, cancellationToken);
+                    continue;
+                }
 
-            if (!IsNotification(message, out var method))
-            {
-                continue;
-            }
+                if (IsResponse(message, requestId))
+                {
+                    ThrowIfError(message);
+                    turnStartResponseReceived = true;
+                    turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
+                    continue;
+                }
 
-            switch (method)
-            {
-                case "item/agentMessage/delta":
-                    if (IsCurrentTurnNotification(message, turnId))
-                    {
-                        var delta = message.GetProperty("params").GetProperty("delta").GetString() ?? "";
-                        streamedText.Append(delta);
-                        if (responseChunkHandler is not null)
+                if (!IsNotification(message, out var method))
+                {
+                    continue;
+                }
+
+                switch (method)
+                {
+                    case "item/agentMessage/delta":
+                        if (IsCurrentTurnNotification(message, turnId))
                         {
-                            await responseChunkHandler(delta, cancellationToken);
+                            var delta = message.GetProperty("params").GetProperty("delta").GetString() ?? "";
+                            streamedText.Append(delta);
+                            if (responseChunkHandler is not null)
+                            {
+                                await responseChunkHandler(delta, cancellationToken);
+                            }
                         }
-                    }
 
-                    break;
+                        break;
 
-                case "turn/completed":
-                    if (IsCurrentTurnNotification(message, turnId))
-                    {
-                        turnCompleted = true;
-                        turnId = TryGetNestedString(message, "params", "turn", "id") ?? turnId;
-                        completedText = TryExtractCompletedAgentMessage(message);
-                        ThrowIfTurnFailed(message);
-                    }
+                    case "turn/completed":
+                        if (IsCurrentTurnNotification(message, turnId))
+                        {
+                            turnCompleted = true;
+                            turnId = TryGetNestedString(message, "params", "turn", "id") ?? turnId;
+                            completedText = TryExtractCompletedAgentMessage(message);
+                            ThrowIfTurnFailed(message, turnId);
+                        }
 
-                    break;
+                        break;
+                }
             }
-        }
 
-        return new LlmInferenceResponse(
-            completedText ?? streamedText.ToString(),
-            LlmInferenceSurface.OpenAiCodex,
-            _options.Model,
-            turnId);
+            return new LlmInferenceResponse(
+                completedText ?? streamedText.ToString(),
+                LlmInferenceSurface.OpenAiCodex,
+                _options.Model,
+                turnId);
         }
         finally
         {
@@ -544,7 +544,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         throw new InvalidOperationException($"Codex app-server request failed: {errorMessage}");
     }
 
-    private static void ThrowIfTurnFailed(JsonElement message)
+    private static void ThrowIfTurnFailed(JsonElement message, string? providerResponseId)
     {
         var status = TryGetNestedString(message, "params", "turn", "status");
 
@@ -554,7 +554,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }
 
         var errorMessage = TryGetNestedString(message, "params", "turn", "error", "message") ?? "turn failed";
-        throw new InvalidOperationException($"Codex app-server turn failed: {errorMessage}");
+        throw new LlmInferenceTerminalFailureException($"Codex app-server turn failed: {errorMessage}", providerResponseId);
     }
 
     private static string? TryExtractCompletedAgentMessage(JsonElement message)
