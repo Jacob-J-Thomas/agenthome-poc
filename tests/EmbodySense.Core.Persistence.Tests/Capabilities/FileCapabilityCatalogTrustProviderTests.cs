@@ -163,6 +163,15 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void Workspace_identity_rejects_a_workspace_that_does_not_exist()
+    {
+        var missingWorkspace = Path.Combine(Directory.GetCurrentDirectory(), ".embodysense-missing-workspace-" + Guid.NewGuid().ToString("N"));
+
+        Assert.False(Directory.Exists(missingWorkspace));
+        Assert.Throws<DirectoryNotFoundException>(() => CapabilityCatalogWorkspaceIdentity.Create(missingWorkspace));
+    }
+
+    [Fact]
     public async Task Unix_workspace_lifetime_identity_rejects_retained_anchor_when_device_and_inode_are_reused()
     {
         using var trustRoot = new TestWorkspace();

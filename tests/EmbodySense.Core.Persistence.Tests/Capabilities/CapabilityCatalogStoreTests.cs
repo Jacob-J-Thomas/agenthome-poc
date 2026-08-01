@@ -535,9 +535,11 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
         await RestorePairAsync(replacementPaths, copiedPair);
 
         var replacementRead = await new CapabilityCatalogStore(replacementPaths, provider).ReadAsync(null, 10);
+        var replacementMutation = await new CapabilityCatalogService(new CapabilityCatalogStore(replacementPaths, provider)).DeclareAsync(descriptor, 0, "declare-replacement-workspace");
 
         Assert.Equal(CapabilityCatalogReadStatus.Unavailable, replacementRead.Status);
         Assert.Null(replacementRead.Page);
+        Assert.Equal(CapabilityCatalogMutationStatus.Unavailable, replacementMutation.Status);
     }
 
     [Fact]
