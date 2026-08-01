@@ -645,6 +645,16 @@ public sealed class DefaultConversationTurnRecoveryTests
             return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, "test-model", "provider-response-1");
         }
 
+        public async Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler,
+            CancellationToken cancellationToken,
+            Func<CancellationToken, Task> providerRequestStarting)
+        {
+            await providerRequestStarting(CancellationToken.None);
+            return await GenerateAsync(request, responseChunkHandler, cancellationToken);
+        }
+
         public Task QuarantineAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
