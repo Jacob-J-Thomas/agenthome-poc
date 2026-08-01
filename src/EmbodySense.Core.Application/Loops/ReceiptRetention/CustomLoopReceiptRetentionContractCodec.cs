@@ -64,7 +64,7 @@ public static class CustomLoopReceiptRetentionContractCodec
     }
 
     /// <summary>
-    /// Computes the canonical binding between one Delete request/outcome fingerprint and its complete deleted-definition lineage.
+    /// Computes the canonical binding between one successful Deleted request/outcome fingerprint and its complete deleted-definition lineage.
     /// </summary>
     /// <param name="requestHash">The canonical original Delete request hash.</param>
     /// <param name="outcomeHash">The canonical terminal Delete outcome hash.</param>
@@ -216,6 +216,7 @@ public static class CustomLoopReceiptRetentionContractCodec
         writer.WriteStartObject();
         writer.WriteString("requestHash", requestHash);
         writer.WriteString("outcomeHash", outcomeHash);
+        writer.WriteString("definitionMutationOutcome", "deleted");
         writer.WriteNumber("lineageSchemaVersion", lineage.SchemaVersion);
         writer.WriteString("loopId", lineage.LoopId);
         writer.WriteString("roleId", lineage.RoleId);
