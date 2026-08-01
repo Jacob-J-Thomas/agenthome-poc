@@ -8,12 +8,20 @@ namespace EmbodySense.Core.Clients.Tests.Capabilities;
 internal sealed class TestCapabilityProcessIsolationBoundary : ICapabilityProcessIsolationBoundary
 {
     internal CapabilityExecutableAvailability Availability { get; set; } = new(CapabilityExecutableAvailabilityStatus.Available, "Test isolation boundary available.");
+    internal Exception? AvailabilityException { get; set; }
     internal Exception? StartException { get; set; }
     internal int Starts { get; private set; }
     internal string? LastWorkingDirectory { get; private set; }
     internal TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public CapabilityExecutableAvailability CheckAvailability(CapabilityArtifactManifest manifest) => Availability;
+    public CapabilityExecutableAvailability CheckAvailability(CapabilityArtifactManifest manifest)
+    {
+        if (AvailabilityException is not null)
+        {
+            throw AvailabilityException;
+        }
+        return Availability;
+    }
 
     public Process StartIsolated(ProcessStartInfo startInfo, CapabilityArtifactManifest manifest, ICapabilityExecutableArtifactLease artifactLease)
     {

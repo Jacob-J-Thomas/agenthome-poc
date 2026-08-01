@@ -83,4 +83,17 @@ public sealed class ConfiguredCapabilityArtifactTrustVerifierTests
         Assert.Throws<ArgumentException>(() => new ConfiguredCapabilityArtifactTrustVerifier(new Dictionary<string, string> { ["p384"] = p384.ExportSubjectPublicKeyInfoPem() }));
         Assert.Throws<ArgumentException>(() => new ConfiguredCapabilityArtifactTrustVerifier(new Dictionary<string, string>(), ["not-a-digest"]));
     }
+
+    [Fact]
+    public void Later_invalid_key_rejects_configuration_after_a_valid_key_was_imported()
+    {
+        using var p256 = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var p384 = ECDsa.Create(ECCurve.NamedCurves.nistP384);
+
+        Assert.Throws<ArgumentException>(() => new ConfiguredCapabilityArtifactTrustVerifier(new Dictionary<string, string>
+        {
+            ["valid-key"] = p256.ExportSubjectPublicKeyInfoPem(),
+            ["invalid-key"] = p384.ExportSubjectPublicKeyInfoPem()
+        }));
+    }
 }

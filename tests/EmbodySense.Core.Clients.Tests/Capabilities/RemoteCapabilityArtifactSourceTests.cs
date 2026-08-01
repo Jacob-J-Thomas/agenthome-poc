@@ -79,6 +79,21 @@ public sealed class RemoteCapabilityArtifactSourceTests
         await Assert.ThrowsAsync<UnauthorizedAccessException>(() => remote.ReadAsync(new CapabilityArtifactSourceReference(CapabilityArtifactSourceKind.Remote, "https://blocked.test/artifact", "rev", CapabilityArtifactUpdatePolicy.Pinned)));
     }
 
+    [Fact]
+    public async Task Default_owned_transport_and_server_origin_configuration_fail_closed()
+    {
+        using var transport = new StubRemoteCapabilityArtifactTransport();
+
+        Assert.Throws<ArgumentNullException>(() => new RemoteCapabilityArtifactSource(transport, null!));
+        Assert.Throws<ArgumentException>(() => new RemoteCapabilityArtifactSource(transport, ["http://allowed.test"]));
+        Assert.Throws<ArgumentException>(() => new RemoteCapabilityArtifactSource(transport, []));
+
+        using var source = new RemoteCapabilityArtifactSource(["https://allowed.test"]);
+        var nonCanonicalSource = new CapabilityArtifactSourceReference(
+            CapabilityArtifactSourceKind.Remote, "https://allowed.test/artifact?unexpected", "rev", CapabilityArtifactUpdatePolicy.Pinned);
+        await Assert.ThrowsAsync<ArgumentException>(() => source.ReadAsync(nonCanonicalSource));
+    }
+
     private sealed class UnknownLengthContent : HttpContent
     {
         private readonly int _length;

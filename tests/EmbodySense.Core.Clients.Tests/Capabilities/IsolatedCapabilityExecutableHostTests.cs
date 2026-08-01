@@ -57,6 +57,67 @@ public sealed class IsolatedCapabilityExecutableHostTests
     }
 
     [Fact]
+    public async Task Resolver_and_lease_failures_remain_structured_without_starting_a_process()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var artifact = PrepareArtifact();
+        var boundary = new TestCapabilityProcessIsolationBoundary();
+        var resolver = new TestCapabilityExecutableArtifactResolver { Resolution = new(CapabilityExecutableAvailabilityStatus.Available, null, "Lease was omitted.") };
+        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), boundary, resolver);
+        var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
+
+        var missingLease = new CapabilityExecutableInvocation(
+            manifest, artifact.RootPath, "{}", "missing-lease");
+        Assert.Equal(CapabilityExecutableInvocationStatus.Unavailable, (await host.InvokeAsync(missingLease)).Status);
+
+        resolver.ResolveException = new IOException("private resolver detail");
+        var resolverFailure = new CapabilityExecutableInvocation(
+            manifest, artifact.RootPath, "{}", "resolver-failure");
+        Assert.Equal(CapabilityExecutableInvocationStatus.Unavailable, (await host.InvokeAsync(resolverFailure)).Status);
+
+        resolver.ResolveException = null;
+        var mismatchedLease = new TestCapabilityExecutableArtifactLease(
+            artifact.RootPath, Path.Combine(artifact.RootPath, artifact.EntryPoint), EmbodySense.Core.Common.Capabilities.CapabilityIntegrityDigest.Compute("wrong"u8), 0);
+        resolver.Resolution = new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Available, mismatchedLease, "Mismatched lease.");
+        var mismatchedInvocation = new CapabilityExecutableInvocation(
+            manifest, artifact.RootPath, "{}", "mismatched-lease");
+        Assert.Equal(CapabilityExecutableInvocationStatus.Invalid, (await host.InvokeAsync(mismatchedInvocation)).Status);
+        Assert.Equal(0, boundary.Starts);
+    }
+
+    [Fact]
+    public async Task Resolver_cancellation_and_boundary_failure_are_safe_terminal_results()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var artifact = PrepareArtifact();
+        var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        using var cancelledHost = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), new TestCapabilityProcessIsolationBoundary(), new TestCapabilityExecutableArtifactResolver { ReturnCancellation = true });
+
+        var cancelledInvocation = new CapabilityExecutableInvocation(
+            manifest, artifact.RootPath, "{}", "resolver-cancelled");
+        var cancelled = await cancelledHost.InvokeAsync(cancelledInvocation, cancellation.Token);
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.Cancelled, cancelled.Status);
+
+        var failingBoundary = new TestCapabilityProcessIsolationBoundary { AvailabilityException = new IOException("private boundary detail") };
+        using var failingHost = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), failingBoundary, new TestCapabilityExecutableArtifactResolver());
+        var boundaryFailure = new CapabilityExecutableInvocation(
+            manifest, artifact.RootPath, "{}", "boundary-failure");
+        var unavailable = await failingHost.InvokeAsync(boundaryFailure);
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.Unavailable, unavailable.Status);
+        Assert.DoesNotContain("private", unavailable.Diagnostic, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Host_redacts_platform_availability_diagnostics()
     {
         var boundary = new TestCapabilityProcessIsolationBoundary { Availability = new(CapabilityExecutableAvailabilityStatus.Unavailable, "password=hunter2 C:\\private\\secret.txt") };
