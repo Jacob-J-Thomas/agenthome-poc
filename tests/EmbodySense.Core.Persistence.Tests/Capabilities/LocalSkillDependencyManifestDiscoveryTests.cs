@@ -59,6 +59,78 @@ public sealed class LocalSkillDependencyManifestDiscoveryTests
     }
 
     [Fact]
+    public async Task Discovery_returns_empty_when_the_configured_skills_root_does_not_exist()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        var results = await new LocalSkillDependencyManifestDiscovery(paths).DiscoverAsync();
+
+        Assert.Empty(results);
+        Assert.False(Directory.Exists(paths.SkillsPath));
+    }
+
+    [Fact]
+    public async Task Discovery_reports_no_manifest_when_either_required_sidecar_is_missing()
+    {
+        using var workspace = new TestWorkspace();
+        var skillsPath = new WorkspacePaths(workspace.RootPath).SkillsPath;
+        var skillOnly = Path.Combine(skillsPath, "skill-only");
+        var manifestOnly = Path.Combine(skillsPath, "manifest-only");
+        Directory.CreateDirectory(skillOnly);
+        Directory.CreateDirectory(manifestOnly);
+        await File.WriteAllTextAsync(Path.Combine(skillOnly, "SKILL.md"), "# skill only\n", Encoding.UTF8);
+        await File.WriteAllTextAsync(Path.Combine(manifestOnly, "capability-dependencies.json"), "{}", Encoding.UTF8);
+
+        var results = await new LocalSkillDependencyManifestDiscovery(new WorkspacePaths(workspace.RootPath)).DiscoverAsync();
+
+        Assert.Equal(["manifest-only", "skill-only"], results.Select(result => result.DirectoryName));
+        Assert.All(results, result => Assert.Equal(LocalSkillDependencyDiscoveryStatus.NoManifest, result.Status));
+    }
+
+    [Fact]
+    public async Task Discovery_accepts_a_bom_prefixed_canonical_dependency_sidecar()
+    {
+        using var workspace = new TestWorkspace();
+        await WriteSkillAsync(workspace, "bom", "org.example/bom", "# bom\n");
+        var manifestPath = workspace.File(".agent", "skills", "bom", "capability-dependencies.json");
+        var canonical = await File.ReadAllTextAsync(manifestPath);
+        await File.WriteAllTextAsync(manifestPath, "\uFEFF" + canonical, new UTF8Encoding(false));
+
+        var result = Assert.Single(await new LocalSkillDependencyManifestDiscovery(new WorkspacePaths(workspace.RootPath)).DiscoverAsync());
+
+        Assert.Equal(LocalSkillDependencyDiscoveryStatus.Discovered, result.Status);
+        Assert.Equal("org.example/bom", result.Manifest!.SubjectId.Value);
+    }
+
+    [Fact]
+    public async Task Discovery_rejects_malformed_dependency_json()
+    {
+        using var workspace = new TestWorkspace();
+        var directory = workspace.File(".agent", "skills", "malformed");
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "SKILL.md"), "# malformed\n", Encoding.UTF8);
+        await File.WriteAllTextAsync(Path.Combine(directory, "capability-dependencies.json"), "{", Encoding.UTF8);
+
+        var result = Assert.Single(await new LocalSkillDependencyManifestDiscovery(new WorkspacePaths(workspace.RootPath)).DiscoverAsync());
+
+        Assert.Equal(LocalSkillDependencyDiscoveryStatus.Invalid, result.Status);
+        Assert.Null(result.Manifest);
+    }
+
+    [Fact]
+    public async Task Discovery_honors_cancellation_before_reading_a_bound_skill()
+    {
+        using var workspace = new TestWorkspace();
+        var directory = workspace.File(".agent", "skills", "cancelled");
+        Directory.CreateDirectory(directory);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new LocalSkillDependencyManifestDiscovery(new WorkspacePaths(workspace.RootPath)).DiscoverAsync(cancellation.Token));
+    }
+
+    [Fact]
     public async Task Discovery_rejects_reparse_configured_skills_roots_and_ancestors_when_supported()
     {
         using var skillsWorkspace = new TestWorkspace();
