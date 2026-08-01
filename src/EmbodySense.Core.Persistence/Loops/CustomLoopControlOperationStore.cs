@@ -32,6 +32,8 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     private const long MaximumArtifactBytes = 64 * 1024;
     private const string ActiveCleanupJournalFileName = "active.json";
     private const int IntentAuditRecoveryTailLimit = 128;
+    private const int MaximumInterruptedAtomicWriteCount = 1;
+    private const int SharedRetentionOwnedFileCount = 2; // The shared mutation lock plus at most one interrupted atomic write.
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _processGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -46,6 +48,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     private readonly string _retentionRoot;
     private readonly string _cleanupRoot;
     private readonly string _cleanupHistoryRoot;
+    private readonly ImmutableHashSet<string> _canonicalSharedRetentionFileNames;
     private readonly CustomLoopArtifactPathGuard _pathGuard;
     private readonly SemaphoreSlim _processGate;
     private readonly IAuditLog? _auditLog;
@@ -64,6 +67,11 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         _retentionRoot = Path.GetFullPath(paths.CustomLoopReceiptRetentionPath);
         _cleanupRoot = Path.GetFullPath(paths.CustomLoopControlReceiptCleanupPath);
         _cleanupHistoryRoot = Path.GetFullPath(paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath);
+        _canonicalSharedRetentionFileNames = ImmutableHashSet.Create(
+            StringComparer.Ordinal,
+            Path.GetFileName(paths.CustomLoopReceiptProofLedgerPath),
+            Path.GetFileName(paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath),
+            Path.GetFileName(paths.CustomLoopDefinitionTombstoneCleanupJournalPath));
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
         _processGate = _processGates.GetOrAdd(_retentionRoot, _ => new SemaphoreSlim(1, 1));
         _auditLog = auditLog;
@@ -894,10 +902,11 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             return [];
         }
 
-        ValidateOperationStorageForRead(allowedOrphanOwnerOperationId);
+        var paths = ReadBoundedOperationStoragePaths(allowedOrphanOwnerOperationId);
+        ValidateOperationStorageForRead(paths, allowedOrphanOwnerOperationId);
 
         var artifacts = new List<(CustomLoopControlOperation Operation, byte[] Bytes, string Path)>();
-        foreach (var path in Directory.EnumerateFiles(_root, "*.json", SearchOption.TopDirectoryOnly).OrderBy(item => item, StringComparer.Ordinal))
+        foreach (var path in paths.Where(path => string.Equals(Path.GetExtension(path), ".json", StringComparison.Ordinal)))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var operationId = Path.GetFileNameWithoutExtension(path);
@@ -1006,8 +1015,8 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     private void ReclaimAbandonedInternalArtifactsUnderOwnership()
     {
         ReclaimOperationArtifactsUnderOwnership();
-        ReclaimAtomicWriteTempsUnderOwnership(_cleanupRoot, fileName => string.Equals(fileName, ActiveCleanupJournalFileName, StringComparison.Ordinal), rejectOtherFiles: true);
-        ReclaimAtomicWriteTempsUnderOwnership(_retentionRoot, fileName => string.Equals(fileName, "proof-ledger.json", StringComparison.Ordinal), rejectOtherFiles: false);
+        ReclaimCleanupAtomicWriteTempsUnderOwnership();
+        ReclaimSharedRetentionAtomicWriteTempsUnderOwnership();
     }
 
     private void ReclaimOperationArtifactsUnderOwnership()
@@ -1017,12 +1026,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             return;
         }
 
-        if (Directory.EnumerateDirectories(_root, "*", SearchOption.TopDirectoryOnly).Any())
-        {
-            throw new FormatException("Lifecycle-control receipt storage cannot contain subdirectories.");
-        }
-
-        var files = Directory.EnumerateFiles(_root, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        var files = ReadBoundedOperationStoragePaths();
         foreach (var path in files)
         {
             var fileName = Path.GetFileName(path);
@@ -1050,51 +1054,122 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         }
     }
 
-    private void ReclaimAtomicWriteTempsUnderOwnership(string root, Func<string, bool> validTarget, bool rejectOtherFiles)
+    private void ReclaimCleanupAtomicWriteTempsUnderOwnership()
     {
-        if (!_pathGuard.DirectoryExists(root))
+        if (!_pathGuard.DirectoryExists(_cleanupRoot))
         {
             return;
         }
 
-        if (rejectOtherFiles && Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly).Any())
-        {
-            throw new FormatException("Lifecycle-control cleanup storage cannot contain subdirectories.");
-        }
-
-        foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.Ordinal))
+        var paths = ReadBoundedTopLevelFiles(_cleanupRoot, 1 + MaximumInterruptedAtomicWriteCount, "Lifecycle-control cleanup storage");
+        foreach (var path in paths.OrderBy(path => path, StringComparer.Ordinal))
         {
             var fileName = Path.GetFileName(path);
-            if (IsAtomicWriteTemp(fileName, validTarget))
+            if (IsAtomicWriteTemp(fileName, target => string.Equals(target, ActiveCleanupJournalFileName, StringComparison.Ordinal)))
             {
-                _pathGuard.DeleteFile(root, path);
+                _pathGuard.DeleteFile(_cleanupRoot, path);
                 continue;
             }
 
-            if (rejectOtherFiles && !validTarget(fileName))
+            if (!string.Equals(fileName, ActiveCleanupJournalFileName, StringComparison.Ordinal))
             {
                 throw new FormatException($"Lifecycle-control cleanup storage contains an unrecognized artifact `{fileName}`.");
-            }
-
-            if (!rejectOtherFiles && LooksTemporary(fileName) && !string.Equals(fileName, ".custom-loop-mutations.lock", StringComparison.Ordinal))
-            {
-                throw new FormatException($"Shared receipt-retention storage contains an unrecognized temporary artifact `{fileName}`.");
             }
         }
     }
 
-    private void ValidateOperationStorageForRead(string? allowedOrphanOwnerOperationId)
+    private void ReclaimSharedRetentionAtomicWriteTempsUnderOwnership()
     {
-        if (Directory.EnumerateDirectories(_root, "*", SearchOption.TopDirectoryOnly).Any())
+        if (!_pathGuard.DirectoryExists(_retentionRoot))
         {
-            throw new FormatException("Lifecycle-control receipt storage cannot contain subdirectories.");
+            return;
         }
 
-        var receiptIds = Directory.EnumerateFiles(_root, "*.json", SearchOption.TopDirectoryOnly)
+        var maximumFileCount = _canonicalSharedRetentionFileNames.Count + SharedRetentionOwnedFileCount;
+        var paths = ReadBoundedTopLevelFiles(_retentionRoot, maximumFileCount, "Shared receipt-retention storage", _cleanupRoot);
+        foreach (var path in paths.OrderBy(path => path, StringComparer.Ordinal))
+        {
+            var fileName = Path.GetFileName(path);
+            if (string.Equals(fileName, ".custom-loop-mutations.lock", StringComparison.Ordinal) || _canonicalSharedRetentionFileNames.Contains(fileName))
+            {
+                continue;
+            }
+
+            if (IsAtomicWriteTemp(fileName, _canonicalSharedRetentionFileNames.Contains))
+            {
+                _pathGuard.DeleteFile(_retentionRoot, path);
+                continue;
+            }
+
+            if (LooksTemporary(fileName))
+            {
+                throw new FormatException($"Shared receipt-retention storage contains an unrecognized temporary artifact `{fileName}`.");
+            }
+
+            throw new FormatException($"Shared receipt-retention storage contains an unrecognized artifact `{fileName}`.");
+        }
+    }
+
+    private string[] ReadBoundedOperationStoragePaths(string? allowedOrphanOwnerOperationId = null)
+    {
+        var budget = CustomLoopReceiptRetentionPolicy.GetBudget(ArtifactClass);
+        var orphanOwnerAllowance = allowedOrphanOwnerOperationId is null ? 0 : 1;
+        var maximumOwnerLockCount = checked(budget.MaximumArtifactCount + orphanOwnerAllowance);
+        var maximumFileCount = checked(budget.MaximumArtifactCount + maximumOwnerLockCount + MaximumInterruptedAtomicWriteCount);
+        var paths = ReadBoundedTopLevelFiles(_root, maximumFileCount, "Lifecycle-control receipt storage");
+        var receiptCount = paths.Count(path => IsCanonicalOperationArtifactFileName(Path.GetFileName(path)));
+        var ownerLockCount = paths.Count(path => TryGetOwnerLockOperationId(Path.GetFileName(path), out _));
+        var atomicWriteTempCount = paths.Count(path => IsAtomicWriteTemp(Path.GetFileName(path), IsCanonicalOperationArtifactFileName));
+        if (receiptCount > budget.MaximumArtifactCount || ownerLockCount > maximumOwnerLockCount || atomicWriteTempCount > MaximumInterruptedAtomicWriteCount)
+        {
+            throw new FormatException("Lifecycle-control receipt storage exceeds its bounded inventory ceiling.");
+        }
+
+        return paths.OrderBy(path => path, StringComparer.Ordinal).ToArray();
+    }
+
+    private string[] ReadBoundedTopLevelFiles(string root, int maximumFileCount, string artifactName, string? allowedDirectoryPath = null)
+    {
+        var maximumEntryCount = checked(maximumFileCount + (allowedDirectoryPath is null ? 0 : 1));
+        var boundedEntries = Directory.EnumerateFileSystemEntries(root, "*", SearchOption.TopDirectoryOnly).Take(maximumEntryCount + 1).ToArray();
+        if (boundedEntries.Length > maximumEntryCount)
+        {
+            throw new FormatException($"{artifactName} exceeds its bounded inventory ceiling.");
+        }
+
+        var files = new List<string>(boundedEntries.Length);
+        var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var entry in boundedEntries)
+        {
+            if (Directory.Exists(entry))
+            {
+                _ = _pathGuard.DirectoryExists(entry);
+                if (allowedDirectoryPath is null || !string.Equals(Path.GetFullPath(entry), allowedDirectoryPath, pathComparison))
+                {
+                    throw new FormatException($"{artifactName} contains an unrecognized subdirectory `{Path.GetFileName(entry)}`.");
+                }
+
+                continue;
+            }
+
+            files.Add(_pathGuard.GetFilePath(root, Path.GetFileName(entry)));
+        }
+
+        if (files.Count > maximumFileCount)
+        {
+            throw new FormatException($"{artifactName} exceeds its bounded inventory ceiling.");
+        }
+
+        return files.ToArray();
+    }
+
+    private static void ValidateOperationStorageForRead(IReadOnlyList<string> paths, string? allowedOrphanOwnerOperationId)
+    {
+        var receiptIds = paths
             .Where(path => IsCanonicalOperationArtifactFileName(Path.GetFileName(path)))
             .Select(path => Path.GetFileNameWithoutExtension(path))
             .ToHashSet(StringComparer.Ordinal);
-        foreach (var path in Directory.EnumerateFiles(_root, "*", SearchOption.TopDirectoryOnly))
+        foreach (var path in paths)
         {
             var fileName = Path.GetFileName(path);
             if (IsCanonicalOperationArtifactFileName(fileName))
@@ -1114,12 +1189,8 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
 
     private void ValidateCleanupStorageForRead()
     {
-        if (Directory.EnumerateDirectories(_cleanupRoot, "*", SearchOption.TopDirectoryOnly).Any())
-        {
-            throw new FormatException("Lifecycle-control cleanup storage cannot contain subdirectories.");
-        }
-
-        foreach (var path in Directory.EnumerateFiles(_cleanupRoot, "*", SearchOption.TopDirectoryOnly))
+        var paths = ReadBoundedTopLevelFiles(_cleanupRoot, 1 + MaximumInterruptedAtomicWriteCount, "Lifecycle-control cleanup storage");
+        foreach (var path in paths.OrderBy(path => path, StringComparer.Ordinal))
         {
             var fileName = Path.GetFileName(path);
             if (!string.Equals(fileName, ActiveCleanupJournalFileName, StringComparison.Ordinal))
@@ -1131,14 +1202,22 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
 
     private void ValidateProofStorageForRead()
     {
-        foreach (var path in Directory.EnumerateFiles(_retentionRoot, "*", SearchOption.TopDirectoryOnly))
+        var maximumFileCount = _canonicalSharedRetentionFileNames.Count + SharedRetentionOwnedFileCount;
+        var paths = ReadBoundedTopLevelFiles(_retentionRoot, maximumFileCount, "Shared receipt-retention storage", _cleanupRoot);
+        foreach (var path in paths.OrderBy(path => path, StringComparer.Ordinal))
         {
             var fileName = Path.GetFileName(path);
-            if (IsAtomicWriteTemp(fileName, target => string.Equals(target, "proof-ledger.json", StringComparison.Ordinal))
-                || LooksTemporary(fileName) && !string.Equals(fileName, ".custom-loop-mutations.lock", StringComparison.Ordinal))
+            if (string.Equals(fileName, ".custom-loop-mutations.lock", StringComparison.Ordinal) || _canonicalSharedRetentionFileNames.Contains(fileName))
+            {
+                continue;
+            }
+
+            if (IsAtomicWriteTemp(fileName, _canonicalSharedRetentionFileNames.Contains) || LooksTemporary(fileName))
             {
                 throw new FormatException($"Shared receipt-retention storage contains an unrecognized or abandoned internal artifact `{fileName}`.");
             }
+
+            throw new FormatException($"Shared receipt-retention storage contains an unrecognized artifact `{fileName}`.");
         }
     }
 

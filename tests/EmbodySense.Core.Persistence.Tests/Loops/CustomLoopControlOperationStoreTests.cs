@@ -1479,6 +1479,130 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, cleanupFailure.BlockReason);
     }
 
+    [Fact]
+    public async Task Max_plus_one_raw_receipts_fail_before_json_reads_or_any_lifecycle_control_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopControlOperationsPath);
+        for (var index = 0; index <= CustomLoopReceiptRetentionPolicy.MaxLifecycleControlReceiptCount; index++)
+        {
+            File.Create(Path.Combine(paths.CustomLoopControlOperationsPath, $"control-inventory-{index:D5}.json")).Dispose();
+        }
+
+        var lockedPath = Path.Combine(paths.CustomLoopControlOperationsPath, "control-inventory-00000.json");
+        using var unreadableReceipt = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var store = new CustomLoopControlOperationStore(paths, timeProvider: new MutableTimeProvider(_timestamp));
+        var posture = await store.InspectAsync();
+        var cleanup = await store.CleanupAsync(CleanupCommand("cleanup-overpopulated-control-inventory"));
+        var begin = await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(Pending("control-after-overpopulated-inventory", AuditSchema.Actors.Web)));
+        var ownedPending = Pending("control-complete-overpopulated-inventory", AuditSchema.Actors.Web) with
+        {
+            OwnerGenerationId = "control-owner-overpopulated-inventory",
+            OwnerProcessId = Environment.ProcessId,
+            OwnerAcquiredAtUtc = _timestamp
+        };
+        var complete = await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(Complete(ownedPending, _timestamp)));
+
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, posture.CleanupBlockReason);
+        Assert.Contains("FormatException", posture.Detail, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, cleanup.Status);
+        Assert.Contains("bounded inventory ceiling", cleanup.Detail, StringComparison.Ordinal);
+        Assert.Contains("bounded inventory ceiling", begin.Message, StringComparison.Ordinal);
+        Assert.Contains("bounded inventory ceiling", complete.Message, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopReceiptRetentionPolicy.MaxLifecycleControlReceiptCount + 1, Directory.EnumerateFiles(paths.CustomLoopControlOperationsPath, "*", SearchOption.TopDirectoryOnly).Count());
+        Assert.Equal(0, unreadableReceipt.Length);
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, "control-after-overpopulated-inventory.json")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, ".control-after-overpopulated-inventory.owner.lock")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlReceiptCleanupPath, "active.json")));
+    }
+
+    [Fact]
+    public async Task Shared_retention_directory_inventory_is_bounded_and_fails_before_lifecycle_control_mutation()
+    {
+        using var unexpectedWorkspace = new TestWorkspace();
+        var unexpectedPaths = new WorkspacePaths(unexpectedWorkspace.RootPath);
+        Directory.CreateDirectory(Path.Combine(unexpectedPaths.CustomLoopReceiptRetentionPath, "unexpected-directory"));
+        var unexpectedStore = new CustomLoopControlOperationStore(unexpectedPaths);
+        var unexpectedPosture = await unexpectedStore.InspectAsync();
+        var unexpectedBegin = await Assert.ThrowsAsync<FormatException>(() => unexpectedStore.BeginAsync(Pending("control-after-unexpected-retention-directory", AuditSchema.Actors.Web)));
+
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, unexpectedPosture.CleanupBlockReason);
+        Assert.Contains("FormatException", unexpectedPosture.Detail, StringComparison.Ordinal);
+        Assert.Contains("unrecognized subdirectory", unexpectedBegin.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(unexpectedPaths.CustomLoopControlOperationsPath, "control-after-unexpected-retention-directory.json")));
+        Assert.False(File.Exists(Path.Combine(unexpectedPaths.CustomLoopControlOperationsPath, ".control-after-unexpected-retention-directory.owner.lock")));
+        Assert.False(File.Exists(Path.Combine(unexpectedPaths.CustomLoopControlReceiptCleanupPath, "active.json")));
+
+        using var overpopulatedWorkspace = new TestWorkspace();
+        var overpopulatedPaths = new WorkspacePaths(overpopulatedWorkspace.RootPath);
+        for (var index = 0; index < 7; index++)
+        {
+            Directory.CreateDirectory(Path.Combine(overpopulatedPaths.CustomLoopReceiptRetentionPath, $"unexpected-directory-{index}"));
+        }
+
+        var overpopulatedStore = new CustomLoopControlOperationStore(overpopulatedPaths);
+        var overpopulatedBegin = await Assert.ThrowsAsync<FormatException>(() => overpopulatedStore.BeginAsync(Pending("control-after-overpopulated-retention-directories", AuditSchema.Actors.Web)));
+
+        Assert.Contains("bounded inventory ceiling", overpopulatedBegin.Message, StringComparison.Ordinal);
+        Assert.Equal(7, Directory.EnumerateDirectories(overpopulatedPaths.CustomLoopReceiptRetentionPath, "*", SearchOption.TopDirectoryOnly).Count());
+        Assert.False(File.Exists(Path.Combine(overpopulatedPaths.CustomLoopControlOperationsPath, "control-after-overpopulated-retention-directories.json")));
+        Assert.False(File.Exists(Path.Combine(overpopulatedPaths.CustomLoopControlOperationsPath, ".control-after-overpopulated-retention-directories.owner.lock")));
+        Assert.False(File.Exists(Path.Combine(overpopulatedPaths.CustomLoopControlReceiptCleanupPath, "active.json")));
+    }
+
+    [Fact]
+    public async Task Max_plus_one_internal_files_fail_before_cleanup_or_shared_retention_reads_and_reclamation()
+    {
+        using var cleanupWorkspace = new TestWorkspace();
+        var cleanupPaths = new WorkspacePaths(cleanupWorkspace.RootPath);
+        Directory.CreateDirectory(cleanupPaths.CustomLoopControlReceiptCleanupPath);
+        var cleanupFiles = new[]
+        {
+            Path.Combine(cleanupPaths.CustomLoopControlReceiptCleanupPath, "active.json"),
+            Path.Combine(cleanupPaths.CustomLoopControlReceiptCleanupPath, $".active.json.{Guid.NewGuid():N}.tmp"),
+            Path.Combine(cleanupPaths.CustomLoopControlReceiptCleanupPath, $".active.json.{Guid.NewGuid():N}.tmp")
+        };
+        foreach (var path in cleanupFiles)
+        {
+            await File.WriteAllTextAsync(path, "unreadable");
+        }
+
+        var cleanupStore = new CustomLoopControlOperationStore(cleanupPaths);
+        var cleanupPosture = await cleanupStore.InspectAsync();
+        var cleanup = await cleanupStore.CleanupAsync(CleanupCommand("cleanup-overpopulated-internal-inventory"));
+
+        using var retentionWorkspace = new TestWorkspace();
+        var retentionPaths = new WorkspacePaths(retentionWorkspace.RootPath);
+        Directory.CreateDirectory(retentionPaths.CustomLoopReceiptRetentionPath);
+        var retentionFiles = new[]
+        {
+            retentionPaths.CustomLoopReceiptProofLedgerPath,
+            retentionPaths.CustomLoopDefinitionMutationReceiptCleanupJournalPath,
+            retentionPaths.CustomLoopDefinitionTombstoneCleanupJournalPath,
+            Path.Combine(retentionPaths.CustomLoopReceiptRetentionPath, ".custom-loop-mutations.lock"),
+            Path.Combine(retentionPaths.CustomLoopReceiptRetentionPath, $".proof-ledger.json.{Guid.NewGuid():N}.tmp"),
+            Path.Combine(retentionPaths.CustomLoopReceiptRetentionPath, "unexpected-shared-artifact.json")
+        };
+        foreach (var path in retentionFiles)
+        {
+            await File.WriteAllTextAsync(path, "unreadable");
+        }
+
+        var retentionStore = new CustomLoopControlOperationStore(retentionPaths);
+        var retentionPosture = await retentionStore.InspectAsync();
+        var retentionCleanup = await retentionStore.CleanupAsync(CleanupCommand("cleanup-overpopulated-shared-inventory"));
+
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, cleanupPosture.CleanupBlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, cleanup.Status);
+        Assert.Contains("bounded inventory ceiling", cleanup.Detail, StringComparison.Ordinal);
+        Assert.Equal(cleanupFiles.Length, cleanupFiles.Count(File.Exists));
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, retentionPosture.CleanupBlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, retentionCleanup.Status);
+        Assert.Contains("bounded inventory ceiling", retentionCleanup.Detail, StringComparison.Ordinal);
+        Assert.Equal(retentionFiles.Length, retentionFiles.Count(File.Exists));
+    }
+
     private static CustomLoopControlOperation Pending(string operationId, string actor)
     {
         var kind = CustomLoopControlKind.Pause;
