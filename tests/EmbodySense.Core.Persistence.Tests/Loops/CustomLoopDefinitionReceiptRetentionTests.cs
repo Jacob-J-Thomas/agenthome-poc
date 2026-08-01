@@ -561,11 +561,11 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
 
         var exception = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(definition.Id));
 
-        Assert.Contains("conflicts with its retained compact lineage", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("conflicts with its retained compact proof", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Role_changed_compact_lineage_cannot_match_its_raw_delete_receipt_even_with_a_recomputed_binding()
+    public async Task Routine_workspace_reads_reject_role_changed_compact_lineage_when_the_authoritative_delete_receipt_remains()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -583,9 +583,11 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         var changedProof = deleteProof with { DeleteLineageBindingHash = CustomLoopReceiptRetentionContractCodec.ComputeDeleteLineageBindingHash(deleteProof.RequestHash, deleteProof.OutcomeHash, changedLineage) };
         await WriteProofLedgerAsync(paths, ledger with { DefinitionLineage = [changedLineage], ExpiredOperations = [changedProof] });
 
-        var exception = await Assert.ThrowsAsync<FormatException>(() => store.LookupReceiptOperationAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, deletion.OperationId));
+        var getException = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(definition.Id));
+        var listException = await Assert.ThrowsAsync<FormatException>(() => store.ListAsync());
 
-        Assert.Contains("conflicts with its retained compact proof", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("conflicts with its retained compact proof", getException.Message, StringComparison.Ordinal);
+        Assert.Contains("conflicts with its retained compact proof", listException.Message, StringComparison.Ordinal);
     }
 
     [Fact]

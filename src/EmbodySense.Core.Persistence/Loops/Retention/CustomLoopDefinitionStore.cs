@@ -1196,7 +1196,7 @@ public sealed partial class CustomLoopDefinitionStore
     private static bool IsRetentionArtifactFileName(string fileName, int maximumIdentifierLength)
     {
         var identifier = Path.GetFileNameWithoutExtension(fileName);
-        return string.Equals(Path.GetExtension(fileName), ".json", StringComparison.OrdinalIgnoreCase)
+        return string.Equals(Path.GetExtension(fileName), ".json", StringComparison.Ordinal)
             && CustomLoopArtifactIdentifier.IsValid(identifier, maximumIdentifierLength);
     }
 

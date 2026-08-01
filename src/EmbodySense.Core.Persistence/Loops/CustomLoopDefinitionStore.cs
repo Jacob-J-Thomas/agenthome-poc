@@ -720,7 +720,9 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         var tombstones = await ReadTombstonesAsync(cancellationToken);
         var operations = await ReadMutationOperationsAsync(cancellationToken);
         var proofLedger = await ReadProofLedgerAsync(cancellationToken);
-        return new WorkspaceState(definitions, tombstones, operations, proofLedger);
+        var state = new WorkspaceState(definitions, tombstones, operations, proofLedger);
+        await ValidateRetainedDeleteProofsAgainstExactReceiptsAsync(state, cancellationToken);
+        return state;
     }
 
     private async Task<IReadOnlyList<CustomLoopDefinition>> ReadDefinitionsAsync(CancellationToken cancellationToken)
@@ -730,6 +732,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
             return [];
         }
 
+        ReclaimRetentionAtomicWriteTempsUnderWorkspaceOwnership(_paths.CustomLoopDefinitionsPath, CustomLoopLimits.MaxArtifactIdCharacters, CustomLoopLimits.MaxDefinitionsPerWorkspace, "Custom loop definition storage");
         var definitions = new List<CustomLoopDefinition>();
         var paths = Directory.EnumerateFiles(_paths.CustomLoopDefinitionsPath, "*.json", SearchOption.TopDirectoryOnly).Take(CustomLoopLimits.MaxDefinitionsPerWorkspace + 1).ToArray();
         if (paths.Length > CustomLoopLimits.MaxDefinitionsPerWorkspace)
@@ -752,6 +755,31 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         }
 
         return definitions;
+    }
+
+    private async Task ValidateRetainedDeleteProofsAgainstExactReceiptsAsync(WorkspaceState state, CancellationToken cancellationToken)
+    {
+        if (state.ProofLedger is null || state.ProofLedger.DefinitionLineage.Length == 0)
+        {
+            return;
+        }
+
+        var rawOperations = await ReadRetentionArtifactsAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, cancellationToken);
+        foreach (var artifact in rawOperations.Where(item => item.Operation is { Kind: CustomLoopDefinitionMutationKind.Delete, Outcome: CustomLoopDefinitionStoreStatus.Deleted }))
+        {
+            var operation = artifact.Operation!;
+            var lineage = state.ProofLedger.DefinitionLineage.SingleOrDefault(item => string.Equals(item.LastMutationOperationId, operation.OperationId, StringComparison.Ordinal));
+            if (lineage is null)
+            {
+                continue;
+            }
+
+            var proof = state.ProofLedger.ExpiredOperations.SingleOrDefault(item => item.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt && string.Equals(item.OperationId, operation.OperationId, StringComparison.Ordinal));
+            if (proof is null || !ProofMatchesOperation(proof, artifact, lineage))
+            {
+                throw new FormatException($"Definition mutation receipt `{operation.OperationId}` conflicts with its retained compact proof.");
+            }
+        }
     }
 
     private async Task<IReadOnlyList<CustomLoopDefinitionTombstone>> ReadTombstonesAsync(CancellationToken cancellationToken)
