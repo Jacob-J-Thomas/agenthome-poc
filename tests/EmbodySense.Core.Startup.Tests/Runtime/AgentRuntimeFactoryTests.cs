@@ -7,6 +7,7 @@ using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -42,6 +43,22 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(CodexRuntimeCompatibility.Compatible, runtime.CodexRuntimeStatus.Compatibility);
         Assert.Equal("codex-cli 999.0.0-test", runtime.CodexRuntimeStatus.Version);
         Assert.Equal("explicit --codex-path", runtime.CodexRuntimeStatus.Source);
+    }
+
+    [Fact]
+    public async Task CreateAsync_surfaces_actionable_cleanup_without_rewriting_a_superseded_identityless_transcript()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var legacyEntry = """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-31T00:00:00Z","role":"user","content":"legacy prompt"}""";
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, legacyEntry);
+
+        var exception = await Assert.ThrowsAsync<ConversationTranscriptCleanupRequiredException>(() => CreateRuntimeAsync(workspace));
+
+        Assert.Equal(paths.CurrentConversationPath, exception.TranscriptPath);
+        Assert.Contains("start EmbodySense again", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(legacyEntry, await File.ReadAllTextAsync(paths.CurrentConversationPath));
     }
 
     [Fact]
@@ -376,46 +393,34 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task RunTurnAsync_surfaces_provider_ambiguity_and_allows_explicit_review_resolution()
+    public async Task RunTurnAsync_closes_a_conclusive_terminal_provider_failure_without_review_or_quarantine()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var fakeCodex = await CreateFakeCodexExecutableAsync(workspace, "provider exploded");
         AgentRuntimeTurnResult response;
-        AgentRuntimeTurnResult history;
-        AgentRuntimeTurnResult reviewList;
-        string reviewTurnId;
         await using (var runtime = await CreateRuntimeAsync(workspace, codexPath: fakeCodex))
         {
             response = await runtime.RunTurnAsync("hello");
-            history = await runtime.RunTurnAsync("/history");
-            var review = Assert.Single(await runtime.ListDefaultConversationReviewsAsync());
-            reviewTurnId = review.TurnId;
-            reviewList = await runtime.RunTurnAsync("/review");
+            Assert.Empty(await runtime.ListDefaultConversationReviewsAsync());
+            Assert.Collection(
+                runtime.GetActiveConversationTranscript(),
+                message => Assert.Equal(("User", "hello"), (message.Role, message.Content)));
         }
 
-        Assert.Equal(AgentRuntimeTurnStatus.MessageNeedsReview, response.Status);
+        Assert.Equal(AgentRuntimeTurnStatus.MessageFailed, response.Status);
         Assert.Contains("Codex app-server turn failed: provider exploded", response.FailureDetail, StringComparison.Ordinal);
-        Assert.Contains("Automatic redispatch is forbidden", response.FailureDetail, StringComparison.Ordinal);
         Assert.Equal(response.FailureDetail, response.Output);
         var failureEvent = Assert.Single(response.Events);
-        Assert.Equal(AgentRuntimeTurnEventKind.NeedsReview, failureEvent.Kind);
+        Assert.Equal(AgentRuntimeTurnEventKind.Failure, failureEvent.Kind);
         Assert.Equal(response.FailureDetail, failureEvent.Text);
         Assert.Equal(response.RunIdentity, failureEvent.RunIdentity);
         Assert.NotNull(response.RunIdentity);
         Assert.Equal("default-conversation", response.RunIdentity.LoopId);
         Assert.Equal("default-assistant", response.RunIdentity.RoleId);
-        Assert.Contains("before sending the first prompt", history.Output, StringComparison.Ordinal);
-        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, reviewList.Status);
-        Assert.Contains("provider-attempt", reviewList.Output, StringComparison.Ordinal);
 
         await using var restarted = await CreateRuntimeAsync(workspace, codexPath: fakeCodex);
-        Assert.Collection(
-            restarted.GetActiveConversationTranscript(),
-            message => Assert.Equal(("User", "hello"), (message.Role, message.Content)));
-        var reviewResolution = await restarted.RunTurnAsync($"/review resolve {reviewTurnId}");
-        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, reviewResolution.Status);
-        Assert.Contains("explicitly abandoning", reviewResolution.Output, StringComparison.Ordinal);
+        Assert.Empty(restarted.GetActiveConversationTranscript());
         Assert.Empty(await restarted.ListDefaultConversationReviewsAsync());
     }
 

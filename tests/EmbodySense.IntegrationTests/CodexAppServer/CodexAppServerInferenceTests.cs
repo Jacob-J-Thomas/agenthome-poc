@@ -55,6 +55,110 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_classifies_a_failed_completion_as_a_conclusive_terminal_provider_outcome()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"provider rejected the turn"},"items":[]}}"""));
+        var client = CreateClient(transport);
+        var dispatchStarted = false;
+
+        var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("fail conclusively"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ =>
+            {
+                dispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.True(dispatchStarted);
+        Assert.Equal("turn-1", exception.ProviderResponseId);
+        Assert.Contains("provider rejected the turn", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_preserves_an_observed_success_when_completion_audit_fails()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"observed answer","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, workingDirectory: workspace.RootPath);
+        FileStream? auditLock = null;
+
+        try
+        {
+            var exception = await Assert.ThrowsAsync<LlmInferenceObservedResponseException>(() => client.GenerateAsync(
+                LlmInferenceRequest.FromUserText("observe success"),
+                responseChunkHandler: null,
+                CancellationToken.None,
+                _ =>
+                {
+                    auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
+                    return Task.CompletedTask;
+                }));
+
+            Assert.Equal("observed answer", exception.Response.OutputText);
+            Assert.Equal("turn-1", exception.Response.ProviderResponseId);
+            Assert.Contains("must not be redispatched", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (auditLock is not null)
+            {
+                await auditLock.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsync_preserves_a_conclusive_failure_when_completion_audit_also_fails()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"provider rejected the turn"},"items":[]}}"""));
+        var client = CreateClient(transport, workingDirectory: workspace.RootPath);
+        FileStream? auditLock = null;
+
+        try
+        {
+            var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(
+                LlmInferenceRequest.FromUserText("observe failure"),
+                responseChunkHandler: null,
+                CancellationToken.None,
+                _ =>
+                {
+                    auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
+                    return Task.CompletedTask;
+                }));
+
+            Assert.Equal("turn-1", exception.ProviderResponseId);
+            Assert.Contains("provider rejected the turn", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("completion audit could not be persisted", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (auditLock is not null)
+            {
+                await auditLock.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
     public async Task GenerateAsync_routes_dynamic_tool_calls_through_tool_broker()
     {
         using var workspace = new TestWorkspace();
@@ -444,9 +548,10 @@ public sealed class CodexAppServerInferenceTests
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"model refused"},"items":[]}}"""));
         var client = CreateClient(transport);
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+        var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
 
         Assert.Contains("model refused", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("turn-1", exception.ProviderResponseId);
     }
 
     [Fact]

@@ -169,7 +169,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                             turnCompleted = true;
                             turnId = TryGetNestedString(message, "params", "turn", "id") ?? turnId;
                             completedText = TryExtractCompletedAgentMessage(message);
-                            ThrowIfTurnFailed(message);
+                            ThrowIfTurnFailed(message, turnId);
                         }
 
                         break;
@@ -544,7 +544,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         throw new InvalidOperationException($"Codex app-server request failed: {errorMessage}");
     }
 
-    private static void ThrowIfTurnFailed(JsonElement message)
+    private static void ThrowIfTurnFailed(JsonElement message, string? providerResponseId)
     {
         var status = TryGetNestedString(message, "params", "turn", "status");
 
@@ -554,7 +554,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }
 
         var errorMessage = TryGetNestedString(message, "params", "turn", "error", "message") ?? "turn failed";
-        throw new InvalidOperationException($"Codex app-server turn failed: {errorMessage}");
+        throw new LlmInferenceTerminalFailureException($"Codex app-server turn failed: {errorMessage}", providerResponseId);
     }
 
     private static string? TryExtractCompletedAgentMessage(JsonElement message)

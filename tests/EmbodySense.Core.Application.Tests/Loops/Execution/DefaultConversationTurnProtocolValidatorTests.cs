@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Inference.Models;
@@ -30,6 +31,48 @@ public sealed class DefaultConversationTurnProtocolValidatorTests
         DefaultConversationTurnProtocolValidator.Validate(record);
         record = SynchronizeTerminal(record);
         DefaultConversationTurnProtocolValidator.Validate(record);
+    }
+
+    [Fact]
+    public void Validate_accepts_conclusive_provider_failure_without_assistant_publication()
+    {
+        var record = CreateObservedFailure();
+        DefaultConversationTurnProtocolValidator.Validate(record);
+
+        record = PrepareTerminal(record, LoopRunStatus.Failed);
+        DefaultConversationTurnProtocolValidator.Validate(record);
+        DefaultConversationTurnProtocolValidator.Validate(SynchronizeTerminal(record));
+    }
+
+    [Fact]
+    public void Validate_accepts_observed_success_with_failed_audit_only_as_needs_review_before_publication()
+    {
+        var observed = AdvanceTo(DefaultConversationTurnCheckpoint.ProviderOutcomeObserved);
+        var auditFailure = observed with { ProviderOutcome = DefaultConversationProviderOutcome.ObservedWithAuditFailure };
+        DefaultConversationTurnProtocolValidator.Validate(auditFailure);
+
+        var needsReview = PrepareTerminal(auditFailure, LoopRunStatus.NeedsReview);
+        DefaultConversationTurnProtocolValidator.Validate(needsReview);
+        DefaultConversationTurnProtocolValidator.Validate(SynchronizeTerminal(needsReview));
+
+        var publication = auditFailure.Advance(DefaultConversationTurnCheckpoint.AssistantPublicationPrepared, NextTime(auditFailure), "Forged publication.");
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(publication));
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(PrepareTerminal(auditFailure, LoopRunStatus.Completed)));
+    }
+
+    [Fact]
+    public void Validate_rejects_provider_outcome_evidence_that_disagrees_with_terminal_status()
+    {
+        var observedFailure = CreateObservedFailure();
+        var assistantMessage = new DefaultConversationTurnMessage(observedFailure.TurnId + ":message:assistant", LlmMessageRole.Assistant, "forged answer");
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(observedFailure with { AssistantMessage = assistantMessage }));
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(observedFailure with { ProviderOutcome = DefaultConversationProviderOutcome.Observed }));
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(observedFailure with { ProviderResponseId = " " }));
+
+        var observedSuccess = AdvanceTo(DefaultConversationTurnCheckpoint.ProviderOutcomeObserved);
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(observedSuccess with { ProviderOutcome = DefaultConversationProviderOutcome.ObservedFailure }));
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(PrepareTerminal(observedSuccess, LoopRunStatus.Failed)));
+        Assert.Throws<FormatException>(() => DefaultConversationTurnProtocolValidator.Validate(PrepareTerminal(observedFailure, LoopRunStatus.Completed)));
     }
 
     [Fact]
@@ -164,6 +207,12 @@ public sealed class DefaultConversationTurnProtocolValidatorTests
             DefaultConversationTurnCheckpoint.ProviderOutcomeObserved => record.Advance(checkpoint, NextTime(record), checkpoint.ToString(), providerOutcome: DefaultConversationProviderOutcome.Observed, assistantMessage: new DefaultConversationTurnMessage(record.TurnId + ":message:assistant", LlmMessageRole.Assistant, "answer"), providerResponseId: "response-1"),
             _ => record.Advance(checkpoint, NextTime(record), checkpoint.ToString())
         };
+    }
+
+    private static DefaultConversationTurnRecord CreateObservedFailure()
+    {
+        var record = AdvanceTo(DefaultConversationTurnCheckpoint.ProviderDispatchStarted);
+        return record.Advance(DefaultConversationTurnCheckpoint.ProviderOutcomeObserved, NextTime(record), "Provider failure observed.", providerOutcome: DefaultConversationProviderOutcome.ObservedFailure, providerResponseId: "response-failed");
     }
 
     private static DefaultConversationTurnRecord PrepareTerminal(DefaultConversationTurnRecord record, LoopRunStatus status)
