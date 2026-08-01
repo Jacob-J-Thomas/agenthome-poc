@@ -147,6 +147,11 @@ internal sealed class CapabilityDependencyResolutionContext
 
     private static bool IsResolvable(CapabilityDependencyCatalogCandidate candidate)
     {
+        if (candidate.Entry?.Descriptor is null || candidate.Entry.Lifecycle is null || candidate.Artifact is null || !CapabilityDescriptorIdentity.TryCreate(candidate.Entry.Descriptor, out var computedIdentity, out var descriptorValidation) || !descriptorValidation.IsValid || !CapabilityLifecycleSnapshotValidator.Validate(candidate.Entry.Lifecycle).IsValid || !candidate.Entry.Lifecycle.DescriptorIdentity.Equals(computedIdentity))
+        {
+            return false;
+        }
+
         var lifecycle = candidate.Entry.Lifecycle;
         var declaredIntegrity = candidate.Entry.Descriptor.Provenance.Integrity;
         return lifecycle.Declaration == CapabilityDeclarationState.Declared && lifecycle.Installation == CapabilityInstallationState.Installed && lifecycle.Health is CapabilityHealthState.Healthy or CapabilityHealthState.Degraded && lifecycle.Retirement != CapabilityRetirementState.Removed && lifecycle.Trust == CapabilityTrustState.Verified && (candidate.Artifact.Checksum is null || declaredIntegrity is null || candidate.Artifact.Checksum.FixedTimeEquals(declaredIntegrity));

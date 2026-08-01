@@ -88,6 +88,23 @@ public sealed class CapabilityDependencyResolverTests
     }
 
     [Fact]
+    public void Resolver_rejects_a_candidate_whose_verified_lifecycle_identity_belongs_to_another_descriptor()
+    {
+        var candidate = Candidate("org.example/a", "1.0.0");
+        var foreignDescriptor = Descriptor("org.example/other", "1.0.0", "file:///catalog");
+        Assert.True(CapabilityDescriptorIdentity.TryCreate(foreignDescriptor, out var foreignIdentity, out _));
+        var confused = candidate with { Entry = candidate.Entry with { Lifecycle = candidate.Entry.Lifecycle with { DescriptorIdentity = foreignIdentity! } } };
+
+        var result = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [confused]);
+
+        Assert.False(result.IsResolved);
+        Assert.Empty(result.Selected);
+        var evidence = Assert.Single(result.Evidence);
+        Assert.Equal(CapabilityDependencyResolutionOutcome.Untrusted, evidence.Outcome);
+        Assert.Null(evidence.Pin);
+    }
+
+    [Fact]
     public void Resolver_returns_invalid_evidence_for_a_candidate_with_a_malformed_dependency_manifest()
     {
         var malformed = Manifest("org.example/a", []) with { SubjectId = null! };
