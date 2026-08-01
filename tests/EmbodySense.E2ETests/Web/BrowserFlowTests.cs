@@ -191,6 +191,19 @@ public sealed class BrowserFlowTests
             await ClickButtonByTextAsync(browser, "#loopApprovals button", "Approve");
             await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('approved browser evidence')");
             Assert.Contains("browser governed tool approved", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.OrdinalIgnoreCase);
+            var publicationInspector = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
+            Assert.Contains("Published", publicationInspector, StringComparison.Ordinal);
+            Assert.Contains("definite", publicationInspector, StringComparison.Ordinal);
+            Assert.DoesNotContain("not published", publicationInspector, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("terminal outcome recorded", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.Ordinal);
+
+            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Browser governed loop'))");
+            await ClickLoopByNameAsync(browser, LoopName);
+            await ClickAsync(browser, "#runsTab");
+            await browser.WaitForExpressionAsync("document.getElementById('inspectorContent').textContent.includes('Published') && !document.getElementById('inspectorContent').textContent.toLowerCase().includes('not published')");
 
             await ClickAsync(browser, "#builderTab");
             await InvokeLoopAsync(browser, "browser-approval-reject");
