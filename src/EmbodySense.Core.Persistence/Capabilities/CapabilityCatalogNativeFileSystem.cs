@@ -34,8 +34,6 @@ internal static class CapabilityCatalogNativeFileSystem
     private const ushort UnixFileTypeMask = 0xF000;
     private const ushort UnixRegularFile = 0x8000;
     private const uint StatxMode = 0x2;
-    private const uint StatxInode = 0x100;
-    private const uint StatxBirthTime = 0x800;
     private const uint AttributeVolumeCapabilities = 0x00020000;
     private const uint AttributeVolumeInfo = 0x80000000;
 
@@ -174,9 +172,7 @@ internal static class CapabilityCatalogNativeFileSystem
 
         if (OperatingSystem.IsLinux())
         {
-            CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(statx(directory, string.Empty, AtEmptyPath, StatxInode | StatxBirthTime, out var information), Marshal.GetLastPInvokeError());
-            var generation = ReadLinuxDirectoryGeneration(directory);
-            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", information.DeviceMajor, information.DeviceMinor, (information.Mask & StatxInode) != 0 ? information.Inode : null, generation, (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Seconds : null, (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Nanoseconds : null);
+            throw new PlatformNotSupportedException(CapabilityCatalogWorkspaceIdentity.LinuxUnsupportedMessage);
         }
 
         if (OperatingSystem.IsMacOS())
@@ -185,13 +181,7 @@ internal static class CapabilityCatalogNativeFileSystem
             return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", information.Device, 0, information.Inode, information.Generation, information.BirthTime.Seconds, information.BirthTime.Nanoseconds, information.Generation == 0 && MacVolumeUsesNonRecycledObjectIds(directory));
         }
 
-        throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows, Linux, and macOS.");
-    }
-
-    private static uint ReadLinuxDirectoryGeneration(SafeFileHandle directory)
-    {
-        var rawGeneration = 0;
-        return CapabilityCatalogWorkspaceIdentity.MapLinuxDirectoryGeneration(ioctl(directory, CapabilityCatalogWorkspaceIdentity.GetLinuxDirectoryGenerationIoctlRequest(IntPtr.Size), ref rawGeneration), rawGeneration, Marshal.GetLastPInvokeError());
+        throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows and macOS.");
     }
 
     private static bool MacVolumeUsesNonRecycledObjectIds(SafeFileHandle directory)
@@ -625,9 +615,6 @@ internal static class CapabilityCatalogNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fgetattrlist(SafeFileHandle file, ref CapabilityCatalogMacAttributeList attributeList, out CapabilityCatalogMacVolumeCapabilitiesBuffer attributeBuffer, nuint attributeBufferSize, uint options);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int ioctl(SafeFileHandle file, nuint request, ref int value);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int statx(SafeFileHandle directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out CapabilityCatalogLinuxStatx information);
