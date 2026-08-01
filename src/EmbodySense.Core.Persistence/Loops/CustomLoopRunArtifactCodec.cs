@@ -1650,7 +1650,14 @@ internal static class CustomLoopRunArtifactCodec
     {
         try
         {
-            return owner[propertyName]?.GetValue<int>() ?? throw new FormatException($"Required integer `{propertyName}` is missing.");
+            var node = owner[propertyName] ?? throw new FormatException($"Required integer `{propertyName}` is missing.");
+            if (node is not JsonValue value)
+            {
+                throw new FormatException($"Required integer `{propertyName}` is malformed.");
+            }
+
+            ValidateCanonicalPrimitiveValue(value, typeof(int));
+            return value.GetValue<int>();
         }
         catch (InvalidOperationException exception)
         {
@@ -1662,7 +1669,14 @@ internal static class CustomLoopRunArtifactCodec
     {
         try
         {
-            return owner[propertyName]?.GetValue<long>() ?? throw new FormatException($"Required integer `{propertyName}` is missing.");
+            var node = owner[propertyName] ?? throw new FormatException($"Required integer `{propertyName}` is missing.");
+            if (node is not JsonValue value)
+            {
+                throw new FormatException($"Required integer `{propertyName}` is malformed.");
+            }
+
+            ValidateCanonicalPrimitiveValue(value, typeof(long));
+            return value.GetValue<long>();
         }
         catch (InvalidOperationException exception)
         {

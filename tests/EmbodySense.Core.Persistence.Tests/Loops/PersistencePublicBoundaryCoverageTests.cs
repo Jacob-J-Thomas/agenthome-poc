@@ -339,6 +339,21 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     [Fact]
+    public void Artifact_deserializer_rejects_noncanonical_integer_spellings_in_untyped_content_metadata()
+    {
+        var canonical = Encoding.UTF8.GetString(Artifact());
+        foreach (var propertyName in new[] { "utf16Characters", "utf8Bytes" })
+        {
+            var noncanonical = canonical.Replace($"\"{propertyName}\":0", $"\"{propertyName}\":-0", StringComparison.Ordinal);
+            Assert.NotEqual(canonical, noncanonical);
+
+            var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(noncanonical)));
+
+            Assert.Contains("does not use its canonical serializer spelling", exception.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void Artifact_deserializer_rejects_alternate_string_escape_spellings_in_headers_and_projected_fields()
     {
         var canonical = Encoding.UTF8.GetString(Artifact());
