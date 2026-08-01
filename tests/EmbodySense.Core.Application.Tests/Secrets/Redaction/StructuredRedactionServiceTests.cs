@@ -334,6 +334,25 @@ public sealed class StructuredRedactionServiceTests
     }
 
     [Fact]
+    public void Projection_safety_failure_remains_distinct_in_structured_summary()
+    {
+        using var replaced = EphemeralSecretMaterial.Create("SECRET");
+        using var synthesized = EphemeralSecretMaterial.Create("foo[REDACTED]");
+        using var scope = SensitiveRedactionScope.Create([replaced, synthesized]);
+        IReadOnlyDictionary<string, object?> source = new Dictionary<string, object?> { ["value"] = "fooSECRET" };
+
+        var result = _service.RedactStructure(source, scope);
+        var json = JsonSerializer.Serialize(result);
+
+        Assert.DoesNotContain("SECRET", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("foo[REDACTED]", json, StringComparison.Ordinal);
+        Assert.Equal(1, result.Summary.ProjectionSafetyFailureCount);
+        Assert.Equal(0, result.Summary.LimitCount);
+        Assert.Equal(0, result.Summary.FailureCount);
+        Assert.False(result.Summary.IsComplete);
+    }
+
+    [Fact]
     public void Aggregate_projection_character_budget_fails_closed_and_remains_bounded()
     {
         using var fixture = CreateScope();

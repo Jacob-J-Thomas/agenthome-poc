@@ -13,15 +13,15 @@ internal static class SensitiveRedactionPatternFactory
 
     public static void AddSupportedPatterns(List<SensitiveRedactionPattern> patterns, ReadOnlySpan<char> value)
     {
-        AddOwnedDistinct(patterns, value.ToArray(), matchesPercentHexCaseInsensitively: false);
+        AddOwnedDistinct(patterns, value.ToArray(), matchesPercentHexCaseInsensitively: false, matchesEscapedUnreservedCharacters: false);
 
         var utf8 = new byte[_replacementUtf8.GetByteCount(value)];
         try
         {
             _replacementUtf8.GetBytes(value, utf8);
-            AddOwnedDistinct(patterns, EncodePercent(utf8, Rfc3986SafePunctuation, formStyle: false), matchesPercentHexCaseInsensitively: true);
-            AddOwnedDistinct(patterns, EncodePercent(utf8, DotNetUriSafePunctuation, formStyle: false), matchesPercentHexCaseInsensitively: true);
-            AddOwnedDistinct(patterns, EncodePercent(utf8, FormSafePunctuation, formStyle: true), matchesPercentHexCaseInsensitively: true);
+            AddOwnedDistinct(patterns, EncodePercent(utf8, Rfc3986SafePunctuation, formStyle: false), matchesPercentHexCaseInsensitively: true, matchesEscapedUnreservedCharacters: true);
+            AddOwnedDistinct(patterns, EncodePercent(utf8, DotNetUriSafePunctuation, formStyle: false), matchesPercentHexCaseInsensitively: true, matchesEscapedUnreservedCharacters: true);
+            AddOwnedDistinct(patterns, EncodePercent(utf8, FormSafePunctuation, formStyle: true), matchesPercentHexCaseInsensitively: true, matchesEscapedUnreservedCharacters: true);
 
             var base64 = new char[((utf8.Length + 2) / 3) * 4];
             var callerOwnsBase64 = true;
@@ -29,7 +29,7 @@ internal static class SensitiveRedactionPatternFactory
             {
                 Convert.TryToBase64Chars(utf8, base64, out _);
                 callerOwnsBase64 = false;
-                AddOwnedDistinct(patterns, base64, matchesPercentHexCaseInsensitively: false);
+                AddOwnedDistinct(patterns, base64, matchesPercentHexCaseInsensitively: false, matchesEscapedUnreservedCharacters: false);
             }
             finally
             {
@@ -45,14 +45,16 @@ internal static class SensitiveRedactionPatternFactory
         }
     }
 
-    private static void AddOwnedDistinct(List<SensitiveRedactionPattern> patterns, char[] candidate, bool matchesPercentHexCaseInsensitively)
+    private static void AddOwnedDistinct(List<SensitiveRedactionPattern> patterns, char[] candidate, bool matchesPercentHexCaseInsensitively, bool matchesEscapedUnreservedCharacters)
     {
         var callerOwnsCandidate = true;
         try
         {
             foreach (var pattern in patterns)
             {
-                if (pattern.MatchesPercentHexCaseInsensitively != matchesPercentHexCaseInsensitively || !pattern.Characters.SequenceEqual(candidate))
+                if (pattern.MatchesPercentHexCaseInsensitively != matchesPercentHexCaseInsensitively
+                    || pattern.MatchesEscapedUnreservedCharacters != matchesEscapedUnreservedCharacters
+                    || !pattern.Characters.SequenceEqual(candidate))
                 {
                     continue;
                 }
@@ -60,7 +62,7 @@ internal static class SensitiveRedactionPatternFactory
                 return;
             }
 
-            patterns.Add(new SensitiveRedactionPattern(candidate, matchesPercentHexCaseInsensitively));
+            patterns.Add(new SensitiveRedactionPattern(candidate, matchesPercentHexCaseInsensitively, matchesEscapedUnreservedCharacters));
             callerOwnsCandidate = false;
         }
         finally

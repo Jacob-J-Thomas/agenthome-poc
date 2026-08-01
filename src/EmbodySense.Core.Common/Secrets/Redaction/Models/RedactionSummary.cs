@@ -3,7 +3,7 @@ namespace EmbodySense.Core.Common.Secrets.Redaction.Models;
 /// <summary>
 /// Reports bounded, value-free evidence from one text-redaction operation.
 /// </summary>
-/// <param name="Status">Whether the operation completed or failed closed at a configured limit.</param>
+/// <param name="Status">Whether the operation completed, failed closed at a configured limit, or rejected a projection that synthesized scoped sensitive material.</param>
 /// <param name="SensitiveValueCount">Number of non-empty sensitive values admitted to the scope.</param>
 /// <param name="IgnoredValueCount">Number of empty or duplicate sensitive values ignored by the scope.</param>
 /// <param name="ReplacementCount">Number of non-overlapping supported patterns replaced before completion or fail-closed termination.</param>

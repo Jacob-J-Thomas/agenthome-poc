@@ -54,6 +54,39 @@ public sealed class SensitiveRedactionScopeTests
     }
 
     [Fact]
+    public void RedactText_matches_individually_percent_escaped_unreserved_bytes()
+    {
+        using var material = EphemeralSecretMaterial.Create("abc-._~");
+        using var scope = SensitiveRedactionScope.Create([material]);
+        const string MixedEscaping = "%61b%63%2D.%5f~";
+
+        var result = scope.RedactText("credential=" + MixedEscaping);
+
+        Assert.Equal(RedactionStatus.Completed, result.Summary.Status);
+        Assert.Equal(1, result.Summary.ReplacementCount);
+        Assert.DoesNotContain(MixedEscaping, result.Value, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RedactText_does_not_treat_percent_escape_syntax_as_optionally_escaped_source_payload()
+    {
+        using var material = EphemeralSecretMaterial.Create("é ");
+        using var scope = SensitiveRedactionScope.Create([material]);
+
+        var percent = scope.RedactText("%C3%A9%20");
+        var form = scope.RedactText("%C3%A9+");
+        var malformedPercent = scope.RedactText("%C%33%A9%20");
+        var malformedForm = scope.RedactText("%C%33%A9+");
+
+        Assert.Equal(1, percent.Summary.ReplacementCount);
+        Assert.Equal(1, form.Summary.ReplacementCount);
+        Assert.Equal("%C%33%A9%20", malformedPercent.Value);
+        Assert.Equal(0, malformedPercent.Summary.ReplacementCount);
+        Assert.Equal("%C%33%A9+", malformedForm.Value);
+        Assert.Equal(0, malformedForm.Summary.ReplacementCount);
+    }
+
+    [Fact]
     public void RedactText_prefers_longest_overlap_and_is_independent_of_scope_order()
     {
         var forward = CreateScope(["abc", "abcdef", "x y", "þ"]);
@@ -69,6 +102,40 @@ public sealed class SensitiveRedactionScopeTests
 
         Assert.Equal(firstResult, secondResult);
         Assert.Equal(4, firstResult.Summary.ReplacementCount);
+    }
+
+    [Fact]
+    public void RedactText_prefers_the_pattern_that_consumes_the_most_mixed_escape_input()
+    {
+        using var escapedPrefix = EphemeralSecretMaterial.Create("%61");
+        using var longerMixedRepresentation = EphemeralSecretMaterial.Create("abc");
+        using var scope = SensitiveRedactionScope.Create([escapedPrefix, longerMixedRepresentation]);
+
+        var result = scope.RedactText("%61bc");
+
+        Assert.Equal(RedactionStatus.Completed, result.Summary.Status);
+        Assert.Equal(1, result.Summary.ReplacementCount);
+        Assert.Equal("[REDACTED]", result.Value);
+    }
+
+    [Theory]
+    [InlineData("a", 73, 1)]
+    [InlineData("%61", 74, 1)]
+    [InlineData("%6x", 40, 0)]
+    public void Flexible_percent_matching_charges_plain_escaped_and_malformed_probes_at_the_exact_work_boundary(string input, int expectedWorkUnits, int expectedReplacementCount)
+    {
+        using var material = EphemeralSecretMaterial.Create("a");
+        using var exactScope = SensitiveRedactionScope.Create([material], new RedactionLimits(maxWorkUnits: expectedWorkUnits));
+        using var belowBoundaryScope = SensitiveRedactionScope.Create([material], new RedactionLimits(maxWorkUnits: expectedWorkUnits - 1));
+
+        var exactResult = exactScope.RedactText(input);
+        var belowBoundaryResult = belowBoundaryScope.RedactText(input);
+
+        Assert.Equal(RedactionStatus.Completed, exactResult.Summary.Status);
+        Assert.Equal(expectedWorkUnits, exactResult.Summary.WorkUnitCount);
+        Assert.Equal(expectedReplacementCount, exactResult.Summary.ReplacementCount);
+        Assert.Equal(RedactionStatus.WorkLimitExceeded, belowBoundaryResult.Summary.Status);
+        Assert.Equal(expectedWorkUnits - 1, belowBoundaryResult.Summary.WorkUnitCount);
     }
 
     [Fact]
@@ -128,6 +195,20 @@ public sealed class SensitiveRedactionScopeTests
     }
 
     [Fact]
+    public void Work_limit_preserves_replacements_completed_before_termination()
+    {
+        using var material = EphemeralSecretMaterial.Create("abc");
+        using var completedScope = SensitiveRedactionScope.Create([material]);
+        var completed = completedScope.RedactText("abcx");
+        using var boundedScope = SensitiveRedactionScope.Create([material], new RedactionLimits(maxWorkUnits: completed.Summary.WorkUnitCount - 1));
+
+        var result = boundedScope.RedactText("abcx");
+
+        Assert.Equal(RedactionStatus.WorkLimitExceeded, result.Summary.Status);
+        Assert.Equal(1, result.Summary.ReplacementCount);
+    }
+
+    [Fact]
     public void Malformed_unicode_is_processed_deterministically_without_splitting_or_throwing()
     {
         const string Canary = "\uD800x";
@@ -151,6 +232,21 @@ public sealed class SensitiveRedactionScopeTests
 
         Assert.DoesNotContain("REDACTED", result.Value, StringComparison.Ordinal);
         Assert.Equal(1, result.Summary.ReplacementCount);
+    }
+
+    [Fact]
+    public void Synthesized_sensitive_values_fail_closed_after_replacement()
+    {
+        using var first = EphemeralSecretMaterial.Create("SECRET");
+        using var synthesized = EphemeralSecretMaterial.Create("foo[REDACTED]");
+        using var scope = SensitiveRedactionScope.Create([first, synthesized]);
+
+        var result = scope.RedactText("fooSECRET");
+
+        Assert.Equal(RedactionStatus.ProjectionSafetyFailed, result.Summary.Status);
+        Assert.Equal(1, result.Summary.ReplacementCount);
+        Assert.DoesNotContain("SECRET", result.Value, StringComparison.Ordinal);
+        Assert.DoesNotContain("foo[REDACTED]", result.Value, StringComparison.Ordinal);
     }
 
     [Fact]

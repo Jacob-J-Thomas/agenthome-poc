@@ -10,6 +10,7 @@ namespace EmbodySense.Core.Application.Secrets.Redaction;
 /// <param name="ProjectedCharacterCount">Total sanitized characters retained in the aggregate projection.</param>
 /// <param name="LimitCount">Total bound or cycle conditions encountered, including conditions represented by an empty fail-closed projection.</param>
 /// <param name="FailureCount">Total read or unsupported-value conditions encountered.</param>
+/// <param name="ProjectionSafetyFailureCount">Total text projections rejected because replacement text synthesized another scoped sensitive value.</param>
 public sealed record RedactionProjectionSummary(
     int SensitiveValueCount,
     int IgnoredValueCount,
@@ -17,8 +18,9 @@ public sealed record RedactionProjectionSummary(
     int VisitedNodeCount,
     int ProjectedCharacterCount,
     int LimitCount,
-    int FailureCount)
+    int FailureCount,
+    int ProjectionSafetyFailureCount)
 {
-    /// <summary>Gets whether the projection completed without a bound, cycle, read, or unsupported-value marker.</summary>
-    public bool IsComplete => LimitCount == 0 && FailureCount == 0;
+    /// <summary>Gets whether the projection completed without a bound, cycle, read, unsupported-value, or projection-safety marker.</summary>
+    public bool IsComplete => LimitCount == 0 && FailureCount == 0 && ProjectionSafetyFailureCount == 0;
 }

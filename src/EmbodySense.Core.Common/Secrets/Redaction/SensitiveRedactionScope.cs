@@ -33,6 +33,9 @@ public sealed class SensitiveRedactionScope : IDisposable
     /// <summary>Marker returned when deterministic comparison work exceeds a configured bound.</summary>
     public const string WorkLimitMarker = "[REDACTION_WORK_LIMIT]";
 
+    /// <summary>Marker returned when replacement text would synthesize another scoped sensitive value.</summary>
+    public const string ProjectionSafetyMarker = "[REDACTION_PROJECTION_UNSAFE]";
+
     private const string ProjectionMarker = "[sensitive-redaction-scope]";
     private static readonly string[] _safeMarkerFallbacks = ["[MASKED]", "***"];
     private readonly object _sync = new();
@@ -255,12 +258,13 @@ public sealed class SensitiveRedactionScope : IDisposable
         {
             examinedCharacterCount++;
             SensitiveRedactionPattern? match = null;
+            var matchedLength = 0;
             foreach (var pattern in patterns)
             {
                 workUnitCount++;
                 if (workUnitCount > Limits.MaxWorkUnits)
                 {
-                    return CreateLimitResult(WorkLimitMarker, RedactionStatus.WorkLimitExceeded, examinedCharacterCount, Limits.MaxWorkUnits);
+                    return CreateLimitResult(WorkLimitMarker, RedactionStatus.WorkLimitExceeded, examinedCharacterCount, Limits.MaxWorkUnits, replacementCount);
                 }
 
                 if (pattern.Length > input.Length - index)
@@ -268,26 +272,16 @@ public sealed class SensitiveRedactionScope : IDisposable
                     continue;
                 }
 
-                var matched = true;
-                for (var patternIndex = 0; patternIndex < pattern.Length; patternIndex++)
-                {
-                    workUnitCount++;
-                    if (workUnitCount > Limits.MaxWorkUnits)
-                    {
-                        return CreateLimitResult(WorkLimitMarker, RedactionStatus.WorkLimitExceeded, examinedCharacterCount, Limits.MaxWorkUnits);
-                    }
-
-                    if (!pattern.MatchesCharacter(patternIndex, input[index + patternIndex]))
-                    {
-                        matched = false;
-                        break;
-                    }
-                }
-
-                if (matched)
+                if (pattern.TryMatch(input, index, ref workUnitCount, Limits.MaxWorkUnits, out var candidateMatchedLength, out var workLimitExceeded)
+                    && candidateMatchedLength > matchedLength)
                 {
                     match = pattern;
-                    break;
+                    matchedLength = candidateMatchedLength;
+                }
+
+                if (workLimitExceeded)
+                {
+                    return CreateLimitResult(WorkLimitMarker, RedactionStatus.WorkLimitExceeded, examinedCharacterCount, Limits.MaxWorkUnits, replacementCount);
                 }
             }
 
@@ -299,7 +293,7 @@ public sealed class SensitiveRedactionScope : IDisposable
             else
             {
                 builder.Append(replacementMarker);
-                index += match.Length;
+                index += matchedLength;
                 replacementCount++;
             }
 
@@ -309,7 +303,18 @@ public sealed class SensitiveRedactionScope : IDisposable
             }
         }
 
-        return new TextRedactionResult(builder.ToString(), CreateSummary(RedactionStatus.Completed, replacementCount, examinedCharacterCount, workUnitCount));
+        var projection = builder.ToString();
+        if (ContainsSupportedPattern(projection, patterns, ref workUnitCount, out var projectionWorkLimitExceeded))
+        {
+            return CreateLimitResult(ProjectionSafetyMarker, RedactionStatus.ProjectionSafetyFailed, examinedCharacterCount, workUnitCount, replacementCount);
+        }
+
+        if (projectionWorkLimitExceeded)
+        {
+            return CreateLimitResult(WorkLimitMarker, RedactionStatus.WorkLimitExceeded, examinedCharacterCount, Limits.MaxWorkUnits, replacementCount);
+        }
+
+        return new TextRedactionResult(projection, CreateSummary(RedactionStatus.Completed, replacementCount, examinedCharacterCount, workUnitCount));
     }
 
     private TextRedactionResult CreateLimitResult(string marker, RedactionStatus status, int examinedCharacterCount, int workUnitCount, int replacementCount = 0)
@@ -361,6 +366,41 @@ public sealed class SensitiveRedactionScope : IDisposable
             if (candidate.AsSpan().Contains(pattern.Characters, StringComparison.Ordinal))
             {
                 return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool ContainsSupportedPattern(string candidate, IReadOnlyList<SensitiveRedactionPattern> patterns, ref int workUnitCount, out bool workLimitExceeded)
+    {
+        workLimitExceeded = false;
+        var input = candidate.AsSpan();
+        for (var index = 0; index < input.Length; index++)
+        {
+            foreach (var pattern in patterns)
+            {
+                workUnitCount++;
+                if (workUnitCount > Limits.MaxWorkUnits)
+                {
+                    workLimitExceeded = true;
+                    return false;
+                }
+
+                if (pattern.Length > input.Length - index)
+                {
+                    continue;
+                }
+
+                if (pattern.TryMatch(input, index, ref workUnitCount, Limits.MaxWorkUnits, out _, out workLimitExceeded))
+                {
+                    return true;
+                }
+
+                if (workLimitExceeded)
+                {
+                    return false;
+                }
             }
         }
 

@@ -8,6 +8,7 @@ internal sealed class RedactionProjectionAccumulator
 {
     private int _failureMarkerCount;
     private int _limitMarkerCount;
+    private int _projectionSafetyFailureCount;
     private int _projectedCharacterCount;
     private int _textReplacementCount;
     private int _visitedNodeCount;
@@ -30,7 +31,11 @@ internal sealed class RedactionProjectionAccumulator
     public bool TryAdd(TextRedactionResult result, RedactionProjectionLimits limits)
     {
         _textReplacementCount += result.Summary.ReplacementCount;
-        if (result.Summary.Status != RedactionStatus.Completed)
+        if (result.Summary.Status == RedactionStatus.ProjectionSafetyFailed)
+        {
+            _projectionSafetyFailureCount++;
+        }
+        else if (result.Summary.Status != RedactionStatus.Completed)
         {
             MarkLimit();
         }
@@ -63,6 +68,6 @@ internal sealed class RedactionProjectionAccumulator
 
     public RedactionProjectionSummary ToSummary(SensitiveRedactionScope scope)
     {
-        return new RedactionProjectionSummary(scope.SensitiveValueCount, scope.IgnoredValueCount, _textReplacementCount, _visitedNodeCount, _projectedCharacterCount, _limitMarkerCount, _failureMarkerCount);
+        return new RedactionProjectionSummary(scope.SensitiveValueCount, scope.IgnoredValueCount, _textReplacementCount, _visitedNodeCount, _projectedCharacterCount, _limitMarkerCount, _failureMarkerCount, _projectionSafetyFailureCount);
     }
 }

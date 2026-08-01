@@ -1,7 +1,7 @@
 namespace EmbodySense.Core.Common.Secrets.Redaction.Models;
 
 /// <summary>
-/// Describes whether a bounded text-redaction operation completed or failed closed at a configured limit.
+/// Describes whether a bounded text-redaction operation completed or failed closed.
 /// </summary>
 public enum RedactionStatus
 {
@@ -18,5 +18,8 @@ public enum RedactionStatus
     OutputLimitExceeded,
 
     /// <summary>The deterministic comparison budget was exhausted, so no input content was projected.</summary>
-    WorkLimitExceeded
+    WorkLimitExceeded,
+
+    /// <summary>The first replacement pass synthesized another scoped value, so no input content was projected.</summary>
+    ProjectionSafetyFailed
 }
