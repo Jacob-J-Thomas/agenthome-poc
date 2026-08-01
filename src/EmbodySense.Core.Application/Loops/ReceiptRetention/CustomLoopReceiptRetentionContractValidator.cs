@@ -13,6 +13,17 @@ namespace EmbodySense.Core.Application.Loops.ReceiptRetention;
 public static class CustomLoopReceiptRetentionContractValidator
 {
     /// <summary>
+    /// Validates a timestamp-free, explicitly bounded governed cleanup command.
+    /// </summary>
+    /// <param name="command">The command to validate.</param>
+    public static void ValidateCleanupCommand(CustomLoopReceiptCleanupCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        RequireSchema(command.SchemaVersion, CustomLoopReceiptCleanupCommand.CurrentSchemaVersion, "cleanup command");
+        ValidateCleanupScope(command.ArtifactClass, command.OperationId, command.Actor, command.Surface, command.MaximumArtifactCount, command.MaximumArtifactUtf8Bytes, nameof(command));
+    }
+
+    /// <summary>
     /// Validates that a budget is the canonical immutable policy budget for its class.
     /// </summary>
     /// <param name="budget">The budget to validate.</param>
@@ -40,21 +51,12 @@ public static class CustomLoopReceiptRetentionContractValidator
     {
         ArgumentNullException.ThrowIfNull(request);
         RequireSchema(request.SchemaVersion, CustomLoopReceiptCleanupRequest.CurrentSchemaVersion, "cleanup request");
-        _ = CustomLoopReceiptRetentionPolicy.GetBudget(request.ArtifactClass);
-        RequireIdentifier(request.OperationId, nameof(request.OperationId));
-        RequireBoundedText(request.Actor, CustomLoopLimits.MaxTraceReferenceCharacters, nameof(request.Actor));
-        RequireIdentifier(request.Surface, nameof(request.Surface));
+        ValidateCleanupScope(request.ArtifactClass, request.OperationId, request.Actor, request.Surface, request.MaximumArtifactCount, request.MaximumArtifactUtf8Bytes, nameof(request));
         RequireUtc(request.RequestedAtUtc, nameof(request.RequestedAtUtc));
         RequireUtc(request.ReplayCutoffUtc, nameof(request.ReplayCutoffUtc));
         if (request.ReplayCutoffUtc != CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(request.RequestedAtUtc))
         {
             throw new ArgumentException("Cleanup replay cutoff must equal the inclusive exact-replay cutoff for the request timestamp.", nameof(request));
-        }
-
-        if (request.MaximumArtifactCount is < 1 or > CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount
-            || request.MaximumArtifactUtf8Bytes is < 1 or > CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes)
-        {
-            throw new ArgumentException("Cleanup batch bounds exceed the governed per-operation limits.", nameof(request));
         }
     }
 
@@ -74,12 +76,17 @@ public static class CustomLoopReceiptRetentionContractValidator
         var validDefinitionMutationKind = proof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
             ? proof.DefinitionMutationKind is { } mutationKind && Enum.IsDefined(mutationKind) && mutationKind != CustomLoopDefinitionMutationKind.Unknown
             : proof.DefinitionMutationKind is null;
-        var validDeleteBinding = proof.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete
+        var validDefinitionMutationOutcome = proof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
+            ? IsCompatibleDefinitionMutationOutcome(proof.DefinitionMutationKind, proof.DefinitionMutationOutcome)
+            : proof.DefinitionMutationOutcome is null;
+        var successfulDelete = proof.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete
+            && proof.DefinitionMutationOutcome == CustomLoopDefinitionStoreStatus.Deleted;
+        var validDeleteBinding = successfulDelete
             ? proof.DeleteLineageBindingHash is not null
             : proof.DeleteLineageBindingHash is null;
-        if (!validDefinitionMutationKind || !validDeleteBinding)
+        if (!validDefinitionMutationKind || !validDefinitionMutationOutcome || !validDeleteBinding)
         {
-            throw new ArgumentException("Expired-operation proof must retain a mutation kind exactly for definition-mutation receipts and a lineage binding exactly for Delete.", nameof(proof));
+            throw new ArgumentException("Expired-operation proof must retain a compatible mutation kind and exact outcome for definition-mutation receipts, plus lineage binding exactly for successful Deleted outcomes.", nameof(proof));
         }
 
         RequireIdentifier(proof.OperationId, nameof(proof.OperationId));
@@ -199,6 +206,7 @@ public static class CustomLoopReceiptRetentionContractValidator
         var expiredDeleteMutations = ledger.ExpiredOperations
             .Where(item => item.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt)
             .Where(item => item.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete)
+            .Where(item => item.DefinitionMutationOutcome == CustomLoopDefinitionStoreStatus.Deleted)
             .ToDictionary(item => item.OperationId, StringComparer.Ordinal);
         var lineageOwnersByOperation = ledger.DefinitionLineage.ToLookup(item => item.LastMutationOperationId, StringComparer.Ordinal);
         if (expiredDeleteMutations.Count != deletedLineage.Length
@@ -248,7 +256,8 @@ public static class CustomLoopReceiptRetentionContractValidator
             var compatibleClass = result.ArtifactClass == result.ExpiredProof.ArtifactClass
                 || result.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionTombstone
                     && result.ExpiredProof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
-                    && result.ExpiredProof.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete;
+                    && result.ExpiredProof.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete
+                    && result.ExpiredProof.DefinitionMutationOutcome == CustomLoopDefinitionStoreStatus.Deleted;
             if (!compatibleClass || !string.Equals(result.OperationId, result.ExpiredProof.OperationId, StringComparison.Ordinal))
             {
                 throw new ArgumentException("Expired lookup proof does not match the requested class and operation identity.", nameof(result));
@@ -451,16 +460,16 @@ public static class CustomLoopReceiptRetentionContractValidator
         {
             CustomLoopReceiptArtifactClass.DefinitionMutationReceipt => candidate.ExpiredOperationProof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
                 && string.Equals(candidate.ArtifactId, candidate.ExpiredOperationProof.OperationId, StringComparison.Ordinal)
-                && candidate.ExpiredOperationProof.DefinitionMutationKind switch
+                && (candidate.ExpiredOperationProof.DefinitionMutationKind, candidate.ExpiredOperationProof.DefinitionMutationOutcome) switch
                 {
-                    CustomLoopDefinitionMutationKind.Delete => candidate.DefinitionLineageProof is { IsDeleted: true } mutationLineage
+                    (CustomLoopDefinitionMutationKind.Delete, CustomLoopDefinitionStoreStatus.Deleted) => candidate.DefinitionLineageProof is { IsDeleted: true } mutationLineage
                         && string.Equals(mutationLineage.LastMutationOperationId, candidate.ExpiredOperationProof.OperationId, StringComparison.Ordinal)
                         && DeleteProofMatchesLineage(candidate.ExpiredOperationProof, mutationLineage),
-                    CustomLoopDefinitionMutationKind.Create or CustomLoopDefinitionMutationKind.Update => candidate.DefinitionLineageProof is null,
-                    _ => false
+                    _ => candidate.DefinitionLineageProof is null,
                 },
             CustomLoopReceiptArtifactClass.DefinitionTombstone => candidate.ExpiredOperationProof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
                 && candidate.ExpiredOperationProof.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete
+                && candidate.ExpiredOperationProof.DefinitionMutationOutcome == CustomLoopDefinitionStoreStatus.Deleted
                 && candidate.DefinitionLineageProof is { IsDeleted: true } lineage
                 && string.Equals(candidate.ArtifactId, lineage.LoopId, StringComparison.Ordinal)
                 && string.Equals(candidate.ExpiredOperationProof.OperationId, lineage.LastMutationOperationId, StringComparison.Ordinal)
@@ -486,6 +495,18 @@ public static class CustomLoopReceiptRetentionContractValidator
     {
         var owners = lineageOwners.Take(2).ToArray();
         return owners.Length == 1 && owners[0].IsDeleted && DeleteProofMatchesLineage(proof, owners[0]);
+    }
+
+    private static bool IsCompatibleDefinitionMutationOutcome(CustomLoopDefinitionMutationKind? kind, CustomLoopDefinitionStoreStatus? outcome)
+    {
+        return (kind, outcome) switch
+        {
+            (CustomLoopDefinitionMutationKind.Create, CustomLoopDefinitionStoreStatus.Created or CustomLoopDefinitionStoreStatus.Conflict or CustomLoopDefinitionStoreStatus.LimitExceeded) => true,
+            (CustomLoopDefinitionMutationKind.Update, CustomLoopDefinitionStoreStatus.Updated or CustomLoopDefinitionStoreStatus.Conflict or CustomLoopDefinitionStoreStatus.NotFound) => true,
+            (CustomLoopDefinitionMutationKind.Delete, CustomLoopDefinitionStoreStatus.Deleted or CustomLoopDefinitionStoreStatus.AlreadyDeleted or CustomLoopDefinitionStoreStatus.NotFound) => true,
+            (CustomLoopDefinitionMutationKind.Delete, CustomLoopDefinitionStoreStatus.Conflict) => true,
+            _ => false
+        };
     }
 
     private static void ValidateJournalState(CustomLoopReceiptCleanupJournal journal)
@@ -542,6 +563,19 @@ public static class CustomLoopReceiptRetentionContractValidator
         if (actual != expected)
         {
             throw new ArgumentException($"Unsupported {artifact} schema version `{actual}`; explicit reinitialization is required.");
+        }
+    }
+
+    private static void ValidateCleanupScope(CustomLoopReceiptArtifactClass artifactClass, string operationId, string actor, string surface, int maximumArtifactCount, long maximumArtifactUtf8Bytes, string parameterName)
+    {
+        _ = CustomLoopReceiptRetentionPolicy.GetBudget(artifactClass);
+        RequireIdentifier(operationId, nameof(operationId));
+        RequireBoundedText(actor, CustomLoopLimits.MaxTraceReferenceCharacters, nameof(actor));
+        RequireIdentifier(surface, nameof(surface));
+        if (maximumArtifactCount is < 1 or > CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount
+            || maximumArtifactUtf8Bytes is < 1 or > CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes)
+        {
+            throw new ArgumentException("Cleanup batch bounds exceed the governed per-operation limits.", parameterName);
         }
     }
 
