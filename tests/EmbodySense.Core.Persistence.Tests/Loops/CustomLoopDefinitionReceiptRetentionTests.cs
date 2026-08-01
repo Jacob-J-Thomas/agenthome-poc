@@ -13,6 +13,7 @@ using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Tests.Support;
 using System.Collections.Immutable;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -665,6 +666,135 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Recovery_never_attributes_candidate_removal_when_the_receipt_root_is_missing()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var mutations = await CreateExpiredUpdatesAsync(store, "loop-missing-removal-root", "update-missing-removal-root", 2);
+        var candidates = new List<CustomLoopReceiptCleanupCandidate>();
+        foreach (var mutation in mutations)
+        {
+            candidates.Add(await CreateCandidateAsync(paths, mutation.OperationId, mutation.RequestHash, mutation.RequestedAtUtc));
+        }
+
+        var staleOwnershipAtUtc = _observedAtUtc.AddMinutes(-2);
+        var ledger = ProofLedger(staleOwnershipAtUtc, [.. candidates]);
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-missing-removal-root-crash");
+        var journal = CleanupJournal(request, staleOwnershipAtUtc, CustomLoopReceiptCleanupStage.ProofLedgerWritten, [.. candidates], CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(ledger));
+        await WriteProofLedgerAsync(paths, ledger);
+        await WriteCleanupJournalAsync(paths, journal);
+        Directory.Delete(paths.CustomLoopDefinitionOperationsPath, recursive: true);
+
+        var recovered = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-missing-removal-root"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, recovered.BlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStage.Degraded, recovered.Journal!.Stage);
+        Assert.Equal(0, recovered.Journal.RemovedArtifactCount);
+    }
+
+    [Fact]
+    public async Task Recovery_degrades_when_more_than_one_removal_is_missing_beyond_durable_progress()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var mutations = await CreateExpiredUpdatesAsync(store, "loop-impossible-removal-prefix", "update-impossible-removal-prefix", 3);
+        var candidates = new List<CustomLoopReceiptCleanupCandidate>();
+        foreach (var mutation in mutations)
+        {
+            candidates.Add(await CreateCandidateAsync(paths, mutation.OperationId, mutation.RequestHash, mutation.RequestedAtUtc));
+        }
+
+        var staleOwnershipAtUtc = _observedAtUtc.AddMinutes(-2);
+        var ledger = ProofLedger(staleOwnershipAtUtc, [.. candidates]);
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-impossible-removal-prefix-crash");
+        var journal = CleanupJournal(request, staleOwnershipAtUtc, CustomLoopReceiptCleanupStage.ProofLedgerWritten, [.. candidates], CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(ledger));
+        await WriteProofLedgerAsync(paths, ledger);
+        await WriteCleanupJournalAsync(paths, journal);
+        File.Delete(Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[0].ArtifactId + ".json"));
+        File.Delete(Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[1].ArtifactId + ".json"));
+        var preservedPath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[2].ArtifactId + ".json");
+
+        var recovered = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-impossible-removal-prefix"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Degraded, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, recovered.BlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStage.Degraded, recovered.Journal!.Stage);
+        Assert.Equal(0, recovered.Journal.RemovedArtifactCount);
+        Assert.True(File.Exists(preservedPath));
+    }
+
+    [Fact]
+    public async Task Recovery_completes_one_exact_pending_removal_transition_before_later_candidates()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var mutations = await CreateExpiredUpdatesAsync(store, "loop-pending-removal", "update-pending-removal", 2);
+        var candidates = new List<CustomLoopReceiptCleanupCandidate>();
+        foreach (var mutation in mutations)
+        {
+            candidates.Add(await CreateCandidateAsync(paths, mutation.OperationId, mutation.RequestHash, mutation.RequestedAtUtc));
+        }
+
+        var staleOwnershipAtUtc = _observedAtUtc.AddMinutes(-2);
+        var ledger = ProofLedger(staleOwnershipAtUtc, [.. candidates]);
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-pending-removal-crash");
+        var journal = CleanupJournal(request, staleOwnershipAtUtc, CustomLoopReceiptCleanupStage.ProofLedgerWritten, [.. candidates], CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(ledger));
+        await WriteProofLedgerAsync(paths, ledger);
+        await WriteCleanupJournalAsync(paths, journal);
+        var sourcePath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[0].ArtifactId + ".json");
+        var pendingPath = GetPendingRemovalPath(paths, journal, candidates[0]);
+        File.Move(sourcePath, pendingPath);
+
+        var recovered = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-pending-removal"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, recovered.Status);
+        Assert.Equal(2, recovered.Journal!.RemovedArtifactCount);
+        Assert.False(File.Exists(sourcePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[1].ArtifactId + ".json")));
+    }
+
+    [Fact]
+    public async Task Recovery_preserves_source_and_pending_evidence_when_the_source_reappears()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var mutations = await CreateExpiredUpdatesAsync(store, "loop-source-reappeared", "update-source-reappeared", 2);
+        var candidates = new List<CustomLoopReceiptCleanupCandidate>();
+        foreach (var mutation in mutations)
+        {
+            candidates.Add(await CreateCandidateAsync(paths, mutation.OperationId, mutation.RequestHash, mutation.RequestedAtUtc));
+        }
+
+        var staleOwnershipAtUtc = _observedAtUtc.AddMinutes(-2);
+        var ledger = ProofLedger(staleOwnershipAtUtc, [.. candidates]);
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-source-reappeared-crash");
+        var journal = CleanupJournal(request, staleOwnershipAtUtc, CustomLoopReceiptCleanupStage.ProofLedgerWritten, [.. candidates], CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(ledger));
+        await WriteProofLedgerAsync(paths, ledger);
+        await WriteCleanupJournalAsync(paths, journal);
+        var sourcePath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[0].ArtifactId + ".json");
+        var pendingPath = GetPendingRemovalPath(paths, journal, candidates[0]);
+        File.Move(sourcePath, pendingPath);
+        File.Copy(pendingPath, sourcePath);
+        var preservedPath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[1].ArtifactId + ".json");
+
+        var recovered = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-source-reappeared"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.CleanupConflict, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CleanupConflict, recovered.BlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStage.AbandonedConflict, recovered.Journal!.Stage);
+        Assert.Equal(0, recovered.Journal.RemovedArtifactCount);
+        Assert.True(File.Exists(sourcePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.True(File.Exists(preservedPath));
+    }
+
+    [Fact]
     public async Task Recovery_never_removes_raw_evidence_when_the_committed_proof_ledger_is_missing()
     {
         using var workspace = new TestWorkspace();
@@ -863,6 +993,13 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     {
         Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
         await File.WriteAllBytesAsync(paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath, CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(journal));
+    }
+
+    private static string GetPendingRemovalPath(WorkspacePaths paths, CustomLoopReceiptCleanupJournal journal, CustomLoopReceiptCleanupCandidate candidate)
+    {
+        var identity = Encoding.UTF8.GetBytes($"{journal.Request.ArtifactClass}\n{journal.Request.OperationId}\n{candidate.ArtifactId}");
+        var hash = Convert.ToHexString(SHA256.HashData(identity)).ToLowerInvariant();
+        return Path.Combine(paths.CustomLoopDefinitionOperationsPath, $".retention-removal-{hash}.pending");
     }
 
     private static async Task<string> CreateExpiredUpdateAsync(CustomLoopDefinitionStore store)
