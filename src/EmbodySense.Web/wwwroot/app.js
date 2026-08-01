@@ -1069,6 +1069,7 @@ function handleStreamEvent(event) {
       "system",
       event.text ?? "This turn requires explicit review.",
     );
+    // TODO(#272): Reconcile the unaccepted streamed assistant bubble with the canonical transcript.
     activeAgentMessage = null;
   } else if (event.type === "error") {
     appendMessage("error", event.error ?? "Request failed.");
