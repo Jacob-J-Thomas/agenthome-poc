@@ -4,7 +4,7 @@ This document defines the schema-1 contract shared by custom-loop definition mut
 
 ## Capacity and reservation
 
-All sizes are measured from canonical persisted UTF-8 bytes. Per-class compact-proof bytes are the canonical proof-entry bytes plus their array separators; the shared ledger envelope is enforced by the aggregate ledger ceiling. Accounted workspace bytes include raw artifacts, compact proof, and at most one active cleanup journal for each of the three artifact classes.
+All sizes are measured from canonical persisted UTF-8 bytes. Every schema-1 JSON property is required on input, including properties whose intentional value is `null`; omission is not equivalent to an explicit semantic null. Per-class compact-proof bytes are the canonical proof-entry bytes plus their array separators; the shared ledger envelope is enforced by the aggregate ledger ceiling. Accounted workspace bytes include raw artifacts, compact proof, and at most one active cleanup journal for each of the three artifact classes.
 
 | Artifact class | Raw count | Raw aggregate bytes | Pending-completion reserve | Compact proof count | Compact proof bytes |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -26,7 +26,7 @@ Operation lookup has three meanings:
 - `Expired`: the full receipt was compacted, but schema-1 proof retains the operation ID, artifact class, request hash, outcome hash, completion time, and exact expiry time. Definition-mutation proof also requires the exact `create`, `update`, or `delete` mutation kind; lifecycle-control proof requires that field to be null. The caller must receive an explicit expired response and must not reuse the ID as a new operation.
 - `Unknown`: neither a full receipt nor compact proof recognizes the ID. This is not interchangeable with `Expired`.
 
-A delete receipt's expired-operation proof belongs to the definition-mutation class and carries the `delete` kind. Before that receipt is removed, cleanup must also write a matching definition-lineage proof containing the loop ID, immutable role binding, last version and content hash, last mutation ID, and deletion timestamp. Later tombstone compaction requires and preserves that same role-bound lineage. Each deleted lineage has one unique last-mutation owner, so one delete operation cannot be attributed to multiple loop identities. This permanent proof prevents loop-ID reuse after both full artifacts expire.
+A delete receipt's expired-operation proof belongs to the definition-mutation class and carries the `delete` kind. Before that receipt is removed, cleanup must also write a matching definition-lineage proof containing the loop ID, immutable role binding, last version and content hash, last mutation ID, and deletion timestamp. The expired proof retains a canonical binding hash over its request hash, outcome hash, and that complete lineage tuple; validation rejects either side when the fingerprint and lineage do not match exactly. Later tombstone compaction requires and preserves that same role-bound lineage. Each deleted lineage has one unique last-mutation owner, so one delete operation cannot be attributed to multiple loop identities. This permanent proof prevents loop-ID reuse after both full artifacts expire.
 
 These fields are the only accepted schema-1 proof shape. This experimental contract has no compatibility reader or automatic migration: any artifact produced from an earlier pre-release shape must be explicitly removed or reinitialized before downstream persistence uses this contract.
 

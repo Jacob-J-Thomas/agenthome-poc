@@ -10,6 +10,7 @@ namespace EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 /// <param name="SchemaVersion">The proof schema version.</param>
 /// <param name="ArtifactClass">The source receipt artifact class.</param>
 /// <param name="DefinitionMutationKind">The definition mutation kind when the source is a definition-mutation receipt; otherwise <see langword="null"/>.</param>
+/// <param name="DeleteLineageBindingHash">The canonical binding between a Delete fingerprint and its complete definition lineage; otherwise <see langword="null"/>.</param>
 /// <param name="OperationId">The original operation identity.</param>
 /// <param name="RequestHash">The canonical original request hash.</param>
 /// <param name="OutcomeHash">The canonical terminal outcome hash.</param>
@@ -19,6 +20,7 @@ public sealed record CustomLoopExpiredOperationProof(
     int SchemaVersion,
     CustomLoopReceiptArtifactClass ArtifactClass,
     [property: JsonRequired] CustomLoopDefinitionMutationKind? DefinitionMutationKind,
+    [property: JsonRequired] string? DeleteLineageBindingHash,
     string OperationId,
     string RequestHash,
     string OutcomeHash,
