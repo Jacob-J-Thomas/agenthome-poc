@@ -631,6 +631,40 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
+    public async Task Recovery_fails_closed_when_a_candidate_path_exists_but_cannot_be_read_as_an_artifact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var mutations = await CreateExpiredUpdatesAsync(store, "loop-unreadable-removal", "update-unreadable-removal", 2);
+        var candidates = new List<CustomLoopReceiptCleanupCandidate>();
+        foreach (var mutation in mutations)
+        {
+            candidates.Add(await CreateCandidateAsync(paths, mutation.OperationId, mutation.RequestHash, mutation.RequestedAtUtc));
+        }
+
+        var staleOwnershipAtUtc = _observedAtUtc.AddMinutes(-2);
+        var ledger = ProofLedger(staleOwnershipAtUtc, [.. candidates]);
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-unreadable-removal-crash");
+        var journal = CleanupJournal(request, staleOwnershipAtUtc, CustomLoopReceiptCleanupStage.ProofLedgerWritten, [.. candidates], CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(ledger));
+        await WriteProofLedgerAsync(paths, ledger);
+        await WriteCleanupJournalAsync(paths, journal);
+        var unreadablePath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[0].ArtifactId + ".json");
+        var preservedPath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, candidates[1].ArtifactId + ".json");
+        File.Delete(unreadablePath);
+        Directory.CreateDirectory(unreadablePath);
+
+        var recovered = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-unreadable-removal"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, recovered.BlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStage.Degraded, recovered.Journal!.Stage);
+        Assert.Equal(0, recovered.Journal.RemovedArtifactCount);
+        Assert.True(Directory.Exists(unreadablePath));
+        Assert.True(File.Exists(preservedPath));
+    }
+
+    [Fact]
     public async Task Recovery_never_removes_raw_evidence_when_the_committed_proof_ledger_is_missing()
     {
         using var workspace = new TestWorkspace();

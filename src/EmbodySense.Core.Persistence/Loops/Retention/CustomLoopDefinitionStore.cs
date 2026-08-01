@@ -662,7 +662,17 @@ public sealed partial class CustomLoopDefinitionStore
                 return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Compact proof failed closed: {exception.GetType().Name}.");
             }
 
-            var removalProgress = await ReconcileRemovalProgressAsync(journal, ownerToken);
+            (bool IsCanonical, bool HasConflict, int AttributedRemovedCount, long AttributedRemovedBytes) removalProgress;
+            try
+            {
+                removalProgress = await ReconcileRemovalProgressAsync(journal, ownerToken);
+            }
+            catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+            {
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Corrupt, "Authoring evidence could not be read while reconstructing removal progress; every remaining raw artifact was preserved.", ownerToken);
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Removal progress failed closed: {exception.GetType().Name}.");
+            }
+
             if (!removalProgress.IsCanonical)
             {
                 journal = journal with { RemovedArtifactCount = removalProgress.AttributedRemovedCount, RemovedArtifactUtf8Bytes = removalProgress.AttributedRemovedBytes };
@@ -984,7 +994,12 @@ public sealed partial class CustomLoopDefinitionStore
         foreach (var candidate in candidates)
         {
             var path = GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId);
-            if (!File.Exists(path))
+            CustomLoopDefinitionRetentionArtifact artifact;
+            try
+            {
+                artifact = await ReadRetentionArtifactAsync(journal.Request.ArtifactClass, path, cancellationToken);
+            }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
             {
                 if (retainedCandidateSeen)
                 {
@@ -997,7 +1012,6 @@ public sealed partial class CustomLoopDefinitionStore
             }
 
             retainedCandidateSeen = true;
-            var artifact = await ReadRetentionArtifactAsync(journal.Request.ArtifactClass, path, cancellationToken);
             if (!string.Equals(artifact.Hash, candidate.ArtifactHash, StringComparison.Ordinal) || artifact.Utf8Json.LongLength != candidate.ArtifactUtf8Bytes)
             {
                 canonical = false;
