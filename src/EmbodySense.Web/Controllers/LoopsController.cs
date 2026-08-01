@@ -55,9 +55,25 @@ public sealed class LoopsController : ControllerBase
     }
 
     /// <summary>
-    /// Gets the default loop or one custom-loop definition.
+    /// Gets the canonical read-only default conversation loop.
     /// </summary>
-    /// <param name="loopId">The reserved <c>default-conversation</c> identity or a custom artifact identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel the definition read.</param>
+    /// <returns>HTTP 200 with the system-loop graph and policy, or HTTP 409 when the workspace is not initialized.</returns>
+    [HttpGet("default-conversation")]
+    public async Task<ActionResult<SystemLoopDefinitionSnapshot>> GetSystemDefault(CancellationToken cancellationToken)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
+        }
+
+        return Ok((await _loops.GetCatalogAsync(cancellationToken)).SystemDefault);
+    }
+
+    /// <summary>
+    /// Gets one custom-loop definition.
+    /// </summary>
+    /// <param name="loopId">The custom artifact identifier.</param>
     /// <param name="cancellationToken">The token used to cancel the definition read.</param>
     /// <returns>
     /// HTTP 200 with the definition, HTTP 400 for an invalid custom identifier, HTTP 404 when a
@@ -69,11 +85,6 @@ public sealed class LoopsController : ControllerBase
         if (!IsWorkspaceInitialized())
         {
             return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
-        }
-
-        if (string.Equals(loopId, "default-conversation", StringComparison.Ordinal))
-        {
-            return Ok((await _loops.GetCatalogAsync(cancellationToken)).SystemDefault);
         }
 
         try
