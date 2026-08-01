@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops;
 using System.Text.Json;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -577,6 +578,206 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_bounds_a_non_draining_post_checkpoint_turn_write_and_quarantines_the_transport()
+    {
+        var turnWriteStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteOverride = (line, _) =>
+            {
+                if (IsTurnStart(line))
+                {
+                    turnWriteStarted.TrySetResult();
+                    return Task.Delay(Timeout.InfiniteTimeSpan, CancellationToken.None);
+                }
+                return Task.CompletedTask;
+            }
+        };
+        await using var client = CreateRawClient(transport);
+        var durableDispatchStarted = false;
+
+        var exception = await Assert.ThrowsAsync<TimeoutException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ =>
+            {
+                durableDispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        await turnWriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(durableDispatchStarted);
+        Assert.Contains("server-owned deadline", exception.Message, StringComparison.Ordinal);
+        Assert.True(transport.Disposed);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("must not reuse")));
+        Assert.Equal(1, transport.Writes.Count(IsTurnStart));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_treats_caller_cancellation_during_a_non_draining_post_checkpoint_write_as_ambiguous()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var turnWriteStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteOverride = (line, _) =>
+            {
+                if (IsTurnStart(line))
+                {
+                    turnWriteStarted.TrySetResult();
+                    return Task.Delay(Timeout.InfiniteTimeSpan, CancellationToken.None);
+                }
+                return Task.CompletedTask;
+            }
+        };
+        await using var client = CreateRawClient(transport);
+        var durableDispatchStarted = false;
+        var generation = client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            cancellation.Token,
+            _ =>
+            {
+                durableDispatchStarted = true;
+                return Task.CompletedTask;
+            });
+
+        await turnWriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+        await transport.DisposedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(durableDispatchStarted);
+        Assert.True(transport.Disposed);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("must not reuse")));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_audits_an_unexpected_late_post_checkpoint_write_fault_without_recording_its_message()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lateWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteOverride = (line, _) =>
+            {
+                if (IsTurnStart(line))
+                {
+                    writeStarted.TrySetResult();
+                    return lateWrite.Task;
+                }
+
+                return Task.CompletedTask;
+            }
+        };
+        var auditLog = new AuditLog(new WorkspacePaths(workspace.RootPath));
+        await using var client = CreateRawClient(transport, auditLog);
+        using var cancellation = new CancellationTokenSource();
+        var generation = client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            cancellation.Token,
+            _ => Task.CompletedTask);
+
+        await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+        lateWrite.TrySetException(new ApplicationException("late write input must stay private"));
+
+        var auditEvent = await WaitForLateTransportAuditAsync(auditLog, "write");
+        Assert.Equal("ApplicationException", GetMetadataString(auditEvent, "error_type"));
+        Assert.DoesNotContain("late write input must stay private", JsonSerializer.Serialize(auditEvent));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_audits_an_unexpected_detached_transport_disposal_fault_without_recording_its_message()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            DisposeFailure = new ApplicationException("transport disposal input must stay private"),
+            WriteOverride = (line, token) =>
+            {
+                if (IsTurnStart(line))
+                {
+                    writeStarted.TrySetResult();
+                    return Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+
+                return Task.CompletedTask;
+            }
+        };
+        var auditLog = new AuditLog(new WorkspacePaths(workspace.RootPath));
+        await using var client = CreateRawClient(transport, auditLog);
+        var generation = client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            cancellation.Token,
+            _ => Task.CompletedTask);
+
+        await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+
+        var auditEvent = await WaitForLateTransportAuditAsync(auditLog, "dispose");
+        Assert.Equal("ApplicationException", GetMetadataString(auditEvent, "error_type"));
+        Assert.DoesNotContain("transport disposal input must stay private", JsonSerializer.Serialize(auditEvent));
+    }
+
+    [Fact]
+    public async Task GenerateAsync_bounds_a_late_transport_fault_audit_when_the_audit_sink_does_not_drain()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var writeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lateWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteOverride = (line, _) =>
+            {
+                if (IsTurnStart(line))
+                {
+                    writeStarted.TrySetResult();
+                    return lateWrite.Task;
+                }
+
+                return Task.CompletedTask;
+            }
+        };
+        var auditLog = new BlockingAuditLog();
+        await using var client = CreateRawClient(transport, auditLog);
+        var generation = client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            cancellation.Token,
+            _ => Task.CompletedTask);
+
+        await writeStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => generation);
+        lateWrite.TrySetException(new ApplicationException("late write input must stay private"));
+
+        await auditLog.AppendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await auditLog.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(7));
+    }
+
+    [Fact]
     public async Task GenerateAsync_does_not_mark_durable_dispatch_when_cancelled_before_the_turn_transport_write()
     {
         using var cancellation = new CancellationTokenSource();
@@ -728,6 +929,17 @@ public sealed class CodexAppServerInferenceTests
         }, broker, transport, providerRequestStarted);
     }
 
+    private static CodexAppServerInferenceClient CreateRawClient(ScriptedAppServerTransport transport, IAuditLog? auditLog = null)
+    {
+        return new CodexAppServerInferenceClient(new LlmInferenceClientOptions
+        {
+            Surface = LlmInferenceSurface.OpenAiCodex,
+            Model = "gpt-test",
+            WorkingDirectory = Directory.GetCurrentDirectory(),
+            CodexSandbox = "read-only"
+        }, transport: transport, auditLog: auditLog);
+    }
+
     private static ToolBroker CreateBroker(TestWorkspace workspace, IToolApprovalPrompt prompt, LoopDefinition? loopDefinition = null)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -777,6 +989,25 @@ public sealed class CodexAppServerInferenceTests
         return events;
     }
 
+    private static async Task<AuditEvent> WaitForLateTransportAuditAsync(IAuditLog auditLog, string operation)
+    {
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            var auditEvent = (await auditLog.ReadTailAsync(20)).LastOrDefault(item =>
+                item.Action == AuditSchema.Actions.LlmAppServerRequest
+                && item.Target == "turn/start"
+                && GetMetadataString(item, "operation") == operation);
+            if (auditEvent is not null)
+            {
+                return auditEvent;
+            }
+
+            await Task.Delay(25);
+        }
+
+        throw new TimeoutException($"Timed out waiting for the detached {operation} transport audit event.");
+    }
+
     private static string? GetMetadataString(AuditEvent auditEvent, string key)
     {
         return auditEvent.Metadata.TryGetValue(key, out var value)
@@ -799,13 +1030,25 @@ public sealed class CodexAppServerInferenceTests
 
         public Func<string, Exception?>? WriteFailure { get; init; }
 
+        public Func<string, CancellationToken, Task>? WriteOverride { get; init; }
+
+        public Exception? DisposeFailure { get; init; }
+
         public Action<string>? AfterWrite { get; init; }
 
         public bool Disposed { get; private set; }
 
+        public TaskCompletionSource DisposedSignal { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public ValueTask DisposeAsync()
         {
             Disposed = true;
+            DisposedSignal.TrySetResult();
+            if (DisposeFailure is not null)
+            {
+                return ValueTask.FromException(DisposeFailure);
+            }
+
             return ValueTask.CompletedTask;
         }
 
@@ -823,7 +1066,37 @@ public sealed class CodexAppServerInferenceTests
 
             Writes.Add(line);
             AfterWrite?.Invoke(line);
+            if (WriteOverride is not null)
+            {
+                return WriteOverride(line, cancellationToken);
+            }
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class BlockingAuditLog : IAuditLog
+    {
+        public TaskCompletionSource AppendStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
+        {
+            AppendStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                CancellationObserved.TrySetResult();
+                throw;
+            }
+        }
+
+        public Task<IReadOnlyList<AuditEvent>> ReadTailAsync(int limit, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<AuditEvent>>([]);
         }
     }
 
