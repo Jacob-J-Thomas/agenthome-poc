@@ -118,6 +118,82 @@ public sealed class IsolatedCapabilityExecutableHostTests
     }
 
     [Fact]
+    public async Task Invalid_lease_root_fails_closed_before_process_start()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var artifact = PrepareArtifact();
+        var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
+        var invalidRootLease = new TestCapabilityExecutableArtifactLease(
+            artifact.RootPath, Path.Combine(artifact.RootPath, artifact.EntryPoint), manifest.Checksum, 0, "invalid\0root");
+        var invalidRootResolver = new TestCapabilityExecutableArtifactResolver
+        {
+            Resolution = new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Available, invalidRootLease, "Malformed server lease root.")
+        };
+        using var invalidRootHost = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), new TestCapabilityProcessIsolationBoundary(), invalidRootResolver);
+        var invalidRootInvocation = new CapabilityExecutableInvocation(
+            manifest, artifact.RootPath, "{}", "invalid-lease-root");
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.Invalid, (await invalidRootHost.InvokeAsync(invalidRootInvocation)).Status);
+    }
+
+    [Fact]
+    public async Task Stderr_overflow_terminates_the_process_without_returning_its_output()
+    {
+        using var artifact = PrepareArtifact();
+        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), new TestCapabilityProcessIsolationBoundary(), new TestCapabilityExecutableArtifactResolver(artifact.RootPath));
+        var invocation = new CapabilityExecutableInvocation(
+            CapabilityClientTestData.Manifest(artifact.EntryPoint, "stderr-oversize", outputBytes: 1_024), artifact.RootPath, "{}", "stderr-overflow");
+
+        var result = await host.InvokeAsync(invocation);
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.OutputLimitExceeded, result.Status);
+        Assert.DoesNotContain(new string('x', 64), result.Diagnostic, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("token=alpha, TOKEN : bravo; token=charlie", "alpha|bravo|charlie", "[redacted]")]
+    [InlineData("secret: delta password = echo", "delta|echo", "[redacted]")]
+    [InlineData("api_key=foxtrot api-key: golf", "foxtrot|golf", "[redacted]")]
+    [InlineData("authorization=hotel Bearer india bearer juliet", "hotel|india|juliet", "[redacted]")]
+    [InlineData("C:\\private\\alpha.txt D:\\secrets\\bravo.txt", "C:\\private\\alpha.txt|D:\\secrets\\bravo.txt", "[path]")]
+    [InlineData("/var/private/alpha /opt/secrets/bravo", "/var/private/alpha|/opt/secrets/bravo", "[path]")]
+    [InlineData("ToKeN=kilogram; C:\\private\\lima.txt /var/private/mike Bearer november", "kilogram|C:\\private\\lima.txt|/var/private/mike|november", "[redacted]")]
+    public async Task Process_output_redacts_each_sensitive_diagnostic_family(string privateOutput, string privateFragments, string expectedMarker)
+    {
+        using var artifact = PrepareArtifact();
+        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), new TestCapabilityProcessIsolationBoundary(), new TestCapabilityExecutableArtifactResolver(artifact.RootPath));
+        var invocation = new CapabilityExecutableInvocation(
+            CapabilityClientTestData.Manifest(artifact.EntryPoint), artifact.RootPath, JsonSerializer.Serialize(privateOutput), "redacted-output");
+
+        var result = await host.InvokeAsync(invocation);
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.Succeeded, result.Status);
+        Assert.Contains(expectedMarker, result.OutputJson, StringComparison.Ordinal);
+        foreach (var privateFragment in privateFragments.Split('|'))
+        {
+            Assert.DoesNotContain(privateFragment, result.OutputJson, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Process_output_is_bounded_after_redaction_without_changing_the_execution_outcome()
+    {
+        using var artifact = PrepareArtifact();
+        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), new TestCapabilityProcessIsolationBoundary(), new TestCapabilityExecutableArtifactResolver(artifact.RootPath));
+        var privateOutput = new string('x', 2_048);
+        var invocation = new CapabilityExecutableInvocation(
+            CapabilityClientTestData.Manifest(artifact.EntryPoint), artifact.RootPath, JsonSerializer.Serialize(privateOutput), "bounded-output");
+
+        var result = await host.InvokeAsync(invocation);
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.Succeeded, result.Status);
+        Assert.Equal(1_024, result.OutputJson!.Length);
+    }
+
+    [Fact]
     public void Host_redacts_platform_availability_diagnostics()
     {
         var boundary = new TestCapabilityProcessIsolationBoundary { Availability = new(CapabilityExecutableAvailabilityStatus.Unavailable, "password=hunter2 C:\\private\\secret.txt") };

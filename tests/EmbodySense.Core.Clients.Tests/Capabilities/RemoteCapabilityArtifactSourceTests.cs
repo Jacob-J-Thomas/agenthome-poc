@@ -68,6 +68,25 @@ public sealed class RemoteCapabilityArtifactSourceTests
 
         transport.Handler = request => new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new UnknownLengthContent(EmbodySense.Core.Application.Capabilities.CapabilityArtifactManifestValidator.MaximumArtifactBytes + 1) };
         await Assert.ThrowsAsync<HttpRequestException>(() => remote.ReadAsync(source));
+
+        transport.Handler = request => new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new UnknownLengthContent(0) };
+        await Assert.ThrowsAsync<HttpRequestException>(() => remote.ReadAsync(source));
+    }
+
+    [Fact]
+    public async Task Non_success_and_unknown_length_nonempty_responses_have_honest_outcomes()
+    {
+        using var transport = new StubRemoteCapabilityArtifactTransport();
+        using var remote = new RemoteCapabilityArtifactSource(transport, ["https://example.test"]);
+        var source = new CapabilityArtifactSourceReference(CapabilityArtifactSourceKind.Remote, "https://example.test/artifact", "rev", CapabilityArtifactUpdatePolicy.Pinned);
+        transport.Handler = request => new HttpResponseMessage(HttpStatusCode.NotFound) { RequestMessage = request, Content = new ByteArrayContent("not-found"u8.ToArray()) };
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => remote.ReadAsync(source));
+
+        transport.Handler = request => new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new UnknownLengthContent(3) };
+        var content = await remote.ReadAsync(source);
+
+        Assert.Equal(new byte[3], content.ToArray());
     }
 
     [Fact]

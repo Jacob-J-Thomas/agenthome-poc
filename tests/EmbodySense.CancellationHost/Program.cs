@@ -42,6 +42,9 @@ static async Task<int> HostCapabilityAsync(string behavior)
         case "oversize":
             Console.Write(new string('x', 128 * 1024));
             return 0;
+        case "stderr-oversize":
+            Console.Error.Write(new string('x', 128 * 1024));
+            return 0;
         case "environment":
             Console.Write(JsonSerializer.Serialize(Environment.GetEnvironmentVariables().Keys.Cast<object>().Select(value => value.ToString()).OrderBy(value => value, StringComparer.Ordinal)));
             return 0;

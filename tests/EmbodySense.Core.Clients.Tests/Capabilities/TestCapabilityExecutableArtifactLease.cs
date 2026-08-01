@@ -8,9 +8,9 @@ internal sealed class TestCapabilityExecutableArtifactLease : ICapabilityExecuta
 {
     private FileStream? _executable;
 
-    internal TestCapabilityExecutableArtifactLease(string artifactRoot, string executablePath, CapabilityIntegrityDigest artifactDigest, long activationRevision)
+    internal TestCapabilityExecutableArtifactLease(string artifactRoot, string executablePath, CapabilityIntegrityDigest artifactDigest, long activationRevision, string? reportedArtifactRoot = null)
     {
-        ArtifactRoot = artifactRoot;
+        ArtifactRoot = reportedArtifactRoot ?? artifactRoot;
         ExecutablePath = executablePath;
         ArtifactDigest = artifactDigest;
         ActivationRevision = activationRevision;

@@ -21,6 +21,19 @@ public sealed class ConfiguredCapabilityArtifactTrustVerifierTests
     }
 
     [Fact]
+    public async Task Unsigned_and_noncanonical_manifests_fail_closed_without_server_policy_evidence()
+    {
+        var manifest = CapabilityClientTestData.Manifest();
+        using var verifier = new ConfiguredCapabilityArtifactTrustVerifier(new Dictionary<string, string>());
+
+        var unsigned = await verifier.VerifyAsync(manifest, manifest.Checksum);
+        var noncanonical = await verifier.VerifyAsync(manifest with { SchemaVersion = 2 }, manifest.Checksum);
+
+        Assert.Equal(CapabilityArtifactTrustStatus.Rejected, unsigned.Status);
+        Assert.Equal(CapabilityArtifactTrustStatus.Rejected, noncanonical.Status);
+    }
+
+    [Fact]
     public async Task Ecdsa_signature_is_verified_by_server_key_not_manifest_claim()
     {
         var manifest = CapabilityClientTestData.Manifest();
