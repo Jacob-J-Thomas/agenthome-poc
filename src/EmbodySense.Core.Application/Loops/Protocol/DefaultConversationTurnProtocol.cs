@@ -53,6 +53,7 @@ public static class DefaultConversationTurnProtocol
             null,
             DefaultConversationTurnCheckpoint.Admitted,
             false,
+            DefaultConversationTurnReviewCause.None,
             null,
             null,
             [transition]);
@@ -72,6 +73,7 @@ public static class DefaultConversationTurnProtocol
     /// <param name="runProjectionSynchronized">An optional run-projection synchronization value.</param>
     /// <param name="reviewDetail">Optional actionable conflict or ambiguity evidence.</param>
     /// <param name="reviewResolution">Optional explicit human review-resolution evidence.</param>
+    /// <param name="reviewCause">Optional durable cause for a needs-review terminal state.</param>
     /// <returns>The next lifecycle version.</returns>
     public static DefaultConversationTurnRecord Advance(
         this DefaultConversationTurnRecord record,
@@ -84,7 +86,8 @@ public static class DefaultConversationTurnProtocol
         LoopRunRecord? run = null,
         bool? runProjectionSynchronized = null,
         string? reviewDetail = null,
-        DefaultConversationTurnReviewResolution? reviewResolution = null)
+        DefaultConversationTurnReviewResolution? reviewResolution = null,
+        DefaultConversationTurnReviewCause? reviewCause = null)
     {
         ArgumentNullException.ThrowIfNull(record);
         if (!Enum.IsDefined(checkpoint) || !DefaultConversationTurnProtocolValidator.IsLegalTransition(record.Checkpoint, checkpoint))
@@ -105,6 +108,7 @@ public static class DefaultConversationTurnProtocol
             ProviderResponseId = providerResponseId ?? record.ProviderResponseId,
             Checkpoint = checkpoint,
             RunProjectionSynchronized = runProjectionSynchronized ?? record.RunProjectionSynchronized,
+            ReviewCause = reviewCause ?? InferReviewCause(record, run, providerOutcome),
             ReviewDetail = reviewDetail ?? record.ReviewDetail,
             ReviewResolution = reviewResolution ?? record.ReviewResolution,
             Transitions = [.. record.Transitions, transition]
@@ -143,11 +147,27 @@ public static class DefaultConversationTurnProtocol
     public static DefaultConversationTurnReviewClassification GetReviewClassification(DefaultConversationTurnRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
-        return record.ProviderOutcome switch
+        return record.ReviewCause switch
         {
-            DefaultConversationProviderOutcome.OutcomeUnknown => DefaultConversationTurnReviewClassification.OutcomeUnknown,
-            DefaultConversationProviderOutcome.ObservedWithAuditFailure => DefaultConversationTurnReviewClassification.ObservedWithAuditFailure,
-            _ => DefaultConversationTurnReviewClassification.TranscriptConflict
+            DefaultConversationTurnReviewCause.OutcomeUnknown => DefaultConversationTurnReviewClassification.OutcomeUnknown,
+            DefaultConversationTurnReviewCause.ObservedWithAuditFailure => DefaultConversationTurnReviewClassification.ObservedWithAuditFailure,
+            DefaultConversationTurnReviewCause.TranscriptConflict => DefaultConversationTurnReviewClassification.TranscriptConflict,
+            _ => DefaultConversationTurnReviewClassification.Unknown
+        };
+    }
+
+    private static DefaultConversationTurnReviewCause InferReviewCause(DefaultConversationTurnRecord record, LoopRunRecord? run, DefaultConversationProviderOutcome? providerOutcome)
+    {
+        if (record.ReviewCause != DefaultConversationTurnReviewCause.None || run?.Status != LoopRunStatus.NeedsReview)
+        {
+            return record.ReviewCause;
+        }
+
+        return (providerOutcome ?? record.ProviderOutcome) switch
+        {
+            DefaultConversationProviderOutcome.OutcomeUnknown => DefaultConversationTurnReviewCause.OutcomeUnknown,
+            DefaultConversationProviderOutcome.ObservedWithAuditFailure => DefaultConversationTurnReviewCause.ObservedWithAuditFailure,
+            _ => DefaultConversationTurnReviewCause.TranscriptConflict
         };
     }
 

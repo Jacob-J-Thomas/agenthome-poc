@@ -334,6 +334,45 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
+    public async Task Provider_dispatch_transcript_conflict_stays_blocked_without_quarantine_or_abandonment()
+    {
+        using var workspace = new TestWorkspace();
+        var fixture = CreateFixture(workspace, new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderDispatchStarted));
+
+        await Assert.ThrowsAsync<DefaultConversationTurnInterruptedException>(() => fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: "dispatch-conflict")));
+        await fixture.Memory.AppendMessageAsync(LlmMessage.User("owner edit"));
+
+        var recovered = Assert.Single((await fixture.Recovery.RecoverAsync()).Results);
+        var record = await fixture.Turns.LoadAsync(recovered.TurnId);
+        Assert.NotNull(record);
+        Assert.Equal(DefaultConversationTurnRecoveryClassification.Conflict, recovered.Classification);
+        Assert.Equal(DefaultConversationProviderOutcome.OutcomeUnknown, record.ProviderOutcome);
+        Assert.Equal(DefaultConversationTurnReviewCause.TranscriptConflict, record.ReviewCause);
+        Assert.Equal(DefaultConversationTurnReviewClassification.TranscriptConflict, DefaultConversationTurnProtocol.GetReviewClassification(record));
+        var version = record.LifecycleVersion;
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var reviewService = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+
+        var forgedAbandonment = (record with { ReviewCause = DefaultConversationTurnReviewCause.OutcomeUnknown }).ResolveReview(DateTimeOffset.UtcNow);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Conflict, (await fixture.Turns.UpdateAsync(forgedAbandonment, record.LifecycleVersion)).Status);
+        var afterForgedWrite = await fixture.Turns.LoadAsync(record.TurnId);
+        Assert.NotNull(afterForgedWrite);
+        Assert.Equal(DefaultConversationTurnReviewCause.TranscriptConflict, afterForgedWrite.ReviewCause);
+        Assert.Equal(version, afterForgedWrite.LifecycleVersion);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => reviewService.ResolveAsync(record.TurnId));
+        Assert.Equal(0, fixture.Client.QuarantineCount);
+        var blocked = await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("must remain blocked"));
+        Assert.Equal(DefaultConversationLoopTurnStatus.NeedsReview, blocked.Status);
+        Assert.DoesNotContain("/review resolve", blocked.FailureDetail, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.Client.GenerateCount);
+        var reread = await fixture.Turns.LoadAsync(record.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(version, reread.LifecycleVersion);
+        Assert.Null(reread.ReviewResolution);
+    }
+
+    [Fact]
     public async Task Separate_process_recovers_a_raw_assistant_append_after_abrupt_process_loss()
     {
         using var workspace = new TestWorkspace();
