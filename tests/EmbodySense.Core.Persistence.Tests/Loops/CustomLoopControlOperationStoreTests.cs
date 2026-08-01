@@ -643,6 +643,98 @@ public sealed class CustomLoopControlOperationStoreTests
     }
 
     [Fact]
+    public async Task New_admission_rejects_any_preexisting_raw_and_compact_proof_contradiction_before_creating_a_receipt_or_owner_lease()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopControlOperationStore(paths, timeProvider: new MutableTimeProvider(_timestamp));
+        var existing = await store.BeginAsync(Pending("control-admission-contradictory-existing", AuditSchema.Actors.Web));
+        using var existingLease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(existing.Lease);
+        var completed = Complete(existing.Operation!, _timestamp);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+
+        var receiptPath = Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json");
+        var receiptBytes = await File.ReadAllBytesAsync(receiptPath);
+        var proof = new CustomLoopExpiredOperationProof(
+            CustomLoopExpiredOperationProof.CurrentSchemaVersion,
+            CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
+            null,
+            null,
+            null,
+            completed.OperationId,
+            completed.RequestHash,
+            Convert.ToHexString(SHA256.HashData(receiptBytes)).ToLowerInvariant(),
+            completed.UpdatedAtUtc,
+            completed.UpdatedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration);
+        Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+        await File.WriteAllBytesAsync(paths.CustomLoopReceiptProofLedgerPath, CustomLoopReceiptRetentionContractCodec.SerializeProofLedger(new CustomLoopReceiptProofLedger(
+            CustomLoopReceiptProofLedger.CurrentSchemaVersion,
+            1,
+            proof.ExpiredAtUtc,
+            null,
+            [],
+            [proof])));
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(Pending("control-admission-after-contradiction", AuditSchema.Actors.Web)));
+
+        Assert.Contains("contradictory raw and compact expiry evidence", exception.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(receiptPath));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, "control-admission-after-contradiction.json")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, ".control-admission-after-contradiction.owner.lock")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlReceiptCleanupPath, "active.json")));
+    }
+
+    [Fact]
+    public async Task Aggregate_raw_receipt_ceiling_fails_during_inventory_preflight_before_the_first_artifact_can_be_parsed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopControlOperationsPath);
+        for (var index = 0; index <= 2_048; index++)
+        {
+            await using var file = new FileStream(Path.Combine(paths.CustomLoopControlOperationsPath, $"control-aggregate-{index:D5}.json"), FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+            file.SetLength(64 * 1024);
+        }
+
+        var lockedPath = Path.Combine(paths.CustomLoopControlOperationsPath, "control-aggregate-00000.json");
+        using var unreadableFirstArtifact = new FileStream(lockedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var store = new CustomLoopControlOperationStore(paths);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(Pending("control-after-aggregate-overflow", AuditSchema.Actors.Web)));
+
+        Assert.Contains("aggregate UTF-8 byte ceiling", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(64 * 1024, unreadableFirstArtifact.Length);
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, "control-after-aggregate-overflow.json")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, ".control-after-aggregate-overflow.owner.lock")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlReceiptCleanupPath, "active.json")));
+    }
+
+    [Fact]
+    public async Task Inspection_leaves_cleanup_history_temps_untouched_while_another_process_owns_the_shared_retention_mutation_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath);
+        var tempPath = Path.Combine(paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath, $".cleanup-history-temp.json.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(tempPath, "partial");
+        Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+
+        var lockPath = Path.Combine(paths.CustomLoopReceiptRetentionPath, ".custom-loop-mutations.lock");
+        using (new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            var blocked = await new CustomLoopControlOperationStore(paths).InspectAsync();
+
+            Assert.Equal(CustomLoopReceiptCleanupBlockReason.OwnershipUnresolved, blocked.CleanupBlockReason);
+            Assert.True(File.Exists(tempPath));
+        }
+
+        var recovered = await new CustomLoopControlOperationStore(paths).InspectAsync();
+
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.None, recovered.CleanupBlockReason);
+        Assert.False(File.Exists(tempPath));
+    }
+
+    [Fact]
     public async Task Mutation_reclaims_only_recognized_abandoned_temp_and_orphan_owner_artifacts()
     {
         using var workspace = new TestWorkspace();

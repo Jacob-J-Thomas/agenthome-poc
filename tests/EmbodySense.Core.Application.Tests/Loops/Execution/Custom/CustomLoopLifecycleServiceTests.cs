@@ -977,6 +977,28 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes, cleanup.MaximumArtifactUtf8Bytes);
     }
 
+    [Fact]
+    public async Task Retention_retry_uses_one_stable_cleanup_identity_for_the_same_lifecycle_operation_request()
+    {
+        var run = Run("run-control-retention-stable-id", CustomLoopRunStatus.Running);
+        var runStore = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore { QuotaBeginCount = 2 };
+        var retention = new RecordingReceiptRetentionPort(CustomLoopReceiptCleanupStatus.OperationInProgress);
+        var service = new CustomLoopLifecycleService(runStore, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)), retention, "web");
+        const string OperationId = "pause-retention-stable-cleanup-id";
+
+        var first = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web));
+        var replay = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.OperationInProgress, first.Status);
+        Assert.Equal(CustomLoopControlStatus.OperationInProgress, replay.Status);
+        var cleanupAttempts = retention.Requests.ToArray();
+        Assert.Equal(2, cleanupAttempts.Length);
+        Assert.All(cleanupAttempts, attempt => Assert.Equal(cleanupAttempts[0].OperationId, attempt.OperationId));
+        Assert.Equal($"control-receipt-retention-{CustomLoopControlRequestHash.Compute(CustomLoopControlKind.Pause, run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web)}", cleanupAttempts[0].OperationId);
+        Assert.Equal(0, runStore.UpdateCallCount);
+    }
+
     [Theory]
     [InlineData(CustomLoopReceiptCleanupStatus.OperationInProgress, CustomLoopControlStatus.OperationInProgress, "bounded ownership window")]
     [InlineData(CustomLoopReceiptCleanupStatus.AuditUnavailable, CustomLoopControlStatus.Failed, "audit integrity was unavailable")]
@@ -1227,6 +1249,8 @@ public sealed class CustomLoopLifecycleServiceTests
 
         public bool QuotaOnFirstBegin { get; init; }
 
+        public int QuotaBeginCount { get; init; }
+
         public int BeginCallCount { get; private set; }
 
         public bool RecoverPendingReplays { get; set; }
@@ -1241,7 +1265,7 @@ public sealed class CustomLoopLifecycleServiceTests
                 throw new IOException("Operation store unavailable.");
             }
 
-            if (QuotaOnFirstBegin && BeginCallCount == 1)
+            if (BeginCallCount <= QuotaBeginCount || QuotaOnFirstBegin && BeginCallCount == 1)
             {
                 return Task.FromResult(new CustomLoopControlOperationStoreResult(CustomLoopControlOperationStoreStatus.QuotaExceeded, null));
             }

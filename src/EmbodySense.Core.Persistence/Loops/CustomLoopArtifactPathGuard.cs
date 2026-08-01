@@ -139,6 +139,21 @@ internal sealed class CustomLoopArtifactPathGuard
     }
 
     /// <summary>
+    /// Gets the length of one contained non-reparse artifact without opening or parsing its content.
+    /// </summary>
+    /// <param name="root">The artifact root.</param>
+    /// <param name="path">The artifact path.</param>
+    /// <returns>The observed byte length.</returns>
+    public long GetFileLength(string root, string path)
+    {
+        EnsureContained(ValidateRoot(root), Path.GetFullPath(path), "Artifact path escaped its configured root.");
+        EnsureNoReparsePoints(path);
+        var length = new FileInfo(path).Length;
+        EnsureNoReparsePoints(path);
+        return length;
+    }
+
+    /// <summary>
     /// Flushes text to a sibling temporary file and renames it over the contained destination.
     /// </summary>
     /// <param name="root">The root.</param>
