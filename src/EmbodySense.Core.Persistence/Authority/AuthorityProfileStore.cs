@@ -399,7 +399,7 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore
 
     private static string? ValidateMutation(AuthorityProfileMutation? mutation)
     {
-        if (mutation is null || !Enum.IsDefined(mutation.Kind) || !IsOperationIdValid(mutation.OperationId) || mutation.ExpectedRevision < 0 || mutation.ActorId is null || mutation.Reason is null)
+        if (mutation is null || !Enum.IsDefined(mutation.Kind) || !IsOperationIdValid(mutation.OperationId) || mutation.ExpectedRevision is < 0 or int.MaxValue || mutation.ActorId is null || mutation.Reason is null)
         {
             return "The authority-profile operation identity, revision, actor, or reason is invalid.";
         }

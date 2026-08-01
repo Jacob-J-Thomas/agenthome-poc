@@ -96,6 +96,7 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         var created = await store.MutateAsync(Create(profile, "create-once"));
         var duplicate = await store.MutateAsync(Create(profile, "create-twice"));
         var invalidCreate = await store.MutateAsync(new AuthorityProfileMutation(AuthorityProfileMutationKind.Create, "create-invalid-revision", 1, profile with { Revision = Revision(2) }, null, null, Actor(), Reason()));
+        var overflowingRevision = await store.MutateAsync(new AuthorityProfileMutation(AuthorityProfileMutationKind.Create, "create-overflowing-revision", int.MaxValue, profile, null, null, Actor(), Reason()));
         var invalidTransition = await store.MutateAsync(new AuthorityProfileMutation(AuthorityProfileMutationKind.TransitionStatus, "transition-without-status", 1, null, profile.ProfileId, null, Actor(), Reason()));
         var persisted = await Store(paths).ReadAsync(profile.ProfileId.Value);
 
@@ -106,6 +107,7 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         Assert.Equal(AuthorityProfileMutationStatus.Applied, created.Status);
         Assert.Equal(AuthorityProfileMutationStatus.Invalid, duplicate.Status);
         Assert.Equal(AuthorityProfileMutationStatus.Invalid, invalidCreate.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Invalid, overflowingRevision.Status);
         Assert.Equal(AuthorityProfileMutationStatus.Invalid, invalidTransition.Status);
         Assert.Single(persisted.Record!.Operations);
         Assert.Equal("create-once", persisted.Record.Operations[0].OperationId);
