@@ -266,6 +266,36 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void File_backed_catalog_shares_one_Windows_probe_budget_between_missing_and_existing_ancestors()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        Directory.CreateDirectory(workspaceRoot);
+        var trustRoot = root.File("trust-existing");
+        for (var index = 0; index < 20; index++)
+        {
+            trustRoot = Path.Combine(trustRoot, $"existing-{index:D2}");
+        }
+
+        Directory.CreateDirectory(trustRoot);
+        for (var index = 0; index < 20; index++)
+        {
+            trustRoot = Path.Combine(trustRoot, $"missing-{index:D2}");
+        }
+
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var exception = Assert.Throws<IOException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+
+        Assert.Equal("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.", exception.Message);
+        Assert.False(File.Exists(provider.AuthenticationKeyPath));
+    }
+
+    [Fact]
     public async Task File_backed_catalog_treats_a_disjoint_existing_file_trust_root_as_unavailable()
     {
         using var root = new TestWorkspace();
@@ -330,6 +360,39 @@ public sealed class FileCapabilityCatalogTrustProviderTests
         Assert.False(Directory.Exists(provider.RootPath));
         Assert.False(File.Exists(provider.AuthenticationKeyPath));
         Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(root.RootPath), path => Path.GetFileName(path).StartsWith(".server-trust.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Provider_releases_the_Windows_staging_handle_when_exact_cleanup_disposition_fails()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        string? stagingPath = null;
+        var barrier = new RecordingCapabilityCatalogDurabilityBarrier
+        {
+            BeforeDirectoryMoveAction = (path, _) =>
+            {
+                stagingPath = path;
+                File.WriteAllText(Path.Combine(path, "cleanup-blocker"), "retained");
+                throw new IOException("Injected pre-move durability failure.");
+            }
+        };
+        var provider = new FileCapabilityCatalogTrustProvider(root.File("server-trust"), barrier);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => provider.InitializeAsync(Identity("cleanup-disposition-failure"), 0, Digest("cleanup-disposition-failure")));
+
+        Assert.NotNull(stagingPath);
+        Assert.Contains("could not be marked for exact cleanup", exception.Message, StringComparison.Ordinal);
+        File.Delete(Path.Combine(stagingPath, "cleanup-blocker"));
+        if (Directory.Exists(stagingPath))
+        {
+            Directory.Delete(stagingPath);
+        }
+        Assert.False(Directory.Exists(stagingPath));
     }
 
     [Fact]

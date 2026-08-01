@@ -6,6 +6,8 @@ namespace EmbodySense.Core.Persistence.Capabilities;
 /// <summary>Validates that server-owned capability trust state is physically disjoint from governed workspace storage.</summary>
 internal static class CapabilityCatalogTrustRootTopology
 {
+    private const int MaximumWindowsIdentityProbes = 32;
+
     /// <summary>Rejects equality or containment in either direction after lexical, link, and Windows physical-identity checks.</summary>
     /// <param name="workspaceRootPath">The governed workspace root.</param>
     /// <param name="trustRootPath">The server-owned capability trust root.</param>
@@ -50,12 +52,14 @@ internal static class CapabilityCatalogTrustRootTopology
     {
         var tailSegments = new List<string>();
         var current = path;
-        for (var depth = 0; ; depth++)
+        var remainingProbes = MaximumWindowsIdentityProbes;
+        for (; ; )
         {
-            RequireSafeTopology(depth <= 32, "Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
+            RequireSafeTopology(remainingProbes > 0, "Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
+            remainingProbes--;
             if (CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var identity, out var finalPath))
             {
-                return GetCanonicalWindowsAncestors(finalPath, identity, tailSegments);
+                return GetCanonicalWindowsAncestors(finalPath, identity, tailSegments, remainingProbes);
             }
 
             var parent = Path.GetDirectoryName(current);
@@ -70,13 +74,12 @@ internal static class CapabilityCatalogTrustRootTopology
     }
 
     [SupportedOSPlatform("windows")]
-    private static IReadOnlyList<(string Identity, string RelativeTail)> GetCanonicalWindowsAncestors(string finalPath, string identity, List<string> tailSegments)
+    private static IReadOnlyList<(string Identity, string RelativeTail)> GetCanonicalWindowsAncestors(string finalPath, string identity, List<string> tailSegments, int remainingProbes)
     {
         var ancestors = new List<(string Identity, string RelativeTail)> { (identity, string.Join(Path.DirectorySeparatorChar, tailSegments)) };
         var current = Normalize(finalPath);
-        for (var depth = 0; ; depth++)
+        for (; ; )
         {
-            RequireSafeTopology(depth <= 32, "Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
             var parent = Path.GetDirectoryName(current);
             if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
             {
@@ -85,6 +88,8 @@ internal static class CapabilityCatalogTrustRootTopology
 
             tailSegments.Insert(0, Path.GetFileName(current));
             current = parent;
+            RequireSafeTopology(remainingProbes > 0, "Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
+            remainingProbes--;
             var parentResolved = CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var parentIdentity, out _);
             RequireSafeTopology(parentResolved, "Capability catalog root topology could not resolve an existing directory safely.");
 

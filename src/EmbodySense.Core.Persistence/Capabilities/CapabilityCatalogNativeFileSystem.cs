@@ -354,12 +354,18 @@ internal static class CapabilityCatalogNativeFileSystem
         }
         finally
         {
-            if (!renamed && staging is not null && !staging.IsInvalid && !staging.IsClosed)
+            try
             {
-                MarkWindowsDirectoryForDeletion(staging);
+                if (!renamed && staging is not null && !staging.IsInvalid && !staging.IsClosed)
+                {
+                    MarkWindowsDirectoryForDeletion(staging);
+                }
             }
-            staging?.Dispose();
-            movedIdentity?.Dispose();
+            finally
+            {
+                staging?.Dispose();
+                movedIdentity?.Dispose();
+            }
         }
     }
 
