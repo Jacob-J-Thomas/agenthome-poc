@@ -127,12 +127,14 @@ public sealed class BuiltInCapabilityCatalogSeederTests
 
         var transitionResult = await transition(service, entry.Descriptor.Id, await ReadCatalogRevisionAsync(service));
         Assert.Equal(CapabilityCatalogMutationStatus.Applied, transitionResult.Status);
+        var transitioned = (await ReadBuiltInsAsync(new CapabilityCatalogStore(paths, provider))).Single(candidate => candidate.Descriptor.Id.Equals(entry.Descriptor.Id));
+        assertLifecycle(transitioned.Lifecycle);
 
         await seeder.SeedAsync(paths);
 
         var reseeded = (await ReadBuiltInsAsync(new CapabilityCatalogStore(paths, provider))).Single(candidate => candidate.Descriptor.Id.Equals(entry.Descriptor.Id));
         assertLifecycle(reseeded.Lifecycle);
-        Assert.Equal(transitionResult.CatalogRevision, reseeded.Revision);
+        Assert.Equal(transitioned.Revision, reseeded.Revision);
     }
 
     private static void AssertEffectReady(CapabilityCatalogEntry entry)
