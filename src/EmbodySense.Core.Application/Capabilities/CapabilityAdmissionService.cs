@@ -10,16 +10,31 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
     private const int PageSize = 100;
     private readonly ICapabilityCatalogStore _catalogStore;
     private readonly CapabilityDependencyResolver _resolver;
+    private readonly CapabilityVersion _hostContractVersion;
+    private readonly CapabilityPlatform _hostPlatform;
     private readonly string _workspaceScopeId;
     private readonly TimeProvider _timeProvider;
 
-    /// <summary>Creates a workspace-bound admission service.</summary>
-    public CapabilityAdmissionService(ICapabilityCatalogStore catalogStore, string workspaceScopeId, TimeProvider? timeProvider = null)
+    /// <summary>Creates a workspace-bound admission service for one exact current host contract and platform.</summary>
+    /// <param name="catalogStore">The governed catalog store.</param>
+    /// <param name="workspaceScopeId">The exact workspace scope identity.</param>
+    /// <param name="hostContractVersion">The current EmbodySense capability-host contract version.</param>
+    /// <param name="hostPlatform">The current exact operating-system and process-architecture tuple.</param>
+    /// <param name="timeProvider">The optional trusted admission clock.</param>
+    public CapabilityAdmissionService(ICapabilityCatalogStore catalogStore, string workspaceScopeId, CapabilityVersion hostContractVersion, CapabilityPlatform hostPlatform, TimeProvider? timeProvider = null)
     {
         _catalogStore = catalogStore ?? throw new ArgumentNullException(nameof(catalogStore));
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceScopeId);
+        ArgumentNullException.ThrowIfNull(hostContractVersion);
+        ArgumentNullException.ThrowIfNull(hostPlatform);
+        if (hostPlatform.Equals(CapabilityPlatform.Any))
+        {
+            throw new ArgumentException("Capability admission requires one exact current host platform.", nameof(hostPlatform));
+        }
         _workspaceScopeId = workspaceScopeId;
-        _resolver = new CapabilityDependencyResolver();
+        _hostContractVersion = hostContractVersion;
+        _hostPlatform = hostPlatform;
+        _resolver = new CapabilityDependencyResolver(hostContractVersion, hostPlatform);
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -57,7 +72,7 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
             var entry = catalog.Entries.SingleOrDefault(item => PinMatches(selected, item));
             if (entry is null || !IsCurrentlyAvailable(entry))
             {
-                return Rejected("A resolved capability was not enabled, healthy, trusted, installed, and exact at admission.");
+                return Rejected("A resolved capability was not enabled, healthy, trusted, installed, host-compatible, and exact at admission.");
             }
 
             pins.Add(new CapabilityAdmissionPin(selected.DescriptorIdentity, entry.Descriptor.Kind, selected.Implementation, selected.Provenance, selected.Artifact, entry.Descriptor.Purpose));
@@ -120,7 +135,7 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
 
             if (!IsCurrentlyAvailable(entry))
             {
-                return Invalid($"Admitted capability `{pin.DescriptorIdentity.Id.Value}` is disabled, unavailable, untrusted, uninstalled, or removed.");
+                return Invalid($"Admitted capability `{pin.DescriptorIdentity.Id.Value}` is disabled, unavailable, untrusted, uninstalled, host-incompatible, or removed.");
             }
         }
 
@@ -170,15 +185,19 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
         return new CatalogSnapshot(true, entries, "The current proved catalog was read completely.");
     }
 
-    private static bool IsCurrentlyAvailable(CapabilityCatalogEntry entry)
+    private bool IsCurrentlyAvailable(CapabilityCatalogEntry entry)
     {
         var lifecycle = entry.Lifecycle;
-        return lifecycle.Declaration == CapabilityDeclarationState.Declared
+        return CapabilityDescriptorIdentity.TryCreate(entry.Descriptor, out var currentIdentity, out _)
+            && lifecycle.DescriptorIdentity.Equals(currentIdentity)
+            && lifecycle.Declaration == CapabilityDeclarationState.Declared
             && lifecycle.Installation == CapabilityInstallationState.Installed
             && lifecycle.Enablement == CapabilityEnablementState.Enabled
             && lifecycle.Health == CapabilityHealthState.Healthy
             && lifecycle.Retirement != CapabilityRetirementState.Removed
-            && lifecycle.Trust == CapabilityTrustState.Verified;
+            && lifecycle.Trust == CapabilityTrustState.Verified
+            && entry.Descriptor.Compatibility.HostVersionRange.Contains(_hostContractVersion)
+            && entry.Descriptor.Compatibility.SupportedPlatforms.Any(platform => platform.Equals(CapabilityPlatform.Any) || platform.Equals(_hostPlatform));
     }
 
     private static bool PinMatches(CapabilityResolvedPin pin, CapabilityCatalogEntry entry)

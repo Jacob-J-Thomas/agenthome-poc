@@ -42,6 +42,53 @@ public sealed class CapabilityAdmissionServiceTests
     }
 
     [Theory]
+    [InlineData("[1.0.0,2.0.0)", "any/any", true)]
+    [InlineData("[1.5.0]", "linux/x64", true)]
+    [InlineData("[1.5.1,2.0.0)", "linux/x64", false)]
+    [InlineData("*", "windows/x64", false)]
+    [InlineData("*", "linux/arm64", false)]
+    public async Task Admission_enforces_the_current_host_contract_operating_system_and_architecture(string hostVersionRange, string supportedPlatform, bool expectedAdmitted)
+    {
+        var entry = Entry(hostVersionRange: hostVersionRange, supportedPlatform: supportedPlatform);
+
+        var result = await Service(new MutableCatalogStore([entry])).AdmitAsync(Manifest(), [entry.Descriptor.Id]);
+
+        Assert.Equal(expectedAdmitted, result.IsAdmitted);
+        Assert.Equal(expectedAdmitted, result.Snapshot is not null);
+    }
+
+    [Fact]
+    public async Task Admission_keeps_current_host_compatibility_context_out_of_immutable_model_evidence()
+    {
+        const string PrivateHostVersion = "98.76.54";
+        const string PrivateHostPlatform = "secretos/secretarch";
+        var entry = Entry(hostVersionRange: $"[{PrivateHostVersion}]", supportedPlatform: PrivateHostPlatform);
+        var service = Service(new MutableCatalogStore([entry]), PrivateHostVersion, PrivateHostPlatform);
+
+        var result = await service.AdmitAsync(Manifest(), [entry.Descriptor.Id]);
+
+        var snapshot = Assert.IsType<CapabilityAdmissionSnapshot>(result.Snapshot);
+        var serialized = JsonSerializer.Serialize(result);
+        Assert.DoesNotContain(PrivateHostVersion, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateHostPlatform, serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Revalidation_rejects_a_pin_when_the_current_host_no_longer_matches_the_descriptor()
+    {
+        var entry = Entry(hostVersionRange: "[1.5.0]", supportedPlatform: "linux/x64");
+        var store = new MutableCatalogStore([entry]);
+        var admitted = await Service(store).AdmitAsync(Manifest(), [entry.Descriptor.Id]);
+        var snapshot = Assert.IsType<CapabilityAdmissionSnapshot>(admitted.Snapshot);
+
+        var versionDrift = await Service(store, hostVersion: "2.0.0").RevalidateAsync(snapshot, [entry.Descriptor.Id]);
+        var platformDrift = await Service(store, hostPlatform: "linux/arm64").RevalidateAsync(snapshot, [entry.Descriptor.Id]);
+
+        Assert.False(versionDrift.IsValid);
+        Assert.False(platformDrift.IsValid);
+    }
+
+    [Theory]
     [InlineData(CapabilityEnablementState.Disabled, CapabilityHealthState.Healthy, CapabilityRetirementState.Active, CapabilityTrustState.Verified)]
     [InlineData(CapabilityEnablementState.Enabled, CapabilityHealthState.Degraded, CapabilityRetirementState.Active, CapabilityTrustState.Verified)]
     [InlineData(CapabilityEnablementState.Enabled, CapabilityHealthState.Unavailable, CapabilityRetirementState.Active, CapabilityTrustState.Verified)]
@@ -98,9 +145,12 @@ public sealed class CapabilityAdmissionServiceTests
         store.Entries = [Entry(health: CapabilityHealthState.Degraded)];
         Assert.False((await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
 
+        store.Entries = [original with { Descriptor = original.Descriptor with { Compatibility = null! } }];
+        Assert.False((await service.RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+
         store.Entries = [original];
         Assert.False((await service.RevalidateAsync(snapshot, [])).IsValid);
-        Assert.False((await new CapabilityAdmissionService(store, "workspace-other").RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.False((await new CapabilityAdmissionService(store, "workspace-other", Version("1.5.0"), Platform("linux/x64")).RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
 
         var malformedEvidence = snapshot with { Evidence = [null!] };
         Assert.False((await service.RevalidateAsync(malformedEvidence, [original.Descriptor.Id])).IsValid);
@@ -147,19 +197,22 @@ public sealed class CapabilityAdmissionServiceTests
         Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(snapshot));
     }
 
-    private static CapabilityAdmissionService Service(MutableCatalogStore store) => new(store, "workspace-test", new FixedTimeProvider(_now));
+    private static CapabilityAdmissionService Service(MutableCatalogStore store, string hostVersion = "1.5.0", string hostPlatform = "linux/x64") => new(store, "workspace-test", Version(hostVersion), Platform(hostPlatform), new FixedTimeProvider(_now));
 
     private static CapabilityCatalogEntry Entry(
         CapabilityEnablementState enablement = CapabilityEnablementState.Enabled,
         CapabilityHealthState health = CapabilityHealthState.Healthy,
         CapabilityRetirementState retirement = CapabilityRetirementState.Active,
         CapabilityTrustState trust = CapabilityTrustState.Verified,
-        string purpose = "A safe test capability description.")
+        string purpose = "A safe test capability description.",
+        string hostVersionRange = "*",
+        string supportedPlatform = "any/any")
     {
         Assert.True(CapabilityId.TryParse("org.example/effect", out var id, out _));
         Assert.True(CapabilityProviderId.TryParse("org.example", out var provider, out _));
         Assert.True(CapabilityVersion.TryParse("1.2.3", out var version, out _));
-        Assert.True(CapabilityVersionRange.TryParse("*", out var compatibility, out _));
+        Assert.True(CapabilityVersionRange.TryParse(hostVersionRange, out var compatibility, out _));
+        Assert.True(CapabilityPlatform.TryParse(supportedPlatform, out var platform, out _));
         Assert.True(CapabilityJsonSchema.TryCreate($"{{\"$schema\":\"{CapabilityJsonSchema.Draft202012Dialect}\",\"type\":\"object\"}}", out var schema, out _));
         var descriptor = new CapabilityDescriptor(
             CapabilityDescriptor.CurrentSchemaVersion,
@@ -168,7 +221,7 @@ public sealed class CapabilityAdmissionServiceTests
             version!,
             new CapabilityImplementationIdentity(provider!, "effect-v1"),
             new CapabilityProvenance(CapabilityProvenanceKind.BuiltIn, "https://example.test/effect", "revision-1", null),
-            new CapabilityCompatibility(compatibility!, [CapabilityPlatform.Any]),
+            new CapabilityCompatibility(compatibility!, [platform!]),
             purpose,
             schema!,
             schema!,
@@ -200,6 +253,18 @@ public sealed class CapabilityAdmissionServiceTests
             [new CapabilityDependency(dependency!, range!)],
             [],
             new CapabilityDependencyArtifactMetadata(null, null));
+    }
+
+    private static CapabilityVersion Version(string value)
+    {
+        Assert.True(CapabilityVersion.TryParse(value, out var version, out _));
+        return version!;
+    }
+
+    private static CapabilityPlatform Platform(string value)
+    {
+        Assert.True(CapabilityPlatform.TryParse(value, out var platform, out _));
+        return platform!;
     }
 
     private static CapabilityAdmissionSnapshot CreateCoherentAdmissionSnapshot(int pinCount)

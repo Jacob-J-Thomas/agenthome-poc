@@ -9,22 +9,37 @@ namespace EmbodySense.Core.Application.Capabilities;
 public sealed class CapabilityDependencyResolver
 {
     private static readonly CapabilityId _invalidRootManifestSubjectId = CreateInvalidRootManifestSubjectId();
+    private readonly CapabilityVersion _hostContractVersion;
+    private readonly CapabilityPlatform _hostPlatform;
     private readonly CapabilityDependencyResolutionLimits _limits;
 
-    /// <summary>Creates a resolver with conservative schema-version-1 traversal limits.</summary>
-    public CapabilityDependencyResolver() : this(CapabilityDependencyResolutionLimits.Default)
+    /// <summary>Creates a resolver for one exact host contract and platform with conservative schema-version-1 traversal limits.</summary>
+    /// <param name="hostContractVersion">The current EmbodySense capability-host contract version.</param>
+    /// <param name="hostPlatform">The current exact operating-system and process-architecture tuple.</param>
+    public CapabilityDependencyResolver(CapabilityVersion hostContractVersion, CapabilityPlatform hostPlatform) : this(hostContractVersion, hostPlatform, CapabilityDependencyResolutionLimits.Default)
     {
     }
 
-    /// <summary>Creates a resolver with explicit bounded traversal limits.</summary>
-    public CapabilityDependencyResolver(CapabilityDependencyResolutionLimits limits)
+    /// <summary>Creates a resolver for one exact host contract and platform with explicit bounded traversal limits.</summary>
+    /// <param name="hostContractVersion">The current EmbodySense capability-host contract version.</param>
+    /// <param name="hostPlatform">The current exact operating-system and process-architecture tuple.</param>
+    /// <param name="limits">The bounded dependency traversal limits.</param>
+    public CapabilityDependencyResolver(CapabilityVersion hostContractVersion, CapabilityPlatform hostPlatform, CapabilityDependencyResolutionLimits limits)
     {
+        ArgumentNullException.ThrowIfNull(hostContractVersion);
+        ArgumentNullException.ThrowIfNull(hostPlatform);
         ArgumentNullException.ThrowIfNull(limits);
+        if (hostPlatform.Equals(CapabilityPlatform.Any))
+        {
+            throw new ArgumentException("Capability resolution requires one exact current host platform.", nameof(hostPlatform));
+        }
         if (!limits.IsValid)
         {
             throw new ArgumentOutOfRangeException(nameof(limits));
         }
 
+        _hostContractVersion = hostContractVersion;
+        _hostPlatform = hostPlatform;
         _limits = limits;
     }
 
@@ -51,7 +66,7 @@ public sealed class CapabilityDependencyResolver
         for (var iteration = 0; iteration < _limits.MaximumDependencies; iteration++)
         {
             evidence = [];
-            context = new CapabilityDependencyResolutionContext(candidates, evidence, _limits, previousSelection);
+            context = new CapabilityDependencyResolutionContext(candidates, evidence, _limits, previousSelection, _hostContractVersion, _hostPlatform);
             context.ResolveManifest(manifest, 0, []);
             if (SameSelection(previousSelection, context.Selected) && previousFailed == context.Failed)
             {

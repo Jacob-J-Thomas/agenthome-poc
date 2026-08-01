@@ -23,6 +23,7 @@ using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Startup.Capabilities;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
@@ -64,7 +65,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             new ToolApprovalPromptAdapter(approvalPrompt),
             new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(CreatePaths(options))),
             new CustomLoopRunToolEvidenceSink(new CustomLoopRunStore(CreatePaths(options))),
-            new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath)),
+            new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform),
             clientFactory)
     {
     }
@@ -72,7 +73,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     internal CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
-        CustomLoopInferenceClientFactory? clientFactory = null) : this(options, approvalPrompt, new AdmittedMaximumAuthorityProvider(), new NullToolEvidenceSink(), new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath)), clientFactory)
+        CustomLoopInferenceClientFactory? clientFactory = null) : this(options, approvalPrompt, new AdmittedMaximumAuthorityProvider(), new NullToolEvidenceSink(), new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform), clientFactory)
     {
     }
 

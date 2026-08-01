@@ -25,6 +25,7 @@ using EmbodySense.Core.Persistence.ToolResults;
 using EmbodySense.Core.Persistence.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Governance;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime.Models;
@@ -261,7 +262,7 @@ public sealed class AgentRuntimeFactory
             var workspaceClient = new LocalWorkspaceClient(paths);
             var loopDefinitionStore = new LoopDefinitionStore(paths);
             var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
-            var capabilityAdmission = new CapabilityAdmissionService(new CapabilityCatalogStore(paths, _capabilityTrustProvider), CapabilityWorkspaceScopeId.Create(paths.RootPath));
+            var capabilityAdmission = new CapabilityAdmissionService(new CapabilityCatalogStore(paths, _capabilityTrustProvider), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform);
             var conversationTurnStore = new DefaultConversationTurnStore(paths);
             var defaultCapabilityRevalidator = new DefaultConversationCapabilityAuthorityRevalidator(conversationTurnStore, loopDefinitionStore, capabilityAdmission);
             var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog, defaultLoop, new ToolResultRetentionStore(paths), actuationAuthorityRevalidator: defaultCapabilityRevalidator);
