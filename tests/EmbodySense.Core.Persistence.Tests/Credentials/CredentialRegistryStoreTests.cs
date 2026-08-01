@@ -11,7 +11,10 @@ using EmbodySense.Core.Persistence.Capabilities.Models;
 using EmbodySense.Core.Persistence.Tests.Capabilities;
 using EmbodySense.Tests.Support;
 using Microsoft.Win32.SafeHandles;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Persistence.Tests.Credentials;
 
@@ -221,6 +224,62 @@ public sealed class CredentialRegistryStoreTests
         Assert.True(recovered.Succeeded);
         Assert.Equal(1, recovered.RegistryRevision);
         Assert.Equal(CredentialProviderHealthStatus.Available, Assert.Single(recovered.Entries).Health);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public async Task Initial_artifact_write_failure_recovers_the_server_authenticated_empty_state_for_retry(int failingWrite)
+    {
+        using var workspace = new TestWorkspace();
+        using var trustRoot = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+        var interrupted = new CredentialRegistryStore(paths, provider, new AcceptingLocatorVerifier(), durabilityBarrier: new FailOnDurabilityCallBarrier(failingWrite));
+
+        var failed = await interrupted.MutateAsync(Register(0));
+
+        Assert.Equal(CredentialRegistryMutationStatus.Unavailable, failed.Status);
+        var restarted = new CredentialRegistryStore(paths, provider, new AcceptingLocatorVerifier());
+        var empty = await restarted.ReadAsync();
+        Assert.True(empty.Succeeded);
+        Assert.Equal(0, empty.RegistryRevision);
+        Assert.Empty(empty.Entries);
+
+        var retried = await restarted.MutateAsync(Register(0));
+
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, retried.Status);
+        var completed = await new CredentialRegistryStore(paths, provider, new AcceptingLocatorVerifier()).ReadAsync();
+        Assert.True(completed.Succeeded);
+        Assert.Equal(1, completed.RegistryRevision);
+        Assert.Single(completed.Entries);
+    }
+
+    [Fact]
+    public async Task Rehashed_state_digests_cannot_reuse_an_authenticated_public_content_digest_and_tag()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await Store(paths).MutateAsync(Register(0))).Status);
+        var publicDocument = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!.AsObject();
+        var privateDocument = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!.AsObject();
+        publicDocument["entries"]!.AsArray()[0]!.AsObject()["health"] = (int)CredentialProviderHealthStatus.Corrupt;
+        var stateDigest = ComputeStateDigest(publicDocument, privateDocument);
+        publicDocument["stateDigest"] = stateDigest;
+        privateDocument["stateDigest"] = stateDigest;
+        var forgedPublic = publicDocument.ToJsonString(JsonOptions(writeIndented: true));
+        var forgedPrivate = privateDocument.ToJsonString(JsonOptions(writeIndented: true));
+        await File.WriteAllTextAsync(paths.CredentialRegistryDocumentPath, forgedPublic);
+        await File.WriteAllTextAsync(paths.CredentialRegistryPrivateDocumentPath, forgedPrivate);
+        await File.WriteAllTextAsync(paths.CredentialRegistryProofPath, forgedPublic);
+        await File.WriteAllTextAsync(paths.CredentialRegistryPrivateProofPath, forgedPrivate);
+
+        var read = await Store(paths).ReadAsync();
+
+        Assert.False(read.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
     }
 
     [Fact]
@@ -518,6 +577,20 @@ public sealed class CredentialRegistryStoreTests
     }
 
     private static CredentialRegistryStore Store(WorkspacePaths paths, TimeProvider? timeProvider = null) => new(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), timeProvider);
+
+    private static string ComputeStateDigest(JsonObject publicDocument, JsonObject privateDocument)
+    {
+        var publicState = publicDocument.DeepClone().AsObject();
+        var privateState = privateDocument.DeepClone().AsObject();
+        publicState["stateDigest"] = string.Empty;
+        publicState["contentDigest"] = string.Empty;
+        publicState["authenticationTag"] = string.Empty;
+        privateState["stateDigest"] = string.Empty;
+        var content = publicState.ToJsonString(JsonOptions(writeIndented: false)) + "\n" + privateState.ToJsonString(JsonOptions(writeIndented: false));
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+    }
+
+    private static JsonSerializerOptions JsonOptions(bool writeIndented) => new(JsonSerializerDefaults.Web) { WriteIndented = writeIndented };
 
     private sealed class AcceptingLocatorVerifier : ICredentialProviderLocatorVerifier
     {

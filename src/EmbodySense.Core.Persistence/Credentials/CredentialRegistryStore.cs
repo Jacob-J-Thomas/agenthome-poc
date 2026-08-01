@@ -215,6 +215,11 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             return primary;
         }
 
+        if (trust is not null && IsInitialEmptyTrust(identity, trust))
+        {
+            return Empty(identity);
+        }
+
         var proof = await TryReadPairAsync(session, _paths.CredentialRegistryProofPath, _paths.CredentialRegistryPrivateProofPath, identity, cancellationToken);
         if (proof is not null && trust is not null && (MatchesCurrent(proof.Public, trust) || MatchesPrevious(proof.Public, trust)))
         {
@@ -437,6 +442,11 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             return false;
         }
 
+        if (!FixedTimeEquals(publicDocument.ContentDigest, ComputeDocumentDigest(publicDocument)))
+        {
+            return false;
+        }
+
         var entryIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in publicDocument.Entries)
         {
@@ -512,6 +522,11 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
     private static string Hash(string value) => "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     private static bool FixedTimeEquals(string? left, string right) => left is not null && left.Length == right.Length && CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right));
     private static string WorkspaceIdentity(string material) => Hash("embodysense-credential-registry-workspace-v1\n" + material);
+    private static bool IsInitialEmptyTrust(string identity, CapabilityCatalogTrustState trust)
+    {
+        var empty = Empty(identity).Public;
+        return trust.CurrentGeneration == empty.Generation && trust.PreviousGeneration is null && trust.PreviousContentDigest is null && MatchesCurrent(empty with { ContentDigest = ComputeDocumentDigest(empty) }, trust);
+    }
     private static bool MatchesCurrent(CredentialRegistryDocument document, CapabilityCatalogTrustState trust) => document.Generation == trust.CurrentGeneration && string.Equals(document.ContentDigest, trust.CurrentContentDigest, StringComparison.Ordinal);
     private static bool MatchesPrevious(CredentialRegistryDocument document, CapabilityCatalogTrustState trust) => trust.PreviousGeneration == document.Generation && string.Equals(document.ContentDigest, trust.PreviousContentDigest, StringComparison.Ordinal);
     private static bool Matches(CredentialRegistryEntryDocument document, CredentialReferenceId id) => string.Equals(GetReferenceId(document), id.Value, StringComparison.Ordinal);
