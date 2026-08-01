@@ -3489,6 +3489,11 @@ async function saveNewLoopDraft(definition) {
       newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved for an explicit retry.`;
       pendingCreateRequest = null;
       newLoopDraftOperationId = newOperationId();
+    } else if (error.status === 409 && responseStatus === "LimitExceeded") {
+      newLoopDraftCommitState = "failed";
+      newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved so Save can retry after capacity is available.`;
+      pendingCreateRequest = null;
+      newLoopDraftOperationId = newOperationId();
     } else if (
       typeof error.status !== "number" ||
       (error.status >= 500 && responseStatus === null)

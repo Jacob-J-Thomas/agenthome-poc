@@ -1470,7 +1470,7 @@ test("a proved first-save response remains saved when the follow-up catalog refr
   );
 });
 
-test("independent tab drafts do not consume quota and a later quota rejection leaves the losing draft local", async () => {
+test("independent tab drafts do not consume quota and a later quota rejection rotates the losing draft operation", async () => {
   const catalog = createCatalog();
   catalog.customDefinitions = [];
   catalog.limits.maxDefinitionsPerWorkspace = 1;
@@ -1521,6 +1521,20 @@ test("independent tab drafts do not consume quota and a later quota rejection le
   );
   assert.equal(secondTab.elements.invokeButton.disabled, true);
   assert.match(secondTab.elements.loopList.textContent, /Not durable/);
+
+  const deniedRequest = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  )[1].body;
+  server.catalog.customDefinitions = [];
+
+  await secondTab.elements.saveButton.click();
+
+  const retriedRequest = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  )[2].body;
+  assert.notEqual(retriedRequest.operationId, deniedRequest.operationId);
+  assert.equal(server.catalog.customDefinitions.length, 1);
+  assert.equal(secondTab.elements.saveState.textContent, "Saved · v1");
 });
 
 test("save retries reuse the exact request after an ambiguous committed response", async () => {
