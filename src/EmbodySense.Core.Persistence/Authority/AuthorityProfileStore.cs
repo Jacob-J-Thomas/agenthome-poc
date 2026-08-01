@@ -193,7 +193,7 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore
         if (mutation.Kind == AuthorityProfileMutationKind.Tombstone)
         {
             var tombstone = new AuthorityProfileTombstoneDocument(mutation.OperationId, mutation.ActorId.Value, mutation.Reason.Value, _timeProvider.GetUtcNow());
-            return new Transition(AuthorityProfileMutationStatus.Applied, existing with { Tombstone = tombstone }, latest.Revision, "The profile tombstone was retained without rewriting profile history.");
+            return new Transition(AuthorityProfileMutationStatus.Applied, existing with { Tombstone = tombstone }, null, "The profile tombstone was retained without rewriting profile history.");
         }
 
         if (existing.Revisions.Count >= AuthorityProfileStoreLimits.MaximumRevisionsPerProfile)
@@ -317,7 +317,7 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore
         var operationIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var operation in document.Operations)
         {
-            if (!IsOperationIdValid(operation.OperationId) || !operationIds.Add(operation.OperationId) || !CapabilityIntegrityDigest.TryParse(operation.RequestHash, out _, out _) || operation.Outcome != AuthorityProfileMutationStatus.Applied || !Enum.IsDefined(operation.Kind) || !AuthorityProfileId.TryParse(operation.ProfileId, out _, out _) || !AuthorityActorId.TryParse(operation.ActorId, out _, out _) || !AuthorityPurpose.TryParse(operation.Reason, out _, out _) || operation.RecordedAtUtc.Offset != TimeSpan.Zero)
+            if (operation is null || !IsOperationIdValid(operation.OperationId) || !operationIds.Add(operation.OperationId) || !CapabilityIntegrityDigest.TryParse(operation.RequestHash, out _, out _) || operation.Outcome != AuthorityProfileMutationStatus.Applied || !Enum.IsDefined(operation.Kind) || operation.Kind == AuthorityProfileMutationKind.Tombstone && operation.ResultingRevision is not null || operation.Kind != AuthorityProfileMutationKind.Tombstone && operation.ResultingRevision is null || !AuthorityProfileId.TryParse(operation.ProfileId, out _, out _) || !AuthorityActorId.TryParse(operation.ActorId, out _, out _) || !AuthorityPurpose.TryParse(operation.Reason, out _, out _) || operation.RecordedAtUtc.Offset != TimeSpan.Zero)
             {
                 return false;
             }
@@ -358,8 +358,9 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore
         }
 
         var limit = receipt?.ResultingRevision ?? int.MaxValue;
+        var operationLimit = receipt?.ResultingRevision ?? (receipt?.Kind == AuthorityProfileMutationKind.Tombstone ? mapped!.CurrentProfile.Revision.Value : null);
         var revisions = mapped!.Revisions.Where(value => value.Profile.Revision.Value <= limit).ToArray();
-        var operations = document.Operations.Where(value => string.Equals(value.ProfileId, mapped.ProfileId.Value, StringComparison.Ordinal) && (receipt is null || receipt.Kind == AuthorityProfileMutationKind.Tombstone || value.ResultingRevision <= receipt.ResultingRevision)).Select(MapReceipt).ToArray();
+        var operations = document.Operations.Where(value => string.Equals(value.ProfileId, mapped.ProfileId.Value, StringComparison.Ordinal) && (receipt is null || value.OperationId == receipt.OperationId || operationLimit.HasValue && value.ResultingRevision is int resultingRevision && resultingRevision <= operationLimit.Value)).Select(MapReceipt).ToArray();
         var tombstone = profile.Tombstone is not null && (receipt is null || receipt.Kind == AuthorityProfileMutationKind.Tombstone) ? MapTombstone(profile.Tombstone) : null;
         return new AuthorityProfileRecord(mapped.ProfileId, revisions[^1].Profile, revisions[^1].Hash, revisions, tombstone, operations);
     }

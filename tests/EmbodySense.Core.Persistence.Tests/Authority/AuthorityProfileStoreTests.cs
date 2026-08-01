@@ -1,6 +1,11 @@
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Governance.Authority.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Authority;
@@ -12,6 +17,7 @@ namespace EmbodySense.Core.Persistence.Tests.Authority;
 
 public sealed class AuthorityProfileStoreTests : IDisposable
 {
+    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, false) } };
     private readonly TestWorkspace _trustRoot = new();
     private readonly FileCapabilityCatalogTrustProvider _trustProvider;
 
@@ -69,6 +75,8 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         var changedIntent = await store.MutateAsync(Transition(profile.ProfileId, 2, AuthorityProfileStatus.Active, "same-operation"));
         var stale = await store.MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Retired, "stale-operation"));
         var tombstoned = await store.MutateAsync(Tombstone(profile.ProfileId, 2, "tombstone-operation"));
+        var transitionReplay = await store.MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Suspended, "later-operation"));
+        var tombstoneReplay = await store.MutateAsync(Tombstone(profile.ProfileId, 2, "tombstone-operation"));
         var resurrection = await store.MutateAsync(Revise(profile with { Revision = Revision(3) }, "resurrect-operation"));
 
         Assert.Equal(AuthorityProfileMutationStatus.Applied, created.Status);
@@ -78,6 +86,12 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         Assert.Equal(AuthorityProfileMutationStatus.Conflict, changedIntent.Status);
         Assert.Equal(AuthorityProfileMutationStatus.Conflict, stale.Status);
         Assert.Equal(AuthorityProfileMutationStatus.Applied, tombstoned.Status);
+        Assert.Null(tombstoned.Record!.Operations.Single(operation => operation.OperationId == "tombstone-operation").ResultingRevision);
+        Assert.Equal(AuthorityProfileMutationStatus.Replayed, transitionReplay.Status);
+        Assert.Null(transitionReplay.Record!.Tombstone);
+        Assert.DoesNotContain(transitionReplay.Record.Operations, operation => operation.OperationId == "tombstone-operation");
+        Assert.Equal(AuthorityProfileMutationStatus.Replayed, tombstoneReplay.Status);
+        Assert.Null(tombstoneReplay.Record!.Operations.Single(operation => operation.OperationId == "tombstone-operation").ResultingRevision);
         Assert.Equal(AuthorityProfileMutationStatus.Invalid, resurrection.Status);
     }
 
@@ -134,6 +148,27 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         Assert.Equal(AuthorityProfileReadStatus.Unavailable, substituted.Status);
         Assert.Equal(AuthorityProfileReadStatus.RecoveredLastProved, recovered.Status);
         Assert.Equal(profile.ProfileId, recovered.Record!.ProfileId);
+    }
+
+    [Fact]
+    public async Task Null_operation_entries_recover_from_the_last_proved_profile_or_return_unavailable()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = Profile();
+        var store = Store(paths);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Create(profile, "create-null-operation"))).Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Suspended, "transition-null-operation"))).Status);
+        var malformed = await CreateAuthenticatedNullOperationDocumentAsync(paths);
+
+        await WriteDocumentAsync(paths.AuthorityProfilesDocumentPath, malformed);
+        var recovered = await Store(paths).ReadAsync(profile.ProfileId.Value);
+        await WriteDocumentAsync(paths.AuthorityProfilesProofPath, malformed);
+        var unavailable = await Store(paths).ReadAsync(profile.ProfileId.Value);
+
+        Assert.Equal(AuthorityProfileReadStatus.RecoveredLastProved, recovered.Status);
+        Assert.Equal(1, recovered.Record!.CurrentProfile.Revision.Value);
+        Assert.Equal(AuthorityProfileReadStatus.Unavailable, unavailable.Status);
     }
 
     [Fact]
@@ -265,6 +300,24 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     }
 
     private AuthorityProfileStore Store(WorkspacePaths paths) => new(paths, _trustProvider);
+
+    private async Task<JsonObject> CreateAuthenticatedNullOperationDocumentAsync(WorkspacePaths paths)
+    {
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(paths.AuthorityProfilesDocumentPath))?.AsObject();
+        Assert.NotNull(document);
+        document["operations"] = new JsonArray((JsonNode?)null);
+        document["generation"] = document["generation"]!.GetValue<long>() + 1;
+        document["contentDigest"] = string.Empty;
+        document["authenticationTag"] = string.Empty;
+        var contentDigest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(document, _jsonOptions))).Value;
+        var workspaceIdentity = document["workspaceIdentity"]!.GetValue<string>();
+        var generation = document["generation"]!.GetValue<long>();
+        document["contentDigest"] = contentDigest;
+        document["authenticationTag"] = await _trustProvider.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest);
+        return document;
+    }
+
+    private static Task WriteDocumentAsync(string path, JsonObject document) => File.WriteAllTextAsync(path, JsonSerializer.Serialize(document, _jsonOptions) + Environment.NewLine);
 
     private static AuthorityProfileMutation Create(AuthorityProfile profile, string operationId) => new(AuthorityProfileMutationKind.Create, operationId, 0, profile, null, null, Actor(), Reason());
     private static AuthorityProfileMutation Revise(AuthorityProfile profile, string operationId) => new(AuthorityProfileMutationKind.Revise, operationId, profile.Revision.Value - 1, profile, null, null, Actor(), Reason());
