@@ -187,12 +187,15 @@ public sealed class StructuredRedactionService
             return Marker(EntryLimitMarker, context);
         }
 
-        entries.Sort((left, right) => string.CompareOrdinal(left.Key, right.Key));
-        var properties = new List<RedactedDataProperty>(entries.Count);
-        foreach (var entry in entries)
+        if (!TryOrderBoundedKeys(entries, context, out var orderedEntries))
         {
-            var key = Sanitize(entry.Key ?? "", context);
-            properties.Add(new RedactedDataProperty(key, RedactNode(entry.Value, depth + 1, context)));
+            return Marker(SensitiveRedactionScope.InputLimitMarker, context);
+        }
+
+        var properties = new List<RedactedDataProperty>(entries.Count);
+        foreach (var entry in orderedEntries)
+        {
+            properties.Add(new RedactedDataProperty(Sanitize(entry.Key ?? "", context), RedactNode(entry.Value, depth + 1, context)));
         }
 
         return Object(properties);
@@ -222,8 +225,12 @@ public sealed class StructuredRedactionService
             return Marker(EntryLimitMarker, context);
         }
 
-        entries.Sort((left, right) => string.CompareOrdinal(left.Key, right.Key));
-        var properties = entries.Select(entry => new RedactedDataProperty(Sanitize(entry.Key, context), RedactNode(entry.Value, depth + 1, context))).ToList();
+        if (!TryOrderBoundedKeys(entries, context, out var orderedEntries))
+        {
+            return Marker(SensitiveRedactionScope.InputLimitMarker, context);
+        }
+
+        var properties = orderedEntries.Select(entry => new RedactedDataProperty(Sanitize(entry.Key ?? "", context), RedactNode(entry.Value, depth + 1, context))).ToList();
         return Object(properties);
     }
 
@@ -271,9 +278,14 @@ public sealed class StructuredRedactionService
             return new ReadOnlyCollection<RedactedHeader>([new RedactedHeader(marker, [marker])]);
         }
 
-        entries.Sort((left, right) => string.CompareOrdinal(left.Key, right.Key));
+        if (!TryOrderBoundedKeys(entries, context, out var orderedEntries))
+        {
+            var marker = Sanitize(SensitiveRedactionScope.InputLimitMarker, context);
+            return new ReadOnlyCollection<RedactedHeader>([new RedactedHeader(marker, [marker])]);
+        }
+
         var projected = new List<RedactedHeader>(entries.Count);
-        foreach (var entry in entries)
+        foreach (var entry in orderedEntries)
         {
             if (!context.Accumulator.TryVisit(context.Limits))
             {
@@ -463,6 +475,27 @@ public sealed class StructuredRedactionService
         }
 
         return result;
+    }
+
+    private static bool TryOrderBoundedKeys<TValue>(IReadOnlyList<KeyValuePair<string, TValue>> entries, RedactionTraversalContext context, out List<KeyValuePair<string, TValue>> ordered)
+    {
+        ordered = [];
+        var totalKeyCharacters = 0;
+        foreach (var entry in entries)
+        {
+            var originalKey = entry.Key ?? "";
+            if (originalKey.Length > context.Scope.Limits.MaxInputCharacters || originalKey.Length > context.Limits.MaxProjectedCharacters - totalKeyCharacters)
+            {
+                context.Accumulator.MarkLimit();
+                return false;
+            }
+
+            totalKeyCharacters += originalKey.Length;
+        }
+
+        ordered = [.. entries];
+        ordered.Sort((left, right) => string.CompareOrdinal(left.Key, right.Key));
+        return true;
     }
 
     private static bool TryFormatKnownScalar(object value, out string text)

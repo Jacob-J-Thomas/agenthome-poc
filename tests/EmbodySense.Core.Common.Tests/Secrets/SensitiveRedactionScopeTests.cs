@@ -39,6 +39,21 @@ public sealed class SensitiveRedactionScopeTests
     }
 
     [Fact]
+    public void RedactText_matches_percent_escape_hex_case_independently_per_nibble()
+    {
+        const string Canary = "þ?";
+        using var material = EphemeralSecretMaterial.Create(Canary);
+        using var scope = SensitiveRedactionScope.Create([material]);
+        const string MixedCasePercentEncoding = "%C3%be%3f";
+
+        var result = scope.RedactText("credential=" + MixedCasePercentEncoding);
+
+        Assert.Equal(RedactionStatus.Completed, result.Summary.Status);
+        Assert.Equal(1, result.Summary.ReplacementCount);
+        Assert.DoesNotContain(MixedCasePercentEncoding, result.Value, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RedactText_prefers_longest_overlap_and_is_independent_of_scope_order()
     {
         var forward = CreateScope(["abc", "abcdef", "x y", "þ"]);

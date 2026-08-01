@@ -269,8 +269,7 @@ public sealed class SensitiveRedactionScope : IDisposable
                 }
 
                 var matched = true;
-                var candidate = pattern.Characters;
-                for (var patternIndex = 0; patternIndex < candidate.Length; patternIndex++)
+                for (var patternIndex = 0; patternIndex < pattern.Length; patternIndex++)
                 {
                     workUnitCount++;
                     if (workUnitCount > Limits.MaxWorkUnits)
@@ -278,7 +277,7 @@ public sealed class SensitiveRedactionScope : IDisposable
                         return CreateLimitResult(WorkLimitMarker, RedactionStatus.WorkLimitExceeded, examinedCharacterCount, Limits.MaxWorkUnits);
                     }
 
-                    if (input[index + patternIndex] != candidate[patternIndex])
+                    if (!pattern.MatchesCharacter(patternIndex, input[index + patternIndex]))
                     {
                         matched = false;
                         break;

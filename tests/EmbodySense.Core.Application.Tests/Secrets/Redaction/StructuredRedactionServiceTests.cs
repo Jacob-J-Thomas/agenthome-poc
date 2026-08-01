@@ -116,6 +116,37 @@ public sealed class StructuredRedactionServiceTests
     }
 
     [Fact]
+    public void Structure_and_headers_bound_keys_before_deterministic_ordering()
+    {
+        using var material = EphemeralSecretMaterial.Create(Canary);
+        using var scope = SensitiveRedactionScope.Create([material], new RedactionLimits(maxInputCharacters: 16));
+        var oversizedKey = new string('a', 17);
+        IReadOnlyDictionary<string, object?> structure = new Dictionary<string, object?> { [oversizedKey] = Canary, ["safe"] = Canary };
+        IReadOnlyDictionary<string, object?> nonGenericStructure = new Dictionary<string, object?> { ["nested"] = new Hashtable { [oversizedKey] = Canary } };
+        var headers = new[] { new KeyValuePair<string, IEnumerable<string>>(oversizedKey, [Canary]), new KeyValuePair<string, IEnumerable<string>>("safe", [Canary]) };
+        var commonPrefix = new string('b', 15);
+        IReadOnlyDictionary<string, object?> aggregateStructure = new Dictionary<string, object?> { [commonPrefix + "a"] = Canary, [commonPrefix + "b"] = Canary };
+        var aggregateHeaders = aggregateStructure.Select(entry => new KeyValuePair<string, IEnumerable<string>>(entry.Key, [(string)entry.Value!])).ToArray();
+        var aggregateLimits = new RedactionProjectionLimits(maxProjectedCharacters: 16);
+
+        var structureResult = _service.RedactStructure(structure, scope);
+        var nonGenericStructureResult = _service.RedactStructure(nonGenericStructure, scope);
+        var headerResult = _service.RedactHeaders(headers, scope);
+        var aggregateStructureResult = _service.RedactStructure(aggregateStructure, scope, aggregateLimits);
+        var aggregateHeaderResult = _service.RedactHeaders(aggregateHeaders, scope, aggregateLimits);
+        var serialized = JsonSerializer.Serialize(new { Structure = structureResult, NonGenericStructure = nonGenericStructureResult, Headers = headerResult, AggregateStructure = aggregateStructureResult, AggregateHeaders = aggregateHeaderResult });
+
+        Assert.DoesNotContain(oversizedKey, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(Canary, serialized, StringComparison.Ordinal);
+        Assert.Contains(SensitiveRedactionScope.InputLimitMarker, serialized, StringComparison.Ordinal);
+        Assert.False(structureResult.Summary.IsComplete);
+        Assert.False(nonGenericStructureResult.Summary.IsComplete);
+        Assert.False(headerResult.Summary.IsComplete);
+        Assert.False(aggregateStructureResult.Summary.IsComplete);
+        Assert.False(aggregateHeaderResult.Summary.IsComplete);
+    }
+
+    [Fact]
     public void Non_generic_dictionaries_and_sequences_fail_closed_for_entry_and_read_bounds()
     {
         var wideDictionary = new Hashtable { ["a"] = "1", ["b"] = "2" };
@@ -195,6 +226,18 @@ public sealed class StructuredRedactionServiceTests
         var result = _service.RedactUri(uri, fixture.Scope);
 
         Assert.DoesNotContain(Uri.EscapeDataString(Canary), result.Value, StringComparison.Ordinal);
+        Assert.Equal(1, result.Summary.ReplacementCount);
+    }
+
+    [Fact]
+    public void Uri_projection_redacts_mixed_case_percent_escapes()
+    {
+        using var fixture = CreateScope("þ?");
+        var uri = new Uri("https://example.test/?credential=%C3%be%3f");
+
+        var result = _service.RedactUri(uri, fixture.Scope);
+
+        Assert.DoesNotContain("%C3%be%3f", result.Value, StringComparison.Ordinal);
         Assert.Equal(1, result.Summary.ReplacementCount);
     }
 

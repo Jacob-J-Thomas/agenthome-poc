@@ -13,18 +13,15 @@ internal static class SensitiveRedactionPatternFactory
 
     public static void AddSupportedPatterns(List<SensitiveRedactionPattern> patterns, ReadOnlySpan<char> value)
     {
-        AddOwnedDistinct(patterns, value.ToArray());
+        AddOwnedDistinct(patterns, value.ToArray(), matchesPercentHexCaseInsensitively: false);
 
         var utf8 = new byte[_replacementUtf8.GetByteCount(value)];
         try
         {
             _replacementUtf8.GetBytes(value, utf8);
-            AddOwnedDistinct(patterns, EncodePercent(utf8, Rfc3986SafePunctuation, formStyle: false, lowerHex: false));
-            AddOwnedDistinct(patterns, EncodePercent(utf8, Rfc3986SafePunctuation, formStyle: false, lowerHex: true));
-            AddOwnedDistinct(patterns, EncodePercent(utf8, DotNetUriSafePunctuation, formStyle: false, lowerHex: false));
-            AddOwnedDistinct(patterns, EncodePercent(utf8, DotNetUriSafePunctuation, formStyle: false, lowerHex: true));
-            AddOwnedDistinct(patterns, EncodePercent(utf8, FormSafePunctuation, formStyle: true, lowerHex: false));
-            AddOwnedDistinct(patterns, EncodePercent(utf8, FormSafePunctuation, formStyle: true, lowerHex: true));
+            AddOwnedDistinct(patterns, EncodePercent(utf8, Rfc3986SafePunctuation, formStyle: false), matchesPercentHexCaseInsensitively: true);
+            AddOwnedDistinct(patterns, EncodePercent(utf8, DotNetUriSafePunctuation, formStyle: false), matchesPercentHexCaseInsensitively: true);
+            AddOwnedDistinct(patterns, EncodePercent(utf8, FormSafePunctuation, formStyle: true), matchesPercentHexCaseInsensitively: true);
 
             var base64 = new char[((utf8.Length + 2) / 3) * 4];
             var callerOwnsBase64 = true;
@@ -32,7 +29,7 @@ internal static class SensitiveRedactionPatternFactory
             {
                 Convert.TryToBase64Chars(utf8, base64, out _);
                 callerOwnsBase64 = false;
-                AddOwnedDistinct(patterns, base64);
+                AddOwnedDistinct(patterns, base64, matchesPercentHexCaseInsensitively: false);
             }
             finally
             {
@@ -48,14 +45,14 @@ internal static class SensitiveRedactionPatternFactory
         }
     }
 
-    private static void AddOwnedDistinct(List<SensitiveRedactionPattern> patterns, char[] candidate)
+    private static void AddOwnedDistinct(List<SensitiveRedactionPattern> patterns, char[] candidate, bool matchesPercentHexCaseInsensitively)
     {
         var callerOwnsCandidate = true;
         try
         {
             foreach (var pattern in patterns)
             {
-                if (!pattern.Characters.SequenceEqual(candidate))
+                if (pattern.MatchesPercentHexCaseInsensitively != matchesPercentHexCaseInsensitively || !pattern.Characters.SequenceEqual(candidate))
                 {
                     continue;
                 }
@@ -63,7 +60,7 @@ internal static class SensitiveRedactionPatternFactory
                 return;
             }
 
-            patterns.Add(new SensitiveRedactionPattern(candidate));
+            patterns.Add(new SensitiveRedactionPattern(candidate, matchesPercentHexCaseInsensitively));
             callerOwnsCandidate = false;
         }
         finally
@@ -75,7 +72,7 @@ internal static class SensitiveRedactionPatternFactory
         }
     }
 
-    private static char[] EncodePercent(ReadOnlySpan<byte> value, string safePunctuation, bool formStyle, bool lowerHex)
+    private static char[] EncodePercent(ReadOnlySpan<byte> value, string safePunctuation, bool formStyle)
     {
         var length = 0;
         foreach (var item in value)
@@ -98,8 +95,8 @@ internal static class SensitiveRedactionPatternFactory
             else
             {
                 result[index++] = '%';
-                result[index++] = ToHex(item >> 4, lowerHex);
-                result[index++] = ToHex(item & 0x0f, lowerHex);
+                result[index++] = ToHex(item >> 4);
+                result[index++] = ToHex(item & 0x0f);
             }
         }
 
@@ -114,14 +111,14 @@ internal static class SensitiveRedactionPatternFactory
             || safePunctuation.Contains((char)value, StringComparison.Ordinal);
     }
 
-    private static char ToHex(int value, bool lowerHex)
+    private static char ToHex(int value)
     {
         if (value < 10)
         {
             return (char)('0' + value);
         }
 
-        return (char)((lowerHex ? 'a' : 'A') + value - 10);
+        return (char)('A' + value - 10);
     }
 
     private static void Zero(char[] value)
