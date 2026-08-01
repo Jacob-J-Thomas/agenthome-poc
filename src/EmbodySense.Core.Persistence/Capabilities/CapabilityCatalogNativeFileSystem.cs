@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -158,16 +159,12 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
+    [SupportedOSPlatform("windows")]
     public static bool TryGetExistingWindowsDirectoryIdentity(string fullPath, out string identity, out string finalPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
         identity = string.Empty;
         finalPath = string.Empty;
-        if (!OperatingSystem.IsWindows())
-        {
-            return false;
-        }
-
         var handle = CreateFile(fullPath, 0, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics, IntPtr.Zero);
         if (handle.IsInvalid)
         {
@@ -183,28 +180,19 @@ internal static class CapabilityCatalogNativeFileSystem
 
         using (handle)
         {
-            if (!GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileAttributeTagInfo, out CapabilityCatalogFileAttributeTagInfo attributes, (uint)Marshal.SizeOf<CapabilityCatalogFileAttributeTagInfo>()))
-            {
-                throw NativeIOException("The capability catalog root topology could not inspect an existing directory", Marshal.GetLastPInvokeError());
-            }
+            RequireWindowsTopologyQuery(GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileAttributeTagInfo, out CapabilityCatalogFileAttributeTagInfo attributes, (uint)Marshal.SizeOf<CapabilityCatalogFileAttributeTagInfo>()), "The capability catalog root topology could not inspect an existing directory");
 
             if ((attributes.FileAttributes & FileAttributeDirectory) == 0)
             {
                 return false;
             }
 
-            if (!GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileIdInfo, out CapabilityCatalogFileIdInfo information, (uint)Marshal.SizeOf<CapabilityCatalogFileIdInfo>()))
-            {
-                throw NativeIOException("The capability catalog root topology could not inspect an existing directory", Marshal.GetLastPInvokeError());
-            }
+            RequireWindowsTopologyQuery(GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileIdInfo, out CapabilityCatalogFileIdInfo information, (uint)Marshal.SizeOf<CapabilityCatalogFileIdInfo>()), "The capability catalog root topology could not inspect an existing directory");
 
             identity = $"{information.VolumeSerialNumber:x16}:{information.FileId:N}";
             var finalPathBuffer = new StringBuilder(32_768);
             var finalPathLength = GetFinalPathNameByHandle(handle, finalPathBuffer, finalPathBuffer.Capacity, 0);
-            if (finalPathLength == 0)
-            {
-                throw NativeIOException("The capability catalog root topology could not resolve an existing directory", Marshal.GetLastPInvokeError());
-            }
+            RequireWindowsTopologyQuery(finalPathLength != 0, "The capability catalog root topology could not resolve an existing directory");
 
             if (finalPathLength >= finalPathBuffer.Capacity)
             {
@@ -597,6 +585,14 @@ internal static class CapabilityCatalogNativeFileSystem
         {
             handle.Dispose();
             throw new IOException($"Capability catalog persistence refuses reparse points or mismatched filesystem entry types: `{path}`.");
+        }
+    }
+
+    private static void RequireWindowsTopologyQuery(bool succeeded, string failureMessage)
+    {
+        if (!succeeded)
+        {
+            throw NativeIOException(failureMessage, Marshal.GetLastPInvokeError());
         }
     }
 

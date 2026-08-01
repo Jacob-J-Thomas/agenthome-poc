@@ -160,6 +160,179 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void File_backed_catalog_fails_closed_without_disclosing_an_unavailable_Windows_UNC_root()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        Directory.CreateDirectory(workspaceRoot);
+        var privateCanary = $"embodysense-private-{Guid.NewGuid():N}";
+        var provider = new FileCapabilityCatalogTrustProvider($@"\\?\UNC\localhost\{privateCanary}\trust");
+
+        var exception = Assert.Throws<IOException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+
+        Assert.DoesNotContain(privateCanary, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(root.RootPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void File_backed_catalog_fails_closed_without_disclosing_a_Windows_device_metadata_failure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        Directory.CreateDirectory(workspaceRoot);
+        var provider = new FileCapabilityCatalogTrustProvider(@"\\.\NUL");
+
+        var exception = Assert.Throws<IOException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+
+        Assert.DoesNotContain(root.RootPath, exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("NUL", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task File_backed_catalog_treats_an_unavailable_Windows_volume_device_root_as_unavailable()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        Directory.CreateDirectory(workspaceRoot);
+        var trustRoot = @"\\?\Volume{00000000-0000-0000-0000-000000000000}\trust";
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var store = new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider);
+
+        var result = await store.ReadAsync(null, 1);
+
+        Assert.Equal(CapabilityCatalogReadStatus.Unavailable, result.Status);
+        Assert.False(File.Exists(provider.AuthenticationKeyPath));
+    }
+
+    [Fact]
+    public void File_backed_catalog_fails_closed_when_a_Windows_nonexistent_tail_exceeds_the_topology_bound()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        Directory.CreateDirectory(workspaceRoot);
+        var trustRoot = root.File("missing-trust");
+        for (var index = 0; index < 34; index++)
+        {
+            trustRoot = Path.Combine(trustRoot, "x");
+        }
+
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot);
+        var exception = Assert.Throws<IOException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+
+        Assert.Equal("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.", exception.Message);
+    }
+
+    [Fact]
+    public void File_backed_catalog_fails_closed_when_a_Windows_existing_ancestor_walk_exceeds_the_topology_bound()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("deep-workspace");
+        for (var index = 0; index < 34; index++)
+        {
+            workspaceRoot = Path.Combine(workspaceRoot, "x");
+        }
+
+        Directory.CreateDirectory(workspaceRoot);
+        var provider = new FileCapabilityCatalogTrustProvider(root.File("server-trust"));
+        var exception = Assert.Throws<IOException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), provider));
+
+        Assert.Equal("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.", exception.Message);
+        Assert.False(File.Exists(provider.AuthenticationKeyPath));
+    }
+
+    [Fact]
+    public async Task File_backed_catalog_treats_a_disjoint_existing_file_trust_root_as_unavailable()
+    {
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("workspace");
+        var trustRoot = root.File("server-trust");
+        Directory.CreateDirectory(workspaceRoot);
+        await File.WriteAllTextAsync(trustRoot, "untrusted-file-root");
+        var store = new CapabilityCatalogStore(new WorkspacePaths(workspaceRoot), new FileCapabilityCatalogTrustProvider(trustRoot));
+
+        var result = await store.ReadAsync(null, 1);
+
+        Assert.Equal(CapabilityCatalogReadStatus.Unavailable, result.Status);
+        Assert.Equal("untrusted-file-root", await File.ReadAllTextAsync(trustRoot));
+    }
+
+    [Fact]
+    public async Task Provider_fails_closed_when_a_Windows_UNC_root_is_unavailable_at_startup()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var privateCanary = $"embodysense-private-{Guid.NewGuid():N}";
+        var provider = new FileCapabilityCatalogTrustProvider($@"\\?\UNC\localhost\{privateCanary}\trust");
+
+        _ = await Assert.ThrowsAsync<IOException>(() => provider.ReadAsync(Identity("unavailable-unc-root")));
+    }
+
+    [Fact]
+    public async Task Provider_fails_closed_when_the_Windows_trust_lock_is_a_directory()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var trustRoot = new TestWorkspace();
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+        Directory.CreateDirectory(provider.TrustLockPath);
+
+        _ = await Assert.ThrowsAsync<IOException>(() => provider.ReadAsync(Identity("directory-trust-lock")));
+
+        Assert.True(Directory.Exists(provider.TrustLockPath));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(provider.TrustLockPath));
+    }
+
+    [Fact]
+    public async Task Provider_removes_Windows_staging_state_when_startup_is_rejected_before_move()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var root = new TestWorkspace();
+        var barrier = new RecordingCapabilityCatalogDurabilityBarrier { BeforeDirectoryMoveFailure = new IOException("Injected pre-move durability failure.") };
+        var provider = new FileCapabilityCatalogTrustProvider(root.File("server-trust"), barrier);
+
+        _ = await Assert.ThrowsAsync<IOException>(() => provider.InitializeAsync(Identity("pre-move-failure"), 0, Digest("pre-move-failure")));
+
+        Assert.False(Directory.Exists(provider.RootPath));
+        Assert.False(File.Exists(provider.AuthenticationKeyPath));
+        Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(root.RootPath), path => Path.GetFileName(path).StartsWith(".server-trust.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Provider_enforces_initialization_successor_and_compare_exchange_contracts()
     {
         using var trustRoot = new TestWorkspace();

@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using EmbodySense.Core.Common;
 
 namespace EmbodySense.Core.Persistence.Capabilities;
@@ -36,6 +37,7 @@ internal static class CapabilityCatalogTrustRootTopology
         }
     }
 
+    [SupportedOSPlatform("windows")]
     private static bool WindowsPhysicalOverlap(string workspaceRoot, string trustRoot)
     {
         var workspaceAncestors = GetExistingWindowsAncestors(workspaceRoot);
@@ -43,12 +45,14 @@ internal static class CapabilityCatalogTrustRootTopology
         return workspaceAncestors.Any(workspace => trustAncestors.Any(trust => string.Equals(workspace.Identity, trust.Identity, StringComparison.Ordinal) && RelativeTailsOverlap(workspace.RelativeTail, trust.RelativeTail)));
     }
 
+    [SupportedOSPlatform("windows")]
     private static IReadOnlyList<(string Identity, string RelativeTail)> GetExistingWindowsAncestors(string path)
     {
         var tailSegments = new List<string>();
         var current = path;
-        for (var depth = 0; depth <= 32; depth++)
+        for (var depth = 0; ; depth++)
         {
+            RequireSafeTopology(depth <= 32, "Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
             if (CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var identity, out var finalPath))
             {
                 return GetCanonicalWindowsAncestors(finalPath, identity, tailSegments);
@@ -63,16 +67,16 @@ internal static class CapabilityCatalogTrustRootTopology
             tailSegments.Insert(0, Path.GetFileName(current));
             current = parent;
         }
-
-        throw new IOException("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
     }
 
+    [SupportedOSPlatform("windows")]
     private static IReadOnlyList<(string Identity, string RelativeTail)> GetCanonicalWindowsAncestors(string finalPath, string identity, List<string> tailSegments)
     {
         var ancestors = new List<(string Identity, string RelativeTail)> { (identity, string.Join(Path.DirectorySeparatorChar, tailSegments)) };
         var current = Normalize(finalPath);
-        for (var depth = 0; depth <= 32; depth++)
+        for (var depth = 0; ; depth++)
         {
+            RequireSafeTopology(depth <= 32, "Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
             var parent = Path.GetDirectoryName(current);
             if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
             {
@@ -81,15 +85,19 @@ internal static class CapabilityCatalogTrustRootTopology
 
             tailSegments.Insert(0, Path.GetFileName(current));
             current = parent;
-            if (!CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var parentIdentity, out _))
-            {
-                throw new IOException("Capability catalog root topology could not resolve an existing directory safely.");
-            }
+            var parentResolved = CapabilityCatalogNativeFileSystem.TryGetExistingWindowsDirectoryIdentity(current, out var parentIdentity, out _);
+            RequireSafeTopology(parentResolved, "Capability catalog root topology could not resolve an existing directory safely.");
 
             ancestors.Add((parentIdentity, string.Join(Path.DirectorySeparatorChar, tailSegments)));
         }
+    }
 
-        throw new IOException("Capability catalog root topology exceeded its bounded filesystem-link resolution depth.");
+    private static void RequireSafeTopology(bool condition, string failureMessage)
+    {
+        if (!condition)
+        {
+            throw new IOException(failureMessage);
+        }
     }
 
     private static bool RelativeTailsOverlap(string first, string second)
