@@ -10,7 +10,7 @@ public sealed class RedactedExceptionSnapshot
         string message,
         string? source,
         string? stackTrace,
-        int hResult,
+        string? hResult,
         RedactedDataNode data,
         IReadOnlyList<RedactedExceptionSnapshot> innerExceptions,
         bool isMarker)
@@ -37,8 +37,8 @@ public sealed class RedactedExceptionSnapshot
     /// <summary>Gets the sanitized stack trace when present.</summary>
     public string? StackTrace { get; }
 
-    /// <summary>Gets the non-secret numeric exception result code.</summary>
-    public int HResult { get; }
+    /// <summary>Gets the sanitized invariant exception result code, or <see langword="null"/> for a synthetic marker.</summary>
+    public string? HResult { get; }
 
     /// <summary>Gets bounded sanitized exception data.</summary>
     public RedactedDataNode Data { get; }

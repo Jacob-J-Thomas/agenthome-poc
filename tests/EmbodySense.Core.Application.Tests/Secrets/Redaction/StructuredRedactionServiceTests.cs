@@ -78,6 +78,24 @@ public sealed class StructuredRedactionServiceTests
         Assert.True(result.Summary.IsComplete);
     }
 
+    [Theory]
+    [InlineData(true, "true")]
+    [InlineData(false, "false")]
+    public void Structure_redacts_scoped_boolean_canonical_projection(bool value, string scopedValue)
+    {
+        using var fixture = CreateScope(scopedValue);
+        IReadOnlyDictionary<string, object?> source = new Dictionary<string, object?> { ["value"] = value };
+
+        var result = _service.RedactStructure(source, fixture.Scope);
+        var projected = Assert.Single(result.Value.Properties).Value;
+
+        Assert.Equal(RedactedDataKind.Text, projected.Kind);
+        Assert.Equal("[REDACTED]", projected.Text);
+        Assert.Null(projected.Boolean);
+        Assert.Equal(1, result.Summary.TextReplacementCount);
+        Assert.DoesNotContain(scopedValue, JsonSerializer.Serialize(result.Value), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Structure_fails_closed_for_depth_entry_node_and_read_bounds()
     {
@@ -264,6 +282,19 @@ public sealed class StructuredRedactionServiceTests
         Assert.Single(result.Value.InnerExceptions);
         Assert.False(result.Value.IsMarker);
         Assert.True(result.Summary.TextReplacementCount >= 5);
+    }
+
+    [Fact]
+    public void Exception_projection_redacts_scoped_hresult()
+    {
+        const int SensitiveResultCode = 1234;
+        using var fixture = CreateScope(SensitiveResultCode.ToString());
+
+        var result = _service.RedactException(new System.Runtime.InteropServices.ExternalException("safe", SensitiveResultCode), fixture.Scope);
+
+        Assert.Equal("[REDACTED]", result.Value.HResult);
+        Assert.Equal(1, result.Summary.TextReplacementCount);
+        Assert.DoesNotContain(SensitiveResultCode.ToString(), JsonSerializer.Serialize(result.Value), StringComparison.Ordinal);
     }
 
     [Fact]

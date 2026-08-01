@@ -128,7 +128,11 @@ public sealed class StructuredRedactionService
 
         if (value is bool boolean)
         {
-            return new RedactedDataNode(RedactedDataKind.Boolean, null, boolean, [], []);
+            var canonicalBoolean = boolean ? "true" : "false";
+            var sanitizedBoolean = Sanitize(canonicalBoolean, context);
+            return string.Equals(canonicalBoolean, sanitizedBoolean, StringComparison.Ordinal)
+                ? new RedactedDataNode(RedactedDataKind.Boolean, null, boolean, [], [])
+                : Text(sanitizedBoolean);
         }
 
         if (TryFormatKnownScalar(value, out var scalar))
@@ -356,9 +360,10 @@ public sealed class StructuredRedactionService
             var message = ReadExceptionText(() => exception.Message, context) ?? "";
             var source = ReadExceptionText(() => exception.Source, context);
             var stackTrace = ReadExceptionText(() => exception.StackTrace, context);
+            var hResult = Sanitize(exception.HResult.ToString(CultureInfo.InvariantCulture), context);
             var data = ReadExceptionData(exception, depth, context);
             var innerExceptions = ReadInnerExceptions(exception, depth, context);
-            return new RedactedExceptionSnapshot(typeName, message, source, stackTrace, exception.HResult, data, innerExceptions, isMarker: false);
+            return new RedactedExceptionSnapshot(typeName, message, source, stackTrace, hResult, data, innerExceptions, isMarker: false);
         }
         finally
         {
@@ -547,6 +552,6 @@ public sealed class StructuredRedactionService
     private static RedactedExceptionSnapshot ExceptionMarker(string marker, RedactionTraversalContext context)
     {
         var safeMarker = Sanitize(marker, context);
-        return new RedactedExceptionSnapshot(safeMarker, safeMarker, null, null, 0, Marker(marker, context), [], isMarker: true);
+        return new RedactedExceptionSnapshot(safeMarker, safeMarker, null, null, null, Marker(marker, context), [], isMarker: true);
     }
 }
