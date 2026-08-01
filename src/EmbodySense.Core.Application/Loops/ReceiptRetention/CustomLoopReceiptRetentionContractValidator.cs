@@ -1,4 +1,5 @@
 using System.Text;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
@@ -68,6 +69,14 @@ public static class CustomLoopReceiptRetentionContractValidator
         if (proof.ArtifactClass is not CustomLoopReceiptArtifactClass.DefinitionMutationReceipt and not CustomLoopReceiptArtifactClass.LifecycleControlReceipt)
         {
             throw new ArgumentException("Expired-operation proof must identify a receipt class with an idempotent request.", nameof(proof));
+        }
+
+        var validDefinitionMutationKind = proof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
+            ? proof.DefinitionMutationKind is { } mutationKind && Enum.IsDefined(mutationKind) && mutationKind != CustomLoopDefinitionMutationKind.Unknown
+            : proof.DefinitionMutationKind is null;
+        if (!validDefinitionMutationKind)
+        {
+            throw new ArgumentException("Expired-operation proof must retain a mutation kind exactly for definition-mutation receipts.", nameof(proof));
         }
 
         RequireIdentifier(proof.OperationId, nameof(proof.OperationId));
@@ -173,13 +182,20 @@ public static class CustomLoopReceiptRetentionContractValidator
             throw new ArgumentException("Proof ledger contains duplicate lineage or operation identities.", nameof(ledger));
         }
 
-        var expiredMutationIds = ledger.ExpiredOperations
+        var deletedLineage = ledger.DefinitionLineage.Where(item => item.IsDeleted).ToArray();
+        if (deletedLineage.Select(item => item.LastMutationOperationId).Distinct(StringComparer.Ordinal).Count() != deletedLineage.Length)
+        {
+            throw new ArgumentException("Deleted definition lineage must retain unique mutation ownership.", nameof(ledger));
+        }
+
+        var expiredDeleteMutationIds = ledger.ExpiredOperations
             .Where(item => item.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt)
+            .Where(item => item.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete)
             .Select(item => item.OperationId)
             .ToHashSet(StringComparer.Ordinal);
-        if (ledger.DefinitionLineage.Any(item => item.IsDeleted && !expiredMutationIds.Contains(item.LastMutationOperationId)))
+        if (deletedLineage.Any(item => !expiredDeleteMutationIds.Contains(item.LastMutationOperationId)))
         {
-            throw new ArgumentException("Deleted definition lineage must bind to retained expired mutation proof.", nameof(ledger));
+            throw new ArgumentException("Deleted definition lineage must bind to its unique retained expired delete-mutation proof.", nameof(ledger));
         }
 
         var lineageUsage = MeasureProofUsage(ledger.DefinitionLineage, CustomLoopReceiptRetentionContractCodec.MeasureDefinitionLineageProofUtf8BytesUnchecked);
@@ -220,7 +236,9 @@ public static class CustomLoopReceiptRetentionContractValidator
         {
             ValidateExpiredOperationProof(result.ExpiredProof);
             var compatibleClass = result.ArtifactClass == result.ExpiredProof.ArtifactClass
-                || result.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionTombstone && result.ExpiredProof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt;
+                || result.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionTombstone
+                    && result.ExpiredProof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
+                    && result.ExpiredProof.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete;
             if (!compatibleClass || !string.Equals(result.OperationId, result.ExpiredProof.OperationId, StringComparison.Ordinal))
             {
                 throw new ArgumentException("Expired lookup proof does not match the requested class and operation identity.", nameof(result));
@@ -424,10 +442,15 @@ public static class CustomLoopReceiptRetentionContractValidator
         {
             CustomLoopReceiptArtifactClass.DefinitionMutationReceipt => candidate.ExpiredOperationProof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
                 && string.Equals(candidate.ArtifactId, candidate.ExpiredOperationProof.OperationId, StringComparison.Ordinal)
-                && (candidate.DefinitionLineageProof is null
-                    || candidate.DefinitionLineageProof is { IsDeleted: true } mutationLineage
-                    && string.Equals(mutationLineage.LastMutationOperationId, candidate.ExpiredOperationProof.OperationId, StringComparison.Ordinal)),
+                && candidate.ExpiredOperationProof.DefinitionMutationKind switch
+                {
+                    CustomLoopDefinitionMutationKind.Delete => candidate.DefinitionLineageProof is { IsDeleted: true } mutationLineage
+                        && string.Equals(mutationLineage.LastMutationOperationId, candidate.ExpiredOperationProof.OperationId, StringComparison.Ordinal),
+                    CustomLoopDefinitionMutationKind.Create or CustomLoopDefinitionMutationKind.Update => candidate.DefinitionLineageProof is null,
+                    _ => false
+                },
             CustomLoopReceiptArtifactClass.DefinitionTombstone => candidate.ExpiredOperationProof.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
+                && candidate.ExpiredOperationProof.DefinitionMutationKind == CustomLoopDefinitionMutationKind.Delete
                 && candidate.DefinitionLineageProof is { IsDeleted: true } lineage
                 && string.Equals(candidate.ArtifactId, lineage.LoopId, StringComparison.Ordinal)
                 && string.Equals(candidate.ExpiredOperationProof.OperationId, lineage.LastMutationOperationId, StringComparison.Ordinal),

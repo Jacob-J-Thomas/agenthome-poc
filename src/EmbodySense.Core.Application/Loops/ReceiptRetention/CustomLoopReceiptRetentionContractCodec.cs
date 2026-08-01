@@ -100,6 +100,7 @@ public static class CustomLoopReceiptRetentionContractCodec
         RequireInputSize(utf8Json, CustomLoopReceiptRetentionPolicy.MaxProofLedgerUtf8Bytes, "proof ledger");
         try
         {
+            RejectDuplicateProperties(utf8Json, "proof ledger");
             var ledger = JsonSerializer.Deserialize<CustomLoopReceiptProofLedger>(utf8Json, _jsonOptions)
                 ?? throw new FormatException("Compact proof ledger cannot be null.");
             CustomLoopReceiptRetentionContractValidator.ValidateProofLedger(ledger);
@@ -157,6 +158,7 @@ public static class CustomLoopReceiptRetentionContractCodec
         RequireInputSize(utf8Json, CustomLoopReceiptRetentionPolicy.MaxCleanupJournalUtf8Bytes, "cleanup journal");
         try
         {
+            RejectDuplicateProperties(utf8Json, "cleanup journal");
             var journal = JsonSerializer.Deserialize<CustomLoopReceiptCleanupJournal>(utf8Json, _jsonOptions)
                 ?? throw new FormatException("Receipt cleanup journal cannot be null.");
             CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(journal);
@@ -184,6 +186,47 @@ public static class CustomLoopReceiptRetentionContractCodec
     internal static int MeasureExpiredOperationProofUtf8BytesUnchecked(CustomLoopExpiredOperationProof proof) => JsonSerializer.SerializeToUtf8Bytes(proof, _jsonOptions).Length;
 
     internal static int MeasureDefinitionLineageProofUtf8BytesUnchecked(CustomLoopDefinitionLineageProof proof) => JsonSerializer.SerializeToUtf8Bytes(proof, _jsonOptions).Length;
+
+    private static void RejectDuplicateProperties(ReadOnlySpan<byte> utf8Json, string artifact)
+    {
+        var reader = new Utf8JsonReader(utf8Json);
+        using var document = JsonDocument.ParseValue(ref reader);
+        if (reader.Read())
+        {
+            throw new JsonException($"Receipt retention {artifact} contains trailing JSON content.");
+        }
+
+        RejectDuplicateProperties(document.RootElement, "$", artifact);
+    }
+
+    private static void RejectDuplicateProperties(JsonElement element, string path, string artifact)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!propertyNames.Add(property.Name))
+                {
+                    throw new FormatException($"Receipt retention {artifact} JSON object `{path}` contains duplicate property `{property.Name}`.");
+                }
+
+                RejectDuplicateProperties(property.Value, $"{path}.{property.Name}", artifact);
+            }
+
+            return;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray())
+            {
+                RejectDuplicateProperties(item, $"{path}[{index}]", artifact);
+                index++;
+            }
+        }
+    }
 
     private static void RequireInputSize(ReadOnlySpan<byte> utf8Json, long maximumUtf8Bytes, string artifact)
     {

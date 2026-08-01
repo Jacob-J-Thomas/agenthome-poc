@@ -23,10 +23,12 @@ Exact replay is promised for 30 days from a receipt's terminal UTC timestamp. A 
 Operation lookup has three meanings:
 
 - `Exact`: the complete receipt remains and the original result can be replayed exactly.
-- `Expired`: the full receipt was compacted, but schema-1 proof retains the operation ID, artifact class, request hash, outcome hash, completion time, and exact expiry time. The caller must receive an explicit expired response and must not reuse the ID as a new operation.
+- `Expired`: the full receipt was compacted, but schema-1 proof retains the operation ID, artifact class, request hash, outcome hash, completion time, and exact expiry time. Definition-mutation proof also requires the exact `create`, `update`, or `delete` mutation kind; lifecycle-control proof requires that field to be null. The caller must receive an explicit expired response and must not reuse the ID as a new operation.
 - `Unknown`: neither a full receipt nor compact proof recognizes the ID. This is not interchangeable with `Expired`.
 
-A delete receipt's expired-operation proof belongs to the definition-mutation class. Its tombstone compaction additionally writes a definition-lineage proof containing the loop ID, immutable role binding, last version and content hash, last mutation ID, and deletion timestamp. This permanent proof prevents loop-ID reuse after the full tombstone expires.
+A delete receipt's expired-operation proof belongs to the definition-mutation class and carries the `delete` kind. Before that receipt is removed, cleanup must also write a matching definition-lineage proof containing the loop ID, immutable role binding, last version and content hash, last mutation ID, and deletion timestamp. Later tombstone compaction requires and preserves that same role-bound lineage. Each deleted lineage has one unique last-mutation owner, so one delete operation cannot be attributed to multiple loop identities. This permanent proof prevents loop-ID reuse after both full artifacts expire.
+
+These fields are the only accepted schema-1 proof shape. This experimental contract has no compatibility reader or automatic migration: any artifact produced from an earlier pre-release shape must be explicitly removed or reinitialized before downstream persistence uses this contract.
 
 ## Posture classification
 

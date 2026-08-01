@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Text;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 
@@ -50,11 +51,15 @@ public sealed class CustomLoopReceiptRetentionContractTests
         [
             operation with { SchemaVersion = 2 },
             operation with { ArtifactClass = CustomLoopReceiptArtifactClass.DefinitionTombstone },
+            operation with { DefinitionMutationKind = null },
+            operation with { DefinitionMutationKind = CustomLoopDefinitionMutationKind.Unknown },
             operation with { OperationId = "Unsafe" },
             operation with { RequestHash = HashA[..63] },
             operation with { OutcomeHash = HashA.ToUpperInvariant() },
             operation with { ExpiredAtUtc = operation.ExpiredAtUtc.AddTicks(1) }
         ], candidate => Assert.ThrowsAny<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateExpiredOperationProof(candidate)));
+        var lifecycleProof = ExpiredProof(CustomLoopReceiptArtifactClass.LifecycleControlReceipt, "control-old");
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateExpiredOperationProof(lifecycleProof with { DefinitionMutationKind = CustomLoopDefinitionMutationKind.Update }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateDefinitionLineageProof(lineage with { DeletedAtUtc = null }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateDefinitionLineageProof(lineage with { IsDeleted = false }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateDefinitionLineageProof(lineage with { LastDefinitionVersion = 0 }));
@@ -81,7 +86,14 @@ public sealed class CustomLoopReceiptRetentionContractTests
         Assert.Matches("^[0-9a-f]{64}$", CustomLoopReceiptRetentionContractCodec.ComputeProofLedgerHash(first));
 
         var withUnknownField = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(bytes)[..^1] + ",\"legacy\":true}");
+        var proofJson = Encoding.UTF8.GetString(bytes);
+        var withDuplicateGeneration = Encoding.UTF8.GetBytes(proofJson.Replace("\"generation\":1", "\"generation\":1,\"generation\":1", StringComparison.Ordinal));
+        var withNestedDuplicateOperationId = Encoding.UTF8.GetBytes(proofJson.Replace("\"operationId\":\"delete-loop-a\"", "\"operationId\":\"delete-loop-a\",\"operationId\":\"delete-loop-a\"", StringComparison.Ordinal));
+        var withoutLifecycleMutationKind = Encoding.UTF8.GetBytes(proofJson.Replace("\"definitionMutationKind\":null,", string.Empty, StringComparison.Ordinal));
         Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(withUnknownField));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(withDuplicateGeneration));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(withNestedDuplicateOperationId));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(withoutLifecycleMutationKind));
         Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(ReadOnlySpan<byte>.Empty));
         Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger("null"u8));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateProofLedger(first with { Generation = 2 }));
@@ -96,6 +108,10 @@ public sealed class CustomLoopReceiptRetentionContractTests
         var duplicateProof = ExpiredProof(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "mutation-a");
         var duplicate = Ledger([], [duplicateProof]) with { ExpiredOperations = [duplicateProof, duplicateProof] };
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateProofLedger(duplicate));
+
+        var firstLineage = Lineage("loop-a");
+        var secondLineage = Lineage("loop-b") with { LastMutationOperationId = firstLineage.LastMutationOperationId };
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateProofLedger(Ledger([firstLineage, secondLineage], [])));
 
         var tooMany = Enumerable.Range(0, CustomLoopReceiptRetentionPolicy.MaxDefinitionMutationProofCount + 1)
             .Select(index => ExpiredProof(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, $"mutation-{index}"))
@@ -124,7 +140,7 @@ public sealed class CustomLoopReceiptRetentionContractTests
     [Fact]
     public void Lookup_contract_distinguishes_exact_expired_and_unknown_without_reuse_ambiguity()
     {
-        var proof = ExpiredProof(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "mutation-old");
+        var proof = ExpiredProof(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "mutation-old", CustomLoopDefinitionMutationKind.Delete);
         var exact = new CustomLoopReceiptOperationLookupResult(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "mutation-live", CustomLoopReceiptOperationLookupStatus.Exact, null, "Exact receipt retained.");
         var expired = new CustomLoopReceiptOperationLookupResult(CustomLoopReceiptArtifactClass.DefinitionTombstone, proof.OperationId, CustomLoopReceiptOperationLookupStatus.Expired, proof, "Exact replay expired; operation identity remains reserved.");
         var unknown = new CustomLoopReceiptOperationLookupResult(CustomLoopReceiptArtifactClass.LifecycleControlReceipt, "control-new", CustomLoopReceiptOperationLookupStatus.Unknown, null, "Operation identity is unknown.");
@@ -133,6 +149,7 @@ public sealed class CustomLoopReceiptRetentionContractTests
         CustomLoopReceiptRetentionContractValidator.ValidateLookupResult(expired);
         CustomLoopReceiptRetentionContractValidator.ValidateLookupResult(unknown);
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateLookupResult(expired with { ExpiredProof = null }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateLookupResult(expired with { ExpiredProof = proof with { DefinitionMutationKind = CustomLoopDefinitionMutationKind.Update } }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateLookupResult(unknown with { ExpiredProof = proof }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateLookupResult(exact with { Status = CustomLoopReceiptOperationLookupStatus.UnknownStatus }));
     }
@@ -157,6 +174,10 @@ public sealed class CustomLoopReceiptRetentionContractTests
         var mutation = Journal(CustomLoopReceiptCleanupStage.IntentPersisted, CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
         var unrelatedLineage = Lineage("unrelated-loop");
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(mutation with { Candidates = [mutation.Candidates[0] with { DefinitionLineageProof = unrelatedLineage }] }));
+        var deleteProof = mutation.Candidates[0].ExpiredOperationProof! with { DefinitionMutationKind = CustomLoopDefinitionMutationKind.Delete };
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(mutation with { Candidates = [mutation.Candidates[0] with { ExpiredOperationProof = deleteProof }] }));
+        var matchingLineage = Lineage("deleted-loop") with { LastMutationOperationId = deleteProof.OperationId };
+        CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(mutation with { Candidates = [mutation.Candidates[0] with { ExpiredOperationProof = deleteProof, DefinitionLineageProof = matchingLineage }] });
 
         var tombstone = Journal(CustomLoopReceiptCleanupStage.IntentPersisted, CustomLoopReceiptArtifactClass.DefinitionTombstone);
         var futureLineage = tombstone.Candidates[0].DefinitionLineageProof! with { DeletedAtUtc = tombstone.Candidates[0].ExpiredOperationProof!.CompletedAtUtc.AddTicks(1) };
@@ -185,10 +206,22 @@ public sealed class CustomLoopReceiptRetentionContractTests
         var reordered = journal with { Candidates = journal.Candidates.Reverse().ToImmutableArray() };
         var bytes = CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(journal);
         var roundTrip = CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(bytes);
+        var json = Encoding.UTF8.GetString(bytes);
+        var withDuplicateStage = Encoding.UTF8.GetBytes(json.Replace("\"stage\":\"completed\"", "\"stage\":\"completed\",\"stage\":\"completed\"", StringComparison.Ordinal));
+        var withDuplicateCandidateField = Encoding.UTF8.GetBytes(json.Replace("\"artifactId\":\"artifact-0\"", "\"artifactId\":\"artifact-0\",\"artifactId\":\"artifact-0\"", StringComparison.Ordinal));
+        var withNestedDuplicateExpiredProofField = Encoding.UTF8.GetBytes(json.Replace($"\"outcomeHash\":\"{HashB}\"", $"\"outcomeHash\":\"{HashB}\",\"outcomeHash\":\"{HashB}\"", StringComparison.Ordinal));
+        var withoutLifecycleMutationKind = Encoding.UTF8.GetBytes(json.Replace("\"definitionMutationKind\":null,", string.Empty, StringComparison.Ordinal));
+        var tombstoneJson = Encoding.UTF8.GetString(CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(Journal(CustomLoopReceiptCleanupStage.Completed, CustomLoopReceiptArtifactClass.DefinitionTombstone)));
+        var withNestedDuplicateLineageField = Encoding.UTF8.GetBytes(tombstoneJson.Replace("\"roleId\":\"role-primary\"", "\"roleId\":\"role-primary\",\"roleId\":\"role-primary\"", StringComparison.Ordinal));
 
         Assert.True(CustomLoopReceiptRetentionContractCodec.CleanupJournalsEqual(journal, reordered));
         Assert.Equal(CustomLoopReceiptRetentionContractCodec.ComputeCleanupJournalHash(journal), CustomLoopReceiptRetentionContractCodec.ComputeCleanupJournalHash(reordered));
         Assert.True(CustomLoopReceiptRetentionContractCodec.CleanupJournalsEqual(journal, roundTrip));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(withDuplicateStage));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(withDuplicateCandidateField));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(withNestedDuplicateExpiredProofField));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(withoutLifecycleMutationKind));
+        Assert.Throws<FormatException>(() => CustomLoopReceiptRetentionContractCodec.DeserializeCleanupJournal(withNestedDuplicateLineageField));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(journal with { RequestHash = HashC }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(journal with { RemovedArtifactCount = 0 }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(journal with { Outcome = CustomLoopReceiptCleanupOutcome.Conflict }));
@@ -300,10 +333,13 @@ public sealed class CustomLoopReceiptRetentionContractTests
             maximumBytes);
     }
 
-    private static CustomLoopExpiredOperationProof ExpiredProof(CustomLoopReceiptArtifactClass artifactClass, string operationId)
+    private static CustomLoopExpiredOperationProof ExpiredProof(CustomLoopReceiptArtifactClass artifactClass, string operationId, CustomLoopDefinitionMutationKind? definitionMutationKind = null)
     {
         var completedAtUtc = _now - CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
-        return new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, artifactClass, operationId, HashA, HashB, completedAtUtc, _now);
+        CustomLoopDefinitionMutationKind? resolvedMutationKind = artifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt
+            ? definitionMutationKind ?? CustomLoopDefinitionMutationKind.Update
+            : null;
+        return new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, artifactClass, resolvedMutationKind, operationId, HashA, HashB, completedAtUtc, _now);
     }
 
     private static CustomLoopDefinitionLineageProof Lineage(string loopId)
@@ -315,7 +351,7 @@ public sealed class CustomLoopReceiptRetentionContractTests
     {
         var linkedLineageOperations = lineage
             .Where(item => item.IsDeleted)
-            .Select(item => ExpiredProof(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, item.LastMutationOperationId));
+            .Select(item => ExpiredProof(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, item.LastMutationOperationId, CustomLoopDefinitionMutationKind.Delete));
         var allOperations = operations
             .Concat(linkedLineageOperations)
             .GroupBy(item => (item.ArtifactClass, item.OperationId))
@@ -369,6 +405,7 @@ public sealed class CustomLoopReceiptRetentionContractTests
             : artifactClass;
         var lineage = artifactClass == CustomLoopReceiptArtifactClass.DefinitionTombstone ? Lineage(artifactId) : null;
         var operationId = lineage?.LastMutationOperationId ?? artifactId;
+        var mutationKind = artifactClass == CustomLoopReceiptArtifactClass.DefinitionTombstone ? CustomLoopDefinitionMutationKind.Delete : (CustomLoopDefinitionMutationKind?)null;
         return new CustomLoopReceiptCleanupCandidate(
             artifactId,
             HashA,
@@ -376,7 +413,7 @@ public sealed class CustomLoopReceiptRetentionContractTests
             CustomLoopReceiptArtifactCategory.Compactable,
             true,
             true,
-            ExpiredProof(operationClass, operationId),
+            ExpiredProof(operationClass, operationId, mutationKind),
             lineage);
     }
 
