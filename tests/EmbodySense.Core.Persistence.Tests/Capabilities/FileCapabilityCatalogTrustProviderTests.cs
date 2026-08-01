@@ -241,6 +241,36 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void Linux_workspace_generation_mapping_preserves_the_native_ABI_and_fails_closed()
+    {
+        Assert.Equal((nuint)0x80047601, CapabilityCatalogWorkspaceIdentity.GetLinuxDirectoryGenerationIoctlRequest(4));
+        Assert.Equal((nuint)0x80087601, CapabilityCatalogWorkspaceIdentity.GetLinuxDirectoryGenerationIoctlRequest(8));
+        Assert.Throws<ArgumentOutOfRangeException>(() => CapabilityCatalogWorkspaceIdentity.GetLinuxDirectoryGenerationIoctlRequest(16));
+        CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(0, 0);
+        Assert.Equal(42U, CapabilityCatalogWorkspaceIdentity.MapLinuxDirectoryGeneration(0, 42, 0));
+        Assert.Equal(uint.MaxValue, CapabilityCatalogWorkspaceIdentity.MapLinuxDirectoryGeneration(0, -1, 0));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.MapLinuxDirectoryGeneration(0, 0, 0));
+        var readFailure = Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(-1, 5));
+        var generationFailure = Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.MapLinuxDirectoryGeneration(-1, 42, 5));
+        Assert.Equal(unchecked((int)0x80070005), readFailure.HResult);
+        Assert.Equal(unchecked((int)0x80070005), generationFailure.HResult);
+    }
+
+    [Fact]
+    public void Mac_workspace_volume_capability_mapping_requires_complete_valid_enabled_evidence()
+    {
+        const uint CapabilityBufferLength = 36;
+        const uint PathFromId = 0x00004000;
+        Assert.True(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength, CapabilityBufferLength, PathFromId, PathFromId));
+        Assert.False(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength - 1, CapabilityBufferLength, PathFromId, PathFromId));
+        Assert.False(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength, CapabilityBufferLength, 0, PathFromId));
+        Assert.False(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength, CapabilityBufferLength, PathFromId, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, 0, 0, PathFromId, PathFromId));
+        var failure = Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(-1, 5, CapabilityBufferLength, CapabilityBufferLength, PathFromId, PathFromId));
+        Assert.Equal(unchecked((int)0x80070005), failure.HResult);
+    }
+
+    [Fact]
     public async Task Provider_retains_anchors_without_eviction_and_rejects_a_root_over_its_byte_quota()
     {
         using var trustRoot = new TestWorkspace();

@@ -38,10 +38,6 @@ internal static class CapabilityCatalogNativeFileSystem
     private const uint StatxBirthTime = 0x800;
     private const uint AttributeVolumeCapabilities = 0x00020000;
     private const uint AttributeVolumeInfo = 0x80000000;
-    private const uint VolumeCapabilityPathFromId = 0x00004000;
-    // Linux UAPI FS_IOC_GETVERSION is _IOR('v', 1, long), so its encoded size follows the native pointer width;
-    // filesystem implementations return the actual i_generation payload as an int.
-    private static nuint FsIoctlGetVersion => IntPtr.Size == 8 ? (nuint)0x80087601 : (nuint)0x80047601;
 
     public static SafeFileHandle? OpenDirectory(string fullPath, SafeFileHandle? parent, string? name, bool create, ICapabilityCatalogDurabilityBarrier durabilityBarrier, out bool created)
     {
@@ -178,26 +174,15 @@ internal static class CapabilityCatalogNativeFileSystem
 
         if (OperatingSystem.IsLinux())
         {
-            if (statx(directory, string.Empty, AtEmptyPath, StatxInode | StatxBirthTime, out var information) != 0)
-            {
-                throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
-            }
-
-            ulong? inode = (information.Mask & StatxInode) != 0 ? information.Inode : null;
-            CapabilityCatalogStatxTimestamp? birthTime = (information.Mask & StatxBirthTime) != 0 ? information.BirthTime : null;
+            CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(statx(directory, string.Empty, AtEmptyPath, StatxInode | StatxBirthTime, out var information), Marshal.GetLastPInvokeError());
             var generation = ReadLinuxDirectoryGeneration(directory);
-            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", information.DeviceMajor, information.DeviceMinor, inode, generation, birthTime?.Seconds, birthTime?.Nanoseconds);
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", information.DeviceMajor, information.DeviceMinor, (information.Mask & StatxInode) != 0 ? information.Inode : null, generation, (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Seconds : null, (information.Mask & StatxBirthTime) != 0 ? information.BirthTime.Nanoseconds : null);
         }
 
         if (OperatingSystem.IsMacOS())
         {
-            if (fstat(directory, out CapabilityCatalogMacStat information) != 0)
-            {
-                throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
-            }
-
-            var inodeIsNonRecycled = information.Generation == 0 && MacVolumeUsesNonRecycledObjectIds(directory);
-            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", information.Device, 0, information.Inode, information.Generation, information.BirthTime.Seconds, information.BirthTime.Nanoseconds, inodeIsNonRecycled);
+            CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(fstat(directory, out CapabilityCatalogMacStat information), Marshal.GetLastPInvokeError());
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", information.Device, 0, information.Inode, information.Generation, information.BirthTime.Seconds, information.BirthTime.Nanoseconds, information.Generation == 0 && MacVolumeUsesNonRecycledObjectIds(directory));
         }
 
         throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows, Linux, and macOS.");
@@ -206,30 +191,13 @@ internal static class CapabilityCatalogNativeFileSystem
     private static uint ReadLinuxDirectoryGeneration(SafeFileHandle directory)
     {
         var rawGeneration = 0;
-        if (ioctl(directory, FsIoctlGetVersion, ref rawGeneration) != 0)
-        {
-            throw NativeIOException("The capability catalog workspace filesystem does not expose an inode generation", Marshal.GetLastPInvokeError());
-        }
-
-        var generation = unchecked((uint)rawGeneration);
-        return generation != 0 ? generation : throw new IOException("The capability catalog workspace filesystem returned no usable inode generation.");
+        return CapabilityCatalogWorkspaceIdentity.MapLinuxDirectoryGeneration(ioctl(directory, CapabilityCatalogWorkspaceIdentity.GetLinuxDirectoryGenerationIoctlRequest(IntPtr.Size), ref rawGeneration), rawGeneration, Marshal.GetLastPInvokeError());
     }
 
     private static bool MacVolumeUsesNonRecycledObjectIds(SafeFileHandle directory)
     {
-        var attributes = new CapabilityCatalogMacAttributeList
-        {
-            BitmapCount = 5,
-            VolumeAttributes = AttributeVolumeInfo | AttributeVolumeCapabilities
-        };
-        if (fgetattrlist(directory, ref attributes, out CapabilityCatalogMacVolumeCapabilitiesBuffer capabilities, (nuint)Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>(), 0) != 0)
-        {
-            throw NativeIOException("The capability catalog workspace volume identity capability could not be read", Marshal.GetLastPInvokeError());
-        }
-
-        return capabilities.Length >= Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>()
-            && (capabilities.ValidFormatCapabilities & VolumeCapabilityPathFromId) != 0
-            && (capabilities.FormatCapabilities & VolumeCapabilityPathFromId) != 0;
+        var attributes = new CapabilityCatalogMacAttributeList { BitmapCount = 5, VolumeAttributes = AttributeVolumeInfo | AttributeVolumeCapabilities };
+        return CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(fgetattrlist(directory, ref attributes, out CapabilityCatalogMacVolumeCapabilitiesBuffer capabilities, (nuint)Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>(), 0), Marshal.GetLastPInvokeError(), capabilities.Length, (uint)Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>(), capabilities.ValidFormatCapabilities, capabilities.FormatCapabilities);
     }
 
     public static string GetDirectoryEnumerationPath(SafeFileHandle directory)
@@ -581,7 +549,7 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    private static IOException NativeIOException(string message, int error)
+    internal static IOException NativeIOException(string message, int error)
     {
         return new IOException($"{message}: {new Win32Exception(error).Message}", unchecked((int)(0x80070000U | (uint)error)));
     }
