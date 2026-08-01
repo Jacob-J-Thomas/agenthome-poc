@@ -156,6 +156,30 @@ public sealed class WorkspacePaths
     public string CustomLoopDefinitionOperationsPath => Path.Combine(LoopDefinitionsPath, "custom-create-operations");
 
     /// <summary>
+    /// Gets the shared custom-loop receipt-retention state path.
+    /// </summary>
+    /// <value>The receipt-retention state path.</value>
+    public string CustomLoopReceiptRetentionPath => Path.Combine(LoopsPath, "receipt-retention");
+
+    /// <summary>
+    /// Gets the canonical compact custom-loop receipt proof ledger path.
+    /// </summary>
+    /// <value>The proof-ledger path.</value>
+    public string CustomLoopReceiptProofLedgerPath => Path.Combine(CustomLoopReceiptRetentionPath, "proof-ledger.json");
+
+    /// <summary>
+    /// Gets the definition-mutation receipt cleanup journal path.
+    /// </summary>
+    /// <value>The definition-mutation cleanup journal path.</value>
+    public string CustomLoopDefinitionMutationReceiptCleanupJournalPath => Path.Combine(CustomLoopReceiptRetentionPath, "definition-mutation-receipt-cleanup.json");
+
+    /// <summary>
+    /// Gets the definition-tombstone cleanup journal path.
+    /// </summary>
+    /// <value>The definition-tombstone cleanup journal path.</value>
+    public string CustomLoopDefinitionTombstoneCleanupJournalPath => Path.Combine(CustomLoopReceiptRetentionPath, "definition-tombstone-cleanup.json");
+
+    /// <summary>
     /// Gets the loop runs path.
     /// </summary>
     /// <value>The loop runs path.</value>

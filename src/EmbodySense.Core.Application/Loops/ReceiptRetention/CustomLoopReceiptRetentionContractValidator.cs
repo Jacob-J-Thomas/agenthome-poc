@@ -356,7 +356,6 @@ public static class CustomLoopReceiptRetentionContractValidator
         RequireUtc(journal.UpdatedAtUtc, nameof(journal.UpdatedAtUtc));
         RequireBoundedText(journal.Detail, CustomLoopLimits.MaxRunDetailCharacters, nameof(journal.Detail));
         if (journal.OwnerProcessId <= 0
-            || journal.OwnershipAcquiredAtUtc < journal.Request.RequestedAtUtc
             || journal.UpdatedAtUtc < journal.OwnershipAcquiredAtUtc
             || journal.UpdatedAtUtc - journal.OwnershipAcquiredAtUtc > CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow
             || journal.Candidates.IsDefault

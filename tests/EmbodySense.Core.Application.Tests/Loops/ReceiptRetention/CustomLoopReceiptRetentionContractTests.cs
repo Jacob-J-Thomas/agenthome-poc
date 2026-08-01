@@ -163,6 +163,26 @@ public sealed class CustomLoopReceiptRetentionContractTests
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(tombstone with { Candidates = [tombstone.Candidates[0] with { DefinitionLineageProof = futureLineage }] }));
     }
 
+    [Fact]
+    public void Cleanup_journal_ownership_chronology_is_independent_from_the_caller_request_timestamp()
+    {
+        var journal = Journal(CustomLoopReceiptCleanupStage.IntentPersisted, CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+        var futureRequest = journal.Request with
+        {
+            RequestedAtUtc = journal.Request.RequestedAtUtc.AddDays(1),
+            ReplayCutoffUtc = CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(journal.Request.RequestedAtUtc.AddDays(1))
+        };
+        journal = journal with
+        {
+            Request = futureRequest,
+            RequestHash = CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(futureRequest)
+        };
+
+        CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(journal);
+
+        Assert.True(journal.OwnershipAcquiredAtUtc < journal.Request.RequestedAtUtc);
+    }
+
     [Theory]
     [InlineData(CustomLoopReceiptCleanupStage.IntentPersisted)]
     [InlineData(CustomLoopReceiptCleanupStage.IntentAuditRecorded)]

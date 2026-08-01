@@ -44,17 +44,48 @@ public sealed record CustomLoopReceiptRetentionBudget(
     /// <returns><see langword="true"/> when the requested accounting remains inside the applicable ceilings.</returns>
     public bool CanAccountArtifacts(int currentCount, long currentUtf8Bytes, int addedCount, long addedUtf8Bytes, bool integrityPreservingCompletion)
     {
+        return GetArtifactExhaustionReason(currentCount, currentUtf8Bytes, addedCount, addedUtf8Bytes, integrityPreservingCompletion) == CustomLoopReceiptQuotaExhaustionReason.None;
+    }
+
+    /// <summary>
+    /// Identifies the exact raw-artifact boundary that would prevent one accounting change.
+    /// </summary>
+    /// <param name="currentCount">The currently accounted artifact count.</param>
+    /// <param name="currentUtf8Bytes">The currently accounted artifact bytes.</param>
+    /// <param name="addedCount">The artifact count to reserve.</param>
+    /// <param name="addedUtf8Bytes">The artifact bytes to reserve.</param>
+    /// <param name="integrityPreservingCompletion">Whether the write completes already-pending work and may use reserved capacity.</param>
+    /// <returns>The absolute or reserved-capacity boundary preventing the change, or <see cref="CustomLoopReceiptQuotaExhaustionReason.None"/>.</returns>
+    public CustomLoopReceiptQuotaExhaustionReason GetArtifactExhaustionReason(int currentCount, long currentUtf8Bytes, int addedCount, long addedUtf8Bytes, bool integrityPreservingCompletion)
+    {
         if (currentCount < 0 || currentUtf8Bytes < 0 || addedCount < 0 || addedUtf8Bytes < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(currentCount), "Receipt accounting values cannot be negative.");
         }
 
-        var countLimit = integrityPreservingCompletion ? MaximumArtifactCount : NormalAdmissionArtifactCount;
-        var byteLimit = integrityPreservingCompletion ? MaximumArtifactUtf8Bytes : NormalAdmissionArtifactUtf8Bytes;
-        return currentCount <= countLimit
-            && currentUtf8Bytes <= byteLimit
-            && addedCount <= countLimit - currentCount
-            && addedUtf8Bytes <= byteLimit - currentUtf8Bytes;
+        if (currentCount > MaximumArtifactCount || addedCount > MaximumArtifactCount - currentCount)
+        {
+            return CustomLoopReceiptQuotaExhaustionReason.ArtifactCountLimit;
+        }
+
+        if (currentUtf8Bytes > MaximumArtifactUtf8Bytes || addedUtf8Bytes > MaximumArtifactUtf8Bytes - currentUtf8Bytes)
+        {
+            return CustomLoopReceiptQuotaExhaustionReason.ArtifactByteLimit;
+        }
+
+        if (integrityPreservingCompletion)
+        {
+            return CustomLoopReceiptQuotaExhaustionReason.None;
+        }
+
+        if (currentCount > NormalAdmissionArtifactCount || addedCount > NormalAdmissionArtifactCount - currentCount)
+        {
+            return CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactCountLimit;
+        }
+
+        return currentUtf8Bytes > NormalAdmissionArtifactUtf8Bytes || addedUtf8Bytes > NormalAdmissionArtifactUtf8Bytes - currentUtf8Bytes
+            ? CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactByteLimit
+            : CustomLoopReceiptQuotaExhaustionReason.None;
     }
 
     /// <summary>
@@ -67,14 +98,31 @@ public sealed record CustomLoopReceiptRetentionBudget(
     /// <returns><see langword="true"/> when every required proof entry fits without forgetting older evidence.</returns>
     public bool CanAccountProof(int currentCount, long currentUtf8Bytes, int addedCount, long addedUtf8Bytes)
     {
+        return GetProofExhaustionReason(currentCount, currentUtf8Bytes, addedCount, addedUtf8Bytes) == CustomLoopReceiptQuotaExhaustionReason.None;
+    }
+
+    /// <summary>
+    /// Identifies the exact compact-proof boundary that would prevent one accounting change.
+    /// </summary>
+    /// <param name="currentCount">The currently accounted proof entry count.</param>
+    /// <param name="currentUtf8Bytes">The currently accounted proof bytes.</param>
+    /// <param name="addedCount">The proof entry count to reserve.</param>
+    /// <param name="addedUtf8Bytes">The proof bytes to reserve.</param>
+    /// <returns>The compact-proof boundary preventing the change, or <see cref="CustomLoopReceiptQuotaExhaustionReason.None"/>.</returns>
+    public CustomLoopReceiptQuotaExhaustionReason GetProofExhaustionReason(int currentCount, long currentUtf8Bytes, int addedCount, long addedUtf8Bytes)
+    {
         if (currentCount < 0 || currentUtf8Bytes < 0 || addedCount < 0 || addedUtf8Bytes < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(currentCount), "Compact proof accounting values cannot be negative.");
         }
 
-        return currentCount <= MaximumProofCount
-            && currentUtf8Bytes <= MaximumProofUtf8Bytes
-            && addedCount <= MaximumProofCount - currentCount
-            && addedUtf8Bytes <= MaximumProofUtf8Bytes - currentUtf8Bytes;
+        if (currentCount > MaximumProofCount || addedCount > MaximumProofCount - currentCount)
+        {
+            return CustomLoopReceiptQuotaExhaustionReason.ProofCountLimit;
+        }
+
+        return currentUtf8Bytes > MaximumProofUtf8Bytes || addedUtf8Bytes > MaximumProofUtf8Bytes - currentUtf8Bytes
+            ? CustomLoopReceiptQuotaExhaustionReason.ProofByteLimit
+            : CustomLoopReceiptQuotaExhaustionReason.None;
     }
 }

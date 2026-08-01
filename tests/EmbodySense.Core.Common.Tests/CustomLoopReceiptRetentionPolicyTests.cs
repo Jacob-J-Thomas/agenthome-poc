@@ -37,6 +37,28 @@ public sealed class CustomLoopReceiptRetentionPolicyTests
         Assert.False(budget.CanAccountArtifacts(budget.MaximumArtifactCount + 1, budget.MaximumArtifactUtf8Bytes + 1, 0, 0, integrityPreservingCompletion: true));
     }
 
+    [Fact]
+    public void Normal_admission_and_posture_exhaustion_agree_at_count_and_byte_reserve_boundaries()
+    {
+        var budget = CustomLoopReceiptRetentionPolicy.GetBudget(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+        const int AddedCount = 1;
+        const long AddedBytes = 640 * 1024;
+
+        Assert.True(budget.CanAccountArtifacts(budget.NormalAdmissionArtifactCount - AddedCount, 0, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.None, budget.GetArtifactExhaustionReason(budget.NormalAdmissionArtifactCount - AddedCount, 0, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+        Assert.False(budget.CanAccountArtifacts(budget.NormalAdmissionArtifactCount, 0, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactCountLimit, budget.GetArtifactExhaustionReason(budget.NormalAdmissionArtifactCount, 0, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+
+        var lastNormallyAdmissibleByteCount = budget.NormalAdmissionArtifactUtf8Bytes - AddedBytes;
+        Assert.True(budget.CanAccountArtifacts(0, lastNormallyAdmissibleByteCount, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.None, budget.GetArtifactExhaustionReason(0, lastNormallyAdmissibleByteCount, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+        Assert.False(budget.CanAccountArtifacts(0, lastNormallyAdmissibleByteCount + 1, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactByteLimit, budget.GetArtifactExhaustionReason(0, lastNormallyAdmissibleByteCount + 1, AddedCount, AddedBytes, integrityPreservingCompletion: false));
+
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ArtifactCountLimit, budget.GetArtifactExhaustionReason(budget.MaximumArtifactCount, 0, AddedCount, AddedBytes, integrityPreservingCompletion: true));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ArtifactByteLimit, budget.GetArtifactExhaustionReason(0, budget.MaximumArtifactUtf8Bytes, AddedCount, AddedBytes, integrityPreservingCompletion: true));
+    }
+
     [Theory]
     [InlineData(-1, 0, 0, 0)]
     [InlineData(0, -1, 0, 0)]
@@ -58,6 +80,17 @@ public sealed class CustomLoopReceiptRetentionPolicyTests
         Assert.False(budget.CanAccountProof(budget.MaximumProofCount, budget.MaximumProofUtf8Bytes, 1, 1));
         Assert.False(budget.CanAccountProof(budget.MaximumProofCount + 1, budget.MaximumProofUtf8Bytes + 1, 0, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => budget.CanAccountProof(0, 0, -1, 0));
+    }
+
+    [Fact]
+    public void Prospective_compact_proof_admission_exposes_the_exact_capacity_boundary()
+    {
+        var budget = new CustomLoopReceiptRetentionBudget(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, 4, 400, 1, 100, 3, 30);
+
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.None, budget.GetProofExhaustionReason(2, 19, 1, 11));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ProofCountLimit, budget.GetProofExhaustionReason(3, 0, 1, 1));
+        Assert.Equal(CustomLoopReceiptQuotaExhaustionReason.ProofByteLimit, budget.GetProofExhaustionReason(1, 21, 1, 10));
+        Assert.False(budget.CanAccountProof(1, 21, 1, 10));
     }
 
     [Fact]
