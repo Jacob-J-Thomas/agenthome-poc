@@ -972,7 +972,9 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(CustomLoopReceiptArtifactClass.LifecycleControlReceipt, cleanup.ArtifactClass);
         Assert.Equal(AuditSchema.Actors.Web, cleanup.Actor);
         Assert.Equal("web", cleanup.Surface);
-        Assert.Equal(CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(cleanup.RequestedAtUtc), cleanup.ReplayCutoffUtc);
+        Assert.StartsWith("control-receipt-retention-", cleanup.OperationId, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount, cleanup.MaximumArtifactCount);
+        Assert.Equal(CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes, cleanup.MaximumArtifactUtf8Bytes);
     }
 
     [Theory]
@@ -1317,11 +1319,11 @@ public sealed class CustomLoopLifecycleServiceTests
     {
         public CustomLoopReceiptArtifactClass ArtifactClass => CustomLoopReceiptArtifactClass.LifecycleControlReceipt;
 
-        public List<CustomLoopReceiptCleanupRequest> Requests { get; } = [];
+        public List<CustomLoopReceiptCleanupCommand> Requests { get; } = [];
 
-        public Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken = default)
+        public Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default)
         {
-            Requests.Add(request);
+            Requests.Add(command);
             return Task.FromResult(new CustomLoopReceiptCleanupResult(cleanupStatus, null, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, cleanupStatus == CustomLoopReceiptCleanupStatus.Pruned ? 1 : 0, 1, "Recorded cleanup result."));
         }
 

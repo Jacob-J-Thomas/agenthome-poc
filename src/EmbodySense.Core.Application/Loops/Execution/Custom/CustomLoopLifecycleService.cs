@@ -665,21 +665,18 @@ public sealed class CustomLoopLifecycleService
 
     private async Task<(CustomLoopControlOperationStoreResult StoreResult, CustomLoopReceiptCleanupResult? CleanupResult)> RetryBeginAfterGovernedRetentionAsync(CustomLoopControlOperation pending, CustomLoopControlOperationStoreResult quotaResult, CancellationToken cancellationToken)
     {
-        var now = UtcNow();
-        var request = new CustomLoopReceiptCleanupRequest(
-            CustomLoopReceiptCleanupRequest.CurrentSchemaVersion,
+        var command = new CustomLoopReceiptCleanupCommand(
+            CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
             $"control-receipt-retention-{Guid.NewGuid():N}",
             pending.Actor,
             _surface,
-            now,
-            CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(now),
             CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
             CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes);
         CustomLoopReceiptCleanupResult cleanup;
         try
         {
-            cleanup = await _receiptRetention!.CleanupAsync(request, cancellationToken);
+            cleanup = await _receiptRetention!.CleanupAsync(command, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

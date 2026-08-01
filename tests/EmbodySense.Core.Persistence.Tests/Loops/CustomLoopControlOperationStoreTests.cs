@@ -208,7 +208,7 @@ public sealed class CustomLoopControlOperationStoreTests
         lease.Dispose();
 
         time.UtcNow = completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
-        var cleanup = await store.CleanupAsync(CleanupRequest("cleanup-expired", time.UtcNow));
+        var cleanup = await store.CleanupAsync(CleanupCommand("cleanup-expired"));
         var lookup = await store.LookupOperationAsync(completed.OperationId);
         var expiredBegin = await store.BeginAsync(pending);
         var posture = await store.InspectAsync();
@@ -242,13 +242,13 @@ public sealed class CustomLoopControlOperationStoreTests
 
         time.UtcNow = completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
         var request = CleanupRequest("cleanup-audit-gap", time.UtcNow);
-        var unavailable = await initial.CleanupAsync(request);
+        var unavailable = await initial.CleanupAsync(CleanupCommand(request.OperationId));
         Assert.Equal(CustomLoopReceiptCleanupStatus.AuditUnavailable, unavailable.Status);
         Assert.True(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json")));
         Assert.Equal(CustomLoopReceiptCleanupStage.IntentAuditStarted, unavailable.Journal!.Stage);
 
         time.UtcNow += CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
-        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(request);
+        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.AuditUnavailable, recovered.Status);
         Assert.Equal(CustomLoopReceiptCleanupStage.Degraded, recovered.Journal!.Stage);
@@ -270,7 +270,7 @@ public sealed class CustomLoopControlOperationStoreTests
         lease.Dispose();
 
         time.UtcNow = _timestamp + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
-        var interrupted = await initial.CleanupAsync(CleanupRequest("cleanup-stale-owner", time.UtcNow));
+        var interrupted = await initial.CleanupAsync(CleanupCommand("cleanup-stale-owner"));
         Assert.Equal(CustomLoopReceiptCleanupStage.IntentAuditStarted, interrupted.Journal!.Stage);
 
         time.UtcNow += CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
@@ -301,14 +301,14 @@ public sealed class CustomLoopControlOperationStoreTests
 
         time.UtcNow = completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
         var request = CleanupRequest("cleanup-intent-audit-restart", time.UtcNow);
-        var interrupted = await initial.CleanupAsync(request);
+        var interrupted = await initial.CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.AuditUnavailable, interrupted.Status);
         Assert.Equal(CustomLoopReceiptCleanupStage.IntentAuditStarted, interrupted.Journal!.Stage);
         Assert.Single(audit.Events, item => item.Action == AuditSchema.Actions.LoopControlReceiptRetentionIntent);
 
         time.UtcNow += CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
-        var recovered = await new CustomLoopControlOperationStore(paths, audit, time).CleanupAsync(request);
+        var recovered = await new CustomLoopControlOperationStore(paths, audit, time).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.True(recovered.Status == CustomLoopReceiptCleanupStatus.Pruned, recovered.Detail);
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json")));
@@ -337,7 +337,7 @@ public sealed class CustomLoopControlOperationStoreTests
         var crashTime = new BoundaryCrashTimeProvider(replayExpiry, () => File.Exists(paths.CustomLoopReceiptProofLedgerPath)
             && File.Exists(journalPath)
             && ReadCleanupJournal(journalPath).Stage == CustomLoopReceiptCleanupStage.IntentAuditRecorded);
-        var interrupted = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), crashTime).CleanupAsync(request);
+        var interrupted = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), crashTime).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, interrupted.Status);
         Assert.True(File.Exists(receiptPath));
@@ -346,7 +346,7 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Equal(completed.UpdatedAtUtc, Assert.Single(ledger.ExpiredOperations).CompletedAtUtc);
 
         time.UtcNow = replayExpiry + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
-        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(request);
+        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, recovered.Status);
         Assert.False(File.Exists(receiptPath));
@@ -383,7 +383,7 @@ public sealed class CustomLoopControlOperationStoreTests
         var receiptPaths = completed.Select(item => Path.Combine(paths.CustomLoopControlOperationsPath, item.OperationId + ".json")).ToArray();
         var journalPath = Path.Combine(paths.CustomLoopControlReceiptCleanupPath, "active.json");
         var crashTime = new BoundaryCrashTimeProvider(replayExpiry, () => IsRemovalWriteAheadOfJournal(journalPath, receiptPaths, crashAfterRemovalCount));
-        var interrupted = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), crashTime).CleanupAsync(request);
+        var interrupted = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), crashTime).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, interrupted.Status);
         Assert.Equal(crashAfterRemovalCount, receiptPaths.Count(path => !File.Exists(path)));
@@ -393,7 +393,7 @@ public sealed class CustomLoopControlOperationStoreTests
 
         var firstRecoveryAtUtc = replayExpiry + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
         var reconstructionCrashTime = new BoundaryCrashTimeProvider(firstRecoveryAtUtc, () => IsReconstructedProgressBeforeNextStage(journalPath, receiptPaths, crashAfterRemovalCount));
-        var reconstructionInterrupted = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), reconstructionCrashTime).CleanupAsync(request);
+        var reconstructionInterrupted = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), reconstructionCrashTime).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, reconstructionInterrupted.Status);
         var reconstructedJournal = ReadCleanupJournal(journalPath);
@@ -402,7 +402,7 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Equal(reconstructedJournal.Candidates.OrderBy(item => item.ArtifactId, StringComparer.Ordinal).Take(crashAfterRemovalCount).Sum(item => item.ArtifactUtf8Bytes), reconstructedJournal.RemovedArtifactUtf8Bytes);
 
         var finalRecoveryAtUtc = firstRecoveryAtUtc + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
-        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), new MutableTimeProvider(finalRecoveryAtUtc)).CleanupAsync(request);
+        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), new MutableTimeProvider(finalRecoveryAtUtc)).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, recovered.Status);
         Assert.Equal(completed.Count, recovered.CompactedArtifactCount);
@@ -415,7 +415,7 @@ public sealed class CustomLoopControlOperationStoreTests
     }
 
     [Fact]
-    public async Task Cleanup_rejects_future_request_time_without_accelerating_exact_replay_or_creating_a_lease()
+    public async Task Cleanup_derives_retention_time_from_the_trusted_store_clock()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -428,17 +428,48 @@ public sealed class CustomLoopControlOperationStoreTests
         lease.Dispose();
 
         var trustedNow = completedAtUtc.AddDays(1);
-        var futureRequest = CleanupRequest("cleanup-future-time", completedAtUtc.AddDays(31));
         var audit = new RecordingAuditLog();
         var store = new CustomLoopControlOperationStore(paths, audit, new MutableTimeProvider(trustedNow));
-        var result = await store.CleanupAsync(futureRequest);
+        var command = CleanupCommand("cleanup-trusted-time");
+        var result = await store.CleanupAsync(command);
+        var changed = await store.CleanupAsync(command with { Surface = "cli" });
 
-        Assert.Equal(CustomLoopReceiptCleanupStatus.Invalid, result.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, result.Status);
+        Assert.Equal(trustedNow, result.Journal!.Request.RequestedAtUtc);
+        Assert.Equal(CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(trustedNow), result.Journal.Request.ReplayCutoffUtc);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Invalid, changed.Status);
+        Assert.Equal(result.Journal, changed.Journal);
         Assert.Equal(CustomLoopReceiptOperationLookupStatus.Exact, (await store.LookupOperationAsync(completed.OperationId)).Status);
         Assert.True(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json")));
         Assert.False(File.Exists(paths.CustomLoopReceiptProofLedgerPath));
-        Assert.False(Directory.Exists(paths.CustomLoopControlReceiptCleanupPath));
         Assert.Empty(audit.Events);
+    }
+
+    [Fact]
+    public async Task Cleanup_replays_the_same_timestamp_free_command_after_time_advances()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var completedAtUtc = _timestamp;
+        var time = new MutableTimeProvider(completedAtUtc);
+        var store = new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time);
+        var created = await store.BeginAsync(Pending("control-cleanup-replay", AuditSchema.Actors.Web));
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        var completed = Complete(created.Operation!, completedAtUtc);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+        lease.Dispose();
+
+        time.UtcNow = completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
+        var command = CleanupCommand("cleanup-command-replay");
+        var first = await store.CleanupAsync(command);
+        var persistedRequestedAtUtc = first.Journal!.Request.RequestedAtUtc;
+
+        time.UtcNow += TimeSpan.FromDays(2);
+        var replay = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(command);
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, first.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Replayed, replay.Status);
+        Assert.Equal(persistedRequestedAtUtc, replay.Journal!.Request.RequestedAtUtc);
     }
 
     [Fact]
@@ -460,7 +491,7 @@ public sealed class CustomLoopControlOperationStoreTests
         var receiptPath = Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json");
         var receiptBytes = await File.ReadAllBytesAsync(receiptPath);
         var receiptHash = Convert.ToHexString(SHA256.HashData(receiptBytes)).ToLowerInvariant();
-        var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, completed.OperationId, completed.RequestHash, receiptHash, completedAtUtc, replayExpiry);
+        var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, null, null, null, completed.OperationId, completed.RequestHash, receiptHash, completedAtUtc, replayExpiry);
         var candidate = new CustomLoopReceiptCleanupCandidate(completed.OperationId, receiptHash, receiptBytes.Length, CustomLoopReceiptArtifactCategory.Compactable, true, true, proof, null);
         var journal = new CustomLoopReceiptCleanupJournal(
             CustomLoopReceiptCleanupJournal.CurrentSchemaVersion,
@@ -482,7 +513,7 @@ public sealed class CustomLoopControlOperationStoreTests
         await File.WriteAllBytesAsync(receiptPath, [.. receiptBytes, (byte)'\n']);
 
         time.UtcNow = replayExpiry + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
-        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(request);
+        var recovered = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.CleanupConflict, recovered.Status);
         Assert.Equal(CustomLoopReceiptCleanupStage.AbandonedConflict, recovered.Journal!.Stage);
@@ -509,7 +540,7 @@ public sealed class CustomLoopControlOperationStoreTests
         var receiptPath = Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json");
         var receiptBytes = await File.ReadAllBytesAsync(receiptPath);
         var receiptHash = Convert.ToHexString(SHA256.HashData(receiptBytes)).ToLowerInvariant();
-        var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, completed.OperationId, completed.RequestHash, receiptHash, completedAtUtc, replayExpiry);
+        var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, null, null, null, completed.OperationId, completed.RequestHash, receiptHash, completedAtUtc, replayExpiry);
         var ledger = new CustomLoopReceiptProofLedger(CustomLoopReceiptProofLedger.CurrentSchemaVersion, 1, replayExpiry, null, ImmutableArray<CustomLoopDefinitionLineageProof>.Empty, [proof]);
         Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
         await File.WriteAllBytesAsync(paths.CustomLoopReceiptProofLedgerPath, CustomLoopReceiptRetentionContractCodec.SerializeProofLedger(ledger));
@@ -535,7 +566,7 @@ public sealed class CustomLoopControlOperationStoreTests
 
         time.UtcNow = replayExpiry + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow + TimeSpan.FromSeconds(1);
         var recoveredAudit = new RecordingAuditLog();
-        var recovered = await new CustomLoopControlOperationStore(paths, recoveredAudit, time).CleanupAsync(request);
+        var recovered = await new CustomLoopControlOperationStore(paths, recoveredAudit, time).CleanupAsync(CleanupCommand(request.OperationId));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning, recovered.Status);
         Assert.Equal(CustomLoopReceiptCleanupStage.CommittedWithAuditWarning, recovered.Journal!.Stage);
@@ -558,7 +589,7 @@ public sealed class CustomLoopControlOperationStoreTests
 
         var receiptPath = Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json");
         var receiptBytes = await File.ReadAllBytesAsync(receiptPath);
-        var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, completed.OperationId, completed.RequestHash, Convert.ToHexString(SHA256.HashData(receiptBytes)).ToLowerInvariant(), completed.UpdatedAtUtc, completed.UpdatedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration);
+        var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, null, null, null, completed.OperationId, completed.RequestHash, Convert.ToHexString(SHA256.HashData(receiptBytes)).ToLowerInvariant(), completed.UpdatedAtUtc, completed.UpdatedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration);
         var ledger = new CustomLoopReceiptProofLedger(CustomLoopReceiptProofLedger.CurrentSchemaVersion, 1, proof.ExpiredAtUtc, null, ImmutableArray<CustomLoopDefinitionLineageProof>.Empty, [proof]);
         Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
         await File.WriteAllBytesAsync(paths.CustomLoopReceiptProofLedgerPath, CustomLoopReceiptRetentionContractCodec.SerializeProofLedger(ledger));
@@ -628,7 +659,7 @@ public sealed class CustomLoopControlOperationStoreTests
         var corruptPath = Path.Combine(paths.CustomLoopControlOperationsPath, "control-corrupt-retention.json");
         await File.WriteAllTextAsync(corruptPath, "{ malformed");
         var now = _timestamp + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
-        var result = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), new MutableTimeProvider(now)).CleanupAsync(CleanupRequest("cleanup-corrupt", now));
+        var result = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), new MutableTimeProvider(now)).CleanupAsync(CleanupCommand("cleanup-corrupt"));
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, result.Status);
         Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, result.BlockReason);
@@ -674,14 +705,17 @@ public sealed class CustomLoopControlOperationStoreTests
 
     private static CustomLoopReceiptCleanupRequest CleanupRequest(string operationId, DateTimeOffset requestedAtUtc)
     {
-        return new CustomLoopReceiptCleanupRequest(
-            CustomLoopReceiptCleanupRequest.CurrentSchemaVersion,
+        return CustomLoopReceiptCleanupRequestFactory.Create(CleanupCommand(operationId), requestedAtUtc);
+    }
+
+    private static CustomLoopReceiptCleanupCommand CleanupCommand(string operationId)
+    {
+        return new CustomLoopReceiptCleanupCommand(
+            CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
             CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
             operationId,
             AuditSchema.Actors.Web,
             "web",
-            requestedAtUtc,
-            CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(requestedAtUtc),
             4,
             64 * 1024);
     }

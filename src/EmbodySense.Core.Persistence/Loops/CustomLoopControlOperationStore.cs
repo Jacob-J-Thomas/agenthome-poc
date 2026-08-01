@@ -423,18 +423,21 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     }
 
     /// <inheritdoc />
-    public async Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken = default)
+    public async Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default)
     {
-        CustomLoopReceiptRetentionContractValidator.ValidateCleanupRequest(request);
+        CustomLoopReceiptCleanupRequest request;
+        try
+        {
+            request = CustomLoopReceiptCleanupRequestFactory.Create(command, TrustedUtcNow());
+        }
+        catch (ArgumentException exception)
+        {
+            return CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, null, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, exception.Message);
+        }
+
         if (request.ArtifactClass != ArtifactClass)
         {
             return CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, null, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, "Lifecycle-control retention cannot process a different receipt artifact class.");
-        }
-
-        var trustedNow = TrustedUtcNow();
-        if (IsFutureCleanupRequest(request, trustedNow))
-        {
-            return CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, null, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, "Lifecycle-control receipt cleanup rejected request time or replay cutoff that is ahead of the trusted retention clock.");
         }
 
         await _processGate.WaitAsync(cancellationToken);
@@ -469,6 +472,16 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     private async Task<CustomLoopReceiptCleanupResult> CleanupUnderOwnershipAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken)
     {
         var existing = await ReadCleanupJournalAsync(cancellationToken);
+        if (existing is not null && string.Equals(existing.Request.OperationId, request.OperationId, StringComparison.Ordinal))
+        {
+            if (!MatchesCleanupCommand(existing.Request, request))
+            {
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, existing, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, "The lifecycle-control receipt cleanup operation ID is already bound to different request content.");
+            }
+
+            request = existing.Request;
+        }
+
         if (existing is not null)
         {
             if (string.Equals(existing.RequestHash, CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(request), StringComparison.Ordinal))
@@ -481,11 +494,6 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
                 return IsInsideCleanupOwnershipWindow(existing, TrustedUtcNow())
                     ? CleanupResult(CustomLoopReceiptCleanupStatus.OperationInProgress, existing, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.OwnershipUnresolved, "Another process owns lifecycle-control receipt cleanup or its bounded crash-recovery window.")
                     : await ResumeCleanupAsync(Reown(existing), cancellationToken);
-            }
-
-            if (string.Equals(existing.Request.OperationId, request.OperationId, StringComparison.Ordinal))
-            {
-                return CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, existing, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, "The lifecycle-control receipt cleanup operation ID is already bound to different request content.");
             }
 
             if (IsCleanupActive(existing.Stage))
@@ -539,6 +547,17 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         var intent = CreateJournal(request, candidateArray, CustomLoopReceiptCleanupStage.IntentPersisted, CustomLoopReceiptCleanupOutcome.Unknown, null, 0, 0, "Expired lifecycle-control receipts were selected under bounded cross-process ownership.", now);
         await WriteCleanupJournalAsync(intent, cancellationToken);
         return await ResumeCleanupAsync(intent, cancellationToken);
+    }
+
+    private static bool MatchesCleanupCommand(CustomLoopReceiptCleanupRequest persisted, CustomLoopReceiptCleanupRequest candidate)
+    {
+        return persisted.SchemaVersion == candidate.SchemaVersion
+            && persisted.ArtifactClass == candidate.ArtifactClass
+            && string.Equals(persisted.OperationId, candidate.OperationId, StringComparison.Ordinal)
+            && string.Equals(persisted.Actor, candidate.Actor, StringComparison.Ordinal)
+            && string.Equals(persisted.Surface, candidate.Surface, StringComparison.Ordinal)
+            && persisted.MaximumArtifactCount == candidate.MaximumArtifactCount
+            && persisted.MaximumArtifactUtf8Bytes == candidate.MaximumArtifactUtf8Bytes;
     }
 
     private async Task<CustomLoopReceiptCleanupResult> ResumeCleanupAsync(CustomLoopReceiptCleanupJournal journal, CancellationToken cancellationToken)
@@ -1189,7 +1208,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             }
 
             var hash = Hash(artifact.Bytes);
-            var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, artifact.Operation.OperationId, artifact.Operation.RequestHash, hash, completedAtUtc, completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration);
+            var proof = new CustomLoopExpiredOperationProof(CustomLoopExpiredOperationProof.CurrentSchemaVersion, CustomLoopReceiptArtifactClass.LifecycleControlReceipt, null, null, null, artifact.Operation.OperationId, artifact.Operation.RequestHash, hash, completedAtUtc, completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration);
             candidates.Add(new CustomLoopReceiptCleanupCandidate(artifact.Operation.OperationId, hash, artifact.Bytes.Length, CustomLoopReceiptArtifactCategory.Compactable, true, true, proof, null));
             selectedBytes += artifact.Bytes.Length;
         }
