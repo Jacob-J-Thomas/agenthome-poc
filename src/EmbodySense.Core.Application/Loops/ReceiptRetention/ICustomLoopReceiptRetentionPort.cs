@@ -30,10 +30,10 @@ public interface ICustomLoopReceiptRetentionPort
     Task<CustomLoopReceiptOperationLookupResult> LookupOperationAsync(string operationId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Executes no more than the caller's bounded, validated, governed cleanup request.
+    /// Executes no more than the caller's bounded, validated, governed cleanup command.
     /// </summary>
-    /// <param name="request">The bounded cleanup request.</param>
+    /// <param name="command">The timestamp-free bounded cleanup command.</param>
     /// <param name="cancellationToken">The token used to cancel cleanup.</param>
     /// <returns>The committed, blocked, exhausted, conflicted, or invalid result.</returns>
-    Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken = default);
+    Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default);
 }
