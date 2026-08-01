@@ -16,27 +16,54 @@ public sealed class WorkspaceStatusReader
     /// </summary>
     /// <param name="rootPath">The workspace root, normalized to an absolute path.</param>
     /// <returns>
-    /// A snapshot whose initialized flag requires the <c>.agent</c> directory, role document, and
-    /// permissions document to exist. Missing, invalid, or unsupported permission configuration is
-    /// represented as approval-required default access.
+    /// A snapshot whose initialized flag requires the <c>.agent</c> directory, a readable nonblank role
+    /// document, and a valid current-version permissions document. Missing, invalid, or unsupported permission
+    /// configuration is represented as approval-required default access.
     /// </returns>
     public WorkspaceStatusSnapshot Read(string rootPath)
     {
         var paths = new WorkspacePaths(rootPath);
         var permissions = new PermissionPolicyStore().Load(paths);
+        var isInitialized = Directory.Exists(paths.AgentPath) && IsRoleDocumentAvailable(paths.RolePath) && permissions.HasDocument;
 
         return new WorkspaceStatusSnapshot(
             RootPath: paths.RootPath,
             AgentPath: paths.AgentPath,
             WorkspacePath: paths.WorkspacePath,
-            IsInitialized: paths.IsInitialized,
-            HasPartialScaffold: Directory.Exists(paths.AgentPath) && !paths.IsInitialized,
+            IsInitialized: isInitialized,
+            HasPartialScaffold: Directory.Exists(paths.AgentPath) && !isInitialized,
             EventsLogPath: paths.EventsLogPath,
             PermissionsPath: paths.PermissionsPath,
             TasksPath: paths.TasksPath,
             DefaultAccess: FormatDefaultAccess(permissions),
             ApprovedEntries: FormatApprovedEntries(permissions.Approved),
             DeniedEntries: FormatDeniedEntries(permissions.Denied));
+    }
+
+    private static bool IsRoleDocumentAvailable(string rolePath)
+    {
+        if (!File.Exists(rolePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var reader = File.OpenText(rolePath);
+            while (reader.Read() is var character && character >= 0)
+            {
+                if (!char.IsWhiteSpace((char)character))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        return false;
     }
 
     private static string FormatDefaultAccess(IDirectoryPermissionPolicy permissions)

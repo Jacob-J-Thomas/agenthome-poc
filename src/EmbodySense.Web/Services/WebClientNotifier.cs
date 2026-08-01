@@ -18,6 +18,19 @@ public sealed class WebClientNotifier : IWebClientNotifier
     }
 
     /// <summary>
+    /// Validates the workspace status and completes without publishing it.
+    /// </summary>
+    /// <param name="status">The required current Web workspace status.</param>
+    /// <param name="cancellationToken">Ignored because no asynchronous operation is started.</param>
+    /// <returns>An already completed task.</returns>
+    public Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
     /// Validates the approval projection and completes without publishing it.
     /// </summary>
     /// <param name="ownerConnectionId">The owning connection, or <see langword="null"/> or whitespace only for an empty clear.</param>

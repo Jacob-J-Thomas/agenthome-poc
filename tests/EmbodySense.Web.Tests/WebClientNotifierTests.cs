@@ -5,6 +5,15 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class WebClientNotifierTests
 {
+    [Fact]
+    public async Task None_accepts_a_valid_status_through_the_interface()
+    {
+        IWebClientNotifier notifier = WebClientNotifier.None;
+        var status = new WebStatus("web", true, "C:\\workspace", false, "uninitialized", null, "http://127.0.0.1:5174", "CLI verification");
+
+        await notifier.StatusChangedAsync(status);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

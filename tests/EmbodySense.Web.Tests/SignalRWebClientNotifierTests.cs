@@ -5,6 +5,19 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class SignalRWebClientNotifierTests
 {
+    [Fact]
+    public async Task StatusChangedAsync_broadcasts_to_all_clients()
+    {
+        var context = new RecordingHubContext();
+        var notifier = new SignalRWebClientNotifier(context);
+        var status = new WebStatus("web", true, "C:\\workspace", true, "initialized", "initialized", "http://127.0.0.1:5174", "CLI verification");
+
+        await notifier.StatusChangedAsync(status);
+
+        Assert.Same(status, Assert.Single(context.ClientsRecorder.AllClient.Statuses));
+        Assert.Empty(context.ClientsRecorder.TargetedConnectionIds);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

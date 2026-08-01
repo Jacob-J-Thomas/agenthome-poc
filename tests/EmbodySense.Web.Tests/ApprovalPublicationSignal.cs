@@ -8,6 +8,8 @@ internal sealed class ApprovalPublicationSignal : IWebClientNotifier
     private static readonly TimeSpan _publicationDeadline = TimeSpan.FromSeconds(30);
     private readonly TaskCompletionSource<string> _nonemptyOwnerPublication = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    public Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
     public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
     {
         if (!string.IsNullOrWhiteSpace(ownerConnectionId) && approvals.Count > 0)

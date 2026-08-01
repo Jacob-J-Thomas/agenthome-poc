@@ -50,4 +50,31 @@ public sealed class WorkspaceStatusReaderTests
         Assert.False(status.IsInitialized);
         Assert.True(status.HasPartialScaffold);
     }
+
+    [Fact]
+    public async Task Read_reports_invalid_permissions_as_a_partial_scaffold()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File(".agent", "permissions.json"), "{\"version\":");
+
+        var status = new WorkspaceStatusReader().Read(workspace.RootPath);
+
+        Assert.False(status.IsInitialized);
+        Assert.True(status.HasPartialScaffold);
+        Assert.Equal("requires approval because permissions.json is missing, invalid, or unsupported", status.DefaultAccess);
+    }
+
+    [Fact]
+    public async Task Read_reports_blank_role_as_a_partial_scaffold()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File(".agent", "ROLE.md"), " \r\n\t");
+
+        var status = new WorkspaceStatusReader().Read(workspace.RootPath);
+
+        Assert.False(status.IsInitialized);
+        Assert.True(status.HasPartialScaffold);
+    }
 }

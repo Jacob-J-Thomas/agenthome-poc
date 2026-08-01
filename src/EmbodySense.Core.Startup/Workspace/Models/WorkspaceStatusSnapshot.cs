@@ -6,7 +6,7 @@ namespace EmbodySense.Core.Startup.Workspace.Models;
 /// <param name="RootPath">The normalized absolute workspace root.</param>
 /// <param name="AgentPath">The derived durable <c>.agent</c> directory.</param>
 /// <param name="WorkspacePath">The governed working area, currently equal to <paramref name="RootPath"/>.</param>
-/// <param name="IsInitialized">Whether the agent directory, role document, and permissions document all exist.</param>
+/// <param name="IsInitialized">Whether the agent directory contains a readable, nonblank role document and a valid current-version permissions document.</param>
 /// <param name="HasPartialScaffold">Whether an incomplete <c>.agent</c> scaffold exists and requires repair.</param>
 /// <param name="EventsLogPath">The canonical append-only audit event path.</param>
 /// <param name="PermissionsPath">The canonical directory permission document path.</param>
