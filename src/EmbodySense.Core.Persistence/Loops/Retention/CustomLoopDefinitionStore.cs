@@ -194,6 +194,7 @@ public sealed partial class CustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             return await InspectReceiptRetentionUnderLockAsync(artifactClass, cancellationToken);
         }
         finally
@@ -217,6 +218,7 @@ public sealed partial class CustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var operationPath = GetOperationPath(safeOperationId);
             if (File.Exists(operationPath))
             {
@@ -288,6 +290,7 @@ public sealed partial class CustomLoopDefinitionStore
             try
             {
                 using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+                using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
                 return await CleanupReceiptRetentionUnderLockAsync(request, allowPersistedTimeReuse, cancellationToken);
             }
             catch (InvalidOperationException exception) when (exception.InnerException is IOException)
@@ -1273,13 +1276,17 @@ public sealed partial class CustomLoopDefinitionStore
             Path.GetFileName(_paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath),
             Path.GetFileName(_paths.CustomLoopDefinitionTombstoneCleanupJournalPath)
         };
-        if (Directory.EnumerateDirectories(_paths.CustomLoopReceiptRetentionPath, "*", SearchOption.TopDirectoryOnly).Take(1).Any())
+        var lifecycleCleanupDirectory = Path.GetFileName(_paths.CustomLoopControlReceiptCleanupPath);
+        if (Directory.EnumerateDirectories(_paths.CustomLoopReceiptRetentionPath, "*", SearchOption.TopDirectoryOnly)
+            .Select(Path.GetFileName)
+            .Any(directoryName => !string.Equals(directoryName, lifecycleCleanupDirectory, StringComparison.Ordinal)))
         {
             throw new FormatException("Custom-loop receipt retention storage cannot contain subdirectories.");
         }
 
-        var boundedPaths = Directory.EnumerateFiles(_paths.CustomLoopReceiptRetentionPath, "*", SearchOption.TopDirectoryOnly).Take(canonicalFiles.Count + 2).ToArray();
-        if (boundedPaths.Length > canonicalFiles.Count + 1)
+        const int AdditionalOwnedFileCount = 2; // The shared mutation lock plus at most one interrupted atomic write.
+        var boundedPaths = Directory.EnumerateFiles(_paths.CustomLoopReceiptRetentionPath, "*", SearchOption.TopDirectoryOnly).Take(canonicalFiles.Count + AdditionalOwnedFileCount + 1).ToArray();
+        if (boundedPaths.Length > canonicalFiles.Count + AdditionalOwnedFileCount)
         {
             throw new FormatException("Custom-loop receipt retention storage exceeds its bounded inventory ceiling.");
         }
@@ -1287,6 +1294,12 @@ public sealed partial class CustomLoopDefinitionStore
         foreach (var path in boundedPaths.OrderBy(path => path, StringComparer.Ordinal))
         {
             var fileName = Path.GetFileName(path);
+            if (string.Equals(fileName, ".custom-loop-mutations.lock", StringComparison.Ordinal))
+            {
+                // Lifecycle-control receipt retention shares this root and owns the same cross-process mutation lock.
+                continue;
+            }
+
             if (IsAtomicWriteTemp(fileName, canonicalFiles.Contains))
             {
                 _pathGuard.DeleteFile(_paths.CustomLoopReceiptRetentionPath, path);
