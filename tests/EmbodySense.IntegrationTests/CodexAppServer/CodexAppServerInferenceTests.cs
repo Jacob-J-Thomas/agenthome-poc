@@ -81,6 +81,31 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_classifies_a_turn_start_rejection_as_a_conclusive_terminal_provider_outcome()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            """{"id":3,"error":{"code":-32602,"message":"turn request rejected","data":{"turnId":"turn-rejected"}}}""");
+        var client = CreateClient(transport);
+        var dispatchStarted = false;
+
+        var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("reject conclusively"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ =>
+            {
+                dispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.True(dispatchStarted);
+        Assert.Equal("turn-rejected", exception.ProviderResponseId);
+        Assert.Contains("turn request rejected", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GenerateAsync_preserves_an_observed_success_when_completion_audit_fails()
     {
         using var workspace = new TestWorkspace();
