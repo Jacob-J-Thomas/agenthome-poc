@@ -299,6 +299,8 @@ public sealed class BrowserFlowTests
         try
         {
             await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && !document.getElementById('loopInitializationPanel').hidden");
+            var expectedRoot = JsonSerializer.Serialize(workspace.RootPath);
+            await browser.WaitForExpressionAsync($"document.getElementById('loopInitializationRoot').textContent === {expectedRoot}");
             Assert.Equal(workspace.RootPath, await browser.EvaluateStringAsync("document.getElementById('loopInitializationRoot').textContent"));
             var explanation = await browser.EvaluateStringAsync("document.getElementById('loopInitializationPanel').textContent");
             Assert.Contains(".agent/", explanation, StringComparison.Ordinal);
