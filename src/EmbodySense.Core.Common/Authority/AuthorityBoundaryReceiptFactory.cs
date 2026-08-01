@@ -72,10 +72,17 @@ public static class AuthorityBoundaryReceiptFactory
 
         if (conditionSnapshot.Length > 0 && conditionSnapshot.All(condition => AuthorityBoundaryConditionValidator.Validate(condition) is null))
         {
-            var expectedDecision = conditionSnapshot.Max(condition => condition.Decision);
-            if (decision != expectedDecision)
+            if (conditionSnapshot.Any(condition => condition.Decision == AuthorityBoundaryDecision.Direct) && conditionSnapshot.Length != 1)
             {
-                errors.Add(new AuthorityContractError(AuthorityContractErrorCode.InvalidBoundaryCondition, AuthorityContractField.BoundaryDecision));
+                errors.Add(new AuthorityContractError(AuthorityContractErrorCode.InvalidBoundaryCondition, AuthorityContractField.BoundaryConditions));
+            }
+            else
+            {
+                var expectedDecision = conditionSnapshot.Max(condition => condition.Decision);
+                if (decision != expectedDecision)
+                {
+                    errors.Add(new AuthorityContractError(AuthorityContractErrorCode.InvalidBoundaryCondition, AuthorityContractField.BoundaryDecision));
+                }
             }
         }
 

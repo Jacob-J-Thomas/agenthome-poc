@@ -46,6 +46,43 @@ public sealed class AuthorityCeilingIntersectionTests
     }
 
     [Fact]
+    public void Intersection_handles_distinct_descriptor_hashes_for_the_same_capability_id_and_version()
+    {
+        var firstIdentity = AuthorityContractTestData.Identity();
+        var descriptor = CapabilityContractTestData.ValidDescriptor() with { Purpose = "Read one bounded workspace file with a distinct descriptor declaration." };
+        Assert.True(EmbodySense.Core.Common.Capabilities.CapabilityDescriptorIdentity.TryCreate(descriptor, out var secondIdentity, out var validation), string.Join(',', validation.Errors));
+        Assert.NotNull(secondIdentity);
+        Assert.Equal(firstIdentity.Id, secondIdentity.Id);
+        Assert.Equal(firstIdentity.Version, secondIdentity.Version);
+        Assert.NotEqual(firstIdentity.Hash, secondIdentity.Hash);
+
+        var first = AuthorityContractTestData.Profile("first", capabilities: [firstIdentity]);
+        var second = AuthorityContractTestData.Profile("second", capabilities: [secondIdentity]);
+        var result = AuthorityCeilingIntersection.Evaluate([first, second], AuthorityContractTestData.IssuedAtUtc.AddSeconds(1));
+
+        Assert.True(result.Validation.IsValid);
+        Assert.Empty(result.CandidateCeiling.Capabilities);
+        Assert.Empty(result.EffectiveCeiling.Capabilities);
+    }
+
+    [Fact]
+    public void Singleton_intersection_canonicalizes_ceiling_collection_ordering()
+    {
+        var earlier = AuthorityContractTestData.Identity("1.0.0");
+        var later = AuthorityContractTestData.Identity("2.0.0");
+        var user = AuthorityContractTestData.DataClass("user-content");
+        var workspace = AuthorityContractTestData.DataClass("workspace-content");
+        var profile = AuthorityContractTestData.Profile(capabilities: [later, earlier], dataClasses: [workspace, user]);
+
+        var result = AuthorityCeilingIntersection.Evaluate([profile], AuthorityContractTestData.IssuedAtUtc.AddSeconds(1));
+
+        Assert.Equal(new[] { earlier, later }, result.CandidateCeiling.Capabilities);
+        Assert.Equal(new[] { earlier, later }, result.EffectiveCeiling.Capabilities);
+        Assert.Equal(new[] { user, workspace }, result.CandidateCeiling.DataClasses);
+        Assert.Equal(new[] { user, workspace }, result.EffectiveCeiling.DataClasses);
+    }
+
+    [Fact]
     public void Property_style_intersections_never_widen_each_input_and_never_union_collections()
     {
         var random = new Random(231);
@@ -94,7 +131,7 @@ public sealed class AuthorityCeilingIntersectionTests
         Assert.Contains(result.Receipt.Conditions, condition => condition.Decision == conditionDecision && condition.Reason == reason);
         if (expected == AuthorityBoundaryDecision.Direct)
         {
-            Assert.Equal(profile.Ceiling, result.EffectiveCeiling);
+            AssertCeilingEqual(profile.Ceiling, result.EffectiveCeiling);
         }
         else
         {
@@ -121,6 +158,20 @@ public sealed class AuthorityCeilingIntersectionTests
         Assert.Equal(AuthorityBoundaryDecision.Pause, AuthorityCeilingIntersection.Evaluate([AuthorityContractTestData.Profile(status: AuthorityProfileStatus.Draft)], AuthorityContractTestData.IssuedAtUtc.AddSeconds(1)).Receipt.Decision);
         Assert.Equal(AuthorityBoundaryDecision.Pause, AuthorityCeilingIntersection.Evaluate([AuthorityContractTestData.Profile(status: AuthorityProfileStatus.Suspended)], AuthorityContractTestData.IssuedAtUtc.AddSeconds(1)).Receipt.Decision);
         Assert.Equal(AuthorityBoundaryDecision.Deny, AuthorityCeilingIntersection.Evaluate([AuthorityContractTestData.Profile(status: AuthorityProfileStatus.Retired)], AuthorityContractTestData.IssuedAtUtc.AddSeconds(1)).Receipt.Decision);
+    }
+
+    [Fact]
+    public void Direct_markers_do_not_create_contradictory_restrictive_receipt_evidence()
+    {
+        var direct = AuthorityContractTestData.Profile("direct", conditions: [new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Direct, AuthorityBoundaryReason.NoBoundary)]);
+        var review = AuthorityContractTestData.Profile("review", conditions: [new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Review, AuthorityBoundaryReason.MandatoryReview)]);
+
+        var result = AuthorityCeilingIntersection.Evaluate([direct, review], AuthorityContractTestData.IssuedAtUtc.AddSeconds(1));
+
+        Assert.True(result.Validation.IsValid);
+        Assert.Equal(AuthorityBoundaryDecision.Review, result.Receipt.Decision);
+        Assert.Equal([new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Review, AuthorityBoundaryReason.MandatoryReview)], result.Receipt.Conditions);
+        AssertEmptyCeiling(result.EffectiveCeiling);
     }
 
     [Fact]

@@ -108,7 +108,7 @@ public static class AuthorityCeilingIntersection
 
     private static AuthorityCeiling IntersectCeilings(IEnumerable<AuthorityCeiling> ceilings)
     {
-        using var enumerator = ceilings.GetEnumerator();
+        using var enumerator = ceilings.Select(CanonicalizeCeiling).GetEnumerator();
         if (!enumerator.MoveNext())
         {
             return EmptyCeiling();
@@ -118,14 +118,14 @@ public static class AuthorityCeilingIntersection
         while (enumerator.MoveNext())
         {
             var next = enumerator.Current;
-            current = new AuthorityCeiling(
-                current.Capabilities.Intersect(next.Capabilities).OrderBy(identity => identity.Id).ThenBy(identity => identity.Version).ThenBy(identity => identity.Hash).ToArray(),
-                current.DataClasses.Intersect(next.DataClasses).OrderBy(value => value).ToArray(),
+            current = CanonicalizeCeiling(new AuthorityCeiling(
+                current.Capabilities.Intersect(next.Capabilities).ToArray(),
+                current.DataClasses.Intersect(next.DataClasses).ToArray(),
                 Math.Min(current.MaxTargetCount, next.MaxTargetCount),
                 (CapabilitySideEffectClass)Math.Min((int)current.MaxSideEffectClass, (int)next.MaxSideEffectClass),
                 current.AllowsRecurrence && next.AllowsRecurrence,
                 current.AllowsExternalPublication && next.AllowsExternalPublication,
-                current.AllowsIrreversibleAction && next.AllowsIrreversibleAction);
+                current.AllowsIrreversibleAction && next.AllowsIrreversibleAction));
         }
 
         return current;
@@ -133,6 +133,18 @@ public static class AuthorityCeilingIntersection
 
     private static List<AuthorityBoundaryCondition> CanonicalConditions(IEnumerable<AuthorityBoundaryCondition> conditions)
     {
-        return conditions.Distinct().OrderBy(condition => condition.Decision).ThenBy(condition => condition.Reason).ToList();
+        return conditions.Where(condition => condition.Decision != AuthorityBoundaryDecision.Direct).Distinct().OrderBy(condition => condition.Decision).ThenBy(condition => condition.Reason).ToList();
+    }
+
+    private static AuthorityCeiling CanonicalizeCeiling(AuthorityCeiling ceiling)
+    {
+        return new AuthorityCeiling(
+            ceiling.Capabilities.OrderBy(identity => identity.Id.Value, StringComparer.Ordinal).ThenBy(identity => identity.Version.Value, StringComparer.Ordinal).ThenBy(identity => identity.Hash.Value, StringComparer.Ordinal).ToArray(),
+            ceiling.DataClasses.OrderBy(dataClass => dataClass.Value, StringComparer.Ordinal).ToArray(),
+            ceiling.MaxTargetCount,
+            ceiling.MaxSideEffectClass,
+            ceiling.AllowsRecurrence,
+            ceiling.AllowsExternalPublication,
+            ceiling.AllowsIrreversibleAction);
     }
 }
