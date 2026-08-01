@@ -662,34 +662,64 @@ public sealed partial class CustomLoopDefinitionStore
                 return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Compact proof failed closed: {exception.GetType().Name}.");
             }
 
-            foreach (var candidate in journal.Candidates)
+            (bool IsCanonical, bool HasConflict, int AttributedRemovedCount, long AttributedRemovedBytes) removalProgress;
+            try
             {
-                var path = GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId);
-                if (!File.Exists(path))
-                {
-                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Degraded, "A selected artifact is missing after proof commit; attribution is ambiguous and remaining evidence was preserved.", ownerToken);
-                    return CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail);
-                }
+                removalProgress = await ReconcileRemovalProgressAsync(journal, ownerToken);
+            }
+            catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+            {
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Corrupt, "Authoring evidence could not be read while reconstructing removal progress; every remaining raw artifact was preserved.", ownerToken);
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Removal progress failed closed: {exception.GetType().Name}.");
+            }
 
-                var artifact = await ReadRetentionArtifactAsync(journal.Request.ArtifactClass, path, ownerToken);
-                if (!string.Equals(artifact.Hash, candidate.ArtifactHash, StringComparison.Ordinal) || artifact.Utf8Json.LongLength != candidate.ArtifactUtf8Bytes)
+            if (!removalProgress.IsCanonical)
+            {
+                journal = journal with { RemovedArtifactCount = removalProgress.AttributedRemovedCount, RemovedArtifactUtf8Bytes = removalProgress.AttributedRemovedBytes };
+                if (removalProgress.HasConflict)
                 {
-                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.AbandonedConflict, CustomLoopReceiptCleanupOutcome.Conflict, "A selected artifact changed after durable intent; no removal was attributed to this batch.", ownerToken);
+                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.AbandonedConflict, CustomLoopReceiptCleanupOutcome.Conflict, "A retained authoring artifact changed after durable intent; exact prior removal progress is preserved and no additional artifact was removed.", ownerToken);
                     return CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupConflict, detail: journal.Detail);
                 }
+
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Degraded, "Authoring evidence no longer forms the canonical removal prefix after proof commit; exact attributable progress is preserved and cleanup requires review.", ownerToken);
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail);
             }
 
-            foreach (var candidate in journal.Candidates)
+            if (removalProgress.AttributedRemovedCount > journal.RemovedArtifactCount)
             {
-                var root = GetArtifactRoot(journal.Request.ArtifactClass);
-                _pathGuard.DeleteFile(root, GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId));
+                journal = journal with { RemovedArtifactCount = removalProgress.AttributedRemovedCount, RemovedArtifactUtf8Bytes = removalProgress.AttributedRemovedBytes };
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.ProofLedgerWritten, CustomLoopReceiptCleanupOutcome.Unknown, "A canonical missing authoring-evidence prefix was reconstructed as exact attributed progress after an interrupted removal write.", ownerToken);
             }
 
-            journal = journal with
+            var canonicalCandidates = journal.Candidates.OrderBy(item => item.ArtifactId, StringComparer.Ordinal).ToArray();
+            var removedCount = journal.RemovedArtifactCount;
+            var removedBytes = journal.RemovedArtifactUtf8Bytes;
+            foreach (var candidate in canonicalCandidates.Skip(removedCount))
             {
-                RemovedArtifactCount = journal.Candidates.Length,
-                RemovedArtifactUtf8Bytes = journal.Candidates.Sum(item => item.ArtifactUtf8Bytes)
-            };
+                bool removed;
+                try
+                {
+                    removed = await RemoveCandidateWithVerifiedTransitionAsync(journal, candidate, ownerToken);
+                }
+                catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+                {
+                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Corrupt, "One selected authoring artifact could not complete its identity-bound removal transition; no later candidate was removed.", ownerToken);
+                    return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Candidate removal failed closed: {exception.GetType().Name}.");
+                }
+
+                if (!removed)
+                {
+                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.AbandonedConflict, CustomLoopReceiptCleanupOutcome.Conflict, "A source or pending-removal artifact changed during the identity-bound removal transition; exact durable progress is preserved and no later candidate was removed.", ownerToken);
+                    return CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupConflict, detail: journal.Detail);
+                }
+
+                removedCount++;
+                removedBytes = checked(removedBytes + candidate.ArtifactUtf8Bytes);
+                journal = journal with { RemovedArtifactCount = removedCount, RemovedArtifactUtf8Bytes = removedBytes };
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.ProofLedgerWritten, CustomLoopReceiptCleanupOutcome.Unknown, "One canonical authoring-evidence removal is durably attributed within the immutable cleanup batch.", ownerToken);
+            }
+
             journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.ArtifactsRemoved, CustomLoopReceiptCleanupOutcome.Unknown, "Every selected raw artifact was hash-revalidated and removed.", ownerToken);
         }
 
@@ -969,7 +999,139 @@ public sealed partial class CustomLoopDefinitionStore
         return result;
     }
 
-    private async Task<CustomLoopDefinitionRetentionArtifact> ReadRetentionArtifactAsync(CustomLoopReceiptArtifactClass artifactClass, string path, CancellationToken cancellationToken)
+    private async Task<(bool IsCanonical, bool HasConflict, int AttributedRemovedCount, long AttributedRemovedBytes)> ReconcileRemovalProgressAsync(CustomLoopReceiptCleanupJournal journal, CancellationToken cancellationToken)
+    {
+        var candidates = journal.Candidates.OrderBy(item => item.ArtifactId, StringComparer.Ordinal).ToArray();
+        var root = GetArtifactRoot(journal.Request.ArtifactClass);
+        if (!_pathGuard.DirectoryExists(root))
+        {
+            throw new DirectoryNotFoundException("Authoring receipt storage disappeared while reconstructing cleanup removal progress.");
+        }
+
+        var missingPrefixCount = 0;
+        var retainedCandidateSeen = false;
+        var canonical = true;
+        var hasConflict = false;
+        for (var index = 0; index < candidates.Length; index++)
+        {
+            var candidate = candidates[index];
+            var path = GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId);
+            var pendingPath = GetCandidatePendingRemovalPath(journal, candidate);
+            var artifact = await ReadRetentionArtifactIfPresentAsync(journal.Request.ArtifactClass, path, candidate.ArtifactId, cancellationToken);
+            var pendingArtifact = await ReadRetentionArtifactIfPresentAsync(journal.Request.ArtifactClass, pendingPath, candidate.ArtifactId, cancellationToken);
+            if (pendingArtifact is not null)
+            {
+                if (artifact is not null || index != journal.RemovedArtifactCount || !CandidateMatches(pendingArtifact, candidate))
+                {
+                    canonical = false;
+                    hasConflict = true;
+                    break;
+                }
+
+                retainedCandidateSeen = true;
+                continue;
+            }
+
+            if (artifact is null)
+            {
+                if (retainedCandidateSeen)
+                {
+                    canonical = false;
+                    break;
+                }
+
+                missingPrefixCount++;
+                continue;
+            }
+
+            retainedCandidateSeen = true;
+            if (!CandidateMatches(artifact, candidate))
+            {
+                canonical = false;
+                hasConflict = true;
+                break;
+            }
+        }
+
+        if (missingPrefixCount > journal.RemovedArtifactCount + 1)
+        {
+            canonical = false;
+        }
+
+        var attributedCount = canonical ? Math.Max(journal.RemovedArtifactCount, missingPrefixCount) : journal.RemovedArtifactCount;
+        var attributedBytes = candidates.Take(attributedCount).Sum(item => item.ArtifactUtf8Bytes);
+        if (journal.RemovedArtifactCount > missingPrefixCount)
+        {
+            canonical = false;
+        }
+
+        return (canonical, hasConflict, attributedCount, attributedBytes);
+    }
+
+    private async Task<bool> RemoveCandidateWithVerifiedTransitionAsync(CustomLoopReceiptCleanupJournal journal, CustomLoopReceiptCleanupCandidate candidate, CancellationToken cancellationToken)
+    {
+        var artifactClass = journal.Request.ArtifactClass;
+        var root = GetArtifactRoot(artifactClass);
+        if (!_pathGuard.DirectoryExists(root))
+        {
+            throw new DirectoryNotFoundException("Authoring receipt storage disappeared during cleanup removal.");
+        }
+
+        var sourcePath = GetCandidatePath(artifactClass, candidate.ArtifactId);
+        var pendingPath = GetCandidatePendingRemovalPath(journal, candidate);
+        var source = await ReadRetentionArtifactIfPresentAsync(artifactClass, sourcePath, candidate.ArtifactId, cancellationToken);
+        var pending = await ReadRetentionArtifactIfPresentAsync(artifactClass, pendingPath, candidate.ArtifactId, cancellationToken);
+        if (source is not null && pending is not null)
+        {
+            return false;
+        }
+
+        if (pending is null)
+        {
+            if (source is null || !CandidateMatches(source, candidate))
+            {
+                return false;
+            }
+
+            _pathGuard.MoveFileIfDestinationAbsent(root, sourcePath, pendingPath);
+            pending = await ReadRetentionArtifactAsync(artifactClass, pendingPath, cancellationToken, candidate.ArtifactId);
+        }
+
+        if (!CandidateMatches(pending, candidate) || await ReadRetentionArtifactIfPresentAsync(artifactClass, sourcePath, candidate.ArtifactId, cancellationToken) is not null)
+        {
+            return false;
+        }
+
+        _pathGuard.DeleteFile(root, pendingPath);
+        return await ReadRetentionArtifactIfPresentAsync(artifactClass, sourcePath, candidate.ArtifactId, cancellationToken) is null
+            && await ReadRetentionArtifactIfPresentAsync(artifactClass, pendingPath, candidate.ArtifactId, cancellationToken) is null;
+    }
+
+    private async Task<CustomLoopDefinitionRetentionArtifact?> ReadRetentionArtifactIfPresentAsync(CustomLoopReceiptArtifactClass artifactClass, string path, string expectedArtifactId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ReadRetentionArtifactAsync(artifactClass, path, cancellationToken, expectedArtifactId);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    private string GetCandidatePendingRemovalPath(CustomLoopReceiptCleanupJournal journal, CustomLoopReceiptCleanupCandidate candidate)
+    {
+        var identity = Encoding.UTF8.GetBytes($"{journal.Request.ArtifactClass}\n{journal.Request.OperationId}\n{candidate.ArtifactId}");
+        var hash = Convert.ToHexString(SHA256.HashData(identity)).ToLowerInvariant();
+        return _pathGuard.GetFilePath(GetArtifactRoot(journal.Request.ArtifactClass), $".retention-removal-{hash}.pending");
+    }
+
+    private static bool CandidateMatches(CustomLoopDefinitionRetentionArtifact artifact, CustomLoopReceiptCleanupCandidate candidate)
+    {
+        return string.Equals(artifact.Hash, candidate.ArtifactHash, StringComparison.Ordinal) && artifact.Utf8Json.LongLength == candidate.ArtifactUtf8Bytes;
+    }
+
+    private async Task<CustomLoopDefinitionRetentionArtifact> ReadRetentionArtifactAsync(CustomLoopReceiptArtifactClass artifactClass, string path, CancellationToken cancellationToken, string? expectedArtifactId = null)
     {
         var root = GetArtifactRoot(artifactClass);
         var maximum = artifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt ? MaxDefinitionMutationOperationArtifactBytes : MaxTombstoneArtifactBytes;
@@ -981,7 +1143,7 @@ public sealed partial class CustomLoopDefinitionStore
             {
                 var operation = JsonSerializer.Deserialize<CustomLoopDefinitionMutationOperationRecord>(bytes, _jsonOptions) ?? throw new FormatException("Definition mutation receipt is empty.");
                 ValidateMutationOperation(operation);
-                if (!string.Equals(operation.OperationId, Path.GetFileNameWithoutExtension(path), StringComparison.Ordinal))
+                if (!string.Equals(operation.OperationId, expectedArtifactId ?? Path.GetFileNameWithoutExtension(path), StringComparison.Ordinal))
                 {
                     throw new FormatException("Definition mutation receipt identity does not match its filename.");
                 }
@@ -991,7 +1153,7 @@ public sealed partial class CustomLoopDefinitionStore
 
             var tombstone = JsonSerializer.Deserialize<CustomLoopDefinitionTombstone>(bytes, _jsonOptions) ?? throw new FormatException("Definition tombstone is empty.");
             ValidateTombstone(tombstone);
-            if (!string.Equals(tombstone.LoopId, Path.GetFileNameWithoutExtension(path), StringComparison.Ordinal))
+            if (!string.Equals(tombstone.LoopId, expectedArtifactId ?? Path.GetFileNameWithoutExtension(path), StringComparison.Ordinal))
             {
                 throw new FormatException("Definition tombstone identity does not match its filename.");
             }
@@ -1451,19 +1613,19 @@ public sealed partial class CustomLoopDefinitionStore
     {
         return journal.Stage switch
         {
-            CustomLoopReceiptCleanupStage.Completed when journal.Outcome == CustomLoopReceiptCleanupOutcome.NothingEligible => CleanupResult(CustomLoopReceiptCleanupStatus.NothingEligible, journal, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.Completed => CleanupResult(replay ? CustomLoopReceiptCleanupStatus.Replayed : CustomLoopReceiptCleanupStatus.Pruned, journal, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => CleanupResult(CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.AbandonedConflict => CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupConflict, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable => CleanupResult(CustomLoopReceiptCleanupStatus.AuditUnavailable, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, detail: journal.Detail),
-            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.Corrupt => CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: journal.Detail),
-            _ => CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail)
+            CustomLoopReceiptCleanupStage.Completed when journal.Outcome == CustomLoopReceiptCleanupOutcome.NothingEligible => CleanupResult(CustomLoopReceiptCleanupStatus.NothingEligible, journal, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.Completed => CleanupResult(replay ? CustomLoopReceiptCleanupStatus.Replayed : CustomLoopReceiptCleanupStatus.Pruned, journal, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => CleanupResult(CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, compactedCount: journal.RemovedArtifactCount, compactedBytes: journal.RemovedArtifactUtf8Bytes, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.AbandonedConflict => CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupConflict, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable => CleanupResult(CustomLoopReceiptCleanupStatus.AuditUnavailable, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AuditUnavailable, detail: journal.Detail, isReplay: replay),
+            CustomLoopReceiptCleanupStage.Degraded when journal.Outcome == CustomLoopReceiptCleanupOutcome.Corrupt => CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: journal.Detail, isReplay: replay),
+            _ => CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail, isReplay: replay)
         };
     }
 
-    private static CustomLoopReceiptCleanupResult CleanupResult(CustomLoopReceiptCleanupStatus status, CustomLoopReceiptCleanupJournal? journal, CustomLoopReceiptQuotaExhaustionReason exhaustionReason = CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason blockReason = CustomLoopReceiptCleanupBlockReason.None, int compactedCount = 0, long compactedBytes = 0, string detail = "Receipt cleanup stopped safely.")
+    private static CustomLoopReceiptCleanupResult CleanupResult(CustomLoopReceiptCleanupStatus status, CustomLoopReceiptCleanupJournal? journal, CustomLoopReceiptQuotaExhaustionReason exhaustionReason = CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason blockReason = CustomLoopReceiptCleanupBlockReason.None, int compactedCount = 0, long compactedBytes = 0, string detail = "Receipt cleanup stopped safely.", bool isReplay = false)
     {
-        return new CustomLoopReceiptCleanupResult(status, journal, exhaustionReason, blockReason, compactedCount, compactedBytes, detail);
+        return new CustomLoopReceiptCleanupResult(status, journal, exhaustionReason, blockReason, compactedCount, compactedBytes, detail) { IsReplay = isReplay };
     }
 
     private string GetArtifactRoot(CustomLoopReceiptArtifactClass artifactClass) => artifactClass switch

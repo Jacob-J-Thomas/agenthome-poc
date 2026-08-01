@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -24,6 +25,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 /// </remarks>
 public sealed class CustomLoopLifecycleService
 {
+    private const int MaxRetentionCleanupReplayTraversalCount = 64;
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ICustomLoopRunStore _runStore;
@@ -665,44 +667,78 @@ public sealed class CustomLoopLifecycleService
 
     private async Task<(CustomLoopControlOperationStoreResult StoreResult, CustomLoopReceiptCleanupResult? CleanupResult)> RetryBeginAfterGovernedRetentionAsync(CustomLoopControlOperation pending, CustomLoopControlOperationStoreResult quotaResult, CancellationToken cancellationToken)
     {
-        var command = new CustomLoopReceiptCleanupCommand(
-            CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
-            CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
-            $"control-receipt-retention-{pending.RequestHash}",
-            pending.Actor,
-            _surface,
-            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
-            CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes);
-        CustomLoopReceiptCleanupResult cleanup;
-        try
+        var cleanupOperationId = $"control-receipt-retention-{pending.RequestHash}";
+        CustomLoopReceiptCleanupResult? cleanup = null;
+        for (var replayTraversalCount = 0; replayTraversalCount <= MaxRetentionCleanupReplayTraversalCount; replayTraversalCount++)
         {
-            cleanup = await _receiptRetention!.CleanupAsync(command, cancellationToken);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch
-        {
-            return (quotaResult, null);
+            var command = new CustomLoopReceiptCleanupCommand(
+                CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
+                CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
+                cleanupOperationId,
+                pending.Actor,
+                _surface,
+                CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
+                CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes);
+            try
+            {
+                cleanup = await _receiptRetention!.CleanupAsync(command, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return (quotaResult, null);
+            }
+
+            var permitsAdmissionRetry = cleanup.IsCommitted || cleanup.IsReplay && cleanup.Status == CustomLoopReceiptCleanupStatus.NothingEligible;
+            if (!permitsAdmissionRetry)
+            {
+                return (quotaResult, cleanup);
+            }
+
+            try
+            {
+                quotaResult = await _operationStore.BeginAsync(pending, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return (quotaResult, cleanup);
+            }
+
+            if (quotaResult.Status != CustomLoopControlOperationStoreStatus.QuotaExceeded || !cleanup.IsReplay)
+            {
+                return (quotaResult, cleanup);
+            }
+
+            if (cleanup.Journal is null
+                || !string.Equals(cleanup.Journal.Request.OperationId, cleanupOperationId, StringComparison.Ordinal)
+                || replayTraversalCount == MaxRetentionCleanupReplayTraversalCount)
+            {
+                return (quotaResult, cleanup);
+            }
+
+            cleanupOperationId = NextRetentionCleanupOperationId(pending.RequestHash, cleanupOperationId);
         }
 
-        if (cleanup.Status is not (CustomLoopReceiptCleanupStatus.Pruned or CustomLoopReceiptCleanupStatus.Replayed or CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning))
-        {
-            return (quotaResult, cleanup);
-        }
+        return (quotaResult, cleanup);
+    }
 
+    private static string NextRetentionCleanupOperationId(string requestHash, string priorCleanupOperationId)
+    {
+        var material = Encoding.UTF8.GetBytes(requestHash + "\n" + priorCleanupOperationId);
         try
         {
-            return (await _operationStore.BeginAsync(pending, cancellationToken), cleanup);
+            return $"control-receipt-retention-{Convert.ToHexString(SHA256.HashData(material)).ToLowerInvariant()}";
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        finally
         {
-            throw;
-        }
-        catch
-        {
-            return (quotaResult, cleanup);
+            CryptographicOperations.ZeroMemory(material);
         }
     }
 

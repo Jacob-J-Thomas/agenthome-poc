@@ -470,7 +470,9 @@ public sealed class CustomLoopControlOperationStoreTests
         var replay = await new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time).CleanupAsync(command);
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, first.Status);
+        Assert.False(first.IsReplay);
         Assert.Equal(CustomLoopReceiptCleanupStatus.Replayed, replay.Status);
+        Assert.True(replay.IsReplay);
         Assert.Equal(persistedRequestedAtUtc, replay.Journal!.Request.RequestedAtUtc);
     }
 
@@ -499,8 +501,10 @@ public sealed class CustomLoopControlOperationStoreTests
         var posture = await store.InspectAsync();
 
         Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, first.Status);
+        Assert.False(first.IsReplay);
         Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, second.Status);
         Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, delayedReplay.Status);
+        Assert.True(delayedReplay.IsReplay);
         Assert.Equal(first.Journal, delayedReplay.Journal);
         Assert.Equal(CustomLoopReceiptCleanupStatus.Invalid, changedReuse.Status);
         Assert.Equal(1, posture.CompletedCleanupOperationCount);
@@ -732,6 +736,36 @@ public sealed class CustomLoopControlOperationStoreTests
 
         Assert.Equal(CustomLoopReceiptCleanupBlockReason.None, recovered.CleanupBlockReason);
         Assert.False(File.Exists(tempPath));
+    }
+
+    [Fact]
+    public async Task Operation_lookup_fails_closed_before_reading_raw_or_compact_evidence_while_cleanup_owns_the_shared_retention_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+        var lockPath = Path.Combine(paths.CustomLoopReceiptRetentionPath, ".custom-loop-mutations.lock");
+        using var retentionLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new CustomLoopControlOperationStore(paths).LookupOperationAsync("control-lookup-under-retention-lock"));
+
+        Assert.IsType<IOException>(exception.InnerException);
+        Assert.Contains("locked by another process", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Direct_receipt_read_fails_closed_before_reading_raw_or_compact_evidence_while_cleanup_owns_the_shared_retention_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+        var lockPath = Path.Combine(paths.CustomLoopReceiptRetentionPath, ".custom-loop-mutations.lock");
+        using var retentionLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new CustomLoopControlOperationStore(paths).GetAsync("control-get-under-retention-lock"));
+
+        Assert.IsType<IOException>(exception.InnerException);
+        Assert.Contains("locked by another process", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
