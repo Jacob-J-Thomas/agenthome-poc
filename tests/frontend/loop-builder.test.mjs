@@ -377,7 +377,7 @@ test("corrupt protected initialization sentinels require explicit cleanup instea
   assert.equal(app.elements.initializeLoopsWorkspaceButton.disabled, false);
   assert.match(
     app.elements.loopInitializationStatus.textContent,
-    /unusable protected.*ROLE\.md.*permissions\.json.*Back up.*remove the invalid protected file.*retrying without cleanup cannot replace/i,
+    /unusable protected.*ROLE\.md.*permissions\.json.*workspace-initialized\.json.*Back up.*remove the invalid file or directory.*retrying without cleanup cannot replace/i,
   );
   await app.elements.initializeLoopsWorkspaceButton.click();
   assert.match(

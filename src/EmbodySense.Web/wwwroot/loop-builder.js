@@ -394,7 +394,7 @@ function renderWorkspaceInitialization() {
     elements.initializationStatus.textContent = workspaceInitializationMessage;
   } else if (state === "partial") {
     elements.initializationStatus.textContent = requiresCleanup
-      ? "This workspace has an unusable protected .agent/ROLE.md or .agent/permissions.json document. Back up any intentional content, remove the invalid protected file, then initialize again. Retrying without cleanup cannot replace protected seed documents."
+      ? "This workspace has an unusable protected .agent/ROLE.md or .agent/permissions.json document, or a nonreplaceable .agent/workspace-initialized.json path. Back up any intentional content, remove the invalid file or directory, then initialize again. Retrying without cleanup cannot replace it."
       : "This workspace has an incomplete .agent scaffold. Retry initialization to create the missing required files; existing protected seed documents will remain unchanged.";
   } else if (state === "initialized") {
     elements.initializationStatus.textContent =
@@ -456,7 +456,7 @@ async function initializeLoopsWorkspace() {
     if (initializationRequiresCleanup(currentStatus)) {
       setWorkspaceInitializationOutcome(
         "partial",
-        "Initialization still requires cleanup. Back up any intentional content, remove the unusable protected .agent/ROLE.md or .agent/permissions.json document, then check again. No loop ran, and no protected file was replaced.",
+        "Initialization still requires cleanup. Back up any intentional content, remove the unusable protected .agent/ROLE.md or .agent/permissions.json document or the nonreplaceable .agent/workspace-initialized.json path, then check again. No loop ran, and no protected file was replaced.",
       );
       return;
     }
@@ -479,7 +479,7 @@ async function initializeLoopsWorkspace() {
         partial ? "partial" : "failed",
         partial
           ? requiresCleanup
-            ? "Initialization stopped with an unusable protected .agent/ROLE.md or .agent/permissions.json document. No loop ran. Back up any intentional content, remove the invalid protected file, then initialize again; retrying without cleanup cannot replace it."
+            ? "Initialization stopped with an unusable protected .agent/ROLE.md or .agent/permissions.json document or a nonreplaceable .agent/workspace-initialized.json path. No loop ran. Back up any intentional content, remove the invalid file or directory, then initialize again; retrying without cleanup cannot replace it."
             : "Initialization stopped after creating part of the workspace scaffold. No loop ran. Retry to create the missing required files."
           : "Initialization did not produce a complete workspace. Nothing is unlocked, and no loop ran. Retry when ready.",
       );
@@ -560,7 +560,7 @@ async function reconcileWorkspaceInitializationFailure(generation, error) {
       partial ? "partial" : "failed",
       partial
         ? requiresCleanup
-          ? "Initialization failed with an unusable protected .agent/ROLE.md or .agent/permissions.json document. No loop ran. Back up any intentional content, remove the invalid protected file, then initialize again; retrying without cleanup cannot replace it."
+          ? "Initialization failed with an unusable protected .agent/ROLE.md or .agent/permissions.json document or a nonreplaceable .agent/workspace-initialized.json path. No loop ran. Back up any intentional content, remove the invalid file or directory, then initialize again; retrying without cleanup cannot replace it."
           : "Initialization failed after creating part of the .agent scaffold. No loop ran. Retry to create the missing required files."
         : `Initialization failed before the workspace became ready. Nothing is unlocked, and no loop ran. ${error.message}`,
     );

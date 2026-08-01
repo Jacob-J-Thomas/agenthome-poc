@@ -26,8 +26,9 @@ public sealed class WorkspaceStatusReader
         var permissions = new PermissionPolicyStore().Load(paths);
         var hasAgentDirectory = Directory.Exists(paths.AgentPath);
         var hasRoleDocument = IsRoleDocumentAvailable(paths.RolePath);
-        var isInitialized = hasAgentDirectory && hasRoleDocument && permissions.HasDocument;
-        var requiresExplicitCleanup = hasAgentDirectory && ((!hasRoleDocument && File.Exists(paths.RolePath)) || (!permissions.HasDocument && File.Exists(paths.PermissionsPath)));
+        var hasCompletionMarker = WorkspaceInitializationCompletion.IsValid(paths.WorkspaceInitializationMarkerPath);
+        var isInitialized = hasAgentDirectory && hasRoleDocument && permissions.HasDocument && hasCompletionMarker;
+        var requiresExplicitCleanup = hasAgentDirectory && ((!hasRoleDocument && File.Exists(paths.RolePath)) || (!permissions.HasDocument && File.Exists(paths.PermissionsPath)) || (!hasCompletionMarker && WorkspaceInitializationCompletion.RequiresExplicitCleanup(paths.WorkspaceInitializationMarkerPath)));
 
         return new WorkspaceStatusSnapshot(
             RootPath: paths.RootPath,

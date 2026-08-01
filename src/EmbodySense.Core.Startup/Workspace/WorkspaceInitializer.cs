@@ -72,6 +72,11 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
     public async Task InitializeAsync(string rootPath, CancellationToken cancellationToken = default)
     {
         var paths = new WorkspacePaths(rootPath);
+        if (Directory.Exists(paths.AgentPath))
+        {
+            File.Delete(paths.WorkspaceInitializationMarkerPath);
+        }
         await _scaffolder.ApplyAsync(paths, WorkspaceDefaults.GetDirectories(paths), WorkspaceDefaults.GetSeedFiles(paths), _actor, cancellationToken);
+        await WorkspaceInitializationCompletion.WriteAsync(paths.WorkspaceInitializationMarkerPath, cancellationToken);
     }
 }

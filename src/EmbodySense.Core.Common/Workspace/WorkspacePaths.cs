@@ -264,6 +264,12 @@ public sealed class WorkspacePaths
     public string RolePath => AgentFile("ROLE.md");
 
     /// <summary>
+    /// Gets the version-one workspace initialization completion marker path.
+    /// </summary>
+    /// <value>The initialization completion marker path.</value>
+    public string WorkspaceInitializationMarkerPath => AgentFile("workspace-initialized.json");
+
+    /// <summary>
     /// Gets the workspace private path.
     /// </summary>
     /// <value>The workspace private path.</value>
@@ -290,8 +296,8 @@ public sealed class WorkspacePaths
     /// <summary>
     /// Gets a value indicating whether the minimum workspace scaffold exists.
     /// </summary>
-    /// <value><see langword="true"/> when the <c>.agent</c> directory, permissions document, and role document exist; otherwise, <see langword="false"/>.</value>
-    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath);
+    /// <value><see langword="true"/> when the <c>.agent</c> directory, permissions document, role document, and completion marker exist; otherwise, <see langword="false"/>.</value>
+    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath) && File.Exists(WorkspaceInitializationMarkerPath);
 
     private static string ContainedFile(string rootPath, string relativePath)
     {
