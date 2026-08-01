@@ -13,6 +13,8 @@ namespace EmbodySense.Core.Application.Loops.ReceiptRetention;
 /// <param name="Categories">The complete per-category usage.</param>
 /// <param name="OldestExactReplayExpiresAtUtc">The oldest retained exact receipt expiry timestamp.</param>
 /// <param name="NewestExactReplayExpiresAtUtc">The newest retained exact receipt expiry timestamp.</param>
+/// <param name="CompletedCleanupOperationCount">The completed cleanup identities retained after active-journal rotation.</param>
+/// <param name="CompletedCleanupHistoryUtf8Bytes">The canonical terminal cleanup-journal bytes retained after active-journal rotation.</param>
 /// <param name="ExhaustionReason">The actionable capacity exhaustion reason.</param>
 /// <param name="CleanupBlockReason">The actionable cleanup block reason.</param>
 /// <param name="Detail">A bounded human-readable posture detail.</param>
@@ -22,6 +24,8 @@ public sealed record CustomLoopReceiptClassPosture(
     ImmutableArray<CustomLoopReceiptCategoryUsage> Categories,
     DateTimeOffset? OldestExactReplayExpiresAtUtc,
     DateTimeOffset? NewestExactReplayExpiresAtUtc,
+    int CompletedCleanupOperationCount,
+    long CompletedCleanupHistoryUtf8Bytes,
     CustomLoopReceiptQuotaExhaustionReason ExhaustionReason,
     CustomLoopReceiptCleanupBlockReason CleanupBlockReason,
     string Detail)
@@ -53,8 +57,8 @@ public sealed record CustomLoopReceiptClassPosture(
     /// <summary>
     /// Gets the total accounted class bytes.
     /// </summary>
-    /// <value>The raw artifact and compact proof bytes.</value>
-    public long AccountedUtf8Bytes => checked(ArtifactUtf8Bytes + ProofUtf8Bytes);
+    /// <value>The raw artifact, compact proof, and completed cleanup-history bytes.</value>
+    public long AccountedUtf8Bytes => checked(ArtifactUtf8Bytes + ProofUtf8Bytes + CompletedCleanupHistoryUtf8Bytes);
 
     /// <summary>
     /// Gets a value indicating whether an explicit capacity boundary is exhausted.

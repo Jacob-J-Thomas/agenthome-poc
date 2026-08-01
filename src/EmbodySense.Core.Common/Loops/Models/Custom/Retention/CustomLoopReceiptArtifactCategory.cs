@@ -36,6 +36,11 @@ public enum CustomLoopReceiptArtifactCategory
     Compactable,
 
     /// <summary>
+    /// A complete Create receipt remains the required raw lineage of a live definition after exact replay expires.
+    /// </summary>
+    RetainedLiveLineage,
+
+    /// <summary>
     /// Compact proof preserves definition lineage or loop-identity non-reuse.
     /// </summary>
     RetainedLineage,

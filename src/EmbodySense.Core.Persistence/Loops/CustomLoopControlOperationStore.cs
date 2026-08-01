@@ -45,6 +45,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
     private readonly string _root;
     private readonly string _retentionRoot;
     private readonly string _cleanupRoot;
+    private readonly string _cleanupHistoryRoot;
     private readonly CustomLoopArtifactPathGuard _pathGuard;
     private readonly SemaphoreSlim _processGate;
     private readonly IAuditLog? _auditLog;
@@ -62,6 +63,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         _root = Path.GetFullPath(paths.CustomLoopControlOperationsPath);
         _retentionRoot = Path.GetFullPath(paths.CustomLoopReceiptRetentionPath);
         _cleanupRoot = Path.GetFullPath(paths.CustomLoopControlReceiptCleanupPath);
+        _cleanupHistoryRoot = Path.GetFullPath(paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath);
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
         _processGate = _processGates.GetOrAdd(_retentionRoot, _ => new SemaphoreSlim(1, 1));
         _auditLog = auditLog;
@@ -337,6 +339,8 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             var detail = "Lifecycle-control receipts are within their bounded retention posture.";
             CustomLoopReceiptCleanupBlockReason blockReason = CustomLoopReceiptCleanupBlockReason.None;
             CustomLoopReceiptQuotaExhaustionReason exhaustionReason = CustomLoopReceiptQuotaExhaustionReason.None;
+            var cleanupHistoryCount = 0;
+            var cleanupHistoryBytes = 0L;
             DateTimeOffset? oldestExpiry = null;
             DateTimeOffset? newestExpiry = null;
             try
@@ -373,8 +377,22 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
                     detail = "A lifecycle-control receipt cleanup journal is still inside its bounded ownership or recovery window.";
                 }
 
+                var history = new CustomLoopReceiptCleanupHistoryStore(_pathGuard, _cleanupHistoryRoot, ArtifactClass);
+                (cleanupHistoryCount, cleanupHistoryBytes) = await history.InspectAsync(cancellationToken);
+
                 var usage = SummarizeUsage(categories);
                 exhaustionReason = DetermineExhaustionReason(usage.ArtifactCount, usage.ArtifactUtf8Bytes, usage.ProofCount, usage.ProofUtf8Bytes);
+                if (exhaustionReason == CustomLoopReceiptQuotaExhaustionReason.None && cleanupHistoryCount >= CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryEntryCount)
+                {
+                    exhaustionReason = CustomLoopReceiptQuotaExhaustionReason.CleanupHistoryCountLimit;
+                    blockReason = CustomLoopReceiptCleanupBlockReason.CleanupHistoryCapacityExhausted;
+                }
+                else if (exhaustionReason == CustomLoopReceiptQuotaExhaustionReason.None && cleanupHistoryBytes >= CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryUtf8Bytes)
+                {
+                    exhaustionReason = CustomLoopReceiptQuotaExhaustionReason.CleanupHistoryByteLimit;
+                    blockReason = CustomLoopReceiptCleanupBlockReason.CleanupHistoryCapacityExhausted;
+                }
+
                 if (blockReason == CustomLoopReceiptCleanupBlockReason.None)
                 {
                     blockReason = DetermineBlockReason(categories, exhaustionReason);
@@ -387,7 +405,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
                 detail = $"Lifecycle-control receipt retention evidence could not be classified safely: {exception.GetType().Name}.";
             }
 
-            var posture = new CustomLoopReceiptClassPosture(ArtifactClass, CustomLoopReceiptRetentionPolicy.GetBudget(ArtifactClass), categories.Values.OrderBy(item => item.Category).ToImmutableArray(), oldestExpiry, newestExpiry, exhaustionReason, blockReason, detail);
+            var posture = new CustomLoopReceiptClassPosture(ArtifactClass, CustomLoopReceiptRetentionPolicy.GetBudget(ArtifactClass), categories.Values.OrderBy(item => item.Category).ToImmutableArray(), oldestExpiry, newestExpiry, cleanupHistoryCount, cleanupHistoryBytes, exhaustionReason, blockReason, detail);
             CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(posture);
             return posture;
         }
@@ -471,6 +489,29 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
 
     private async Task<CustomLoopReceiptCleanupResult> CleanupUnderOwnershipAsync(CustomLoopReceiptCleanupRequest request, CancellationToken cancellationToken)
     {
+        var history = new CustomLoopReceiptCleanupHistoryStore(_pathGuard, _cleanupHistoryRoot, ArtifactClass);
+        CustomLoopReceiptCleanupJournal? archived;
+        try
+        {
+            archived = await history.ReadAsync(request.OperationId, cancellationToken);
+        }
+        catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+        {
+            return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, null, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.CorruptEvidence, $"Lifecycle-control cleanup history is corrupt or unreadable: {exception.GetType().Name}.");
+        }
+
+        if (archived is not null)
+        {
+            if (MatchesCleanupCommand(archived.Request, request))
+            {
+                request = archived.Request;
+            }
+
+            return string.Equals(archived.RequestHash, CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(request), StringComparison.Ordinal)
+                ? ResultForJournal(archived, replay: true)
+                : CleanupResult(CustomLoopReceiptCleanupStatus.Invalid, archived, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, "The lifecycle-control receipt cleanup operation ID is already bound to different request content.");
+        }
+
         var existing = await ReadCleanupJournalAsync(cancellationToken);
         if (existing is not null && string.Equals(existing.Request.OperationId, request.OperationId, StringComparison.Ordinal))
         {
@@ -504,6 +545,24 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
                 }
 
                 return await ResumeCleanupAsync(Reown(existing), cancellationToken);
+            }
+        }
+
+        if (existing is not null && IsCleanupTerminal(existing.Stage))
+        {
+            CustomLoopReceiptQuotaExhaustionReason archiveExhaustion;
+            try
+            {
+                archiveExhaustion = await history.ArchiveAsync(existing, cancellationToken);
+            }
+            catch (Exception exception) when (exception is FormatException or IOException or UnauthorizedAccessException)
+            {
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, existing, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.CorruptEvidence, $"Completed lifecycle-control cleanup history could not preserve the prior operation identity: {exception.GetType().Name}.");
+            }
+
+            if (archiveExhaustion != CustomLoopReceiptQuotaExhaustionReason.None)
+            {
+                return CleanupResult(CustomLoopReceiptCleanupStatus.QuotaExhausted, existing, archiveExhaustion, CustomLoopReceiptCleanupBlockReason.CleanupHistoryCapacityExhausted, "Completed cleanup-operation history is full, so the prior lifecycle-control identity was preserved and no new cleanup began.");
             }
         }
 

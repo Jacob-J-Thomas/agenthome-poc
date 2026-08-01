@@ -473,6 +473,41 @@ public sealed class CustomLoopControlOperationStoreTests
     }
 
     [Fact]
+    public async Task Completed_cleanup_identity_survives_journal_rotation_and_cannot_prune_later_receipts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var time = new MutableTimeProvider(_timestamp);
+        var store = new CustomLoopControlOperationStore(paths, new RecordingAuditLog(), time);
+        var firstCommand = CleanupCommand("cleanup-history-a");
+
+        var first = await store.CleanupAsync(firstCommand);
+        time.UtcNow += TimeSpan.FromMinutes(1);
+        var second = await store.CleanupAsync(CleanupCommand("cleanup-history-b"));
+
+        var created = await store.BeginAsync(Pending("control-after-cleanup-a", AuditSchema.Actors.Web));
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        var completed = Complete(created.Operation!, time.UtcNow);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+        lease.Dispose();
+        time.UtcNow += CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
+
+        var delayedReplay = await store.CleanupAsync(firstCommand);
+        var changedReuse = await store.CleanupAsync(firstCommand with { Surface = "cli" });
+        var posture = await store.InspectAsync();
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, first.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, second.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, delayedReplay.Status);
+        Assert.Equal(first.Journal, delayedReplay.Journal);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Invalid, changedReuse.Status);
+        Assert.Equal(1, posture.CompletedCleanupOperationCount);
+        Assert.True(posture.CompletedCleanupHistoryUtf8Bytes > 0);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopControlOperationsPath, completed.OperationId + ".json")));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath, firstCommand.OperationId + ".json")));
+    }
+
+    [Fact]
     public async Task Cleanup_abandons_a_recovered_intent_when_its_selected_receipt_changed_before_proof_commit()
     {
         using var workspace = new TestWorkspace();
