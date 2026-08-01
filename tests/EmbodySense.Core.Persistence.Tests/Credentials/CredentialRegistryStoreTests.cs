@@ -398,6 +398,85 @@ public sealed class CredentialRegistryStoreTests
         Assert.True((await Store(paths).ReadAsync()).Succeeded);
     }
 
+    [Fact]
+    public void Constructor_rejects_invalid_trust_and_quota_bounds()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CredentialRegistryStore(paths, new LongAuthenticationTagTrustProvider(FileCapabilityCatalogTrustProvider.CreateDefault(), 0), new AcceptingLocatorVerifier()));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CredentialRegistryStore(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), quota: new CredentialRegistryQuota(0, 1, 1, 1, 1)));
+    }
+
+    [Fact]
+    public async Task Invalid_mutation_shapes_fail_before_storage_access()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var invalid = new[]
+        {
+            await store.MutateAsync(null!),
+            await store.MutateAsync(new CredentialRegistryMutation((CredentialRegistryMutationKind)999, Id("invalid-kind"), 0, ReferenceId(), null, null, null, null, null)),
+            await store.MutateAsync(Register(0) with { ReferenceId = ReferenceId(2) }),
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id("invalid-health"), 0, ReferenceId(), Reference(), null, null, CredentialProviderHealthStatus.Available, null)),
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("invalid-tombstone"), 0, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null))
+        };
+
+        Assert.All(invalid, result =>
+        {
+            Assert.Equal(CredentialRegistryMutationStatus.Invalid, result.Status);
+            Assert.Equal(CredentialFailureCode.InvalidRequest, result.Failure!.Code);
+        });
+        Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Invalid_returned_authentication_tags_fail_without_registry_artifacts(bool oversized)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var tag = oversized ? new string('a', 65) : string.Empty;
+        var trust = new InvalidAuthenticationTagTrustProvider(FileCapabilityCatalogTrustProvider.CreateDefault(), tag);
+        var result = await new CredentialRegistryStore(paths, trust, new AcceptingLocatorVerifier()).MutateAsync(Register(0));
+
+        Assert.Equal(CredentialRegistryMutationStatus.Unavailable, result.Status);
+        Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
+        Assert.False(File.Exists(paths.CredentialRegistryPrivateDocumentPath));
+    }
+
+    [Fact]
+    public async Task Lookup_and_evidence_replay_conflict_and_quota_results_are_explicit()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var quota = new CredentialRegistryQuota(2, 2, 4, 1, 128 * 1024);
+        var store = new CredentialRegistryStore(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), quota: quota);
+        var missing = await store.GetAsync(ReferenceId(), default);
+        Assert.False(missing.Succeeded);
+        Assert.Equal(CredentialFailureCode.NotFound, missing.Failure!.Code);
+
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
+        var found = await store.GetAsync(ReferenceId(), default);
+        Assert.True(found.Succeeded);
+        Assert.Equal(ReferenceId(), found.Reference!.Id);
+
+        var binding = Binding();
+        var invalidEvidence = Evidence(binding, "invalid-evidence") with { ReferenceId = null! };
+        Assert.Equal(CredentialFailureCode.InvalidRequest, (await store.AppendAsync(invalidEvidence, default)).Failure!.Code);
+
+        var evidence = Evidence(binding);
+        Assert.True((await store.AppendAsync(evidence, default)).Succeeded);
+        Assert.True((await store.AppendAsync(evidence, default)).Succeeded);
+        var changedReplay = evidence with { UsedAtUtc = evidence.UsedAtUtc.AddMinutes(1) };
+        Assert.Equal(CredentialFailureCode.Conflict, (await store.AppendAsync(changedReplay, default)).Failure!.Code);
+        var wrongBinding = Evidence(binding, "wrong-binding") with { BindingHash = CredentialContractHash.Compute("forged") };
+        Assert.Equal(CredentialFailureCode.Conflict, (await store.AppendAsync(wrongBinding, default)).Failure!.Code);
+        Assert.Equal(CredentialFailureCode.LimitExceeded, (await store.AppendAsync(Evidence(binding, "over-limit"), default)).Failure!.Code);
+    }
+
     private static CredentialRegistryMutation Register(long revision)
     {
         return Register(1, revision);
@@ -452,6 +531,16 @@ public sealed class CredentialRegistryStoreTests
         }
 
         public Task<bool> VerifyArtifactAsync(string workspaceIdentity, long generation, string contentDigest, string authenticationTag, CancellationToken cancellationToken = default) => inner.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, authenticationTag, cancellationToken);
+        public Task<CapabilityCatalogTrustState> AdvanceAsync(string workspaceIdentity, long expectedGeneration, string expectedContentDigest, long newGeneration, string newContentDigest, CancellationToken cancellationToken = default) => inner.AdvanceAsync(workspaceIdentity, expectedGeneration, expectedContentDigest, newGeneration, newContentDigest, cancellationToken);
+    }
+
+    private sealed class InvalidAuthenticationTagTrustProvider(ICapabilityCatalogTrustProvider inner, string authenticationTag) : ICapabilityCatalogTrustProvider
+    {
+        public int MaximumAuthenticationTagUtf8Bytes => 64;
+        public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default) => inner.ReadAsync(workspaceIdentity, cancellationToken);
+        public Task<CapabilityCatalogTrustState> InitializeAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default) => inner.InitializeAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
+        public Task<string> AuthenticateArtifactAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default) => Task.FromResult(authenticationTag);
+        public Task<bool> VerifyArtifactAsync(string workspaceIdentity, long generation, string contentDigest, string candidateTag, CancellationToken cancellationToken = default) => inner.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, candidateTag, cancellationToken);
         public Task<CapabilityCatalogTrustState> AdvanceAsync(string workspaceIdentity, long expectedGeneration, string expectedContentDigest, long newGeneration, string newContentDigest, CancellationToken cancellationToken = default) => inner.AdvanceAsync(workspaceIdentity, expectedGeneration, expectedContentDigest, newGeneration, newContentDigest, cancellationToken);
     }
 
