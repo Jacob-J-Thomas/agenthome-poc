@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 
 namespace EmbodySense.Web.Services;
 
@@ -32,11 +33,35 @@ public sealed class WebSessionSecurity
     /// </summary>
     /// <param name="token">The nonblank token required for authenticated requests.</param>
     public WebSessionSecurity(string token)
+        : this(token, CreateToken())
+    {
+    }
+
+    private WebSessionSecurity(string token, string chatRequestScope)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
+        ArgumentException.ThrowIfNullOrWhiteSpace(chatRequestScope);
 
         Token = token;
-        ChatRequestScope = CreateToken();
+        ChatRequestScope = chatRequestScope;
+    }
+
+    /// <summary>
+    /// Creates a process-local bearer token paired with a stable, non-secret workspace chat scope.
+    /// </summary>
+    /// <param name="workingDirectory">The workspace whose durable turn evidence owns retained browser request identities.</param>
+    /// <returns>A session policy whose token changes on restart while its workspace scope remains stable.</returns>
+    public static WebSessionSecurity CreateForWorkspace(string workingDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
+        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workingDirectory));
+        if (OperatingSystem.IsWindows())
+        {
+            normalized = normalized.ToUpperInvariant();
+        }
+
+        var scope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("embodysense-web-chat-request-scope-v1\n" + normalized))).ToLowerInvariant();
+        return new WebSessionSecurity(CreateToken(), scope);
     }
 
     /// <summary>
@@ -45,11 +70,11 @@ public sealed class WebSessionSecurity
     public string Token { get; }
 
     /// <summary>
-    /// Gets a non-secret process-session scope used to partition bounded browser chat-request state.
+    /// Gets a non-secret workspace scope used to partition bounded browser chat-request state.
     /// </summary>
     /// <remarks>
-    /// This identity is deliberately independent from the bearer token. It changes with the Web process session,
-    /// so persisted request state cannot cross into a different authenticated session at the same localhost origin.
+    /// This identity is deliberately independent from the bearer token and remains stable across Web process restarts
+    /// for the same normalized workspace. A different workspace receives a different scope at the same localhost origin.
     /// </remarks>
     public string ChatRequestScope { get; }
 

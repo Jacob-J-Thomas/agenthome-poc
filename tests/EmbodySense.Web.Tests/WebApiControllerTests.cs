@@ -21,6 +21,35 @@ public sealed class WebApiControllerTests
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
 
     [Fact]
+    public async Task Session_scope_survives_web_process_restart_for_the_same_workspace()
+    {
+        using var workspace = new TestWorkspace();
+        WebSessionInfo firstSession;
+        await using (var first = CreateApp(workspace.RootPath, out var firstOptions))
+        {
+            await first.StartAsync();
+            using var client = new HttpClient { BaseAddress = new Uri(firstOptions.Url) };
+            firstSession = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!;
+            await first.StopAsync();
+        }
+
+        await using var second = CreateApp(workspace.RootPath, out var secondOptions);
+        await second.StartAsync();
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(secondOptions.Url) };
+            var secondSession = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!;
+
+            Assert.NotEqual(firstSession.Token, secondSession.Token);
+            Assert.Equal(firstSession.ChatRequestScope, secondSession.ChatRequestScope);
+        }
+        finally
+        {
+            await second.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Configured_app_serves_status_init_and_approval_endpoints()
     {
         using var workspace = new TestWorkspace();

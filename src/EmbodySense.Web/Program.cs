@@ -96,7 +96,7 @@ public static class Program
             });
         });
         services.AddSingleton(options);
-        services.AddSingleton<WebSessionSecurity>();
+        services.AddSingleton(_ => WebSessionSecurity.CreateForWorkspace(options.WorkingDirectory));
         services.AddSingleton<IWebClientNotifier, SignalRWebClientNotifier>();
         services.AddSingleton<IAgentRuntimeConversationPublicationObserver, WebConversationPublicationObserver>();
         services.AddSingleton<WebApprovalCoordinator>();
