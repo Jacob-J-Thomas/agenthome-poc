@@ -633,34 +633,39 @@ public sealed partial class CustomLoopDefinitionStore
                 return CleanupResult(CustomLoopReceiptCleanupStatus.Corrupt, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CorruptEvidence, detail: $"Compact proof failed closed: {exception.GetType().Name}.");
             }
 
-            foreach (var candidate in journal.Candidates)
+            var removalProgress = await ReconcileRemovalProgressAsync(journal, ownerToken);
+            if (!removalProgress.IsCanonical)
             {
-                var path = GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId);
-                if (!File.Exists(path))
+                journal = journal with { RemovedArtifactCount = removalProgress.AttributedRemovedCount, RemovedArtifactUtf8Bytes = removalProgress.AttributedRemovedBytes };
+                if (removalProgress.HasConflict)
                 {
-                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Degraded, "A selected artifact is missing after proof commit; attribution is ambiguous and remaining evidence was preserved.", ownerToken);
-                    return CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail);
-                }
-
-                var artifact = await ReadRetentionArtifactAsync(journal.Request.ArtifactClass, path, ownerToken);
-                if (!string.Equals(artifact.Hash, candidate.ArtifactHash, StringComparison.Ordinal) || artifact.Utf8Json.LongLength != candidate.ArtifactUtf8Bytes)
-                {
-                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.AbandonedConflict, CustomLoopReceiptCleanupOutcome.Conflict, "A selected artifact changed after durable intent; no removal was attributed to this batch.", ownerToken);
+                    journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.AbandonedConflict, CustomLoopReceiptCleanupOutcome.Conflict, "A retained authoring artifact changed after durable intent; exact prior removal progress is preserved and no additional artifact was removed.", ownerToken);
                     return CleanupResult(CustomLoopReceiptCleanupStatus.CleanupConflict, journal, blockReason: CustomLoopReceiptCleanupBlockReason.CleanupConflict, detail: journal.Detail);
                 }
+
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.Degraded, CustomLoopReceiptCleanupOutcome.Degraded, "Authoring evidence no longer forms the canonical removal prefix after proof commit; exact attributable progress is preserved and cleanup requires review.", ownerToken);
+                return CleanupResult(CustomLoopReceiptCleanupStatus.Degraded, journal, blockReason: CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, detail: journal.Detail);
             }
 
-            foreach (var candidate in journal.Candidates)
+            if (removalProgress.AttributedRemovedCount > journal.RemovedArtifactCount)
+            {
+                journal = journal with { RemovedArtifactCount = removalProgress.AttributedRemovedCount, RemovedArtifactUtf8Bytes = removalProgress.AttributedRemovedBytes };
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.ProofLedgerWritten, CustomLoopReceiptCleanupOutcome.Unknown, "A canonical missing authoring-evidence prefix was reconstructed as exact attributed progress after an interrupted removal write.", ownerToken);
+            }
+
+            var canonicalCandidates = journal.Candidates.OrderBy(item => item.ArtifactId, StringComparer.Ordinal).ToArray();
+            var removedCount = journal.RemovedArtifactCount;
+            var removedBytes = journal.RemovedArtifactUtf8Bytes;
+            foreach (var candidate in canonicalCandidates.Skip(removedCount))
             {
                 var root = GetArtifactRoot(journal.Request.ArtifactClass);
                 _pathGuard.DeleteFile(root, GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId));
+                removedCount++;
+                removedBytes = checked(removedBytes + candidate.ArtifactUtf8Bytes);
+                journal = journal with { RemovedArtifactCount = removedCount, RemovedArtifactUtf8Bytes = removedBytes };
+                journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.ProofLedgerWritten, CustomLoopReceiptCleanupOutcome.Unknown, "One canonical authoring-evidence removal is durably attributed within the immutable cleanup batch.", ownerToken);
             }
 
-            journal = journal with
-            {
-                RemovedArtifactCount = journal.Candidates.Length,
-                RemovedArtifactUtf8Bytes = journal.Candidates.Sum(item => item.ArtifactUtf8Bytes)
-            };
             journal = await WriteJournalStageAsync(journal, CustomLoopReceiptCleanupStage.ArtifactsRemoved, CustomLoopReceiptCleanupOutcome.Unknown, "Every selected raw artifact was hash-revalidated and removed.", ownerToken);
         }
 
@@ -938,6 +943,48 @@ public sealed partial class CustomLoopDefinitionStore
         }
 
         return result;
+    }
+
+    private async Task<(bool IsCanonical, bool HasConflict, int AttributedRemovedCount, long AttributedRemovedBytes)> ReconcileRemovalProgressAsync(CustomLoopReceiptCleanupJournal journal, CancellationToken cancellationToken)
+    {
+        var candidates = journal.Candidates.OrderBy(item => item.ArtifactId, StringComparer.Ordinal).ToArray();
+        var missingPrefixCount = 0;
+        var retainedCandidateSeen = false;
+        var canonical = true;
+        var hasConflict = false;
+        foreach (var candidate in candidates)
+        {
+            var path = GetCandidatePath(journal.Request.ArtifactClass, candidate.ArtifactId);
+            if (!File.Exists(path))
+            {
+                if (retainedCandidateSeen)
+                {
+                    canonical = false;
+                    break;
+                }
+
+                missingPrefixCount++;
+                continue;
+            }
+
+            retainedCandidateSeen = true;
+            var artifact = await ReadRetentionArtifactAsync(journal.Request.ArtifactClass, path, cancellationToken);
+            if (!string.Equals(artifact.Hash, candidate.ArtifactHash, StringComparison.Ordinal) || artifact.Utf8Json.LongLength != candidate.ArtifactUtf8Bytes)
+            {
+                canonical = false;
+                hasConflict = true;
+                break;
+            }
+        }
+
+        var attributedCount = Math.Max(journal.RemovedArtifactCount, missingPrefixCount);
+        var attributedBytes = candidates.Take(attributedCount).Sum(item => item.ArtifactUtf8Bytes);
+        if (journal.RemovedArtifactCount > missingPrefixCount)
+        {
+            canonical = false;
+        }
+
+        return (canonical, hasConflict, attributedCount, attributedBytes);
     }
 
     private async Task<CustomLoopDefinitionRetentionArtifact> ReadRetentionArtifactAsync(CustomLoopReceiptArtifactClass artifactClass, string path, CancellationToken cancellationToken)

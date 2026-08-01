@@ -201,6 +201,7 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
         await _processGate.WaitAsync(cancellationToken);
         try
         {
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_retentionRoot);
             var exact = await ReadIfExistsAsync(safeOperationId, cancellationToken);
             var expired = await FindExpiredProofAsync(safeOperationId, cancellationToken);
             ThrowIfRawAndCompactProofConflict(safeOperationId, exact, expired);

@@ -596,7 +596,7 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     }
 
     [Fact]
-    public async Task Recovery_after_partial_raw_removal_fails_closed_and_preserves_every_remaining_candidate()
+    public async Task Recovery_after_interrupted_canonical_prefix_removal_reconstructs_progress_and_completes_the_batch()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -621,10 +621,12 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
         var recovered = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "cleanup-after-partial-removal"));
         var retainedLedger = CustomLoopReceiptRetentionContractCodec.DeserializeProofLedger(await File.ReadAllBytesAsync(paths.CustomLoopReceiptProofLedgerPath));
 
-        Assert.Equal(CustomLoopReceiptCleanupStatus.Degraded, recovered.Status);
-        Assert.Equal(CustomLoopReceiptCleanupBlockReason.AmbiguousEvidence, recovered.BlockReason);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, recovered.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.None, recovered.BlockReason);
+        Assert.Equal(2, recovered.CompactedArtifactCount);
+        Assert.Equal(2, recovered.Journal!.RemovedArtifactCount);
         Assert.False(File.Exists(removedPath));
-        Assert.True(File.Exists(preservedPath));
+        Assert.False(File.Exists(preservedPath));
         Assert.Equal(2, retainedLedger.ExpiredOperations.Length);
     }
 

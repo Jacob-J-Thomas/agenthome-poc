@@ -754,6 +754,21 @@ public sealed class CustomLoopControlOperationStoreTests
     }
 
     [Fact]
+    public async Task Direct_receipt_read_fails_closed_before_reading_raw_or_compact_evidence_while_cleanup_owns_the_shared_retention_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+        var lockPath = Path.Combine(paths.CustomLoopReceiptRetentionPath, ".custom-loop-mutations.lock");
+        using var retentionLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new CustomLoopControlOperationStore(paths).GetAsync("control-get-under-retention-lock"));
+
+        Assert.IsType<IOException>(exception.InnerException);
+        Assert.Contains("locked by another process", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Mutation_reclaims_only_recognized_abandoned_temp_and_orphan_owner_artifacts()
     {
         using var workspace = new TestWorkspace();
