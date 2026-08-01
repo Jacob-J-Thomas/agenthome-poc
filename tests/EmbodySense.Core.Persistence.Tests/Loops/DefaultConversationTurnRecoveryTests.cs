@@ -517,6 +517,23 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Equal("answer", (await turns.LoadAsync(record.TurnId))!.AssistantMessage!.Content);
     }
 
+    [Theory]
+    [InlineData("{", "invalid JSON")]
+    [InlineData("null", "was empty")]
+    public async Task Store_rejects_malformed_and_empty_turn_artifacts(string content, string expectedDetail)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new DefaultConversationTurnStore(paths);
+        const string TurnId = "invalid-turn-artifact";
+        Directory.CreateDirectory(paths.DefaultConversationTurnsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationTurnsPath, TurnId + ".json"), content);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.LoadAsync(TurnId));
+
+        Assert.Contains(expectedDetail, exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Store_rejects_forged_latest_schema_one_artifacts_on_read()
     {
