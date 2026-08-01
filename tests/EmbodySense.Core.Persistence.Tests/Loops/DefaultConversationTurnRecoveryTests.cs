@@ -684,6 +684,42 @@ public sealed class DefaultConversationTurnRecoveryTests
         await AssertArtifactBytesEqualAsync(artifactPath, corruptedBytes);
     }
 
+    [Theory]
+    [InlineData("incomplete")]
+    [InlineData("needs-review")]
+    public async Task Renamed_turn_artifacts_are_rejected_from_discovery_without_duplicating_or_blocking_the_canonical_turn(string state)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var fixture = CreateFixture(workspace, state == "needs-review" ? new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderDispatchStarted) : null);
+        var record = await CreateArtifactForStrictJsonTestAsync(state, fixture, paths);
+        var canonicalPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var renamedPath = Path.Combine(paths.DefaultConversationTurnsPath, "renamed-" + record.TurnId + ".json");
+        var renamedBytes = await File.ReadAllBytesAsync(canonicalPath);
+        File.Copy(canonicalPath, renamedPath);
+
+        if (state == "incomplete")
+        {
+            Assert.Collection(await fixture.Turns.ListIncompleteAsync(), discovered => Assert.Equal(record.TurnId, discovered.TurnId));
+            var recovery = await fixture.Recovery.RecoverAsync();
+
+            Assert.Single(recovery.Results);
+            Assert.Empty(await fixture.Turns.ListIncompleteAsync());
+        }
+        else
+        {
+            Assert.Collection(await fixture.Turns.ListNeedsReviewAsync(), discovered => Assert.Equal(record.TurnId, discovered.TurnId));
+            var reviews = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+            Assert.NotNull(await reviews.ResolveAsync(record.TurnId));
+
+            Assert.Empty(await fixture.Turns.ListNeedsReviewAsync());
+            Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("later", requestId: "renamed-needs-review-later"))).Status);
+        }
+
+        Assert.Equal(renamedBytes, await File.ReadAllBytesAsync(renamedPath));
+        Assert.NotNull(await fixture.Turns.LoadAsync(record.TurnId));
+    }
+
     [Fact]
     public async Task Store_update_succeeds_while_a_compatible_reader_holds_the_prior_artifact()
     {

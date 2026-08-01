@@ -184,7 +184,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         {
             cancellationToken.ThrowIfCancellationRequested();
             var record = await ReadRequiredAsync(path, cancellationToken);
-            if (predicate(record))
+            if (HasCanonicalFileName(path, record.TurnId) && predicate(record))
             {
                 records.Add(record);
             }
@@ -252,6 +252,12 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     {
         DefaultConversationTurnProtocolValidator.Validate(record);
         LoopArtifactPaths.ValidateArtifactId(record.TurnId);
+    }
+
+    private static bool HasCanonicalFileName(string path, string turnId)
+    {
+        var expectedFileName = LoopArtifactPaths.ValidateArtifactId(turnId) + ".json";
+        return string.Equals(Path.GetFileName(path), expectedFileName, StringComparison.Ordinal);
     }
 
     private static bool ImmutableIdentityMatches(DefaultConversationTurnRecord left, DefaultConversationTurnRecord right)
