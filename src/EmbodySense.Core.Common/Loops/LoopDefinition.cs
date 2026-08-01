@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Capabilities.Models;
 namespace EmbodySense.Core.Common.Loops;
 
 /// <summary>
@@ -45,6 +46,9 @@ public sealed record LoopDefinition(
     /// <value>The loop graph definition.</value>
     public LoopGraphDefinition Graph { get; init; } = null!;
 
+    /// <summary>Gets the bounded capability requirements declared by this loop.</summary>
+    public CapabilityDependencyManifest CapabilityRequirements { get; init; } = null!;
+
     /// <summary>
     /// Creates the system-locked built-in conversation-loop definition.
     /// </summary>
@@ -73,7 +77,8 @@ public sealed record LoopDefinition(
             LoopState.Enabled)
         {
             EditMode = LoopEditMode.SystemLocked,
-            Graph = LoopGraphDefinition.CreateDefaultConversation()
+            Graph = LoopGraphDefinition.CreateDefaultConversation(),
+            CapabilityRequirements = LoopCapabilityRequirements.CreateDefaultConversationManifest()
         };
     }
 }

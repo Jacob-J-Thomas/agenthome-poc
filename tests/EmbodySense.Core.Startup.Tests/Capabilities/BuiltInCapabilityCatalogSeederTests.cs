@@ -12,7 +12,7 @@ namespace EmbodySense.Core.Startup.Tests.Capabilities;
 public sealed class BuiltInCapabilityCatalogSeederTests
 {
     [Fact]
-    public async Task Concurrent_seeders_converge_without_ambient_enablement_trust_assignment_or_authority()
+    public async Task Concurrent_seeders_converge_to_effect_ready_built_ins_without_assignment_or_authority()
     {
         using var workspace = new TestWorkspace();
         using var trustRoot = new TestWorkspace();
@@ -28,8 +28,9 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         {
             Assert.Equal(CapabilityDeclarationState.Declared, entry.Lifecycle.Declaration);
             Assert.Equal(CapabilityInstallationState.Installed, entry.Lifecycle.Installation);
-            Assert.Equal(CapabilityEnablementState.Disabled, entry.Lifecycle.Enablement);
-            Assert.Equal(CapabilityTrustState.Unverified, entry.Lifecycle.Trust);
+            Assert.Equal(CapabilityEnablementState.Enabled, entry.Lifecycle.Enablement);
+            Assert.Equal(CapabilityHealthState.Healthy, entry.Lifecycle.Health);
+            Assert.Equal(CapabilityTrustState.Verified, entry.Lifecycle.Trust);
         });
         var artifact = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
         Assert.DoesNotContain("assignment", artifact, StringComparison.OrdinalIgnoreCase);
@@ -64,8 +65,9 @@ public sealed class BuiltInCapabilityCatalogSeederTests
         Assert.All(builtIns, entry =>
         {
             Assert.Equal(CapabilityInstallationState.Installed, entry.Lifecycle.Installation);
-            Assert.Equal(CapabilityEnablementState.Disabled, entry.Lifecycle.Enablement);
-            Assert.Equal(CapabilityTrustState.Unverified, entry.Lifecycle.Trust);
+            Assert.Equal(CapabilityEnablementState.Enabled, entry.Lifecycle.Enablement);
+            Assert.Equal(CapabilityHealthState.Healthy, entry.Lifecycle.Health);
+            Assert.Equal(CapabilityTrustState.Verified, entry.Lifecycle.Trust);
         });
     }
 

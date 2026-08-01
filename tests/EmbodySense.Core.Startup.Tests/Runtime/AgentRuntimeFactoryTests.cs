@@ -530,7 +530,10 @@ public sealed class AgentRuntimeFactoryTests
             events,
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, now)
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
@@ -826,7 +829,7 @@ public sealed class AgentRuntimeFactoryTests
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null, string? codexPath = null)
     {
-        return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync(
             "test-model",
             workspace.RootPath,
             codexPath ?? await CreateFakeCodexExecutableAsync(workspace),

@@ -1,10 +1,12 @@
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Capabilities;
 
 /// <summary>
 /// Represents the canonical SHA-256 identity of one validated capability descriptor.
 /// </summary>
+[JsonConverter(typeof(CapabilityScalarJsonConverterFactory))]
 public sealed class CapabilityDescriptorHash : IEquatable<CapabilityDescriptorHash>
 {
     private CapabilityDescriptorHash(CapabilityIntegrityDigest digest)

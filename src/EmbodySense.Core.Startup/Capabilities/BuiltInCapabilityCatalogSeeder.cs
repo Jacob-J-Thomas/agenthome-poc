@@ -7,7 +7,7 @@ using EmbodySense.Core.Persistence.Capabilities;
 
 namespace EmbodySense.Core.Startup.Capabilities;
 
-/// <summary>Seeds shipped implementations through the catalog contracts without ambient enablement, assignment, trust, or authority.</summary>
+/// <summary>Seeds and verifies shipped implementations without assigning them to a loop or granting authority.</summary>
 public sealed class BuiltInCapabilityCatalogSeeder
 {
     private const int MaximumConvergenceAttempts = 8;
@@ -25,7 +25,7 @@ public sealed class BuiltInCapabilityCatalogSeeder
         _trustProvider = trustProvider;
     }
 
-    /// <summary>Idempotently declares and installs every shipped capability.</summary>
+    /// <summary>Idempotently declares, installs, verifies, enables, and health-checks every exact shipped capability.</summary>
     /// <param name="paths">The target workspace paths.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task that completes after all exact built-in descriptors are present.</returns>
@@ -76,6 +76,25 @@ public sealed class BuiltInCapabilityCatalogSeeder
                 }
 
                 RequireCommitted(installed, descriptor.Id);
+                continue;
+            }
+
+            if (existing.Lifecycle.Trust != CapabilityTrustState.Verified)
+            {
+                RequireCommitted(await service.VerifyAsync(descriptor.Id, catalogRevision, OperationId("verify", descriptor.Id), cancellationToken), descriptor.Id);
+                continue;
+            }
+
+            if (existing.Lifecycle.Enablement != CapabilityEnablementState.Enabled)
+            {
+                RequireCommitted(await service.EnableAsync(descriptor.Id, catalogRevision, OperationId("enable", descriptor.Id), cancellationToken), descriptor.Id);
+                continue;
+            }
+
+            if (existing.Lifecycle.Health != CapabilityHealthState.Healthy)
+            {
+                RequireCommitted(await service.MarkHealthyAsync(descriptor.Id, catalogRevision, OperationId("healthy", descriptor.Id), cancellationToken), descriptor.Id);
+                continue;
             }
 
             return;

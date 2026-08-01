@@ -9,8 +9,10 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
@@ -25,11 +27,13 @@ public sealed class CustomLoopAdmissionServiceTests
         var runs = new FakeRunStore();
         var audit = new RecordingAuditLog();
         var authority = new TestAuthorityProvider();
+        var capabilities = new TestCapabilityAdmissionService();
 
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(null!, runs, audit, authority));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, null!, audit, authority));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, null!, authority));
-        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, audit, null!));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(null!, runs, audit, authority, capabilities));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, null!, audit, authority, capabilities));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, null!, authority, capabilities));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, audit, null!, capabilities));
+        Assert.Throws<ArgumentNullException>(() => new CustomLoopAdmissionService(definitions, runs, audit, authority, null!));
     }
 
     [Fact]
@@ -974,7 +978,7 @@ public sealed class CustomLoopAdmissionServiceTests
 
     private static CustomLoopAdmissionService Service(FakeDefinitionStore definitions, FakeRunStore runs, RecordingAuditLog? audit = null, ICustomLoopRunIdentityGenerator? identity = null, ICustomLoopToolAuthorityProvider? authorityProvider = null)
     {
-        return new CustomLoopAdmissionService(definitions, runs, audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), identity ?? new QueueIdentityGenerator(["run-admitted"], ["event-admitted", "event-audit-complete", "event-integrity-failure"]), new FixedTimeProvider(_now));
+        return new CustomLoopAdmissionService(definitions, runs, audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), new TestCapabilityAdmissionService(), identity ?? new QueueIdentityGenerator(["run-admitted"], ["event-admitted", "event-audit-complete", "event-integrity-failure"]), new FixedTimeProvider(_now));
     }
 
     private static AuditEvent AssertAdmissionAudit(RecordingAuditLog audit, string status, string outcome)
@@ -1001,7 +1005,11 @@ public sealed class CustomLoopAdmissionServiceTests
 
     private static CustomLoopDefinition Rehash(CustomLoopDefinition definition)
     {
-        return CustomLoopDefinitionContentHash.Apply(definition with { ContentHash = string.Empty });
+        return CustomLoopDefinitionContentHash.Apply(definition with
+        {
+            ContentHash = string.Empty,
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments)
+        });
     }
 
     private static CustomLoopAdmissionRequest Request(CustomLoopDefinition definition)
@@ -1123,7 +1131,10 @@ public sealed class CustomLoopAdmissionServiceTests
             [admitted, auditCompleted],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _now)
+        };
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
         return run;

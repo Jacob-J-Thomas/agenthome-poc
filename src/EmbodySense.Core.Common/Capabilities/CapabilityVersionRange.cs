@@ -1,8 +1,11 @@
+using System.Text.Json.Serialization;
+
 namespace EmbodySense.Core.Common.Capabilities;
 
 /// <summary>
 /// Represents one bounded compatible-version interval using canonical NuGet-style interval notation.
 /// </summary>
+[JsonConverter(typeof(CapabilityScalarJsonConverterFactory))]
 public sealed class CapabilityVersionRange : IEquatable<CapabilityVersionRange>
 {
     private CapabilityVersionRange(string value, CapabilityVersion? minimum, bool includesMinimum, CapabilityVersion? maximum, bool includesMaximum)

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Capabilities;
 
@@ -6,6 +7,7 @@ namespace EmbodySense.Core.Common.Capabilities;
 /// Represents one exact, bounded Semantic Versioning 2.0.0 version.
 /// </summary>
 /// <remarks>Precedence follows SemVer; deterministic total ordering uses build metadata as an ordinal tie-breaker.</remarks>
+[JsonConverter(typeof(CapabilityScalarJsonConverterFactory))]
 public sealed class CapabilityVersion : IEquatable<CapabilityVersion>, IComparable<CapabilityVersion>
 {
     private readonly IReadOnlyList<string> _preReleaseIdentifiers;

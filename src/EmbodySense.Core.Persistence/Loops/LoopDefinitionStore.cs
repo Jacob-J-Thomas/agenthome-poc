@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -141,6 +142,22 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
         if (graphFailure is not null)
         {
             throw new FormatException(graphFailure);
+        }
+
+        if (!CapabilityDependencyManifestValidator.Validate(definition.CapabilityRequirements).IsValid)
+        {
+            throw new FormatException("Loop definitions must include a valid bounded capability requirement manifest.");
+        }
+
+        if (string.Equals(definition.Id, BuiltInLoopIds.DefaultConversation, StringComparison.Ordinal))
+        {
+            var expected = LoopCapabilityRequirements.CreateDefaultConversationManifest();
+            if (!CapabilityDependencyManifestHash.TryCompute(definition.CapabilityRequirements, out var actualHash, out _)
+                || !CapabilityDependencyManifestHash.TryCompute(expected, out var expectedHash, out _)
+                || !string.Equals(actualHash!.Value, expectedHash!.Value, StringComparison.Ordinal))
+            {
+                throw new FormatException("The default-conversation capability requirements must match the server-owned mapping.");
+            }
         }
     }
 

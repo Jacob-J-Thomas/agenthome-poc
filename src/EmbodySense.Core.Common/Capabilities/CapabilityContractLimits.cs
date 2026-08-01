@@ -71,6 +71,18 @@ public static class CapabilityContractLimits
     /// <summary>Gets the maximum required or optional dependency declarations in one manifest.</summary>
     public const int MaxDependencyManifestDependencies = 64;
 
+    /// <summary>Gets the maximum dependency edges resolved while producing one exact admission snapshot.</summary>
+    public const int MaxResolvedDependencyGraphDependencies = 256;
+
+    /// <summary>Gets the maximum exact capability pins preserved in one admission snapshot.</summary>
+    public const int MaxCapabilityAdmissionPins = MaxResolvedDependencyGraphDependencies;
+
+    /// <summary>Gets the maximum resolver observations preserved in one successful admission snapshot.</summary>
+    public const int MaxCapabilityAdmissionEvidenceEntries = MaxResolvedDependencyGraphDependencies;
+
+    /// <summary>Gets the maximum bounded diagnostic detail retained for one admission-resolution observation.</summary>
+    public const int MaxCapabilityAdmissionEvidenceDetailCharacters = 1_024;
+
     /// <summary>Gets the maximum canonical dependency-manifest JSON length.</summary>
     public const int MaxDependencyManifestJsonCharacters = 32_768;
 

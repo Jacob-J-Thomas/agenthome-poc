@@ -1,11 +1,13 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Capabilities;
 
 /// <summary>
 /// Represents a canonical OCI-style SHA-256 content digest.
 /// </summary>
+[JsonConverter(typeof(CapabilityScalarJsonConverterFactory))]
 public sealed class CapabilityIntegrityDigest : IEquatable<CapabilityIntegrityDigest>
 {
     private const string Prefix = "sha256:";
