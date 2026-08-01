@@ -41,7 +41,7 @@ public sealed class DefaultConversationTurnReviewService
     }
 
     /// <summary>
-    /// Quarantines live provider state and durably records explicit abandonment without redispatch or publication.
+    /// Quarantines live provider state and durably records explicit abandonment of an outcome-unknown attempt without redispatch or publication.
     /// </summary>
     public async Task<DefaultConversationTurnRecord?> ResolveAsync(string turnId, CancellationToken cancellationToken = default)
     {
@@ -56,6 +56,11 @@ public sealed class DefaultConversationTurnReviewService
         if (current.Checkpoint != DefaultConversationTurnCheckpoint.Terminal || current.Run.Status != LoopRunStatus.NeedsReview)
         {
             throw new InvalidOperationException($"Default-conversation turn `{turnId}` is not an unresolved NeedsReview turn.");
+        }
+
+        if (!DefaultConversationTurnProtocol.CanAbandonReview(current))
+        {
+            throw new InvalidOperationException($"Default-conversation turn `{turnId}` is classified as {DefaultConversationTurnProtocol.GetReviewClassification(current)} and cannot be abandoned. {DefaultConversationTurnProtocol.GetReviewAction(current)}");
         }
 
         await _inferenceClient.QuarantineAsync(cancellationToken);

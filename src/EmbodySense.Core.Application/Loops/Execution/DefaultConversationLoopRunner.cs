@@ -119,7 +119,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             if (activeReview is not null)
             {
                 var reviewRun = new LoopRunIdentity(activeReview.Run.LoopId, activeReview.Run.RunId, activeReview.Run.RoleId);
-                var detail = $"Default-conversation turn `{activeReview.TurnId}` remains in NeedsReview. {activeReview.ReviewDetail} Use `/review resolve {activeReview.TurnId}` only after inspecting provider and audit evidence; no later provider attempt can start before that explicit resolution.";
+                var detail = $"Default-conversation turn `{activeReview.TurnId}` remains in NeedsReview ({DefaultConversationTurnProtocol.GetReviewClassification(activeReview)}). {activeReview.ReviewDetail} {DefaultConversationTurnProtocol.GetReviewAction(activeReview)} No later provider attempt for that retained conversation version can start while this review remains unresolved.";
                 return DefaultConversationLoopTurnResult.NeedsReview(detail, runIdentity: reviewRun);
             }
 

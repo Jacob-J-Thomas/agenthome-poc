@@ -112,7 +112,7 @@ public static class DefaultConversationTurnProtocol
     }
 
     /// <summary>
-    /// Appends the one explicit abandonment decision permitted for a needs-review turn.
+    /// Appends the one explicit abandonment decision permitted for an outcome-unknown needs-review turn.
     /// </summary>
     public static DefaultConversationTurnRecord ResolveReview(this DefaultConversationTurnRecord record, DateTimeOffset resolvedAtUtc)
     {
@@ -122,12 +122,64 @@ public static class DefaultConversationTurnProtocol
             throw new InvalidOperationException("Only an unresolved terminal NeedsReview turn can be resolved.");
         }
 
+        if (!CanAbandonReview(record))
+        {
+            throw new InvalidOperationException($"Default-conversation turn `{record.TurnId}` is classified as {GetReviewClassification(record)} and cannot be abandoned. {GetReviewAction(record)}");
+        }
+
         var resolution = new DefaultConversationTurnReviewResolution(
             CreateReviewResolutionId(record.TurnId),
             DefaultConversationTurnReviewDisposition.Abandoned,
             resolvedAtUtc,
             ReviewAbandonmentDetail);
         return record.Advance(DefaultConversationTurnCheckpoint.ReviewResolved, resolvedAtUtc, resolution.Detail, reviewResolution: resolution);
+    }
+
+    /// <summary>
+    /// Classifies the durable review evidence for a turn without inferring a human disposition.
+    /// </summary>
+    /// <param name="record">The durable default-conversation turn.</param>
+    /// <returns>The review classification implied by retained provider and transcript evidence.</returns>
+    public static DefaultConversationTurnReviewClassification GetReviewClassification(DefaultConversationTurnRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        return record.ProviderOutcome switch
+        {
+            DefaultConversationProviderOutcome.OutcomeUnknown => DefaultConversationTurnReviewClassification.OutcomeUnknown,
+            DefaultConversationProviderOutcome.ObservedWithAuditFailure => DefaultConversationTurnReviewClassification.ObservedWithAuditFailure,
+            _ => DefaultConversationTurnReviewClassification.TranscriptConflict
+        };
+    }
+
+    /// <summary>
+    /// Determines whether the retained review evidence permits the explicit abandonment disposition.
+    /// </summary>
+    /// <param name="record">The durable default-conversation turn.</param>
+    /// <returns><see langword="true"/> only for an unresolved outcome-unknown review.</returns>
+    public static bool CanAbandonReview(DefaultConversationTurnRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        return record.Checkpoint == DefaultConversationTurnCheckpoint.Terminal
+            && record.Run.Status == LoopRunStatus.NeedsReview
+            && record.ReviewResolution is null
+            && GetReviewClassification(record) == DefaultConversationTurnReviewClassification.OutcomeUnknown;
+    }
+
+    /// <summary>
+    /// Describes the only currently supported human action for the retained review classification.
+    /// </summary>
+    /// <param name="record">The durable default-conversation turn.</param>
+    /// <returns>Operator-facing guidance that does not imply unavailable automation.</returns>
+    public static string GetReviewAction(DefaultConversationTurnRecord record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        return GetReviewClassification(record) switch
+        {
+            DefaultConversationTurnReviewClassification.OutcomeUnknown => $"After inspecting provider and audit evidence, `/review resolve {record.TurnId}` may explicitly abandon this outcome-unknown attempt without redispatch or transcript publication.",
+            DefaultConversationTurnReviewClassification.TranscriptConflict => "Transcript-conflict review remains blocked; no state-appropriate human disposition is implemented.",
+            DefaultConversationTurnReviewClassification.ObservedWithAuditFailure => "Observed-with-audit-failure review remains blocked; no state-appropriate human disposition is implemented.",
+            _ => "This review remains blocked because its retained evidence has no supported disposition."
+        };
     }
 
     /// <summary>

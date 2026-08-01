@@ -180,6 +180,7 @@ public static class DefaultConversationTurnProtocolValidator
         Require(record.Run.Status == LoopRunStatus.NeedsReview, "A resolved review requires an unresolved needs-review terminal predecessor.");
         var resolution = record.ReviewResolution ?? throw Invalid("A resolved review requires explicit resolution evidence.");
         var completedAtUtc = record.Run.CompletedAtUtc ?? throw Invalid("A resolved review requires terminal completion evidence.");
+        Require(record.ProviderOutcome == DefaultConversationProviderOutcome.OutcomeUnknown, "Only an outcome-unknown provider attempt can be abandoned after review.");
         Require(resolution.Disposition == DefaultConversationTurnReviewDisposition.Abandoned, "Default-conversation review disposition was invalid.");
         Require(string.Equals(resolution.ResolutionId, DefaultConversationTurnProtocol.CreateReviewResolutionId(record.TurnId), StringComparison.Ordinal), "Default-conversation review resolution identity was noncanonical.");
         Require(string.Equals(resolution.Detail, DefaultConversationTurnProtocol.ReviewAbandonmentDetail, StringComparison.Ordinal), "Default-conversation review resolution detail was noncanonical.");

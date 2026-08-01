@@ -197,6 +197,23 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Equal("observed answer", recovered.AssistantMessage!.Content);
         Assert.Equal(0, client.QuarantineCount);
         Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+
+        var artifactPath = new WorkspacePaths(workspace.RootPath).DefaultConversationTurnsPath + Path.DirectorySeparatorChar + recovered.TurnId + ".json";
+        var retainedArtifact = await File.ReadAllTextAsync(artifactPath);
+        var reviewService = new DefaultConversationTurnReviewService(fixture.Turns, client, new FileConversationWorkspaceLease(new WorkspacePaths(workspace.RootPath)));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => reviewService.ResolveAsync(recovered.TurnId));
+
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.ObservedWithAuditFailure), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.Equal(retainedArtifact, await File.ReadAllTextAsync(artifactPath));
+        var reread = await fixture.Turns.LoadAsync(recovered.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(recovered.LifecycleVersion, reread.LifecycleVersion);
+        Assert.Equal(recovered.ProviderOutcome, reread.ProviderOutcome);
+        Assert.Equal(recovered.AssistantMessage, reread.AssistantMessage);
+        Assert.Equal(recovered.ReviewDetail, reread.ReviewDetail);
+        Assert.Null(reread.ReviewResolution);
+        Assert.Single(await fixture.Turns.ListNeedsReviewAsync());
     }
 
     [Fact]
@@ -239,6 +256,28 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Equal(recovered.TurnId + ":publication:user", recovered.UserPublicationId);
         Assert.Contains(recovered.UserPublicationId, recovered.Run.FailureDetail, StringComparison.Ordinal);
         Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal("owner edit", message.Content));
+
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, recovered.TurnId + ".json");
+        var retainedArtifact = await File.ReadAllTextAsync(artifactPath);
+        var reviewService = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => reviewService.ResolveAsync(recovered.TurnId));
+
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.TranscriptConflict), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.Client.QuarantineCount);
+        Assert.Equal(retainedArtifact, await File.ReadAllTextAsync(artifactPath));
+        var reread = await fixture.Turns.LoadAsync(recovered.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(recovered.LifecycleVersion, reread.LifecycleVersion);
+        Assert.Equal(recovered.ProviderOutcome, reread.ProviderOutcome);
+        Assert.Equal(recovered.UserMessage, reread.UserMessage);
+        Assert.Equal(recovered.ReviewDetail, reread.ReviewDetail);
+        Assert.Null(reread.ReviewResolution);
+        Assert.Single(await fixture.Turns.ListNeedsReviewAsync());
+
+        var restartedRecovery = new DefaultConversationTurnRecoveryService(fixture.Turns, fixture.Memory, new LoopRunStore(paths), new FileConversationWorkspaceLease(paths));
+        Assert.Empty((await restartedRecovery.RecoverAsync()).Results);
+        Assert.Single(await fixture.Turns.ListNeedsReviewAsync());
     }
 
     [Fact]
