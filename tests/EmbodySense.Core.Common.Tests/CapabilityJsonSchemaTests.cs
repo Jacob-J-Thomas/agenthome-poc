@@ -23,6 +23,32 @@ public sealed class CapabilityJsonSchemaTests
         Assert.Contains("[null,false,true,\"text\",2]", literals.CanonicalJson, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("1.0", "1")]
+    [InlineData("0.0100", "1e-2")]
+    [InlineData("1000", "1e3")]
+    [InlineData("1E+3", "1e3")]
+    public void Schema_canonicalization_normalizes_lossless_finite_numbers(string firstNumber, string secondNumber)
+    {
+        var dialect = CapabilityJsonSchema.Draft202012Dialect;
+        var first = Schema($"{{\"$schema\":\"{dialect}\",\"minimum\":{firstNumber}}}");
+        var second = Schema($"{{\"$schema\":\"{dialect}\",\"minimum\":{secondNumber}}}");
+
+        Assert.Equal(first, second);
+    }
+
+    [Theory]
+    [InlineData("1e-999")]
+    [InlineData("9007199254740993")]
+    public void Schema_parser_rejects_numbers_that_cannot_round_trip_without_a_semantic_change(string number)
+    {
+        var json = $"{{\"$schema\":\"{CapabilityJsonSchema.Draft202012Dialect}\",\"minimum\":{number}}}";
+
+        Assert.False(CapabilityJsonSchema.TryCreate(json, out var schema, out var error));
+        Assert.Null(schema);
+        Assert.Equal("unsafe_json_schema_number", error?.Code);
+    }
+
     [Fact]
     public void Schema_parser_rejects_malformed_ambiguous_unsafe_and_noncanonical_inputs()
     {

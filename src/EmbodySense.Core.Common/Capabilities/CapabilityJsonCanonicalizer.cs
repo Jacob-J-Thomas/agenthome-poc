@@ -85,13 +85,11 @@ internal static class CapabilityJsonCanonicalizer
                 writer.WriteStringValue(value);
                 break;
             case JsonValueKind.Number:
-                if (!element.TryGetDouble(out var number) || !double.IsFinite(number) || IsNegativeZero(element.GetRawText()))
+                if (!TryWriteCanonicalNumber(writer, element, field, out error))
                 {
-                    error = new CapabilityContractError("unsafe_json_schema_number", field, "JSON schema numbers must be finite IEEE-754 values and cannot use negative zero.");
                     return false;
                 }
 
-                writer.WriteNumberValue(number);
                 break;
             case JsonValueKind.True:
                 writer.WriteBooleanValue(true);
@@ -109,6 +107,42 @@ internal static class CapabilityJsonCanonicalizer
 
         error = null;
         return true;
+    }
+
+    private static bool TryWriteCanonicalNumber(Utf8JsonWriter writer, JsonElement element, string field, out CapabilityContractError? error)
+    {
+        if (!CapabilityJsonNumberCanonicalizer.TryCanonicalize(element.GetRawText(), out var canonicalNumber, out var isNegativeZero)
+            || isNegativeZero
+            || !element.TryGetDouble(out var number)
+            || !double.IsFinite(number)
+            || !TryGetCanonicalFiniteNumber(number, out var finiteNumber)
+            || !string.Equals(canonicalNumber, finiteNumber, StringComparison.Ordinal))
+        {
+            error = new CapabilityContractError("unsafe_json_schema_number", field, "JSON schema numbers must round-trip exactly through finite IEEE-754 canonicalization and cannot use negative zero.");
+            return false;
+        }
+
+        writer.WriteRawValue(canonicalNumber!, skipInputValidation: true);
+        error = null;
+        return true;
+    }
+
+    private static bool TryGetCanonicalFiniteNumber(double number, out string? canonicalNumber)
+    {
+        canonicalNumber = null;
+        if (!double.IsFinite(number))
+        {
+            return false;
+        }
+
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            writer.WriteNumberValue(number);
+            writer.Flush();
+        }
+
+        return CapabilityJsonNumberCanonicalizer.TryCanonicalize(Encoding.UTF8.GetString(buffer.WrittenSpan), out canonicalNumber, out _);
     }
 
     private static bool TryWriteObject(Utf8JsonWriter writer, JsonElement element, string field, int depth, ref int elementCount, out CapabilityContractError? error)
@@ -164,8 +198,4 @@ internal static class CapabilityJsonCanonicalizer
         return true;
     }
 
-    private static bool IsNegativeZero(string value)
-    {
-        return value.StartsWith('-') && double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) && number == 0d;
-    }
 }
