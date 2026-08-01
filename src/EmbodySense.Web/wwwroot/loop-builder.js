@@ -17,6 +17,7 @@ let retentionPosture = null;
 let retentionPostureFailure = null;
 let retentionCleanupOutcome = null;
 let retentionCleanupInFlight = false;
+let retentionCleanupRegistryFailure = null;
 let retentionPostureRequestGeneration = 0;
 let retentionRecoveryRenderTimer = null;
 const retentionCleanupOperationIds = new Map();
@@ -247,10 +248,13 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
     }
     try {
       configureRetentionCleanupRegistry(status.workspaceRoot);
+      retentionCleanupRegistryFailure = null;
     } catch {
       retentionCleanupStorageKey = null;
       retentionCleanupRegistryLockName = null;
       retentionCleanupOperationIds.clear();
+      retentionCleanupRegistryFailure =
+        "Receipt cleanup is unavailable because this browser cannot durably coordinate its workspace cleanup identity.";
     }
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
@@ -389,9 +393,12 @@ function bindStaticEvents() {
     ) {
       try {
         synchronizeRetentionCleanupOperationIdsFromStorage();
+        retentionCleanupRegistryFailure = null;
         if (currentView === "retention") renderRetention();
       } catch {
-        // Keep the last verified in-memory identity. The server safely arbitrates any later replacement identity.
+        retentionCleanupRegistryFailure =
+          "Receipt cleanup is unavailable because the shared workspace cleanup registry could not be validated.";
+        if (currentView === "retention") renderRetention();
       }
     }
   });
@@ -573,8 +580,21 @@ async function cleanupRetention(artifactClass) {
       }),
     });
     retentionCleanupOutcome = response;
-    await forgetRetentionCleanupOperationId(artifactClass, operationId);
+    try {
+      await forgetRetentionCleanupOperationId(artifactClass, operationId);
+    } catch {
+      retentionCleanupRegistryFailure =
+        "The completed cleanup operation identity remains reserved because it could not be retired safely.";
+      retentionCleanupOutcome = {
+        ...response,
+        detail: `${response.detail} ${retentionCleanupRegistryFailure}`,
+      };
+    }
   } catch (error) {
+    if (!operationId && !error.payload) {
+      retentionCleanupRegistryFailure =
+        "Receipt cleanup is unavailable because this browser could not durably reserve a shared operation identity.";
+    }
     retentionCleanupOutcome = error.payload ?? {
       status: "Unavailable",
       health: "Degraded",
@@ -583,14 +603,25 @@ async function cleanupRetention(artifactClass) {
       cleanupBlockReason: "None",
       compactedArtifactCount: 0,
       compactedArtifactUtf8Bytes: 0,
-      detail: error.message,
+      detail:
+        retentionCleanupRegistryFailure ??
+        "Receipt cleanup is unavailable before a safe server outcome could be obtained.",
     };
     if (
       error.payload &&
       error.payload.status !== "OperationInProgress" &&
       error.payload.status !== "AuditUnavailable"
     ) {
-      await forgetRetentionCleanupOperationId(artifactClass, operationId);
+      try {
+        await forgetRetentionCleanupOperationId(artifactClass, operationId);
+      } catch {
+        retentionCleanupRegistryFailure =
+          "The terminal cleanup operation identity remains reserved because it could not be retired safely.";
+        retentionCleanupOutcome = {
+          ...retentionCleanupOutcome,
+          detail: `${retentionCleanupOutcome.detail} ${retentionCleanupRegistryFailure}`,
+        };
+      }
     }
   } finally {
     retentionCleanupInFlight = false;
@@ -605,7 +636,8 @@ function renderRetention() {
   elements.retentionContent.replaceChildren();
   elements.retentionNotice.textContent = retentionCleanupOutcome
     ? `${formatStatus(retentionCleanupOutcome.status)}: ${retentionCleanupOutcome.detail}`
-    : (retentionPostureFailure ??
+    : (retentionCleanupRegistryFailure ??
+      retentionPostureFailure ??
       retentionPosture?.detail ??
       "Read the current bounded retention posture before requesting cleanup.");
   if (!retentionPosture) {
@@ -735,7 +767,9 @@ function renderRetention() {
             : `Recovery available ${formatTimestamp(posture.cleanupRecoveryAvailableAtUtc)}`
           : "Clean eligible expired evidence",
       () => cleanupRetention(posture.artifactClass),
-      retentionCleanupInFlight || (!normalCleanupAllowed && !recoveryReady),
+      retentionCleanupInFlight ||
+        Boolean(retentionCleanupRegistryFailure) ||
+        (!normalCleanupAllowed && !recoveryReady),
       "secondary-button retention-cleanup-button",
     );
     cleanup.setAttribute(
@@ -4108,7 +4142,28 @@ function configureRetentionCleanupRegistry(workspaceRoot) {
   const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
   retentionCleanupStorageKey = `${retentionCleanupStorageKeyPrefix}.${scope}`;
   retentionCleanupRegistryLockName = `${retentionCleanupRegistryLockNamePrefix}.${scope}`;
+  assertRetentionCleanupRegistryAvailable();
   synchronizeRetentionCleanupOperationIdsFromStorage();
+}
+
+function assertRetentionCleanupRegistryAvailable() {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request || !retentionCleanupStorageKey || !window.localStorage)
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  const probeKey = `${retentionCleanupStorageKey}.availability-probe`;
+  try {
+    window.localStorage.setItem(probeKey, "available");
+    if (window.localStorage.getItem(probeKey) !== "available")
+      throw new Error("The workspace receipt-cleanup registry is unavailable.");
+    window.localStorage.removeItem(probeKey);
+  } catch {
+    try {
+      window.localStorage.removeItem(probeKey);
+    } catch {
+      // The registry remains disabled; never dispatch cleanup with an in-memory fallback.
+    }
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  }
 }
 
 function synchronizeRetentionCleanupOperationIdsFromStorage() {
@@ -4199,40 +4254,27 @@ async function withRetentionCleanupRegistryLock(callback) {
 }
 
 async function getOrCreateRetentionCleanupOperationId(artifactClass) {
-  try {
-    return await withRetentionCleanupRegistryLock(async () => {
-      synchronizeRetentionCleanupOperationIdsFromStorage();
-      const existing = retentionCleanupOperationIds.get(artifactClass);
-      if (existing) return existing;
-      const operationId = newOperationId();
-      const next = new Map(retentionCleanupOperationIds);
-      next.set(artifactClass, operationId);
-      commitRetentionCleanupOperationIds(next);
-      return operationId;
-    });
-  } catch {
-    const operationId =
-      retentionCleanupOperationIds.get(artifactClass) ?? newOperationId();
-    retentionCleanupOperationIds.set(artifactClass, operationId);
+  return withRetentionCleanupRegistryLock(async () => {
+    synchronizeRetentionCleanupOperationIdsFromStorage();
+    const existing = retentionCleanupOperationIds.get(artifactClass);
+    if (existing) return existing;
+    const operationId = newOperationId();
+    const next = new Map(retentionCleanupOperationIds);
+    next.set(artifactClass, operationId);
+    commitRetentionCleanupOperationIds(next);
     return operationId;
-  }
+  });
 }
 
 async function forgetRetentionCleanupOperationId(artifactClass, operationId) {
   if (!operationId) return;
-  try {
-    await withRetentionCleanupRegistryLock(async () => {
-      synchronizeRetentionCleanupOperationIdsFromStorage();
-      if (retentionCleanupOperationIds.get(artifactClass) !== operationId)
-        return;
-      const next = new Map(retentionCleanupOperationIds);
-      next.delete(artifactClass);
-      commitRetentionCleanupOperationIds(next);
-    });
-  } catch {
-    if (retentionCleanupOperationIds.get(artifactClass) === operationId)
-      retentionCleanupOperationIds.delete(artifactClass);
-  }
+  await withRetentionCleanupRegistryLock(async () => {
+    synchronizeRetentionCleanupOperationIdsFromStorage();
+    if (retentionCleanupOperationIds.get(artifactClass) !== operationId) return;
+    const next = new Map(retentionCleanupOperationIds);
+    next.delete(artifactClass);
+    commitRetentionCleanupOperationIds(next);
+  });
 }
 
 async function configurePendingInvocationRegistry(workspaceRoot) {

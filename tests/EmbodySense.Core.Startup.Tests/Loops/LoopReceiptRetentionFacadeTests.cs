@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
@@ -62,6 +63,7 @@ public sealed class LoopReceiptRetentionFacadeTests
 
         var posture = await facade.GetPostureAsync();
         var invalidClass = await facade.CleanupAsync(new LoopReceiptCleanupInput("unknown", "retention-invalid-class", 64, 4 * 1024 * 1024));
+        var numericClass = await facade.CleanupAsync(new LoopReceiptCleanupInput("1", "retention-numeric-class", 64, 4 * 1024 * 1024));
         var invalidBound = await facade.CleanupAsync(new LoopReceiptCleanupInput("LifecycleControlReceipt", "retention-invalid-bound", 65, 4 * 1024 * 1024));
 
         Assert.Equal(LoopReceiptRetentionHealth.Healthy, posture.Health);
@@ -81,7 +83,54 @@ public sealed class LoopReceiptRetentionFacadeTests
             Assert.NotEmpty(item.Categories);
         });
         Assert.Equal("Invalid", invalidClass.Status);
+        Assert.Equal("Invalid", numericClass.Status);
         Assert.Equal("Invalid", invalidBound.Status);
+    }
+
+    [Fact]
+    public async Task Cleanup_projects_a_bounded_interface_detail_without_persistence_paths_or_operation_identities()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var requestedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1);
+        const string OperationId = "retention-safe-detail";
+        var request = new CustomLoopReceiptCleanupRequest(
+            CustomLoopReceiptCleanupRequest.CurrentSchemaVersion,
+            CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
+            OperationId,
+            WorkspaceActors.Web,
+            AgentRuntimeSurface.Web.Id,
+            requestedAtUtc,
+            CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(requestedAtUtc),
+            64,
+            4 * 1024 * 1024);
+        var unsafeDetail = $"Persistence path C:\\private\\receipt.json and operation {OperationId}: {new string('x', 4_096)}";
+        var journal = new CustomLoopReceiptCleanupJournal(
+            CustomLoopReceiptCleanupJournal.CurrentSchemaVersion,
+            request,
+            CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(request),
+            "cleanup-owner-safe-detail",
+            Environment.ProcessId,
+            requestedAtUtc,
+            CustomLoopReceiptCleanupStage.Completed,
+            CustomLoopReceiptCleanupOutcome.NothingEligible,
+            requestedAtUtc,
+            ImmutableArray<CustomLoopReceiptCleanupCandidate>.Empty,
+            null,
+            0,
+            0,
+            unsafeDetail);
+        Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+        await File.WriteAllBytesAsync(paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath, CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(journal));
+
+        var response = await new LoopReceiptRetentionFacade(workspace.RootPath).CleanupAsync(new LoopReceiptCleanupInput(nameof(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt), OperationId, 64, 4 * 1024 * 1024));
+
+        Assert.Equal(nameof(CustomLoopReceiptCleanupStatus.NothingEligible), response.Status);
+        Assert.Equal("No eligible expired receipt evidence was available for cleanup.", response.Detail);
+        Assert.DoesNotContain("private", response.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(OperationId, response.Detail, StringComparison.Ordinal);
+        Assert.True(response.Detail.Length < 256);
     }
 
     [Fact]

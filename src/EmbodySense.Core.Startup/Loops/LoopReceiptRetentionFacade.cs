@@ -257,7 +257,7 @@ public sealed class LoopReceiptRetentionFacade : ILoopReceiptRetentionFacade
             result.BlockReason.ToString(),
             result.CompactedArtifactCount,
             result.CompactedArtifactUtf8Bytes,
-            result.Detail);
+            SafeCleanupDetail(result.Status));
     }
 
     private static LoopReceiptCleanupResponse InvalidCleanup(string detail)
@@ -276,10 +276,34 @@ public sealed class LoopReceiptRetentionFacade : ILoopReceiptRetentionFacade
     private static bool TryParseArtifactClass(string value, out CustomLoopReceiptArtifactClass artifactClass)
     {
         artifactClass = CustomLoopReceiptArtifactClass.Unknown;
-        return !string.IsNullOrWhiteSpace(value)
-            && Enum.TryParse(value, ignoreCase: true, out artifactClass)
-            && Enum.IsDefined(artifactClass)
-            && artifactClass != CustomLoopReceiptArtifactClass.Unknown;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        foreach (var candidate in _artifactClasses)
+        {
+            if (!string.Equals(value, candidate.ToString(), StringComparison.OrdinalIgnoreCase)) continue;
+            artifactClass = candidate;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string SafeCleanupDetail(CustomLoopReceiptCleanupStatus status)
+    {
+        return status switch
+        {
+            CustomLoopReceiptCleanupStatus.Pruned => "Eligible expired receipt evidence was compacted within the requested bounds.",
+            CustomLoopReceiptCleanupStatus.Replayed => "The prior terminal cleanup outcome was replayed; no second cleanup was started.",
+            CustomLoopReceiptCleanupStatus.NothingEligible => "No eligible expired receipt evidence was available for cleanup.",
+            CustomLoopReceiptCleanupStatus.OperationInProgress => "A cleanup owner is inside its bounded ownership window; retry after the displayed recovery time.",
+            CustomLoopReceiptCleanupStatus.QuotaExhausted => "Cleanup could not proceed because a bounded retention capacity is exhausted.",
+            CustomLoopReceiptCleanupStatus.AuditUnavailable => "Cleanup could not prove required audit durability; no additional cleanup was attempted.",
+            CustomLoopReceiptCleanupStatus.CleanupConflict => "Receipt evidence changed during cleanup; the ambiguous evidence was preserved for review.",
+            CustomLoopReceiptCleanupStatus.Corrupt => "Receipt evidence could not be validated safely; cleanup remains unavailable until repaired.",
+            CustomLoopReceiptCleanupStatus.Degraded => "Receipt cleanup evidence is ambiguous and requires operator review.",
+            CustomLoopReceiptCleanupStatus.Invalid => "The cleanup request or durable cleanup journal is invalid.",
+            CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning => "Receipt evidence was compacted, but the terminal audit outcome requires review.",
+            _ => "Receipt cleanup returned an unknown status; no further cleanup was attempted."
+        };
     }
 
     private static LoopReceiptRetentionHealth MapJournalHealth(CustomLoopReceiptActiveCleanupJournalPosture journal)

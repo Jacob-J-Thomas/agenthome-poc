@@ -186,6 +186,123 @@ test("retention cleanup retains its operation identity when an ambiguous transpo
   assert.equal(localStorage.getItem(storageKey), null);
 });
 
+test("retention cleanup remains disabled when Web Locks cannot coordinate its shared identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  const app = await loadLoopBuilder({ server, locks: {} });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+
+  assert.equal(cleanup.disabled, true);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /cannot durably coordinate/i,
+  );
+  await cleanup.click();
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ),
+    false,
+  );
+});
+
+test("retention cleanup remains disabled when its shared identity cannot be persisted", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  localStorage.setItem = () => {
+    throw new Error("Storage quota exceeded.");
+  };
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+
+  assert.equal(cleanup.disabled, true);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /cannot durably coordinate/i,
+  );
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ),
+    false,
+  );
+});
+
+test("an authoritative cleanup outcome remains visible when its shared identity cannot be retired", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  const storageKey = `embodysense.pending-receipt-cleanup.v1.${scope}`;
+  const removeItem = localStorage.removeItem.bind(localStorage);
+  localStorage.removeItem = (key) => {
+    if (key === storageKey) throw new Error("Storage cleanup failed.");
+    removeItem(key);
+  };
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => ({
+    status: 200,
+    body: {
+      status: "NothingEligible",
+      health: "Healthy",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "No evidence is eligible for cleanup.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  await cleanup.click();
+
+  assert.match(app.elements.retentionNotice.textContent, /nothing eligible/i);
+  assert.match(app.elements.retentionNotice.textContent, /remains reserved/i);
+  assert.equal(
+    findByClass(app.elements.retentionContent, "retention-cleanup-button")[0]
+      .disabled,
+    true,
+  );
+  assert.ok(localStorage.getItem(storageKey));
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ).length,
+    1,
+  );
+});
+
 test("a superseded retention read cannot replace a newer blocked posture or re-enable cleanup", async () => {
   const server = new FakeFetchServer(createCatalog());
   const pendingReads = [];
