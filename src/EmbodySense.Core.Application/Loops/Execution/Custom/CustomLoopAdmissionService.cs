@@ -8,6 +8,8 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Common.Loops;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
@@ -27,6 +29,7 @@ public sealed class CustomLoopAdmissionService
     private readonly ICustomLoopRunIdentityGenerator _identityGenerator;
     private readonly TimeProvider _timeProvider;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
+    private readonly ICapabilityAdmissionService _capabilityAdmissionService;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopAdmissionService"/> type.
@@ -35,14 +38,16 @@ public sealed class CustomLoopAdmissionService
     /// <param name="runStore">The run store.</param>
     /// <param name="auditLog">The audit log.</param>
     /// <param name="authorityProvider">The authority provider.</param>
+    /// <param name="capabilityAdmissionService">The exact capability resolver and current-availability authority.</param>
     /// <param name="identityGenerator">The identity generator.</param>
     /// <param name="timeProvider">The time provider.</param>
-    public CustomLoopAdmissionService(ICustomLoopDefinitionStore definitionStore, ICustomLoopRunStore runStore, IAuditLog auditLog, ICustomLoopToolAuthorityProvider authorityProvider, ICustomLoopRunIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null)
+    public CustomLoopAdmissionService(ICustomLoopDefinitionStore definitionStore, ICustomLoopRunStore runStore, IAuditLog auditLog, ICustomLoopToolAuthorityProvider authorityProvider, ICapabilityAdmissionService capabilityAdmissionService, ICustomLoopRunIdentityGenerator? identityGenerator = null, TimeProvider? timeProvider = null)
     {
         _definitionStore = definitionStore ?? throw new ArgumentNullException(nameof(definitionStore));
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
+        _capabilityAdmissionService = capabilityAdmissionService ?? throw new ArgumentNullException(nameof(capabilityAdmissionService));
         _identityGenerator = identityGenerator ?? new CustomLoopRunIdentityGenerator();
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -117,6 +122,14 @@ public sealed class CustomLoopAdmissionService
             return await AuditOutcomeAsync(request, CustomLoopAdmissionResult.Invalid(errors), useIntegrityWindow: false, cancellationToken);
         }
 
+        var assignedCapabilityIds = LoopCapabilityRequirements.GetAssignedCapabilityIds(definition.CapabilityRequirements);
+        var capabilityAdmission = await _capabilityAdmissionService.AdmitAsync(definition.CapabilityRequirements, assignedCapabilityIds, cancellationToken);
+        if (!capabilityAdmission.IsAdmitted || capabilityAdmission.Snapshot is null)
+        {
+            errors.Add(new CustomLoopValidationError("capability_admission_failed", "capabilityRequirements", capabilityAdmission.Detail));
+            return await AuditOutcomeAsync(request, CustomLoopAdmissionResult.Invalid(errors), useIntegrityWindow: false, cancellationToken);
+        }
+
         var now = _timeProvider.GetUtcNow().ToUniversalTime();
         var admittedEvent = new CustomLoopRunEvent(
             1,
@@ -162,7 +175,10 @@ public sealed class CustomLoopAdmissionService
             [admittedEvent],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = capabilityAdmission.Snapshot
+        };
         run = CustomLoopAdmissionRequestHash.Apply(run);
         var validation = CustomLoopRunValidator.Validate(run);
         if (!validation.IsValid)

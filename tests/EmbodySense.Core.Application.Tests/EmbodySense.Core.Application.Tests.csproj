@@ -14,7 +14,13 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\EmbodySense.Core.Application\EmbodySense.Core.Application.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Common\EmbodySense.Core.Common.csproj" />
+    <ProjectReference Include="..\..\src\EmbodySense.Core.Persistence\EmbodySense.Core.Persistence.csproj" />
     <ProjectReference Include="..\EmbodySense.Tests.Support\EmbodySense.Tests.Support.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\TestCapabilityAdmissionFactory.cs" Link="Support\TestCapabilityAdmissionFactory.cs" />
+    <Compile Include="..\Shared\TestCapabilityAdmissionService.cs" Link="Support\TestCapabilityAdmissionService.cs" />
   </ItemGroup>
 
   <PropertyGroup>

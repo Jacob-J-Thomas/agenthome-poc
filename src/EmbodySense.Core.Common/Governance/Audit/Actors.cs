@@ -29,5 +29,13 @@ public static partial class AuditSchema
         /// Identifies the tool audit actor.
         /// </summary>
         public const string Tool = "embodysense.tool";
+
+        /// <summary>
+        /// Identifies server-owned capability intake and hosting infrastructure.
+        /// </summary>
+        public const string CapabilityHost = "embodysense.capability-host";
+
+        /// <summary>Identifies server-owned credential lifecycle infrastructure.</summary>
+        public const string CredentialHost = "embodysense.credential-host";
     }
 }
