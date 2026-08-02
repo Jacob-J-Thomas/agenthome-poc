@@ -873,6 +873,12 @@ public sealed class TriggerQueueStoreTests
         Assert.NotEqual(0, process.ExitCode);
         var precursor = Assert.Single(Directory.EnumerateFiles(root, ".ledger-*.tmp"));
         Assert.Equal(0, new FileInfo(precursor).Length);
+        if (!OperatingSystem.IsWindows())
+        {
+            var ownerOnly = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            Assert.Equal(ownerOnly, File.GetUnixFileMode(precursor));
+            Assert.Equal(ownerOnly, File.GetUnixFileMode(Path.Combine(root, ".queue.lock")));
+        }
 
         var restartedStore = new TriggerQueueStore(paths);
         var restarted = await restartedStore.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));

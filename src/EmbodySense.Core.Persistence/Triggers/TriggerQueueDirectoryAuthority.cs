@@ -12,6 +12,7 @@ internal sealed class TriggerQueueDirectoryAuthority : IDisposable
     private const int UnixReadOnly = 0;
     private const int UnixWriteOnly = 1;
     private const int UnixReadWrite = 2;
+    private const int UnixOwnerReadWriteMode = 0x180;
     private readonly string _queueRoot;
     private readonly TriggerQueueFileIdentity _queueIdentity;
     private readonly IReadOnlyList<SafeFileHandle> _windowsDirectoryHandles;
@@ -46,7 +47,7 @@ internal sealed class TriggerQueueDirectoryAuthority : IDisposable
             return CreateNewWindows(fileName, access, share, bufferSize, options);
         }
 
-        var descriptor = OpenAtCreate(UnixDescriptor, fileName, AccessFlags(access) | CreateFlag | ExclusiveFlag | NoFollowFlag | CloseOnExecFlag, 0);
+        var descriptor = OpenAtCreate(UnixDescriptor, fileName, AccessFlags(access) | CreateFlag | ExclusiveFlag | NoFollowFlag | CloseOnExecFlag, UnixOwnerReadWriteMode);
         if (descriptor < 0)
         {
             throw new IOException("Trigger queue direct-child create-new failed.", new Win32Exception(Marshal.GetLastWin32Error()));
@@ -80,7 +81,7 @@ internal sealed class TriggerQueueDirectoryAuthority : IDisposable
                 throw new IOException("Trigger queue mutation lock could not be opened through pinned directory authority.", new Win32Exception(Marshal.GetLastWin32Error()));
             }
 
-            descriptor = OpenAtCreate(UnixDescriptor, fileName, UnixReadOnly | CreateFlag | ExclusiveFlag | NoFollowFlag | CloseOnExecFlag, 0);
+            descriptor = OpenAtCreate(UnixDescriptor, fileName, UnixReadOnly | CreateFlag | ExclusiveFlag | NoFollowFlag | CloseOnExecFlag, UnixOwnerReadWriteMode);
             if (descriptor >= 0)
             {
                 SetOwnerOnlyMode(descriptor, "Trigger queue mutation lock creation");
