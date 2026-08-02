@@ -17,7 +17,7 @@ public static class ContextualRoleRevisionValidator
         if (revision is null)
         {
             Add(errors, "revision_required", "$", "Contextual-role revision is required.");
-            return new ContextualRoleValidationResult(errors);
+            return Result(errors);
         }
 
         if (revision.SchemaVersion != ContextualRoleLimits.SchemaVersion)
@@ -42,8 +42,11 @@ public static class ContextualRoleRevisionValidator
             Add(errors, "content_hash_mismatch", "contentHash", "Content hash does not match the canonical semantic revision content.");
         }
 
-        return new ContextualRoleValidationResult(errors);
+        return Result(errors);
     }
+
+    private static ContextualRoleValidationResult Result(IReadOnlyList<ContextualRoleValidationError> errors)
+        => new(errors, errors.Count == 0);
 
     private static void ValidateIdentity(ContextualRoleRevisionIdentity? identity, List<ContextualRoleValidationError> errors)
     {

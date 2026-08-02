@@ -7,5 +7,5 @@ namespace EmbodySense.Core.Common.ContextualRoles.Models;
 public sealed record ContextualRolePolicyMaxima(ImmutableArray<string> CapabilityIds)
 {
     /// <summary>Gets a value confirming that this declarative ceiling has no grant, approval, consent, credential, or user-authority effect.</summary>
-    public bool IsNonGranting => true;
+    public bool IsNonGranting { get; } = true;
 }
