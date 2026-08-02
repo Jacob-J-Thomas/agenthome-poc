@@ -460,14 +460,14 @@ public sealed class GovernedLoopGraphValidationService
 
             if (descriptor.JoinPolicy == GovernedLoopJoinPolicy.All && !AreJoinInputsJointlySatisfiable(graph, node.Id, incoming))
             {
-                Add(errors, "node.join.unsatisfiable", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}]", "An all-path join cannot require control paths gated by mutually exclusive outcomes.");
+                Add(errors, "node.join.unsatisfiable", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}]", "An all-path join cannot require a self-produced arrival or control paths gated by mutually exclusive outcomes.");
             }
         }
     }
 
     private static bool AreJoinInputsJointlySatisfiable(GovernedLoopGraphDefinition graph, string joinNodeId, IReadOnlyList<GovernedLoopControlEdgeDefinition> incoming)
     {
-        if (incoming.GroupBy(edge => edge.FromNodeId, StringComparer.Ordinal).Any(group => group.Select(edge => edge.Condition).Distinct().Any(first => group.Any(second => AreMutuallyExclusive(first, second.Condition)))))
+        if (incoming.Any(edge => string.Equals(edge.FromNodeId, joinNodeId, StringComparison.Ordinal)) || incoming.GroupBy(edge => edge.FromNodeId, StringComparer.Ordinal).Any(group => group.Select(edge => edge.Condition).Distinct().Any(first => group.Any(second => AreMutuallyExclusive(first, second.Condition)))))
         {
             return false;
         }

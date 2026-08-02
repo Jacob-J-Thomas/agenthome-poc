@@ -212,6 +212,29 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
+    public async Task ValidateRejectsAllPathJoinThatRequiresItsOwnFirstArrival()
+    {
+        var cycleBudgets = new Dictionary<string, string> { ["max-iterations"] = "2", ["max-milliseconds"] = "5000" };
+        var join = new GovernedLoopNodeDefinition("join", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Join, "all-join", 1), [], GovernedLoopAuthorityCeiling.Create([]), cycleBudgets);
+        var candidate = Candidate(
+            nodes: [.. Nodes(), join],
+            edges:
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-to-join", "infer", "join", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("join-to-join", "join", "join", GovernedLoopControlCondition.Failure),
+                new GovernedLoopControlEdgeDefinition("join-to-exit", "join", "exit", GovernedLoopControlCondition.Success)
+            ]);
+        var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId == "all-join" ? EnableCycle(descriptor) : descriptor).ToArray();
+
+        var result = await Service(descriptors).ValidateAsync(candidate);
+
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("node.join.unsatisfiable", error.Code);
+        Assert.Equal("join", error.Element.Id);
+    }
+
+    [Fact]
     public async Task ValidateAcceptsAllPathJoinAfterLegitimateBoundedCycle()
     {
         var nodes = Nodes();
