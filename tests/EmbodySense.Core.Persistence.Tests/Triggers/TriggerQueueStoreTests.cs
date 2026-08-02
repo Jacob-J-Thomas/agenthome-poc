@@ -66,6 +66,27 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Windows_reserved_lock_directory_fails_closed_without_mutating_it()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        Directory.CreateDirectory(Path.Combine(root, ".queue.lock"));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3), cancellation.Token));
+
+        Assert.True(Directory.Exists(Path.Combine(root, ".queue.lock")));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(Path.Combine(root, ".queue.lock")));
+    }
+
+    [Fact]
     public async Task Admitted_entry_survives_restart_and_exact_retry_replays_without_payload_duplication()
     {
         using var workspace = new TestWorkspace();
@@ -718,6 +739,38 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Excess_empty_precursors_report_public_persistence_backpressure_without_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        using var historyWorkspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        Directory.CreateDirectory(root);
+        var quota = TriggerQueueQuota.Default with { MaxDurabilityTombstones = 2 };
+        var precursors = Enumerable.Range(1, 3)
+            .Select(generation => Path.Combine(root, $".ledger-{generation:D19}.{Guid.NewGuid():N}.tmp"))
+            .ToArray();
+        foreach (var precursor in precursors)
+        {
+            await File.WriteAllBytesAsync(precursor, []);
+        }
+
+        var result = await TriggerQueueTestData.Service(
+            new TriggerQueueStore(paths, quota),
+            new TriggerQueueStore(new WorkspacePaths(historyWorkspace.RootPath))).AdmitAsync(
+            TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+
+        Assert.Equal(TriggerQueueAdmissionStatus.Backpressured, result.Status);
+        Assert.Equal(TriggerQueueAdmissionReason.DurabilityTombstoneCapacityExceeded, result.Reason);
+        Assert.All(precursors, precursor =>
+        {
+            Assert.True(File.Exists(precursor));
+            Assert.Equal(0, new FileInfo(precursor).Length);
+        });
+        Assert.Empty(Directory.EnumerateFiles(root, "ledger-*.json"));
+    }
+
+    [Fact]
     public async Task Pre_staging_cancellation_is_artifact_free_but_cancellation_during_staging_does_not_undo_publication()
     {
         using var beforeWorkspace = new TestWorkspace();
@@ -758,6 +811,7 @@ public sealed class TriggerQueueStoreTests
     public async Task Restart_reclaims_an_exact_authenticated_staging_artifact_after_process_death()
     {
         using var workspace = new TestWorkspace();
+        using var historyWorkspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var root = QueueRoot(paths);
         var gate = Path.Combine(workspace.RootPath, "release-crashing-trigger-queue-host");
@@ -770,6 +824,27 @@ public sealed class TriggerQueueStoreTests
 
         Assert.NotEqual(0, process.ExitCode);
         Assert.Single(Directory.EnumerateFiles(root, ".staged-*.tmp"));
+
+        var quota = TriggerQueueQuota.Default with { MaxDurabilityTombstones = 2 };
+        var precursors = Enumerable.Range(1, 2)
+            .Select(generation => Path.Combine(root, $".ledger-{generation:D19}.{Guid.NewGuid():N}.tmp"))
+            .ToArray();
+        foreach (var precursor in precursors)
+        {
+            await File.WriteAllBytesAsync(precursor, []);
+        }
+
+        var blocked = await TriggerQueueTestData.Service(
+            new TriggerQueueStore(paths, quota),
+            new TriggerQueueStore(new WorkspacePaths(historyWorkspace.RootPath))).AdmitAsync(
+            TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope("delivery-blocked", "dedup-blocked", "loop-blocked")));
+        Assert.Equal(TriggerQueueAdmissionStatus.Backpressured, blocked.Status);
+        Assert.Single(Directory.EnumerateFiles(root, ".staged-*.tmp"));
+        Assert.All(precursors, precursor => Assert.True(File.Exists(precursor)));
+        foreach (var precursor in precursors)
+        {
+            File.Delete(precursor);
+        }
 
         var restartedStore = new TriggerQueueStore(paths);
         var restarted = await restartedStore.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));

@@ -45,6 +45,13 @@ internal static class TriggerQueueTestData
         return new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store);
     }
 
+    internal static TriggerQueueAdmissionService Service(
+        EmbodySense.Core.Persistence.Triggers.TriggerQueueStore store,
+        EmbodySense.Core.Persistence.Triggers.TriggerQueueStore historyStore)
+    {
+        return new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(historyStore), store);
+    }
+
     internal static TriggerAdapterReference Adapter()
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/triggers/webhook", out var id, out _));
