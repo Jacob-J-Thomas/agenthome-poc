@@ -41,7 +41,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
     /// <summary>Initializes the store for one workspace.</summary>
     /// <param name="paths">The workspace paths that own the active and historical turn artifacts.</param>
-    /// <param name="coordination">An optional observer invoked at active-set and archival phases while the store owns the active-turn-set lease.</param>
+    /// <param name="coordination">An optional observer invoked at lease-acquisition, active-set, and archival phases.</param>
     public DefaultConversationTurnStore(WorkspacePaths paths, IDefaultConversationTurnStoreCoordination? coordination = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -62,7 +62,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         await activeSetGate.WaitAsync(cancellationToken);
         try
         {
-            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, DefaultConversationTurnStoreOperation.Create, cancellationToken);
             await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.Create, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.Create, cancellationToken);
             var activeBytes = await ArchiveResolvedActiveAsync(cancellationToken);
@@ -112,7 +112,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         await activeSetGate.WaitAsync(cancellationToken);
         try
         {
-            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, DefaultConversationTurnStoreOperation.Update, cancellationToken);
             await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.Update, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.Update, cancellationToken);
             var activeBytes = await MeasureActiveAggregateBytesAsync(cancellationToken);
@@ -170,7 +170,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         await activeSetGate.WaitAsync(cancellationToken);
         try
         {
-            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, DefaultConversationTurnStoreOperation.Load, cancellationToken);
             await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.Load, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.Load, cancellationToken);
             var active = await ReadOptionalAsync(path, turnId, MaximumActiveArtifactBytes, cancellationToken);
@@ -210,13 +210,16 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return _gates.GetOrAdd(Path.GetFullPath(path), _ => new SemaphoreSlim(1, 1));
     }
 
-    private static async Task<FileStream> AcquireLeaseAsync(string path, CancellationToken cancellationToken)
+    private async Task<FileStream> AcquireLeaseAsync(string path, DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
     {
         var leasePath = path + ".lock";
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var lease = DefaultConversationTurnNativeFileSystem.TryAcquireExclusiveLease(leasePath);
+            var lease = await DefaultConversationTurnNativeFileSystem.TryAcquireExclusiveLeaseAsync(
+                leasePath,
+                (phase, token) => ObserveActiveSetLeasePhaseAsync(operation, phase, token),
+                cancellationToken);
             if (lease is not null)
             {
                 return lease;
@@ -224,6 +227,14 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
             await Task.Delay(_leaseRetryDelay, cancellationToken);
         }
+    }
+
+    private Task ObserveActiveSetLeasePhaseAsync(
+        DefaultConversationTurnStoreOperation operation,
+        DefaultConversationTurnLeasePhase phase,
+        CancellationToken cancellationToken)
+    {
+        return _coordination?.ObserveActiveSetLeasePhaseAsync(operation, phase, cancellationToken) ?? Task.CompletedTask;
     }
 
     private Task CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
@@ -293,7 +304,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         await activeSetGate.WaitAsync(cancellationToken);
         try
         {
-            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, DefaultConversationTurnStoreOperation.List, cancellationToken);
             await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.List, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.List, cancellationToken);
             var records = new List<DefaultConversationTurnRecord>();
