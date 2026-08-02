@@ -33,6 +33,11 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
             return Result(TriggerAdmissionStatus.Invalid, TriggerAdmissionReason.InvalidEnvelope, null);
         }
 
+        if (request.Envelope.Adapter == request.CurrentAdapter && !request.IsAdapterAvailable)
+        {
+            return Result(TriggerAdmissionStatus.Unavailable, TriggerAdmissionReason.AdapterUnavailable, envelopeHash);
+        }
+
         var historyLookup = await _history.FindAsync(request.Envelope.DeliveryId, request.Envelope.DeduplicationId, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (historyLookup is null || historyLookup.Status != TriggerDeliveryAdmissionHistoryLookupStatus.Available)
@@ -79,11 +84,6 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
     private static TriggerDeliveryAdmissionResult? ValidateCurrentEvidence(TriggerDeliveryAdmissionRequest request, string envelopeHash)
     {
         var temporalState = TriggerTemporalEvaluator.Evaluate(request.Envelope.Temporal, request.EvaluatedAtUtc);
-        if (temporalState == TriggerTemporalState.NotYetEligible)
-        {
-            return Result(TriggerAdmissionStatus.NotYetEligible, TriggerAdmissionReason.NotBefore, envelopeHash);
-        }
-
         if (temporalState == TriggerTemporalState.Expired)
         {
             return Result(TriggerAdmissionStatus.Expired, TriggerAdmissionReason.Expired, envelopeHash);
@@ -141,7 +141,9 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
             return Result(TriggerAdmissionStatus.Unauthorized, TriggerAdmissionReason.AuthorityBoundary, envelopeHash);
         }
 
-        return null;
+        return temporalState == TriggerTemporalState.NotYetEligible
+            ? Result(TriggerAdmissionStatus.NotYetEligible, TriggerAdmissionReason.NotBefore, envelopeHash)
+            : null;
     }
 
     private static bool TryResolveHistory(TriggerDeliveryEnvelope envelope, TriggerDeliveryAdmissionHistoryLookupResult lookup, string envelopeHash, out TriggerDeliveryAdmissionHistoryEntry? history, out TriggerDeliveryAdmissionResult? failure)
