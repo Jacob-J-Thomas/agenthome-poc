@@ -996,17 +996,18 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         var unicodeBuffer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
         try
         {
-            var unicode = new UnicodeString { Length = checked((ushort)(name.Length * 2)), MaximumLength = checked((ushort)(name.Length * 2)), Buffer = nameBuffer };
+            var nameBytes = checked(name.Length * sizeof(char));
+            var unicode = new UnicodeString { Length = checked((ushort)nameBytes), MaximumLength = checked((ushort)(nameBytes + sizeof(char))), Buffer = nameBuffer };
             Marshal.StructureToPtr(unicode, unicodeBuffer, fDeleteOld: false);
             var attributes = new ObjectAttributes { Length = Marshal.SizeOf<ObjectAttributes>(), RootDirectory = parent.DangerousGetHandle(), ObjectName = unicodeBuffer, Attributes = ObjectAttributeCaseInsensitive };
-            var status = NtCreateFile(out var handle, access, ref attributes, out var ioStatus, IntPtr.Zero, FileAttributeNormal, FileShareRead | FileShareWrite | FileShareDelete, disposition, options, IntPtr.Zero, 0);
+            var status = NtCreateFile(out var rawHandle, access, ref attributes, out var ioStatus, IntPtr.Zero, FileAttributeNormal, FileShareRead | FileShareWrite | FileShareDelete, disposition, options, IntPtr.Zero, 0);
+            GC.KeepAlive(parent);
             information = ioStatus.Information.ToInt64();
             if (status >= 0)
             {
-                return handle;
+                return new SafeFileHandle(rawHandle, ownsHandle: true);
             }
 
-            handle?.Dispose();
             var unsignedStatus = unchecked((uint)status);
             if (allowMissing && unsignedStatus is StatusObjectNameNotFound or StatusObjectPathNotFound)
             {
@@ -1246,7 +1247,7 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     private static extern bool FlushFileBuffers(SafeFileHandle file);
 
     [DllImport("ntdll.dll")]
-    private static extern int NtCreateFile(out SafeFileHandle file, uint desiredAccess, ref ObjectAttributes objectAttributes, out IoStatusBlock ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+    private static extern int NtCreateFile(out IntPtr file, uint desiredAccess, ref ObjectAttributes objectAttributes, out IoStatusBlock ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
 
     [DllImport("ntdll.dll")]
     private static extern int NtQueryDirectoryFile(SafeFileHandle file, IntPtr eventHandle, IntPtr apcRoutine, IntPtr apcContext, out IoStatusBlock ioStatusBlock, IntPtr fileInformation, uint length, int fileInformationClass, byte returnSingleEntry, IntPtr fileName, byte restartScan);
