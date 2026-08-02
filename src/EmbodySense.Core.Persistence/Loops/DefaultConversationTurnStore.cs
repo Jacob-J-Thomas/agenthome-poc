@@ -546,13 +546,17 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
     private async Task ArchiveActiveAsync(string activePath, (DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity) proof, DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
     {
-        if (HasUnprovedHistoryStageRetirementEvidence(proof.Record.TurnId))
+        using (var initialRetirementEvidence = TryOpenHistoryStageRetirementEvidence(proof.Record.TurnId))
         {
-            throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
+            if (initialRetirementEvidence is null)
+            {
+                throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
+            }
         }
 
         await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeSourceClaim, cancellationToken);
-        if (HasUnprovedHistoryStageRetirementEvidence(proof.Record.TurnId))
+        using var retainedRetirementEvidence = TryOpenHistoryStageRetirementEvidence(proof.Record.TurnId);
+        if (retainedRetirementEvidence is null)
         {
             throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
         }
@@ -563,9 +567,26 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         var sourceProofPath = GetHistorySourceProofPath(proof.Record.TurnId);
         Directory.CreateDirectory(_paths.DefaultConversationTurnHistoryPath);
         File.Move(activePath, pendingSourcePath, overwrite: false);
+        await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterSourceClaimBeforeRetirementEvidenceRevalidation, cancellationToken);
+        using var currentRetirementEvidence = TryOpenHistoryStageRetirementEvidence(proof.Record.TurnId);
+        if (currentRetirementEvidence is null)
+        {
+            TryRestorePendingSource(pendingSourcePath, activePath);
+            throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` retirement evidence changed while its active source was claimed.");
+        }
+
+        await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterRetirementEvidenceProofOpenBeforePathRevalidation, cancellationToken);
+        if (!retainedRetirementEvidence.Matches(currentRetirementEvidence)
+            || !RevalidateHistoryStageRetirementEvidence(proof.Record.TurnId, currentRetirementEvidence))
+        {
+            TryRestorePendingSource(pendingSourcePath, activePath);
+            throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` retirement evidence changed while its active source was claimed.");
+        }
+
         DefaultConversationTurnFileIdentity? historyStageIdentity = null;
         var historyStageProved = false;
         var historyPublished = false;
+        var retirementEvidenceChanged = false;
         try
         {
             var claimed = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
@@ -593,8 +614,20 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             }
 
             historyStageProved = true;
-            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, cancellationToken);
-            File.Move(pendingHistoryPath, historyPath, overwrite: false);
+            if (!await TryPublishHistoryStageWithRetirementEvidenceAsync(
+                pendingHistoryPath,
+                historyPath,
+                proof.Record.TurnId,
+                stagedHistory.Identity,
+                proof.Bytes,
+                operation,
+                retainedRetirementEvidence,
+                cancellationToken))
+            {
+                retirementEvidenceChanged = true;
+                throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` retirement evidence changed before or across canonical history publication.");
+            }
+
             historyPublished = true;
             await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, cancellationToken);
             await RevalidatePublishedHistoryAsync(historyPath, proof.Record.TurnId, stagedHistory.Identity, proof.Bytes, cancellationToken);
@@ -619,10 +652,10 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         catch (Exception exception)
         {
             var historyStageRetired = !historyPublished
-                && !historyStageProved
+                && (!historyStageProved || retirementEvidenceChanged)
                 && await TryRetireOwnedIncompleteHistoryStageAsync(pendingHistoryPath, historyStageIdentity, operation, proof.Record.TurnId);
             if (historyStageRetired
-                || (historyPublished && exception is FormatException))
+                || (historyPublished && !retirementEvidenceChanged && exception is FormatException))
             {
                 TryRestorePendingSource(pendingSourcePath, activePath);
                 TryRestorePendingSource(sourceProofPath, activePath);
@@ -653,7 +686,8 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 throw new FormatException($"Default-conversation turn `{turnId}` has both active and interrupted archival sources.");
             }
 
-            if (HasUnprovedHistoryStageRetirementEvidence(turnId))
+            using var retainedRetirementEvidence = TryOpenHistoryStageRetirementEvidence(turnId);
+            if (retainedRetirementEvidence is null)
             {
                 throw new FormatException($"Default-conversation turn `{turnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
             }
@@ -716,8 +750,25 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                     throw new FormatException($"Default-conversation turn `{turnId}` has conflicting interrupted archival staging.");
                 }
 
-                await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, cancellationToken);
-                File.Move(pendingHistoryPath, historyPath, overwrite: false);
+                if (!await TryPublishHistoryStageWithRetirementEvidenceAsync(
+                    pendingHistoryPath,
+                    historyPath,
+                    turnId,
+                    staged.Identity,
+                    pending.Bytes,
+                    operation,
+                    retainedRetirementEvidence,
+                    cancellationToken))
+                {
+                    var historyStageRetired = await TryRetireOwnedIncompleteHistoryStageAsync(pendingHistoryPath, staged.Identity, operation, turnId);
+                    if (historyStageRetired)
+                    {
+                        TryRestorePendingSource(pendingSourcePath, activePath);
+                    }
+
+                    throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed before or across interrupted history publication.");
+                }
+
                 try
                 {
                     await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, cancellationToken);
@@ -895,34 +946,33 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
     }
 
-    private bool HasUnprovedHistoryStageRetirementEvidence(string turnId)
+    private DefaultConversationTurnRetirementEvidenceProof? TryOpenHistoryStageRetirementEvidence(string turnId)
     {
+        var proof = new DefaultConversationTurnRetirementEvidenceProof();
         if (!Directory.Exists(_paths.DefaultConversationTurnHistoryPath))
         {
-            return false;
+            return proof;
         }
 
         var prefix = $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-history.";
         var entries = Directory.EnumerateFileSystemEntries(_paths.DefaultConversationTurnHistoryPath, prefix + "*", SearchOption.TopDirectoryOnly)
+            .Where(path => !string.Equals(Path.GetFileName(path), prefix + "tmp", StringComparison.Ordinal))
             .Take(MaximumHistoryStageRetirementEvidenceEntries + 1)
             .ToArray();
         if (entries.Length > MaximumHistoryStageRetirementEvidenceEntries)
         {
-            return true;
+            proof.Dispose();
+            return null;
         }
 
         var evidence = new Dictionary<DefaultConversationTurnFileIdentity, (string? IntentPath, string? RetiredPath)>();
         foreach (var path in entries)
         {
             var fileName = Path.GetFileName(path);
-            if (string.Equals(fileName, prefix + "tmp", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
             if (!TryParseHistoryStageRetirementEvidence(fileName, prefix, out var identity, out var isIntent))
             {
-                return true;
+                proof.Dispose();
+                return null;
             }
 
             if (!evidence.TryAdd(identity, isIntent ? (path, null) : (null, path)))
@@ -930,17 +980,101 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 var existing = evidence[identity];
                 if ((isIntent && existing.IntentPath is not null) || (!isIntent && existing.RetiredPath is not null))
                 {
-                    return true;
+                    proof.Dispose();
+                    return null;
                 }
 
                 evidence[identity] = isIntent ? (path, existing.RetiredPath) : (existing.IntentPath, path);
             }
         }
 
-        return evidence.Any(entry => entry.Value.IntentPath is null
-            || entry.Value.RetiredPath is null
-            || !IsValidHistoryStageRetirementIntent(entry.Value.IntentPath!)
-            || !IsValidRetiredHistoryStage(entry.Value.RetiredPath!, entry.Key));
+        foreach (var entry in evidence)
+        {
+            if (entry.Value.IntentPath is null
+                || entry.Value.RetiredPath is null
+                || !proof.TryAddPair(entry.Value.IntentPath, entry.Value.RetiredPath, entry.Key))
+            {
+                proof.Dispose();
+                return null;
+            }
+        }
+
+        return proof;
+    }
+
+    private bool RevalidateHistoryStageRetirementEvidence(string turnId, DefaultConversationTurnRetirementEvidenceProof retainedProof)
+    {
+        using var currentProof = TryOpenRevalidatedHistoryStageRetirementEvidence(turnId, retainedProof);
+        return currentProof is not null;
+    }
+
+    private DefaultConversationTurnRetirementEvidenceProof? TryOpenRevalidatedHistoryStageRetirementEvidence(string turnId, DefaultConversationTurnRetirementEvidenceProof retainedProof)
+    {
+        DefaultConversationTurnRetirementEvidenceProof? currentProof = null;
+        try
+        {
+            currentProof = TryOpenHistoryStageRetirementEvidence(turnId);
+            if (currentProof is null
+                || !retainedProof.Matches(currentProof)
+                || !currentProof.RevalidatesCurrentPathnames())
+            {
+                currentProof?.Dispose();
+                return null;
+            }
+
+            return currentProof;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            currentProof?.Dispose();
+            return null;
+        }
+    }
+
+    private async Task<bool> TryPublishHistoryStageWithRetirementEvidenceAsync(
+        string pendingHistoryPath,
+        string historyPath,
+        string turnId,
+        DefaultConversationTurnFileIdentity expectedIdentity,
+        byte[] expectedBytes,
+        DefaultConversationTurnStoreOperation operation,
+        DefaultConversationTurnRetirementEvidenceProof retainedProof,
+        CancellationToken cancellationToken)
+    {
+        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, cancellationToken);
+        using var publicationRetirementEvidence = TryOpenRevalidatedHistoryStageRetirementEvidence(turnId, retainedProof);
+        if (publicationRetirementEvidence is null)
+        {
+            return false;
+        }
+
+        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.AfterFinalRetirementEvidenceValidationBeforeHistoryPublication, cancellationToken);
+        File.Move(pendingHistoryPath, historyPath, overwrite: false);
+        if (RevalidateHistoryStageRetirementEvidence(turnId, publicationRetirementEvidence))
+        {
+            return true;
+        }
+
+        if (await TryRollbackPublishedHistoryAsync(historyPath, pendingHistoryPath, expectedIdentity, expectedBytes))
+        {
+            return false;
+        }
+
+        throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed across canonical history publication, and exact published history could not be reclaimed.");
+    }
+
+    private static async Task<bool> TryRollbackPublishedHistoryAsync(string historyPath, string pendingHistoryPath, DefaultConversationTurnFileIdentity expectedIdentity, byte[] expectedBytes)
+    {
+        try
+        {
+            File.Move(historyPath, pendingHistoryPath, overwrite: false);
+            var rolledBack = await ReadRequiredAsync(pendingHistoryPath, MaximumActiveArtifactBytes, CancellationToken.None);
+            return rolledBack.Identity == expectedIdentity && rolledBack.Bytes.AsSpan().SequenceEqual(expectedBytes);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)
+        {
+            return false;
+        }
     }
 
     private static bool TryParseHistoryStageRetirementEvidence(string fileName, string prefix, out DefaultConversationTurnFileIdentity identity, out bool isIntent)
@@ -978,58 +1112,6 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
         identity = new DefaultConversationTurnFileIdentity(deviceId, fileId);
         return true;
-    }
-
-    private static bool IsValidHistoryStageRetirementIntent(string path)
-    {
-        try
-        {
-            using var stream = DefaultConversationTurnNativeFileSystem.OpenRegularRead(path);
-            DefaultConversationTurnNativeFileSystem.RequireSingleLinkRegularFile(stream);
-            return stream.Length == 1 && stream.ReadByte() == 1 && stream.ReadByte() == -1;
-        }
-        catch (FileNotFoundException)
-        {
-            return false;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return false;
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
-
-    private static bool IsValidRetiredHistoryStage(string path, DefaultConversationTurnFileIdentity expectedIdentity)
-    {
-        try
-        {
-            using var stream = DefaultConversationTurnNativeFileSystem.OpenRegularReadForRetirement(path);
-            DefaultConversationTurnNativeFileSystem.RequireSingleLinkRegularFile(stream);
-            return DefaultConversationTurnNativeFileSystem.GetIdentity(stream) == expectedIdentity;
-        }
-        catch (FileNotFoundException)
-        {
-            return false;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return false;
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
     }
 
     private static string FormatFileIdentity(DefaultConversationTurnFileIdentity identity)

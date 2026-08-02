@@ -6,6 +6,15 @@ public enum DefaultConversationTurnArchivePhase
     /// <summary>The validated or written active pathname is about to be claimed.</summary>
     BeforeSourceClaim,
 
+    /// <summary>The exact active source has been claimed and retained retirement evidence is about to be revalidated before history staging.</summary>
+    AfterSourceClaimBeforeRetirementEvidenceRevalidation,
+
+    /// <summary>Current retirement-evidence handles have been opened and their pathnames are about to be revalidated against those handles.</summary>
+    AfterRetirementEvidenceProofOpenBeforePathRevalidation,
+
+    /// <summary>The final retirement-evidence proof is held open and canonical history is about to be published.</summary>
+    AfterFinalRetirementEvidenceValidationBeforeHistoryPublication,
+
     /// <summary>The exact history staging object has been validated and is about to be published without replacement.</summary>
     BeforeHistoryPublication,
 
