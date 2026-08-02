@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -12,6 +13,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
@@ -102,6 +104,53 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("DispatchRejected", result.Entry!.State);
         Assert.Equal("Rejected", result.Entry.DispatchOutcome);
         Assert.Contains("does not exist", result.Entry.DispatchDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Trigger_worker_admission_uses_exact_revalidated_trigger_identity_instead_of_retained_chat_identity()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var definition = CustomLoopDefinition.CreateSeed("loop-trigger-identity", "operator", "step-trigger-identity", "create-trigger-identity", TriggerWorkerTestData.CreatedAtUtc);
+        var definitionStore = new CustomLoopDefinitionStore(paths);
+        var created = await definitionStore.CreateAsync(definition);
+        var audited = await definitionStore.MarkOperationOutcomeAuditedAsync(definition.LastMutationOperationId);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var systemDefinitionStore = new LoopDefinitionStore(paths);
+        var systemDefinition = await systemDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation);
+        await systemDefinitionStore.SaveAsync(systemDefinition! with { RoleId = definition.RoleId });
+        var evidencePath = Path.Combine(workspace.RootPath, "current-trigger-authority.txt");
+        await File.WriteAllTextAsync(evidencePath, "Authorized");
+        var authorizer = new FileCurrentTriggerEvidenceAuthorizer(evidencePath);
+        var worker = runtime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4)));
+        Assert.True(TriggerDeliveryFactory.TryCreateLoopReference(definition.Id, definition.DefinitionVersion, definition.ContentHash, out var loop, out _));
+        Assert.True(AuthorityActorId.TryParse("trigger-owner", out var triggerActor, out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateActorContext(triggerActor, "webhook", "workspace-1", definition.RoleId, out var triggerActorContext, out _));
+        var exactTriggerActorContext = triggerActorContext!;
+        var envelope = TriggerWorkerTestData.Envelope(loop: loop, actorContext: exactTriggerActorContext);
+        var store = new TriggerQueueStore(paths);
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
+        var admission = await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
+        var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;
+
+        var result = await worker.RunOnceAsync(new TriggerWorkerSelectionInput("worker-1", generation, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(30), [], 2));
+        var entry = Assert.IsType<TriggerWorkerEntrySnapshot>(result.Entry);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, created.Status);
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, audited);
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admission.Status);
+        Assert.True(entry.State == "Dispatched", $"state={entry.State}; outcome={entry.DispatchOutcome}; detail={entry.DispatchDetail}");
+        var run = await runtime.GetCustomLoopRunAsync(entry.GovernedRunId!);
+        Assert.Equal(exactTriggerActorContext.ActorId.Value, run!.AdmissionActor);
+        Assert.Equal(exactTriggerActorContext.SurfaceId, run.Surface);
+        Assert.Equal(exactTriggerActorContext.RoleId, run.AdmittedDefinition.RoleId);
+        Assert.Equal(exactTriggerActorContext.ActorId.Value, authorizer.LastInput!.ActorId);
+        Assert.Equal(exactTriggerActorContext.SurfaceId, authorizer.LastInput.SurfaceId);
+        Assert.Equal(exactTriggerActorContext.RoleId, authorizer.LastInput.RoleId);
+        Assert.NotEqual(WorkspaceActors.Cli, run.AdmissionActor);
+        Assert.NotEqual(AgentRuntimeSurface.Cli.Id, run.Surface);
+        Assert.NotEqual("default-assistant", run.AdmittedDefinition.RoleId);
     }
 
     [Fact]
@@ -890,9 +939,12 @@ public sealed class AgentRuntimeFactoryTests
     {
         internal int Reads { get; private set; }
 
+        internal TriggerWorkerCurrentEvidenceInput? LastInput { get; private set; }
+
         public async Task<TriggerWorkerAuthorizationResponse> AuthorizeAsync(TriggerWorkerCurrentEvidenceInput input, DateTimeOffset evaluatedAtUtc, CancellationToken cancellationToken = default)
         {
             Reads++;
+            LastInput = input;
             var status = await File.ReadAllTextAsync(path, cancellationToken);
             return new TriggerWorkerAuthorizationResponse(status, new string('a', 64), $"Current evidence reread for {input.DeliveryId} at {evaluatedAtUtc:O}.");
         }

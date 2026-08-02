@@ -25,7 +25,7 @@ internal sealed class TriggerCustomLoopDispatcher : ITriggerWorkerDispatcher
             return preparation.Rejection;
         }
 
-        var response = await _invoker.InvokeAsync(preparation.Input!, cancellationToken).ConfigureAwait(false);
+        var response = await _invoker.InvokeAsync(preparation.Input!, preparation.ActorContext!, cancellationToken).ConfigureAwait(false);
         return TriggerCustomLoopDispatchProtocol.Map(envelope, intent, response);
     }
 }

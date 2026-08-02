@@ -166,8 +166,9 @@ public sealed class AgentRuntime : IAsyncDisposable
     public TriggerWorkerRuntimeFacade CreateTriggerWorkerRuntime(ITriggerWorkerCurrentEvidenceAuthorizer authorizer, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(authorizer);
-        var store = new TriggerQueueStore(Paths);
-        var service = new TriggerWorkerService(store, new TriggerWorkerCurrentEvidenceAuthorizerAdapter(authorizer), new TriggerCustomLoopDispatcher(_customLoops), timeProvider);
+        var clock = timeProvider ?? TimeProvider.System;
+        var store = new TriggerQueueStore(Paths, timeProvider: clock);
+        var service = new TriggerWorkerService(store, new TriggerWorkerCurrentEvidenceAuthorizerAdapter(authorizer), new TriggerCustomLoopDispatcher(_customLoops), clock);
         return new TriggerWorkerRuntimeFacade(store, service);
     }
 

@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Triggers;
 using System.Text;
@@ -127,13 +128,22 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
     /// completion fails after admission, the undispatched run is conservatively parked when that can be
     /// proved. Unsupported run-discovery schemas fail closed with explicit cleanup guidance.
     /// </remarks>
-    public async Task<LoopRunInvocationResponse> InvokeAsync(LoopRunInvocationInput input, CancellationToken cancellationToken)
+    public Task<LoopRunInvocationResponse> InvokeAsync(LoopRunInvocationInput input, CancellationToken cancellationToken)
+        => InvokeAuthorizedAsync(input, _actor, _surface, _currentRoleId, cancellationToken);
+
+    async Task<LoopRunInvocationResponse> ITriggerCustomLoopInvoker.InvokeAsync(LoopRunInvocationInput input, TriggerActorContext actorContext, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(actorContext);
+        return await InvokeAuthorizedAsync(input, actorContext.ActorId.Value, actorContext.SurfaceId, actorContext.RoleId, cancellationToken);
+    }
+
+    private async Task<LoopRunInvocationResponse> InvokeAuthorizedAsync(LoopRunInvocationInput input, string actor, string surface, string currentRoleId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
         CustomLoopInvocationOperation pending;
         try
         {
-            pending = CreatePendingOperation(input);
+            pending = CreatePendingOperation(input, actor, surface, currentRoleId);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
         {
@@ -169,7 +179,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             {
                 if (CustomRecoveryRequired)
                 {
-                    var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+                    var recovery = await EnsureCustomExecutionAvailableAsync(actor, cancellationToken);
                     if (!recovery.Available)
                     {
                         return new LoopRunInvocationResponse(recovery.Status, null, false, null, [], recovery.Detail);
@@ -186,7 +196,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             }
         }
 
-        var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+        var availability = await EnsureCustomExecutionAvailableAsync(actor, cancellationToken);
         if (!availability.Available)
         {
             return new LoopRunInvocationResponse(availability.Status, null, false, null, [], availability.Detail);
@@ -251,7 +261,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             CustomLoopInvocationOperation operation;
             try
             {
-                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(pending, token), cancellationToken);
+                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(pending, token), pending.Actor, pending.Surface, cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
@@ -388,9 +398,9 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
                 input.ExpectedDefinitionVersion,
                 input.ExpectedDefinitionHash,
                 input.OperationId,
-                _actor,
-                _surface,
-                _currentRoleId,
+                actor,
+                surface,
+                currentRoleId,
                 input.InvocationPrompt,
                 _modelSnapshot,
                 conversationReference,
@@ -437,7 +447,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
                 return new LoopRunInvocationResponse(CustomLoopAdmissionStatus.Admitted.ToString(), admission.Run?.Status.ToString(), false, admission.Run is null ? null : Map(admission.Run), admission.ValidationErrors.Select(Map).ToArray(), "The durable admitted invocation outcome was recovered without another provider dispatch.");
             }
 
-            var execution = await ExecuteOrderedRunAsync(_runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, _actor), cancellationToken));
+            var execution = await ExecuteOrderedRunAsync(_runner.RunAsync(new CustomLoopOrderedRunRequest(admission.Run!.Id, actor), cancellationToken));
             CustomLoopRunRecord? executedRun = execution.Run;
             var executionDetail = execution.Detail;
             if (executedRun is null)
@@ -512,7 +522,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         ArgumentNullException.ThrowIfNull(input);
         if (CustomRecoveryRequired)
         {
-            var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+            var recovery = await EnsureCustomExecutionAvailableAsync(_actor, cancellationToken);
             if (!recovery.Available)
             {
                 return new LoopRunControlResponse(recovery.Status, null, input.OperationId, recovery.Detail);
@@ -548,7 +558,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
 
         if (CustomRecoveryRequired)
         {
-            var recovery = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+            var recovery = await EnsureCustomExecutionAvailableAsync(_actor, cancellationToken);
             if (!recovery.Available)
             {
                 return new LoopRunControlResponse(recovery.Status, null, input.OperationId, recovery.Detail);
@@ -564,7 +574,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
 
         // A pending cancel receipt can outlive its original host owner. Reacquire retained hosting,
         // then replay the exact operation id instead of creating a second control request.
-        var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+        var availability = await EnsureCustomExecutionAvailableAsync(_actor, cancellationToken);
         if (!availability.Available)
         {
             return MapControl(result with { Detail = $"{result.Detail} Retained-runtime recovery did not acquire hosting: {availability.Detail}" });
@@ -588,7 +598,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             return replay;
         }
 
-        var availability = await EnsureCustomExecutionAvailableAsync(cancellationToken);
+        var availability = await EnsureCustomExecutionAvailableAsync(_actor, cancellationToken);
         if (!availability.Available)
         {
             return new LoopRunControlResponse(availability.Status, null, input.OperationId, availability.Detail);
@@ -607,7 +617,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         _executionAvailabilityGate.Dispose();
     }
 
-    private async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(CancellationToken cancellationToken)
+    private async Task<CustomExecutionAvailability> EnsureCustomExecutionAvailableAsync(string actor, CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _customExecutionAvailable))
         {
@@ -651,7 +661,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
                 IReadOnlyList<CustomLoopRecoveryResult> recovery;
                 try
                 {
-                    recovery = await _recoveryService.RecoverAsync(_actor, cancellationToken);
+                    recovery = await _recoveryService.RecoverAsync(actor, cancellationToken);
                 }
                 catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException exception)
                 {
@@ -765,7 +775,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             && result.Detail.Contains("control receipt remains pending", StringComparison.OrdinalIgnoreCase);
     }
 
-    private CustomLoopInvocationOperation CreatePendingOperation(LoopRunInvocationInput input)
+    private CustomLoopInvocationOperation CreatePendingOperation(LoopRunInvocationInput input, string actor, string surface, string currentRoleId)
     {
         CustomLoopArtifactIdentifier.Require(input.OperationId, nameof(input.OperationId), CustomLoopLimits.MaxMutationOperationIdCharacters);
         CustomLoopArtifactIdentifier.Require(input.LoopId, nameof(input.LoopId));
@@ -790,9 +800,9 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             input.LoopId,
             input.ExpectedDefinitionVersion,
             input.ExpectedDefinitionHash,
-            _actor,
-            _surface,
-            _currentRoleId,
+            actor,
+            surface,
+            currentRoleId,
             invocationPrompt,
             _modelSnapshot.Provider,
             _modelSnapshot.Model);
@@ -804,9 +814,9 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             input.LoopId,
             input.ExpectedDefinitionVersion,
             input.ExpectedDefinitionHash,
-            _actor,
-            _surface,
-            _currentRoleId,
+            actor,
+            surface,
+            currentRoleId,
             CustomLoopInvocationRequestHash.ComputePromptHash(invocationPrompt),
             _modelSnapshot.Provider,
             _modelSnapshot.Model,
@@ -830,7 +840,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
             var durable = operation;
             if (operation.BindingState == CustomLoopInvocationBindingState.Unbound)
             {
-                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(operation, token), cancellationToken);
+                var begun = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BeginAsync(operation, token), operation.Actor, operation.Surface, cancellationToken);
                 if (begun.Status == CustomLoopInvocationOperationStoreStatus.Conflict)
                 {
                     return Conflict("The invocation operation id is already bound to different canonical authorized request content.");
@@ -915,7 +925,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         CustomLoopInvocationOperationStoreResult stored;
         try
         {
-            stored = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BindAsync(bound, token), cancellationToken);
+            stored = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.BindAsync(bound, token), bound.Actor, bound.Surface, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -1027,7 +1037,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
-            var recovery = await _recoveryService.RecoverAsync(_actor, integrity.Token);
+            var recovery = await _recoveryService.RecoverAsync(run.AdmissionActor, integrity.Token);
             var result = recovery.SingleOrDefault(item => string.Equals(item.Run.Id, run.Id, StringComparison.Ordinal));
             if (result is not null)
             {
@@ -1202,7 +1212,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
         using var integrity = new CancellationTokenSource(_integrityWriteTimeout);
         try
         {
-            var result = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.CompleteAsync(completed, token), integrity.Token);
+            var result = await WriteReceiptWithRetentionAsync(token => _invocationOperationStore.CompleteAsync(completed, token), completed.Actor, completed.Surface, integrity.Token);
             return result.Status is CustomLoopInvocationOperationStoreStatus.Completed or CustomLoopInvocationOperationStoreStatus.Replayed;
         }
         catch
@@ -1213,6 +1223,8 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
 
     private async Task<CustomLoopInvocationOperationStoreResult> WriteReceiptWithRetentionAsync(
         Func<CancellationToken, Task<CustomLoopInvocationOperationStoreResult>> write,
+        string actor,
+        string surface,
         CancellationToken cancellationToken)
     {
         var result = await write(cancellationToken);
@@ -1223,7 +1235,7 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustom
 
         // Capacity is reclaimed only through governed retention. The original write is retried once
         // after retention succeeds so no caller can bypass replay and audit guarantees.
-        var retention = await _invocationReceiptRetention.PruneForCapacityAsync(_actor, _surface, cancellationToken);
+        var retention = await _invocationReceiptRetention.PruneForCapacityAsync(actor, surface, cancellationToken);
         if (!retention.AllowsReceiptWrite)
         {
             var status = retention.Status switch

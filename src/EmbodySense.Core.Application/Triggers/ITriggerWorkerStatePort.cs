@@ -60,6 +60,6 @@ public interface ITriggerWorkerStatePort
     /// <param name="expectedRevision">The exact entry revision containing durable intent.</param>
     /// <param name="outcome">The exact intent-bound provider outcome evidence.</param>
     /// <param name="cancellationToken">A token honored before the outcome commit.</param>
-    /// <returns>The closed mutation posture and latest entry evidence.</returns>
+    /// <returns>The closed mutation posture and latest entry evidence. Proved non-ambiguous outcomes require live ownership at their recorded time and the store's under-lock trusted observation; an exact needs-review outcome may close ambiguity after expiry.</returns>
     Task<TriggerWorkerMutationResult> CompleteDispatchAsync(TriggerDeliveryId deliveryId, string workerId, long leaseGeneration, long expectedRevision, TriggerDispatchEvidence outcome, CancellationToken cancellationToken = default);
 }

@@ -1689,7 +1689,7 @@ public sealed class TriggerQueueStoreTests
     public async Task Exact_nonadmitted_post_intent_outcomes_commit_without_governed_receipts(TriggerDispatchOutcome outcome, TriggerQueueEntryState state, TriggerQueueTerminalReason reason)
     {
         using var workspace = new TestWorkspace();
-        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath));
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7)));
         await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
         var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
         var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
@@ -1711,21 +1711,127 @@ public sealed class TriggerQueueStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new TriggerQueueStore(paths);
+        var store = new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
+        var intent = Intent(selected.Entry!, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
+        var begun = await store.BeginDispatchAsync(selected.Entry!.DeliveryId, "worker-1", 1, selected.Entry.Revision, intent);
+        var terminal = Terminal(intent, begun.Entry!, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6));
+
+        var completed = await store.CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, terminal);
+        var restarted = Assert.Single((await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7))).Entries);
+        var replayed = await new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddMinutes(1))).CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, completed.Entry!.Revision, terminal);
+
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, completed.Status);
+        Assert.Equal(TriggerWorkerMutationStatus.Replayed, replayed.Status);
+        Assert.Equal(TriggerQueueEntryState.Dispatched, restarted.State);
+        Assert.Equal(intent.OperationId, restarted.Dispatch!.GovernedInvocation!.OperationId);
+        Assert.Equal("run-1", restarted.Dispatch.GovernedInvocation.RunId);
+        Assert.Equal(new string('d', 64), restarted.Dispatch.GovernedInvocation.AdmissionRequestHash);
+    }
+
+    [Fact]
+    public async Task Proved_completion_at_lease_expiry_is_rejected_while_exact_needs_review_closes_ambiguity()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7)));
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(3), [], 2));
+        var intent = Intent(selected.Entry!, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
+        var begun = await store.BeginDispatchAsync(selected.Entry!.DeliveryId, "worker-1", 1, selected.Entry.Revision, intent);
+        var expiry = selected.Entry.WorkerLease!.ExpiresAtUtc;
+
+        var stale = await store.CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, Terminal(intent, begun.Entry, expiry));
+        var needsReview = intent with { Outcome = TriggerDispatchOutcome.NeedsReview, OutcomeRecordedAtUtc = expiry, Detail = "completion crossed the exact lease expiry" };
+        var closed = await store.CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, begun.Entry.Revision, needsReview);
+
+        Assert.Equal(TriggerWorkerMutationStatus.StaleOwner, stale.Status);
+        Assert.Equal(TriggerQueueEntryState.Dispatching, stale.Entry!.State);
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, closed.Status);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, closed.Entry!.State);
+        Assert.Null(closed.Entry.Dispatch!.GovernedInvocation);
+    }
+
+    [Fact]
+    public async Task Unavailable_under_lock_completion_clock_leaves_exact_intent_dispatching()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), timeProvider: new ThrowingWorkerTimeProvider());
         await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
         var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
         var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
         var intent = Intent(selected.Entry!, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
         var begun = await store.BeginDispatchAsync(selected.Entry!.DeliveryId, "worker-1", 1, selected.Entry.Revision, intent);
 
-        var completed = await store.CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, Terminal(intent, begun.Entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
-        var restarted = Assert.Single((await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7))).Entries);
+        var result = await store.CompleteDispatchAsync(selected.Entry.DeliveryId, "worker-1", 1, begun.Entry!.Revision, Terminal(intent, begun.Entry, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
 
-        Assert.Equal(TriggerWorkerMutationStatus.Committed, completed.Status);
-        Assert.Equal(TriggerQueueEntryState.Dispatched, restarted.State);
-        Assert.Equal(intent.OperationId, restarted.Dispatch!.GovernedInvocation!.OperationId);
-        Assert.Equal("run-1", restarted.Dispatch.GovernedInvocation.RunId);
-        Assert.Equal(new string('d', 64), restarted.Dispatch.GovernedInvocation.AdmissionRequestHash);
+        Assert.Equal(TriggerWorkerMutationStatus.Unavailable, result.Status);
+        Assert.Equal(TriggerQueueEntryState.Dispatching, result.Entry!.State);
+        Assert.Equal(TriggerDispatchOutcome.IntentRecorded, result.Entry.Dispatch!.Outcome);
+    }
+
+    [Fact]
+    public async Task Worker_clock_crossing_expiry_between_precheck_and_store_completion_cannot_commit_acceptance()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var setup = new TriggerQueueStore(paths);
+        await TriggerQueueTestData.Service(setup).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var snapshot = await setup.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        var time = new MutableWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
+        var lockedReads = 0;
+        var observer = new CallbackObserver(onArtifactsObserved: _ =>
+        {
+            if (Interlocked.Increment(ref lockedReads) == 3)
+            {
+                time.SetUtcNow(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7));
+            }
+        });
+        var store = new TriggerQueueStore(paths, observer: observer, timeProvider: time);
+        var dispatcher = new AcceptedDispatcher();
+        var service = new TriggerWorkerService(store, new AuthorizedAuthorizer(), dispatcher, time);
+
+        var result = await service.RunOnceAsync(new TriggerWorkerRunRequest(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(3), [], 2)));
+
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, result.MutationStatus);
+        Assert.Equal(TriggerQueueEntryState.NeedsReview, result.Entry!.State);
+        Assert.Equal(TriggerDispatchOutcome.NeedsReview, result.Entry.Dispatch!.Outcome);
+        Assert.Equal(TriggerQueueTestData.CreatedAtUtc.AddSeconds(7), result.Entry.Dispatch.OutcomeRecordedAtUtc);
+        Assert.Null(result.Entry.Dispatch.GovernedInvocation);
+        Assert.Contains("StaleOwner", result.Entry.Dispatch.Detail, StringComparison.Ordinal);
+        Assert.Equal(4, lockedReads);
+    }
+
+    [Fact]
+    public async Task Completion_response_loss_after_commit_cannot_overwrite_exact_accepted_receipt_with_needs_review()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var setup = new TriggerQueueStore(paths);
+        await TriggerQueueTestData.Service(setup).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var snapshot = await setup.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+        var completionGeneration = snapshot.Generation + 3;
+        var responseLossStore = new TriggerQueueStore(paths, observer: new CallbackObserver(onPublished: (generation, _) =>
+        {
+            if (generation == completionGeneration)
+            {
+                throw new IOException("simulated completion response loss");
+            }
+        }), timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(5)));
+        var dispatcher = new AcceptedDispatcher();
+        var time = new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
+        var service = new TriggerWorkerService(responseLossStore, new AuthorizedAuthorizer(), dispatcher, time);
+
+        var result = await service.RunOnceAsync(new TriggerWorkerRunRequest(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(3), [], 2)));
+
+        Assert.Equal(1, dispatcher.Calls);
+        Assert.Equal(TriggerWorkerMutationStatus.RevisionConflict, result.MutationStatus);
+        Assert.Equal(TriggerQueueEntryState.Dispatched, result.Entry!.State);
+        Assert.Equal(TriggerDispatchOutcome.Accepted, result.Entry.Dispatch!.Outcome);
+        Assert.NotNull(result.Entry.Dispatch.GovernedInvocation);
     }
 
     [Theory]
@@ -1736,7 +1842,7 @@ public sealed class TriggerQueueStoreTests
     public async Task Stale_or_fabricated_governed_receipt_binding_cannot_complete_dispatch(string mismatch)
     {
         using var workspace = new TestWorkspace();
-        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath));
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
         await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
         var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
         var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
@@ -1809,7 +1915,7 @@ public sealed class TriggerQueueStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var store = new TriggerQueueStore(paths);
+        var store = new TriggerQueueStore(paths, timeProvider: new FixedWorkerTimeProvider(TriggerQueueTestData.CreatedAtUtc.AddSeconds(6)));
         await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
         var generation = (await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4))).Generation;
         var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", generation, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10), [], 2));
@@ -2060,6 +2166,58 @@ public sealed class TriggerQueueStoreTests
     {
         Process.GetCurrentProcess().Kill();
         Thread.Sleep(Timeout.Infinite);
+    }
+
+    private sealed class AuthorizedAuthorizer : ITriggerDispatchAuthorizer
+    {
+        public Task<TriggerDispatchAuthorization> AuthorizeAsync(TriggerDeliveryEnvelope envelope, DateTimeOffset evaluatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new TriggerDispatchAuthorization(TriggerDispatchAuthorizationStatus.Authorized, new string('a', 64), "current authority remains valid"));
+        }
+    }
+
+    private sealed class AcceptedDispatcher : ITriggerWorkerDispatcher
+    {
+        internal int Calls { get; private set; }
+
+        public Task<TriggerWorkerDispatchResult> DispatchAsync(TriggerDeliveryEnvelope envelope, TriggerDispatchEvidence intent, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            var governed = new TriggerGovernedInvocationEvidence(intent.OperationId, "run-1", new string('d', 64), envelope.Loop.LoopId, envelope.Loop.DefinitionVersion, envelope.Loop.ContentHash);
+            return Task.FromResult(new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Accepted, "governed invocation accepted", governed));
+        }
+    }
+
+    private sealed class FixedWorkerTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class ThrowingWorkerTimeProvider : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => throw new InvalidOperationException("trusted completion clock unavailable");
+    }
+
+    private sealed class MutableWorkerTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private readonly object _gate = new();
+        private DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            lock (_gate)
+            {
+                return _now;
+            }
+        }
+
+        internal void SetUtcNow(DateTimeOffset now)
+        {
+            lock (_gate)
+            {
+                _now = now;
+            }
+        }
     }
 
     [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]

@@ -31,6 +31,7 @@ public sealed class TriggerWorkerRuntimeFacadeTests
         Assert.Equal(envelope.Loop.ContentHash, preparation.Input.ExpectedDefinitionHash);
         Assert.Equal(intent.OperationId, preparation.Input.OperationId);
         Assert.Equal("dispatch", preparation.Input.InvocationPrompt);
+        Assert.Same(envelope.ActorContext, preparation.ActorContext);
         Assert.Null(preparation.Rejection);
         Assert.Throws<ArgumentNullException>(() => TriggerCustomLoopDispatchProtocol.Prepare(null!, intent));
         Assert.Throws<ArgumentNullException>(() => TriggerCustomLoopDispatchProtocol.Prepare(envelope, null!));
@@ -55,6 +56,8 @@ public sealed class TriggerWorkerRuntimeFacadeTests
         Assert.Equal(TriggerDispatchOutcome.Rejected, invalidResult.Rejection!.Outcome);
         Assert.Null(referencedResult.Input);
         Assert.Null(invalidResult.Input);
+        Assert.Null(referencedResult.ActorContext);
+        Assert.Null(invalidResult.ActorContext);
     }
 
     [Theory]

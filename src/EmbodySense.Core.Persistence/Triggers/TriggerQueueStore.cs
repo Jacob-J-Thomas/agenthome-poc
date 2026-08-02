@@ -13,6 +13,8 @@ namespace EmbodySense.Core.Persistence.Triggers;
 /// execution dependency and never invokes provider or actuator code.
 /// Caller cancellation is honored through the final pre-staging check. Atomic rename is the commit boundary; an exception after
 /// publication is an ambiguous caller outcome, and exact retry resolves it by replaying the durable entry.
+/// Proved dispatch completion reads a composition-owned UTC clock while holding the mutation lock so stale caller timestamps
+/// cannot extend live ownership. The caller timestamp remains the persisted event time and exact replay binding.
 /// Terminal evidence is retained without automatic pruning and remains subject to explicit retained count and byte bounds.
 /// Unix cleanup uses authenticated tombstones because pathname unlink cannot condition deletion on file identity. Their public
 /// quota is inspectable in snapshots, and every mutation reserves its worst-case tombstone use before staging.
@@ -23,17 +25,20 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
     private readonly TriggerQueueArtifactGuard _guard;
     private readonly int _maximumLedgerBytes;
     private readonly ITriggerQueueDurabilityObserver _observer;
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>Initializes a workspace-scoped queue with composition-owned bounds and an optional durability observer.</summary>
     /// <param name="paths">The canonical workspace paths.</param>
     /// <param name="quota">The schema-version-1 quota, or conservative defaults.</param>
     /// <param name="observer">An optional diagnostics or crash-test observer.</param>
-    public TriggerQueueStore(WorkspacePaths paths, TriggerQueueQuota? quota = null, ITriggerQueueDurabilityObserver? observer = null)
+    /// <param name="timeProvider">The composition-owned UTC clock used for under-lock dispatch-completion liveness checks.</param>
+    public TriggerQueueStore(WorkspacePaths paths, TriggerQueueQuota? quota = null, ITriggerQueueDurabilityObserver? observer = null, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _quota = quota ?? TriggerQueueQuota.Default;
         TriggerQueueQuotaValidator.Validate(_quota);
         _observer = observer ?? NullTriggerQueueDurabilityObserver.Instance;
+        _timeProvider = timeProvider ?? TimeProvider.System;
         var queueRoot = paths.AgentFile(Path.Combine("triggers", "queue"));
         _guard = new TriggerQueueArtifactGuard(paths.RootPath, queueRoot, _quota.MaxDurabilityTombstones);
         _maximumLedgerBytes = checked((int)Math.Min(int.MaxValue, _quota.MaxRetainedBytes + (long)_quota.MaxRetainedEntries * 2_048 + 4_096));
@@ -372,6 +377,30 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
             if (entry.State != TriggerQueueEntryState.Dispatching || entry.Dispatch is null || !SameDispatchBinding(entry.Dispatch, outcome))
             {
                 return (TriggerWorkerMutationStatus.InvalidState, entry);
+            }
+
+            DateTimeOffset trustedObservedAtUtc;
+            try
+            {
+                var now = _timeProvider.GetUtcNow();
+                trustedObservedAtUtc = now.Offset == TimeSpan.Zero ? now : now.ToUniversalTime();
+            }
+            catch
+            {
+                return (TriggerWorkerMutationStatus.Unavailable, entry);
+            }
+
+            if (outcome.OutcomeRecordedAtUtc!.Value > trustedObservedAtUtc)
+            {
+                return (TriggerWorkerMutationStatus.ClockRollback, entry);
+            }
+
+            if (outcome.Outcome != TriggerDispatchOutcome.NeedsReview
+                && (entry.WorkerLease is not { ReleasedAtUtc: null } liveLease
+                    || outcome.OutcomeRecordedAtUtc.Value >= liveLease.ExpiresAtUtc
+                    || trustedObservedAtUtc >= liveLease.ExpiresAtUtc))
+            {
+                return (TriggerWorkerMutationStatus.StaleOwner, entry);
             }
 
             if (!IsGovernedOutcomeBound(entry, outcome))

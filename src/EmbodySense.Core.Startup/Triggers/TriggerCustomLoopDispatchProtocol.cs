@@ -26,7 +26,7 @@ public static class TriggerCustomLoopDispatchProtocol
         var payload = envelope.Payload.GetInlinePayload();
         if (payload is null)
         {
-            return new TriggerCustomLoopDispatchPreparation(null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Rejected, "The governed payload reference requires an adapter that is outside this worker child."));
+            return new TriggerCustomLoopDispatchPreparation(null, null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Rejected, "The governed payload reference requires an adapter that is outside this worker child."));
         }
 
         string prompt;
@@ -36,11 +36,11 @@ public static class TriggerCustomLoopDispatchProtocol
         }
         catch (DecoderFallbackException)
         {
-            return new TriggerCustomLoopDispatchPreparation(null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Rejected, "The inline trigger payload is not strict UTF-8 text."));
+            return new TriggerCustomLoopDispatchPreparation(null, null, new TriggerWorkerDispatchResult(TriggerDispatchOutcome.Rejected, "The inline trigger payload is not strict UTF-8 text."));
         }
 
         var input = new LoopRunInvocationInput(envelope.Loop.LoopId, envelope.Loop.DefinitionVersion, envelope.Loop.ContentHash, intent.OperationId, prompt);
-        return new TriggerCustomLoopDispatchPreparation(input, null);
+        return new TriggerCustomLoopDispatchPreparation(input, envelope.ActorContext, null);
     }
 
     /// <summary>Maps one governed runtime response only when its closed status and receipt evidence prove the outcome.</summary>
