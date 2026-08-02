@@ -828,7 +828,8 @@ internal sealed class TriggerQueueArtifactGuard
         const uint MoveFileWriteThrough = 0x00000008;
         if (!MoveFileEx(sourcePath, destinationPath, MoveFileWriteThrough))
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Trigger queue durable no-replace rename failed.");
+            var error = Marshal.GetLastWin32Error();
+            throw new IOException("Trigger queue durable no-replace rename failed.", new Win32Exception(error));
         }
     }
 
