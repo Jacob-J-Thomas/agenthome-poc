@@ -16,7 +16,7 @@ public sealed class HumanInputContractsTests
 
             Assert.True(HumanInputValidator.ValidateRequest(request).IsValid);
             Assert.Equal(HumanInputResponseOutcomeKind.Valid, outcome.Kind);
-            Assert.Same(response, outcome.Response);
+            Assert.NotSame(response, outcome.Response);
             Assert.Empty(outcome.Errors);
         }
     }
@@ -242,6 +242,27 @@ public sealed class HumanInputContractsTests
         Assert.Contains(errors, error => error.Code == "duplicate_structured_value");
         Assert.Contains(errors, error => error.Code == "unknown_structured_field");
         Assert.Contains(errors, error => error.Code == "required_structured_field_missing");
+    }
+
+    [Fact]
+    public void Valid_structured_outcome_is_an_immutable_snapshot_of_the_checked_response()
+    {
+        var request = Request(HumanInputResponseKind.Structured);
+        var response = Response(request);
+
+        var outcome = HumanInputValidator.ValidateResponse(request, response);
+        var changedFields = response.Value.StructuredFields!.Value.SetItem(
+            0,
+            new HumanInputStructuredFieldValue("unknown", new string('x', HumanInputLimits.MaxResponseTextCharacters + 1), null));
+        response = response with { Value = response.Value with { StructuredFields = changedFields } };
+
+        Assert.Equal(HumanInputResponseOutcomeKind.Valid, outcome.Kind);
+        Assert.NotSame(response, outcome.Response);
+        var field = Assert.Single(outcome.Response!.Value.StructuredFields!.Value);
+        Assert.Equal("choice", field.FieldId);
+        Assert.Equal("one", field.ChoiceId);
+        Assert.Null(field.Text);
+        Assert.Equal("unknown", Assert.Single(response.Value.StructuredFields!.Value).FieldId);
     }
 
     [Fact]

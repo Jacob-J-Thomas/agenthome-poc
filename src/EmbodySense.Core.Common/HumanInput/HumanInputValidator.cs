@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.HumanInput.Models;
+using System.Collections.Immutable;
 
 namespace EmbodySense.Core.Common.HumanInput;
 
@@ -116,7 +117,7 @@ public static class HumanInputValidator
         ValidateOptionalText(response.Explanation, "explanation", HumanInputLimits.MaxExplanationCharacters, errors);
         ValidateResponseValue(request.ResponseSchema, response.Value, errors);
         return errors.Count == 0
-            ? new HumanInputResponseOutcome(HumanInputResponseOutcomeKind.Valid, response, [])
+            ? new HumanInputResponseOutcome(HumanInputResponseOutcomeKind.Valid, Snapshot(response), [])
             : Invalid(errors);
     }
 
@@ -382,15 +383,16 @@ public static class HumanInputValidator
         }
     }
 
-    private static void ValidateStructuredValues(HumanInputStructuredFieldValue[]? values, HumanInputStructuredFieldSchema[]? schema, List<HumanInputValidationError> errors)
+    private static void ValidateStructuredValues(ImmutableArray<HumanInputStructuredFieldValue>? values, HumanInputStructuredFieldSchema[]? schema, List<HumanInputValidationError> errors)
     {
-        if (values is null || schema is null || values.Length > HumanInputLimits.MaxStructuredFields || schema.Length > HumanInputLimits.MaxStructuredFields)
+        if (values is null || values.Value.IsDefault || schema is null || values.Value.Length > HumanInputLimits.MaxStructuredFields || schema.Length > HumanInputLimits.MaxStructuredFields)
         {
             Add(errors, "invalid_structured_values", "value.structuredFields", "Structured values must be a bounded subset of the declared fields.");
             return;
         }
 
-        if (values.Length > schema.Length)
+        var submittedValues = values.Value;
+        if (submittedValues.Length > schema.Length)
         {
             Add(errors, "invalid_structured_values", "value.structuredFields", "Structured values must be a bounded subset of the declared fields.");
         }
@@ -406,9 +408,9 @@ public static class HumanInputValidator
         }
 
         var submitted = new HashSet<string>(StringComparer.Ordinal);
-        for (var index = 0; index < values.Length; index++)
+        for (var index = 0; index < submittedValues.Length; index++)
         {
-            var value = values[index];
+            var value = submittedValues[index];
             var field = $"value.structuredFields[{index}]";
             if (value is null
                 || !HumanInputIdentifier.IsValid(value.FieldId)
@@ -443,6 +445,23 @@ public static class HumanInputValidator
                 Add(errors, "required_structured_field_missing", "value.structuredFields", "Structured response omitted a required field.");
             }
         }
+    }
+
+    private static HumanInputResponse Snapshot(HumanInputResponse response)
+    {
+        var fields = response.Value.StructuredFields;
+        ImmutableArray<HumanInputStructuredFieldValue>? fieldSnapshot = fields is null
+            ? null
+            : fields.Value.Select(field => field with { }).ToImmutableArray();
+        return response with
+        {
+            Binding = response.Binding with { },
+            Value = response.Value with
+            {
+                StructuredFields = fieldSnapshot,
+                Reference = response.Value.Reference is null ? null : response.Value.Reference with { }
+            }
+        };
     }
 
     private static void ValidateReference(HumanInputReference? reference, HumanInputReferencePolicy? policy, List<HumanInputValidationError> errors)

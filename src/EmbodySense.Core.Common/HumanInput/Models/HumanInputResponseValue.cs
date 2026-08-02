@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace EmbodySense.Core.Common.HumanInput.Models;
 
 /// <summary>
@@ -9,4 +11,4 @@ namespace EmbodySense.Core.Common.HumanInput.Models;
 /// <param name="Confirmation">The selected boolean datum for a confirmation response.</param>
 /// <param name="StructuredFields">The field values for a structured response.</param>
 /// <param name="Reference">The safe reference for a reference response.</param>
-public sealed record HumanInputResponseValue(HumanInputResponseKind Kind, string? Text, string? ChoiceId, bool? Confirmation, HumanInputStructuredFieldValue[]? StructuredFields, HumanInputReference? Reference);
+public sealed record HumanInputResponseValue(HumanInputResponseKind Kind, string? Text, string? ChoiceId, bool? Confirmation, ImmutableArray<HumanInputStructuredFieldValue>? StructuredFields, HumanInputReference? Reference);
