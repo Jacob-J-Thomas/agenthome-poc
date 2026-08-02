@@ -12,6 +12,7 @@ namespace EmbodySense.Core.Application.Capabilities.Models;
 /// <param name="Platform">The artifact platform.</param>
 /// <param name="EntryPoint">The contained relative executable path.</param>
 /// <param name="Arguments">The bounded fixed argument vector.</param>
+/// <param name="Dependencies">Optional canonical capability-package dependencies carried by this immutable artifact.</param>
 public sealed record CapabilityArtifactManifest(
     int SchemaVersion,
     CapabilityDescriptor Descriptor,
@@ -20,7 +21,8 @@ public sealed record CapabilityArtifactManifest(
     CapabilityArtifactSignatureEvidence? Signature,
     CapabilityPlatform Platform,
     string EntryPoint,
-    IReadOnlyList<string> Arguments)
+    IReadOnlyList<string> Arguments,
+    CapabilityDependencyManifest? Dependencies = null)
 {
     /// <summary>Gets the only supported experimental artifact manifest schema version.</summary>
     public const int CurrentSchemaVersion = 1;

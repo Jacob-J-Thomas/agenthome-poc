@@ -262,7 +262,7 @@ public sealed class AgentRuntimeFactory
             var workspaceClient = new LocalWorkspaceClient(paths);
             var loopDefinitionStore = new LoopDefinitionStore(paths);
             var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
-            var capabilityAdmission = new CapabilityAdmissionService(new CapabilityCatalogStore(paths, _capabilityTrustProvider), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform);
+            var capabilityAdmission = CapabilityAdmissionFactory.Create(paths, _capabilityTrustProvider);
             var conversationTurnStore = new DefaultConversationTurnStore(paths);
             var defaultCapabilityRevalidator = new DefaultConversationCapabilityAuthorityRevalidator(conversationTurnStore, loopDefinitionStore, capabilityAdmission);
             var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog, defaultLoop, new ToolResultRetentionStore(paths), actuationAuthorityRevalidator: defaultCapabilityRevalidator);

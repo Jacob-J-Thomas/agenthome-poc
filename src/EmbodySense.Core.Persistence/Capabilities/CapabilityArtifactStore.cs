@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities.Models;
 
@@ -12,7 +13,7 @@ namespace EmbodySense.Core.Persistence.Capabilities;
 
 /// <summary>Persists immutable capability payloads and a schema-1 atomic activation index.</summary>
 /// <remarks>Activation state is deliberately separate from declaration, installation, enablement, health, and trust lifecycle axes in the catalog.</remarks>
-public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
+public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabilityPackageDependencyManifestDiscovery, ICapabilityLifecycleArtifactEvidenceSource
 {
     private const int MaximumActivationBytes = 1_048_576;
     private const int MaximumOperations = 256;
@@ -24,9 +25,10 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
     private readonly TimeProvider _timeProvider;
     private readonly ICapabilityArtifactStateTrustProvider _trustProvider;
     private readonly ICapabilityArtifactTrustVerifier _artifactTrustVerifier;
+    private readonly ICapabilityLifecycleMutationStore? _lifecycleStore;
 
     /// <summary>Creates a workspace-local artifact store.</summary>
-    public CapabilityArtifactStore(WorkspacePaths paths, ICapabilityArtifactStateTrustProvider trustProvider, ICapabilityArtifactTrustVerifier artifactTrustVerifier, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
+    public CapabilityArtifactStore(WorkspacePaths paths, ICapabilityArtifactStateTrustProvider trustProvider, ICapabilityArtifactTrustVerifier artifactTrustVerifier, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityLifecycleMutationStore? lifecycleStore = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
@@ -34,6 +36,7 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
         _paths = paths;
         _trustProvider = trustProvider;
         _artifactTrustVerifier = artifactTrustVerifier;
+        _lifecycleStore = lifecycleStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _guard = new CapabilityCatalogPathGuard(paths.CapabilityCatalogPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
     }
@@ -111,6 +114,19 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
         {
             return Result(CapabilityArtifactStoreStatus.Invalid, null, "The activation request is invalid.");
         }
+        var lifecycleBoundary = await ReadLifecycleBoundaryAsync(request.Manifest.Descriptor.Id, cancellationToken);
+        if (lifecycleBoundary is { Status: CapabilityLifecycleReadStatus.Available, State: null })
+        {
+            return Result(CapabilityArtifactStoreStatus.Unavailable, null, "Current lifecycle registration state is incomplete; direct activation fails closed.");
+        }
+        if (lifecycleBoundary?.Status == CapabilityLifecycleReadStatus.Available)
+        {
+            return Result(CapabilityArtifactStoreStatus.Invalid, null, "Registered capability activation must use the dependent-aware lifecycle preview and mutation boundary.");
+        }
+        if (lifecycleBoundary?.Status is CapabilityLifecycleReadStatus.RecoveredLastProved or CapabilityLifecycleReadStatus.Unavailable)
+        {
+            return Result(CapabilityArtifactStoreStatus.Unavailable, null, "Current lifecycle registration state is unproved; direct activation fails closed.");
+        }
 
         try
         {
@@ -173,6 +189,19 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
         {
             return Result(CapabilityArtifactStoreStatus.Invalid, null, "The rollback request is invalid.");
         }
+        var lifecycleBoundary = await ReadLifecycleBoundaryAsync(capabilityId, cancellationToken);
+        if (lifecycleBoundary is { Status: CapabilityLifecycleReadStatus.Available, State: null })
+        {
+            return Result(CapabilityArtifactStoreStatus.Unavailable, null, "Current lifecycle registration state is incomplete; direct rollback fails closed.");
+        }
+        if (lifecycleBoundary?.Status == CapabilityLifecycleReadStatus.Available)
+        {
+            return Result(CapabilityArtifactStoreStatus.Invalid, null, "Registered capability rollback must use the dependent-aware lifecycle preview and mutation boundary.");
+        }
+        if (lifecycleBoundary?.Status is CapabilityLifecycleReadStatus.RecoveredLastProved or CapabilityLifecycleReadStatus.Unavailable)
+        {
+            return Result(CapabilityArtifactStoreStatus.Unavailable, null, "Current lifecycle registration state is unproved; direct rollback fails closed.");
+        }
 
         try
         {
@@ -224,6 +253,27 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
     public async Task<CapabilityArtifactStoreResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(capabilityId);
+        if (_lifecycleStore is not null)
+        {
+            var lifecycle = await _lifecycleStore.ReadAsync(capabilityId, cancellationToken);
+            if (lifecycle.Status == CapabilityLifecycleReadStatus.Available)
+            {
+                if (lifecycle.State is not { } state)
+                {
+                    return Result(CapabilityArtifactStoreStatus.Unavailable, null, "Capability lifecycle state is incomplete.");
+                }
+                if (state.IsRemoved)
+                {
+                    return Result(CapabilityArtifactStoreStatus.NotFound, null, "The capability lifecycle identity is tombstoned.");
+                }
+                var prior = lifecycle.History.LastOrDefault()?.ArtifactDigest;
+                return Result(CapabilityArtifactStoreStatus.Applied, new CapabilityArtifactActivation(capabilityId, state.ArtifactDigest, prior, state.Revision, state.UpdatedAtUtc), "The current authenticated lifecycle artifact is available.");
+            }
+            if (lifecycle.Status is CapabilityLifecycleReadStatus.RecoveredLastProved or CapabilityLifecycleReadStatus.Unavailable)
+            {
+                return Result(CapabilityArtifactStoreStatus.Unavailable, null, "Capability lifecycle state is unavailable.");
+            }
+        }
         try
         {
             await using var fileSystem = await AcquireAsync(createRoot: false, cancellationToken);
@@ -244,6 +294,81 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<CapabilityPackageDependencyDiscovery>> DiscoverAsync(CancellationToken cancellationToken = default)
+    {
+        await using var fileSystem = await AcquireAsync(createRoot: false, cancellationToken);
+        var state = await LoadProvedForMutationAsync(fileSystem, cancellationToken) ?? throw new IOException("Activated package dependencies require one proved activation state.");
+        var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(fileSystem.PhysicalIdentityMaterial);
+        var discoveries = new List<CapabilityPackageDependencyDiscovery>();
+        foreach (var activation in state.Entries)
+        {
+            var artifactDigest = activation.ArtifactDigest;
+            if (_lifecycleStore is not null && CapabilityId.TryParse(activation.CapabilityId, out var capabilityId, out _))
+            {
+                var lifecycle = await _lifecycleStore.ReadAsync(capabilityId!, cancellationToken);
+                if (lifecycle.Status is CapabilityLifecycleReadStatus.RecoveredLastProved or CapabilityLifecycleReadStatus.Unavailable)
+                {
+                    throw new IOException("Activated package lifecycle state is unavailable.");
+                }
+                if (lifecycle.Status == CapabilityLifecycleReadStatus.Available && lifecycle.State is null)
+                {
+                    throw new IOException("Activated package lifecycle state is incomplete.");
+                }
+                if (lifecycle.State is { IsRemoved: true })
+                {
+                    continue;
+                }
+                artifactDigest = lifecycle.State?.ArtifactDigest.Value ?? artifactDigest;
+            }
+            var root = Path.Combine(_paths.CapabilityArtifactsPath, "staged", artifactDigest["sha256:".Length..]);
+            var evidenceBytes = await fileSystem.ReadAllBytesAsync(Path.Combine(root, "artifact.evidence.json"), MaximumActivationBytes, cancellationToken);
+            var evidence = DeserializeStrict<CapabilityArtifactEvidenceDocument>(evidenceBytes);
+            if (evidence is null || !await IsStagedAsync(fileSystem, workspaceIdentity, artifactDigest, activation.CapabilityId, evidence.CapabilityVersion, cancellationToken))
+            {
+                throw new FormatException("Activated package evidence is unavailable or unproved.");
+            }
+            if (evidence.Dependencies is { } dependencies)
+            {
+                if (!CapabilityDependencyManifestValidator.Validate(dependencies).IsValid || dependencies.Kind != CapabilityDependencyManifestKind.CapabilityPackage || dependencies.SubjectId.Value != activation.CapabilityId)
+                {
+                    throw new FormatException("Activated package dependency evidence is invalid or forged.");
+                }
+                discoveries.Add(new CapabilityPackageDependencyDiscovery(activation.CapabilityId, artifactDigest, dependencies));
+            }
+        }
+        return discoveries;
+    }
+
+    /// <inheritdoc />
+    public async Task<CapabilityLifecycleArtifactEvidence> VerifyAsync(CapabilityDescriptor descriptor, CapabilityIntegrityDigest artifactDigest, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        ArgumentNullException.ThrowIfNull(artifactDigest);
+        if (!CapabilityDescriptorJson.TrySerialize(descriptor, out var descriptorJson, out _))
+        {
+            return new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.NotFound, "The lifecycle target descriptor is invalid.");
+        }
+        try
+        {
+            await using var fileSystem = await AcquireAsync(createRoot: false, cancellationToken);
+            var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(fileSystem.PhysicalIdentityMaterial);
+            var root = Path.Combine(_paths.CapabilityArtifactsPath, "staged", artifactDigest.Value["sha256:".Length..]);
+            var evidenceBytes = await fileSystem.ReadAllBytesAsync(Path.Combine(root, "artifact.evidence.json"), MaximumActivationBytes, cancellationToken);
+            var evidence = DeserializeStrict<CapabilityArtifactEvidenceDocument>(evidenceBytes);
+            var proved = evidence is not null && evidence.DescriptorJson == descriptorJson && await IsStagedAsync(fileSystem, workspaceIdentity, artifactDigest.Value, descriptor.Id.Value, descriptor.Version.Value, cancellationToken);
+            return proved ? new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.Proved, "The exact immutable lifecycle target is staged and proved.") : new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.NotFound, "No matching proved immutable lifecycle target is staged.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException or JsonException)
+        {
+            return new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.Unavailable, "Immutable lifecycle target evidence is unavailable.");
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<CapabilityExecutableArtifactResolution> ResolveAsync(CapabilityExecutableInvocation invocation, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(invocation);
@@ -254,20 +379,39 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
         CapabilityCatalogPathSession? fileSystem = null;
         try
         {
+            CapabilityLifecycleState? lifecycleState = null;
+            if (_lifecycleStore is not null)
+            {
+                var lifecycle = await _lifecycleStore.ReadAsync(invocation.Manifest.Descriptor.Id, cancellationToken);
+                if (lifecycle.Status is CapabilityLifecycleReadStatus.RecoveredLastProved or CapabilityLifecycleReadStatus.Unavailable)
+                {
+                    return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Unavailable, null, "The requested lifecycle state is unavailable.");
+                }
+                if (lifecycle.Status == CapabilityLifecycleReadStatus.Available && lifecycle.State is null)
+                {
+                    return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Unavailable, null, "The requested lifecycle state is incomplete.");
+                }
+                lifecycleState = lifecycle.State;
+                if (lifecycleState is not null && (!lifecycleState.IsEnabled || lifecycleState.IsRemoved || lifecycleState.Revision != invocation.ExpectedActivationRevision || !lifecycleState.ArtifactDigest.FixedTimeEquals(invocation.Manifest.Checksum)))
+                {
+                    return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Unavailable, null, "The requested artifact is not the enabled current lifecycle target.");
+                }
+            }
             fileSystem = await AcquireAsync(createRoot: false, cancellationToken);
-            var state = await LoadProvedForMutationAsync(fileSystem, cancellationToken);
-            var activation = state?.Entries.SingleOrDefault(entry => entry.CapabilityId == invocation.Manifest.Descriptor.Id.Value);
-            if (state is null || activation is null || state.Revision != invocation.ExpectedActivationRevision || activation.ArtifactDigest != invocation.Manifest.Checksum.Value)
+            var activationState = lifecycleState is null ? await LoadProvedForMutationAsync(fileSystem, cancellationToken) : null;
+            var activation = activationState?.Entries.SingleOrDefault(entry => entry.CapabilityId == invocation.Manifest.Descriptor.Id.Value);
+            if (lifecycleState is null && (activationState is null || activation is null || activationState.Revision != invocation.ExpectedActivationRevision || activation.ArtifactDigest != invocation.Manifest.Checksum.Value))
             {
                 return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Unavailable, null, "The requested artifact is not the current proved activation.");
             }
             var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(fileSystem.PhysicalIdentityMaterial);
             var expectedPin = CapabilityArtifactManifestCanonicalizer.ComputePolicyPin(invocation.Manifest).Value;
-            var root = Path.Combine(_paths.CapabilityArtifactsPath, "staged", activation.ArtifactDigest["sha256:".Length..]);
+            var artifactDigest = lifecycleState?.ArtifactDigest.Value ?? activation!.ArtifactDigest;
+            var root = Path.Combine(_paths.CapabilityArtifactsPath, "staged", artifactDigest["sha256:".Length..]);
             var evidencePath = Path.Combine(root, "artifact.evidence.json");
             var evidenceBytes = await fileSystem.ReadAllBytesAsync(evidencePath, MaximumActivationBytes, cancellationToken);
             var evidence = DeserializeStrict<CapabilityArtifactEvidenceDocument>(evidenceBytes);
-            if (evidence is null || evidence.ManifestPolicyPin != expectedPin || !await IsStagedAsync(fileSystem, workspaceIdentity, activation.ArtifactDigest, activation.CapabilityId, invocation.Manifest.Descriptor.Version.Value, cancellationToken))
+            if (evidence is null || evidence.ManifestPolicyPin != expectedPin || !await IsStagedAsync(fileSystem, workspaceIdentity, artifactDigest, invocation.Manifest.Descriptor.Id.Value, invocation.Manifest.Descriptor.Version.Value, cancellationToken))
             {
                 return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Unavailable, null, "The requested artifact evidence is not current and proved.");
             }
@@ -284,7 +428,7 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
                     executable.Dispose();
                     return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Unavailable, null, "The retained executable identity does not match the proved artifact digest.");
                 }
-                var lease = new CapabilityExecutableArtifactLease(fileSystem, executable, root, executablePath, actualDigest, state!.Revision);
+                var lease = new CapabilityExecutableArtifactLease(fileSystem, executable, root, executablePath, actualDigest, lifecycleState?.Revision ?? activationState!.Revision);
                 fileSystem = null;
                 return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Available, lease, "The current proved immutable artifact is retained for isolated execution.");
             }
@@ -314,6 +458,8 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
         session.PrepareDirectory(Path.Combine(_paths.CapabilityArtifactsPath, "staged"));
         return session;
     }
+
+    private async Task<CapabilityLifecycleReadResult?> ReadLifecycleBoundaryAsync(CapabilityId capabilityId, CancellationToken cancellationToken) => _lifecycleStore is null ? null : await _lifecycleStore.ReadAsync(capabilityId, cancellationToken);
 
     private async Task<CapabilityArtifactActivationDocument?> LoadProvedForMutationAsync(CapabilityCatalogPathSession fileSystem, CancellationToken cancellationToken)
     {
@@ -405,6 +551,10 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
             {
                 return false;
             }
+            if (!CapabilityDescriptorJson.TryDeserialize(evidence.DescriptorJson, out var descriptor, out _) || descriptor is null || descriptor.Id.Value != evidence.CapabilityId || descriptor.Version.Value != evidence.CapabilityVersion || !CapabilityDescriptorJson.TrySerialize(descriptor, out var canonicalDescriptor, out _) || canonicalDescriptor != evidence.DescriptorJson)
+            {
+                return false;
+            }
             var expectedEvidenceDigest = ComputeEvidenceDigest(evidence);
             if (expectedEvidenceDigest != evidence.ContentDigest || !await _trustProvider.VerifyStagedEvidenceAsync(workspaceIdentity, digest, evidence.ContentDigest, evidence.AuthenticationTag, cancellationToken))
             {
@@ -441,7 +591,8 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore
 
     private async Task<string> SerializeEvidenceAsync(string workspaceIdentity, CapabilityArtifactStageRequest request, CancellationToken cancellationToken)
     {
-        var evidence = new CapabilityArtifactEvidenceDocument(1, request.Manifest.Descriptor.Id.Value, request.Manifest.Descriptor.Version.Value, request.Manifest.Descriptor.Implementation.ProviderId.Value, request.Manifest.Descriptor.Implementation.ImplementationId, request.Manifest.Source.Kind.ToString(), request.Manifest.Source.Uri, request.Manifest.Source.Revision, request.Manifest.Source.UpdatePolicy.ToString(), request.Manifest.Checksum.Value, request.Manifest.Signature, request.Manifest.Platform.ToString(), request.Manifest.EntryPoint, request.Manifest.Arguments, request.Trust.Status.ToString(), request.Trust.Verifier, CapabilityArtifactManifestCanonicalizer.ComputePolicyPin(request.Manifest).Value, string.Empty, string.Empty);
+        _ = CapabilityDescriptorJson.TrySerialize(request.Manifest.Descriptor, out var descriptorJson, out _);
+        var evidence = new CapabilityArtifactEvidenceDocument(1, request.Manifest.Descriptor.Id.Value, request.Manifest.Descriptor.Version.Value, descriptorJson!, request.Manifest.Descriptor.Implementation.ProviderId.Value, request.Manifest.Descriptor.Implementation.ImplementationId, request.Manifest.Source.Kind.ToString(), request.Manifest.Source.Uri, request.Manifest.Source.Revision, request.Manifest.Source.UpdatePolicy.ToString(), request.Manifest.Checksum.Value, request.Manifest.Signature, request.Manifest.Platform.ToString(), request.Manifest.EntryPoint, request.Manifest.Arguments, request.Manifest.Dependencies, request.Trust.Status.ToString(), request.Trust.Verifier, CapabilityArtifactManifestCanonicalizer.ComputePolicyPin(request.Manifest).Value, string.Empty, string.Empty);
         evidence = evidence with { ContentDigest = ComputeEvidenceDigest(evidence) };
         evidence = evidence with { AuthenticationTag = await _trustProvider.AuthenticateStagedEvidenceAsync(workspaceIdentity, evidence.Checksum, evidence.ContentDigest, cancellationToken) };
         return JsonSerializer.Serialize(evidence, _jsonOptions) + Environment.NewLine;

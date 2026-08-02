@@ -54,6 +54,24 @@ public sealed class CapabilityDependencyManifestTests
         Assert.Contains(validation.Errors, error => error.Code == "duplicate_dependency");
     }
 
+    [Fact]
+    public void Capability_package_kind_round_trips_canonical_json_and_hash_identity()
+    {
+        var manifest = new CapabilityDependencyManifest(1, CapabilityDependencyManifestKind.CapabilityPackage, Id("org.example/package"), [Dependency("org.example/a", "[1.0.0,2.0.0)")], [], new CapabilityDependencyArtifactMetadata(null, null));
+
+        Assert.True(CapabilityDependencyManifestJson.TrySerialize(manifest, out var json, out var serialization));
+        Assert.True(serialization.IsValid);
+        Assert.Contains("\"kind\":\"capability-package\"", json, StringComparison.Ordinal);
+        Assert.True(CapabilityDependencyManifestJson.TryDeserialize(json, out var roundTrip, out var deserialization));
+        Assert.True(deserialization.IsValid);
+        Assert.Equal(CapabilityDependencyManifestKind.CapabilityPackage, roundTrip!.Kind);
+        Assert.True(CapabilityDependencyManifestJson.TrySerialize(roundTrip, out var roundTripJson, out _));
+        Assert.Equal(json, roundTripJson);
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(manifest, out var hash, out _));
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(roundTrip, out var roundTripHash, out _));
+        Assert.Equal(hash, roundTripHash);
+    }
+
     private static CapabilityDependencyManifest Manifest(IReadOnlyList<CapabilityDependency> required) => new(1, CapabilityDependencyManifestKind.Skill, Id("org.example/skill"), required, [], new CapabilityDependencyArtifactMetadata(null, null));
 
     private static CapabilityDependency Dependency(string id, string range) => new(Id(id), Range(range));

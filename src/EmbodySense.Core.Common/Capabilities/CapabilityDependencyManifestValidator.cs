@@ -19,7 +19,7 @@ public static class CapabilityDependencyManifestValidator
             Add(errors, "unsupported_schema_version", "schemaVersion", "Only capability dependency manifest schema version 1 is supported.");
         }
 
-        if (manifest.Kind is not CapabilityDependencyManifestKind.Skill and not CapabilityDependencyManifestKind.LoopPackage)
+        if (manifest.Kind is not CapabilityDependencyManifestKind.Skill and not CapabilityDependencyManifestKind.LoopPackage and not CapabilityDependencyManifestKind.CapabilityPackage)
         {
             Add(errors, "unsupported_dependency_manifest_kind", "kind", "The dependency manifest kind is absent or unsupported.");
         }

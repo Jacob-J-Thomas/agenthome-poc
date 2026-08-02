@@ -1,5 +1,7 @@
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 
 namespace EmbodySense.Core.Application.Tests.Capabilities;
 
@@ -95,6 +97,26 @@ public sealed class CapabilityArtifactManifestValidatorTests
         };
 
         Assert.True(CapabilityArtifactManifestValidator.Validate(manifest).IsValid);
+    }
+
+    [Fact]
+    public void Capability_package_dependencies_are_canonical_and_bound_to_the_artifact_identity()
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        Assert.True(CapabilityId.TryParse("org.example/dependency", out var dependencyId, out _));
+        Assert.True(CapabilityVersionRange.TryParse("[1.0.0]", out var range, out _));
+        var dependency = new CapabilityDependency(dependencyId!, range!);
+        var packageManifest = new CapabilityDependencyManifest(1, CapabilityDependencyManifestKind.CapabilityPackage, manifest.Descriptor.Id, [dependency], [], new CapabilityDependencyArtifactMetadata(manifest.Checksum, null));
+        var withDependencies = manifest with { Dependencies = packageManifest };
+
+        Assert.True(CapabilityArtifactManifestValidator.Validate(withDependencies).IsValid);
+        Assert.NotEqual(CapabilityArtifactManifestCanonicalizer.ComputePolicyPin(manifest), CapabilityArtifactManifestCanonicalizer.ComputePolicyPin(withDependencies));
+        var forged = withDependencies with { Dependencies = packageManifest with { Kind = CapabilityDependencyManifestKind.Skill, SubjectId = dependencyId! } };
+        Assert.Contains(CapabilityArtifactManifestValidator.Validate(forged).Errors, error => error.Code == "artifact_dependency_identity_conflict");
+        var missingSubject = withDependencies with { Dependencies = packageManifest with { SubjectId = null! } };
+        var missingSubjectCodes = CapabilityArtifactManifestValidator.Validate(missingSubject).Errors.Select(error => error.Code).ToArray();
+        Assert.Contains("dependency_subject_required", missingSubjectCodes);
+        Assert.Contains("artifact_dependency_identity_conflict", missingSubjectCodes);
     }
 
     [Theory]

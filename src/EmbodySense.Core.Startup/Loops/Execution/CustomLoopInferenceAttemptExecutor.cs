@@ -65,7 +65,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             new ToolApprovalPromptAdapter(approvalPrompt),
             new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(CreatePaths(options))),
             new CustomLoopRunToolEvidenceSink(new CustomLoopRunStore(CreatePaths(options))),
-            new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform),
+            CapabilityAdmissionFactory.Create(CreatePaths(options), FileCapabilityCatalogTrustProvider.CreateDefault()),
             clientFactory)
     {
     }
@@ -73,7 +73,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     internal CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
-        CustomLoopInferenceClientFactory? clientFactory = null) : this(options, approvalPrompt, new AdmittedMaximumAuthorityProvider(), new NullToolEvidenceSink(), new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform), clientFactory)
+        CustomLoopInferenceClientFactory? clientFactory = null) : this(options, approvalPrompt, new AdmittedMaximumAuthorityProvider(), new NullToolEvidenceSink(), CapabilityAdmissionFactory.Create(CreatePaths(options), FileCapabilityCatalogTrustProvider.CreateDefault()), clientFactory)
     {
     }
 

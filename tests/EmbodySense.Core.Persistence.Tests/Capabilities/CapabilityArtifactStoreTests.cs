@@ -5,6 +5,8 @@ using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Tests.Support;
 
@@ -14,6 +16,30 @@ public sealed class CapabilityArtifactStoreTests
 {
     private static readonly byte[] _versionOne = "version-one"u8.ToArray();
     private static readonly byte[] _versionTwo = "version-two"u8.ToArray();
+
+    [Fact]
+    public async Task Activated_package_dependencies_are_discovered_from_authenticated_immutable_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(workspace);
+        var stage = CapabilityArtifactStoreTestData.Stage(_versionOne);
+        Assert.True(CapabilityId.TryParse("org.example/dependency", out var dependencyId, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var range, out _));
+        var dependencies = new CapabilityDependencyManifest(1, CapabilityDependencyManifestKind.CapabilityPackage, stage.Manifest.Descriptor.Id, [new CapabilityDependency(dependencyId!, range!)], [], new CapabilityDependencyArtifactMetadata(stage.Manifest.Checksum, null));
+        stage = stage with { Manifest = stage.Manifest with { Dependencies = dependencies } };
+
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await store.StageAsync(stage)).Status);
+        Assert.Equal(CapabilityLifecycleArtifactEvidenceStatus.Proved, (await store.VerifyAsync(stage.Manifest.Descriptor, stage.Manifest.Checksum)).Status);
+        Assert.Equal(CapabilityLifecycleArtifactEvidenceStatus.NotFound, (await store.VerifyAsync(stage.Manifest.Descriptor with { Version = CapabilityArtifactStoreTestData.Manifest(_versionTwo, "2.0.0").Descriptor.Version }, stage.Manifest.Checksum)).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await store.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "activate-package"))).Status);
+        var discovered = Assert.Single(await store.DiscoverAsync());
+
+        Assert.Equal(stage.Manifest.Descriptor.Id.Value, discovered.CapabilityId);
+        Assert.Equal(stage.Manifest.Checksum.Value, discovered.ArtifactDigest);
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(dependencies, out var expectedHash, out _));
+        Assert.True(CapabilityDependencyManifestHash.TryCompute(discovered.Manifest, out var actualHash, out _));
+        Assert.Equal(expectedHash, actualHash);
+    }
 
     [Fact]
     public async Task Verified_artifact_stages_activates_and_survives_restart()
@@ -417,7 +443,240 @@ public sealed class CapabilityArtifactStoreTests
         Assert.Null(wrongDigest.Lease);
     }
 
+    [Fact]
+    public async Task Registered_lifecycle_aggregate_closes_direct_activation_bypass_and_becomes_resolution_truth()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var initialStore = Store(workspace, paths);
+        var first = CapabilityArtifactStoreTestData.Stage(_versionOne);
+        var second = CapabilityArtifactStoreTestData.Stage(_versionTwo, "2.0.0");
+        await initialStore.StageAsync(first);
+        var initialActivation = await initialStore.ActivateAsync(new CapabilityArtifactActivationRequest(first.Manifest, 0, "activate-before-registration"));
+        var baselineState = new CapabilityLifecycleState(first.Manifest.Descriptor, first.Manifest.Checksum, true, false, initialActivation.Activation!.Revision, "activate-before-registration", initialActivation.Activation.ActivatedAtUtc);
+        var baseline = new CapabilityLifecycleBaseline(baselineState, 1, initialActivation.Activation.Revision);
+        var baselineSource = new StubCapabilityLifecycleBaselineSource { Baseline = baseline };
+        var lifecycleStore = new CapabilityLifecycleMutationStore(paths, new TestCapabilityLifecycleTrustProvider(), baselineSource, initialStore);
+        var coordinated = new CapabilityArtifactStore(paths, new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath), new AlwaysTrustedArtifactVerifier(), lifecycleStore: lifecycleStore);
+        var coordinatedStage = await coordinated.StageAsync(second);
+        Assert.True(coordinatedStage.Status == CapabilityArtifactStoreStatus.Applied, coordinatedStage.Detail);
+        Assert.Equal(first.Manifest.Checksum, (await coordinated.ReadAsync(first.Manifest.Descriptor.Id)).Activation!.ArtifactDigest);
+        var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
+        var request = new CapabilityLifecyclePreviewRequest("coordinated-upgrade", CapabilityLifecycleOperationKind.Upgrade, first.Manifest.Descriptor.Id, second.Manifest.Descriptor, second.Manifest.Checksum);
+        var preview = await lifecycleStore.PreviewAsync(request, baseline, await index.CaptureAsync());
+
+        Assert.Equal(CapabilityArtifactStoreStatus.Invalid, (await coordinated.ActivateAsync(new CapabilityArtifactActivationRequest(second.Manifest, 1, "bypass-upgrade"))).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Invalid, (await coordinated.RollbackAsync(first.Manifest.Descriptor.Id, 1, "bypass-rollback")).Status);
+        var applied = await lifecycleStore.MutateAsync(preview, baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, applied.Status);
+        Assert.Equal(second.Manifest.Checksum, (await coordinated.ReadAsync(first.Manifest.Descriptor.Id)).Activation!.ArtifactDigest);
+        Assert.Empty(await coordinated.DiscoverAsync());
+        var currentResolution = await coordinated.ResolveAsync(new CapabilityExecutableInvocation(second.Manifest, string.Empty, "{}", "resolve-current-lifecycle", applied.State!.Revision));
+        var staleResolution = await coordinated.ResolveAsync(new CapabilityExecutableInvocation(first.Manifest, string.Empty, "{}", "resolve-stale-lifecycle", applied.State.Revision));
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Available, currentResolution.Status);
+        await currentResolution.Lease!.DisposeAsync();
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, staleResolution.Status);
+
+        var removalRequest = new CapabilityLifecyclePreviewRequest("coordinated-remove", CapabilityLifecycleOperationKind.Remove, first.Manifest.Descriptor.Id);
+        var removal = await lifecycleStore.PreviewAsync(removalRequest, baseline, await index.CaptureAsync());
+        var removed = await lifecycleStore.MutateAsync(removal, baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, removed.Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.NotFound, (await coordinated.ReadAsync(first.Manifest.Descriptor.Id)).Status);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, (await coordinated.ResolveAsync(new CapabilityExecutableInvocation(second.Manifest, string.Empty, "{}", "resolve-removed-lifecycle", removed.State!.Revision))).Status);
+        Assert.Empty(await coordinated.DiscoverAsync());
+    }
+
+    [Fact]
+    public async Task Lifecycle_upgrade_and_rollback_reject_deleted_staged_artifacts_until_exact_content_is_restored()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var artifacts = Store(workspace, paths);
+        var first = CapabilityArtifactStoreTestData.Stage(_versionOne);
+        var second = CapabilityArtifactStoreTestData.Stage(_versionTwo, "2.0.0");
+        await artifacts.StageAsync(first);
+        await artifacts.StageAsync(second);
+        var initialActivation = await artifacts.ActivateAsync(new CapabilityArtifactActivationRequest(first.Manifest, 0, "activate-before-lifecycle-reproof"));
+        var baselineState = new CapabilityLifecycleState(first.Manifest.Descriptor, first.Manifest.Checksum, true, false, initialActivation.Activation!.Revision, "activate-before-lifecycle-reproof", initialActivation.Activation.ActivatedAtUtc);
+        var baseline = new CapabilityLifecycleBaseline(baselineState, 1, initialActivation.Activation.Revision);
+        var lifecycle = new CapabilityLifecycleMutationStore(paths, new TestCapabilityLifecycleTrustProvider(), new StubCapabilityLifecycleBaselineSource { Baseline = baseline }, artifacts);
+        var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
+        var upgradeRequest = new CapabilityLifecyclePreviewRequest("delete-before-upgrade", CapabilityLifecycleOperationKind.Upgrade, first.Manifest.Descriptor.Id, second.Manifest.Descriptor, second.Manifest.Checksum);
+        var upgrade = await lifecycle.PreviewAsync(upgradeRequest, baseline, await index.CaptureAsync());
+        var generationBeforeUpgrade = (await lifecycle.ReadAsync(first.Manifest.Descriptor.Id)).LifecycleRevision;
+        File.Delete(StagedExecutablePath(paths, second.Manifest));
+
+        Assert.Equal(CapabilityLifecycleMutationStatus.NotFound, (await lifecycle.MutateAsync(upgrade, baseline, await index.CaptureAsync())).Status);
+        Assert.Equal(generationBeforeUpgrade, (await lifecycle.ReadAsync(first.Manifest.Descriptor.Id)).LifecycleRevision);
+        Assert.True((await artifacts.StageAsync(second)).Status is CapabilityArtifactStoreStatus.Applied or CapabilityArtifactStoreStatus.NoChange);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await lifecycle.MutateAsync(upgrade, baseline, await index.CaptureAsync())).Status);
+
+        var rollbackRequest = new CapabilityLifecyclePreviewRequest("delete-before-rollback", CapabilityLifecycleOperationKind.Rollback, first.Manifest.Descriptor.Id);
+        var rollback = await lifecycle.PreviewAsync(rollbackRequest, baseline, await index.CaptureAsync());
+        var generationBeforeRollback = (await lifecycle.ReadAsync(first.Manifest.Descriptor.Id)).LifecycleRevision;
+        File.Delete(StagedExecutablePath(paths, first.Manifest));
+        Assert.Equal(CapabilityLifecycleMutationStatus.NotFound, (await lifecycle.MutateAsync(rollback, baseline, await index.CaptureAsync())).Status);
+        Assert.Equal(generationBeforeRollback, (await lifecycle.ReadAsync(first.Manifest.Descriptor.Id)).LifecycleRevision);
+        Assert.True((await artifacts.StageAsync(first)).Status is CapabilityArtifactStoreStatus.Applied or CapabilityArtifactStoreStatus.NoChange);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await lifecycle.MutateAsync(rollback, baseline, await index.CaptureAsync())).Status);
+        Assert.Equal(first.Manifest.Checksum, (await lifecycle.ReadAsync(first.Manifest.Descriptor.Id)).State!.ArtifactDigest);
+    }
+
+    [Fact]
+    public async Task Lifecycle_projection_fails_closed_when_registered_state_is_unavailable_or_incomplete()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var initial = Store(workspace, paths);
+        var stage = CapabilityArtifactStoreTestData.Stage(_versionOne);
+        await initial.StageAsync(stage);
+        var activation = await initial.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "activate-for-fail-closed-lifecycle"));
+        var lifecycle = new StubCapabilityLifecycleMutationStore { ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Unavailable, null, [], [], null, "unavailable") };
+        var coordinated = new CapabilityArtifactStore(paths, new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath), new AlwaysTrustedArtifactVerifier(), lifecycleStore: lifecycle);
+        var invocation = new CapabilityExecutableInvocation(stage.Manifest, string.Empty, "{}", "resolve-unavailable-lifecycle", 1);
+
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await coordinated.ReadAsync(stage.Manifest.Descriptor.Id)).Status);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, (await coordinated.ResolveAsync(invocation)).Status);
+        await Assert.ThrowsAsync<IOException>(() => coordinated.DiscoverAsync());
+
+        lifecycle.ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, null, [], [], 1, "incomplete");
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await coordinated.ReadAsync(stage.Manifest.Descriptor.Id)).Status);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, (await coordinated.ResolveAsync(invocation with { OperationId = "resolve-incomplete-lifecycle" })).Status);
+        await Assert.ThrowsAsync<IOException>(() => coordinated.DiscoverAsync());
+
+        var recoveredState = new CapabilityLifecycleState(stage.Manifest.Descriptor, stage.Manifest.Checksum, true, false, 1, "recovered", activation.Activation!.ActivatedAtUtc);
+        lifecycle.ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.RecoveredLastProved, recoveredState, [], [], 1, "recovered");
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await coordinated.ReadAsync(stage.Manifest.Descriptor.Id)).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await coordinated.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 1, "reject-recovered-activation"))).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await coordinated.RollbackAsync(stage.Manifest.Descriptor.Id, 1, "reject-recovered-rollback")).Status);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, (await coordinated.ResolveAsync(invocation with { OperationId = "resolve-recovered-lifecycle" })).Status);
+        await Assert.ThrowsAsync<IOException>(() => coordinated.DiscoverAsync());
+
+        lifecycle.ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.RecoveredLastProved, null, [], [], 0, "recovered-before-registration");
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await coordinated.ReadAsync(stage.Manifest.Descriptor.Id)).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await coordinated.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 1, "reject-unproved-registration-activation"))).Status);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, (await coordinated.ResolveAsync(invocation with { OperationId = "resolve-unproved-registration" })).Status);
+    }
+
+    [Fact]
+    public async Task Lifecycle_artifact_evidence_rejects_invalid_targets_and_propagates_cancellation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(workspace, paths);
+        var manifest = CapabilityArtifactStoreTestData.Manifest(_versionOne);
+
+        Assert.Equal(CapabilityLifecycleArtifactEvidenceStatus.NotFound, (await store.VerifyAsync(manifest.Descriptor with { SchemaVersion = 2 }, manifest.Checksum)).Status);
+        Assert.Equal(CapabilityLifecycleArtifactEvidenceStatus.Unavailable, (await store.VerifyAsync(manifest.Descriptor, manifest.Checksum)).Status);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Incompatible, (await store.ResolveAsync(new CapabilityExecutableInvocation(manifest, string.Empty, "{}", "invalid-resolution-revision", 0))).Status);
+
+        Directory.CreateDirectory(paths.CapabilityCatalogPath);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.VerifyAsync(manifest.Descriptor, manifest.Checksum, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Artifact_io_failures_are_structured_without_exposing_partial_activation()
+    {
+        using var malformedWorkspace = new TestWorkspace();
+        var malformedPaths = new WorkspacePaths(malformedWorkspace.RootPath);
+        Directory.CreateDirectory(malformedPaths.CapabilityCatalogPath);
+        await File.WriteAllTextAsync(malformedPaths.CapabilityArtifactsPath, "not-a-directory");
+        var malformed = Store(malformedWorkspace, malformedPaths);
+        var stage = CapabilityArtifactStoreTestData.Stage(_versionOne);
+
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await malformed.StageAsync(stage)).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await malformed.ReadAsync(stage.Manifest.Descriptor.Id)).Status);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, (await malformed.ResolveAsync(new CapabilityExecutableInvocation(stage.Manifest, string.Empty, "{}", "resolve-malformed-artifact-root", 1))).Status);
+
+        using var activationWorkspace = new TestWorkspace();
+        var activationPaths = new WorkspacePaths(activationWorkspace.RootPath);
+        var activationTrust = new FileCapabilityArtifactStateTrustProvider(activationWorkspace.ServerStatePath);
+        var activationNormal = new CapabilityArtifactStore(activationPaths, activationTrust, new AlwaysTrustedArtifactVerifier());
+        await activationNormal.StageAsync(stage);
+        var activationFailing = new CapabilityArtifactStore(activationPaths, activationTrust, new AlwaysTrustedArtifactVerifier(), durabilityBarrier: new FailingCapabilityLifecycleDurabilityBarrier { DestinationSuffix = "activation.json" });
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await activationFailing.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "fail-activation-commit"))).Status);
+
+        using var rollbackWorkspace = new TestWorkspace();
+        var rollbackPaths = new WorkspacePaths(rollbackWorkspace.RootPath);
+        var rollbackTrust = new FileCapabilityArtifactStateTrustProvider(rollbackWorkspace.ServerStatePath);
+        var rollbackNormal = new CapabilityArtifactStore(rollbackPaths, rollbackTrust, new AlwaysTrustedArtifactVerifier());
+        var second = CapabilityArtifactStoreTestData.Stage(_versionTwo, "2.0.0");
+        await rollbackNormal.StageAsync(stage);
+        await rollbackNormal.StageAsync(second);
+        await rollbackNormal.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "activate-v1-before-failed-rollback"));
+        await rollbackNormal.ActivateAsync(new CapabilityArtifactActivationRequest(second.Manifest, 1, "activate-v2-before-failed-rollback"));
+        var rollbackFailing = new CapabilityArtifactStore(rollbackPaths, rollbackTrust, new AlwaysTrustedArtifactVerifier(), durabilityBarrier: new FailingCapabilityLifecycleDurabilityBarrier { DestinationSuffix = "activation.json" });
+        Assert.Equal(CapabilityArtifactStoreStatus.Unavailable, (await rollbackFailing.RollbackAsync(stage.Manifest.Descriptor.Id, 2, "fail-rollback-commit")).Status);
+    }
+
+    [Fact]
+    public async Task Staged_descriptor_and_content_must_remain_exactly_proved_at_activation()
+    {
+        using var descriptorWorkspace = new TestWorkspace();
+        var descriptorPaths = new WorkspacePaths(descriptorWorkspace.RootPath);
+        var descriptorStore = Store(descriptorWorkspace, descriptorPaths);
+        var stage = CapabilityArtifactStoreTestData.Stage(_versionOne);
+        await descriptorStore.StageAsync(stage);
+        var digestName = stage.Manifest.Checksum.Value["sha256:".Length..];
+        var evidencePath = Path.Combine(descriptorPaths.CapabilityArtifactsPath, "staged", digestName, "artifact.evidence.json");
+        var evidence = JsonNode.Parse(await File.ReadAllTextAsync(evidencePath))!.AsObject();
+        evidence["descriptorJson"] = "{}";
+        await File.WriteAllTextAsync(evidencePath, evidence.ToJsonString());
+        Assert.Equal(CapabilityArtifactStoreStatus.NotFound, (await descriptorStore.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "reject-forged-descriptor"))).Status);
+
+        using var contentWorkspace = new TestWorkspace();
+        var contentPaths = new WorkspacePaths(contentWorkspace.RootPath);
+        var contentStore = Store(contentWorkspace, contentPaths);
+        await contentStore.StageAsync(stage);
+        File.Delete(Path.Combine(contentPaths.CapabilityArtifactsPath, "staged", digestName, stage.Manifest.EntryPoint));
+        Assert.Equal(CapabilityArtifactStoreStatus.NotFound, (await contentStore.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "reject-missing-content"))).Status);
+
+        using var trustWorkspace = new TestWorkspace();
+        var trustPaths = new WorkspacePaths(trustWorkspace.RootPath);
+        var trustStore = Store(trustWorkspace, trustPaths);
+        await trustStore.StageAsync(stage);
+        var rejectingTrust = new RejectingStagedEvidenceTrustProvider(new FileCapabilityArtifactStateTrustProvider(trustWorkspace.ServerStatePath));
+        var rejectingStore = new CapabilityArtifactStore(trustPaths, rejectingTrust, new AlwaysTrustedArtifactVerifier());
+        Assert.Equal(CapabilityArtifactStoreStatus.NotFound, (await rejectingStore.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "reject-foreign-evidence"))).Status);
+
+        using var headerWorkspace = new TestWorkspace();
+        var headerPaths = new WorkspacePaths(headerWorkspace.RootPath);
+        var headerStore = Store(headerWorkspace, headerPaths);
+        await headerStore.StageAsync(stage);
+        var unstaged = CapabilityArtifactStoreTestData.Stage(_versionTwo, "2.0.0");
+        Assert.Equal(CapabilityArtifactStoreStatus.NotFound, (await headerStore.ActivateAsync(new CapabilityArtifactActivationRequest(unstaged.Manifest, 0, "reject-unstaged-target"))).Status);
+        var headerEvidencePath = Path.Combine(headerPaths.CapabilityArtifactsPath, "staged", digestName, "artifact.evidence.json");
+        var headerEvidence = JsonNode.Parse(await File.ReadAllTextAsync(headerEvidencePath))!.AsObject();
+        headerEvidence["capabilityVersion"] = "9.9.9";
+        await File.WriteAllTextAsync(headerEvidencePath, headerEvidence.ToJsonString());
+        Assert.Equal(CapabilityArtifactStoreStatus.NotFound, (await headerStore.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "reject-forged-header"))).Status);
+
+        using var discoveryWorkspace = new TestWorkspace();
+        var discoveryPaths = new WorkspacePaths(discoveryWorkspace.RootPath);
+        var discoveryStore = Store(discoveryWorkspace, discoveryPaths);
+        await discoveryStore.StageAsync(stage);
+        await discoveryStore.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "activate-before-evidence-forgery"));
+        var discoveryEvidencePath = Path.Combine(discoveryPaths.CapabilityArtifactsPath, "staged", digestName, "artifact.evidence.json");
+        var discoveryEvidence = JsonNode.Parse(await File.ReadAllTextAsync(discoveryEvidencePath))!.AsObject();
+        discoveryEvidence["capabilityVersion"] = "9.9.9";
+        await File.WriteAllTextAsync(discoveryEvidencePath, discoveryEvidence.ToJsonString());
+        await Assert.ThrowsAsync<FormatException>(() => discoveryStore.DiscoverAsync());
+
+        using var pinWorkspace = new TestWorkspace();
+        var pinStore = Store(pinWorkspace);
+        await pinStore.StageAsync(stage);
+        await pinStore.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "activate-for-pin-check"));
+        var alteredManifest = stage.Manifest with { EntryPoint = "different.exe" };
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Unavailable, (await pinStore.ResolveAsync(new CapabilityExecutableInvocation(alteredManifest, string.Empty, "{}", "reject-policy-pin", 1))).Status);
+        Assert.True(CapabilityId.TryParse("org.example/unknown-artifact", out var unknownId, out _));
+        Assert.Equal(CapabilityArtifactStoreStatus.NotFound, (await pinStore.ReadAsync(unknownId!)).Status);
+    }
+
     private static CapabilityArtifactStore Store(TestWorkspace workspace, WorkspacePaths? paths = null, ICapabilityArtifactTrustVerifier? verifier = null) => new(paths ?? new WorkspacePaths(workspace.RootPath), new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath), verifier ?? new AlwaysTrustedArtifactVerifier());
+
+    private static string StagedExecutablePath(WorkspacePaths paths, CapabilityArtifactManifest manifest) => Path.Combine(paths.CapabilityArtifactsPath, "staged", manifest.Checksum.Value["sha256:".Length..], manifest.EntryPoint);
 
     private sealed class AlwaysTrustedArtifactVerifier : ICapabilityArtifactTrustVerifier
     {

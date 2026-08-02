@@ -116,7 +116,7 @@ public static class CapabilityDependencyManifestJson
 
     private static CapabilityDependencyManifestKind ParseKind(string? value, List<CapabilityContractError> errors)
     {
-        var kind = value switch { "skill" => CapabilityDependencyManifestKind.Skill, "loop-package" => CapabilityDependencyManifestKind.LoopPackage, _ => CapabilityDependencyManifestKind.Unknown };
+        var kind = value switch { "skill" => CapabilityDependencyManifestKind.Skill, "loop-package" => CapabilityDependencyManifestKind.LoopPackage, "capability-package" => CapabilityDependencyManifestKind.CapabilityPackage, _ => CapabilityDependencyManifestKind.Unknown };
         if (kind == CapabilityDependencyManifestKind.Unknown)
         {
             Add(errors, "unsupported_dependency_manifest_kind", "kind", "The dependency manifest kind is absent or unsupported.");
@@ -245,7 +245,7 @@ public static class CapabilityDependencyManifestJson
         return 0;
     }
 
-    private static string ToText(CapabilityDependencyManifestKind kind) => kind switch { CapabilityDependencyManifestKind.Skill => "skill", CapabilityDependencyManifestKind.LoopPackage => "loop-package", _ => string.Empty };
+    private static string ToText(CapabilityDependencyManifestKind kind) => kind switch { CapabilityDependencyManifestKind.Skill => "skill", CapabilityDependencyManifestKind.LoopPackage => "loop-package", CapabilityDependencyManifestKind.CapabilityPackage => "capability-package", _ => string.Empty };
 
     private static CapabilityContractValidationResult Invalid(string code, string field, string message) => new([new CapabilityContractError(code, field, message)]);
 
