@@ -1,6 +1,10 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using EmbodySense.Cli.Command;
+using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
@@ -8,6 +12,29 @@ namespace EmbodySense.Cli.Command.Tests;
 
 public sealed class CliCommandTests
 {
+    [Fact]
+    public async Task Populated_file_trust_root_round_trips_before_shared_root_workspace_initialization()
+    {
+        using var trustRoot = new TestWorkspace();
+        using var anchorWorkspace = new TestWorkspace();
+        using var firstWorkspace = new TestWorkspace();
+        using var secondWorkspace = new TestWorkspace();
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+        var identity = CapabilityCatalogWorkspaceIdentity.Create(anchorWorkspace.RootPath);
+        var digest = CapabilityIntegrityDigest.Compute(Encoding.UTF8.GetBytes("cli-populated-trust-root-diagnostic")).Value;
+
+        await provider.InitializeAsync(identity, 0, digest);
+        await AssertNoFailureAsync("direct populated-anchor read", async () => Assert.NotNull(await provider.ReadAsync(identity)));
+        await AssertNoFailureAsync("direct populated-anchor authentication", async () => Assert.StartsWith("hmac-sha256:", await provider.AuthenticateArtifactAsync(identity, 0, digest), StringComparison.Ordinal));
+        await AssertNoFailureAsync("first workspace initialization against populated trust", () => WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRoot.RootPath).InitializeAsync(firstWorkspace.RootPath));
+        await AssertNoFailureAsync("second workspace initialization against shared populated trust", () => WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRoot.RootPath).InitializeAsync(secondWorkspace.RootPath));
+
+        var firstRead = await new CapabilityCatalogStore(new(firstWorkspace.RootPath), provider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        var secondRead = await new CapabilityCatalogStore(new(secondWorkspace.RootPath), provider).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        Assert.True(firstRead.Status == CapabilityCatalogReadStatus.Available, $"First detailed catalog read: {firstRead.Status}: {firstRead.Detail}");
+        Assert.True(secondRead.Status == CapabilityCatalogReadStatus.Available, $"Second detailed catalog read: {secondRead.Status}: {secondRead.Detail}");
+    }
+
     [Fact]
     public async Task InitCommand_initializes_workspace_and_prints_paths()
     {
@@ -213,6 +240,12 @@ public sealed class CliCommandTests
             Console.SetOut(oldOut);
             Console.SetError(oldError);
         }
+    }
+
+    private static async Task AssertNoFailureAsync(string stage, Func<Task> action)
+    {
+        var exception = await Record.ExceptionAsync(action);
+        Assert.True(exception is null, $"{stage} failed before the catalog read result was projected:{Environment.NewLine}{exception}");
     }
 
     private sealed record ConsoleResult(int ExitCode, string Output, string Error);
