@@ -5,6 +5,8 @@ using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Common.Loops;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
@@ -13,6 +15,7 @@ internal sealed class CustomLoopToolActuationAuthorityRevalidator : IToolActuati
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly CustomLoopInferenceAttemptRequest _attempt;
     private readonly CorrelatedToolEvidenceObserver _observer;
+    private readonly ICapabilityAdmissionService _capabilityAdmissionService;
 
     /// <summary>
     /// Creates an attempt-bound revalidator for the final pre-actuation authority check.
@@ -20,11 +23,13 @@ internal sealed class CustomLoopToolActuationAuthorityRevalidator : IToolActuati
     /// <param name="authorityProvider">The authority provider.</param>
     /// <param name="attempt">The attempt.</param>
     /// <param name="observer">The observer.</param>
-    public CustomLoopToolActuationAuthorityRevalidator(ICustomLoopToolAuthorityProvider authorityProvider, CustomLoopInferenceAttemptRequest attempt, CorrelatedToolEvidenceObserver observer)
+    /// <param name="capabilityAdmissionService">The exact capability effect-boundary revalidator.</param>
+    public CustomLoopToolActuationAuthorityRevalidator(ICustomLoopToolAuthorityProvider authorityProvider, CustomLoopInferenceAttemptRequest attempt, CorrelatedToolEvidenceObserver observer, ICapabilityAdmissionService capabilityAdmissionService)
     {
         _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
         _attempt = attempt ?? throw new ArgumentNullException(nameof(attempt));
         _observer = observer ?? throw new ArgumentNullException(nameof(observer));
+        _capabilityAdmissionService = capabilityAdmissionService ?? throw new ArgumentNullException(nameof(capabilityAdmissionService));
     }
 
     /// <summary>
@@ -37,6 +42,13 @@ internal sealed class CustomLoopToolActuationAuthorityRevalidator : IToolActuati
     public async Task<ToolActuationAuthorityRevalidation> RevalidateAsync(ToolRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        var allowedCapabilities = LoopCapabilityRequirements.GetAssignedCapabilityIds(_attempt.CapabilityAdmission.Requirements);
+        var currentCapabilities = await _capabilityAdmissionService.RevalidateAsync(_attempt.CapabilityAdmission, allowedCapabilities, cancellationToken);
+        if (!currentCapabilities.IsValid)
+        {
+            return new ToolActuationAuthorityRevalidation(false, $"Capability authority changed before actuation: {currentCapabilities.Detail}", new Dictionary<string, object?> { ["capability_authority_valid"] = false });
+        }
+
         var authority = await _authorityProvider.ResolveAsync(_attempt.RoleId, _attempt.AdmittedToolAssignments, cancellationToken);
         _observer.RefreshAuthority(request, authority);
         var assignment = MapAssignment(request.Command);

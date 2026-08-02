@@ -8,12 +8,85 @@ using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Permissions;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Workspace;
 
 public sealed class WorkspaceInitializerTests
 {
+    [Fact]
+    public void Default_composition_factories_do_not_mutate_server_state_during_construction()
+    {
+        Assert.NotNull(new WorkspaceInitializer());
+        Assert.NotNull(WorkspaceInitializer.ForCli());
+        Assert.NotNull(WorkspaceInitializer.ForWeb());
+    }
+
+    [Fact]
+    public async Task InitializeAsync_creates_a_genuinely_absent_workspace_before_seeding_and_audits_only_after_success()
+    {
+        using var workspace = new TestWorkspace();
+        Directory.Delete(workspace.RootPath, recursive: true);
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+
+        Assert.True(paths.IsInitialized);
+        Assert.True(File.Exists(paths.CapabilityCatalogDocumentPath));
+        var auditLines = await File.ReadAllLinesAsync(paths.EventsLogPath);
+        Assert.Single(auditLines, line => line.Contains(AuditSchema.Actions.WorkspaceInit, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_seeds_exact_built_ins_as_available_but_not_assigned_or_authorized()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var firstRead = await new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        var firstArtifact = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+
+        var read = await new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)).ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, read.Status);
+        Assert.Equal(firstRead.Page!.CatalogRevision, read.Page!.CatalogRevision);
+        Assert.Equal(firstArtifact, await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath));
+        Assert.Equal(BuiltInCapabilityCatalog.Descriptors.Count, read.Page!.Entries.Count);
+        foreach (var entry in read.Page.Entries)
+        {
+            Assert.Equal(CapabilityDeclarationState.Declared, entry.Lifecycle.Declaration);
+            Assert.Equal(CapabilityInstallationState.Installed, entry.Lifecycle.Installation);
+            Assert.Equal(CapabilityEnablementState.Enabled, entry.Lifecycle.Enablement);
+            Assert.Equal(CapabilityHealthState.Healthy, entry.Lifecycle.Health);
+            Assert.Equal(CapabilityTrustState.Verified, entry.Lifecycle.Trust);
+            Assert.Equal(CapabilityRetirementState.Active, entry.Lifecycle.Retirement);
+        }
+
+        var json = await File.ReadAllTextAsync(paths.CapabilityCatalogDocumentPath);
+        Assert.DoesNotContain("assignment", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("authority", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secretValue", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_fails_closed_when_built_in_catalog_primary_and_proof_are_corrupt()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(paths.CapabilityCatalogDocumentPath, "{broken");
+        await File.WriteAllTextAsync(paths.CapabilityCatalogProofPath, "{also-broken");
+        var auditBeforeFailure = await File.ReadAllTextAsync(paths.EventsLogPath);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath));
+        Assert.Equal(auditBeforeFailure, await File.ReadAllTextAsync(paths.EventsLogPath));
+    }
+
     [Fact]
     public async Task InitializeAsync_upgrades_a_pre_role_workspace_without_loading_or_deleting_legacy_agent_text()
     {
@@ -24,7 +97,7 @@ public sealed class WorkspaceInitializerTests
         await File.WriteAllTextAsync(paths.AgentFile("AGENT.md"), "legacy role");
         Assert.False(paths.IsInitialized);
 
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         Assert.True(paths.IsInitialized);
         Assert.True(File.Exists(paths.RolePath));
@@ -36,7 +109,7 @@ public sealed class WorkspaceInitializerTests
     {
         using var workspace = new TestWorkspace();
 
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         var roleGuide = await File.ReadAllTextAsync(workspace.File(".agent", "ROLE.md"));
         Assert.Contains("contextual role the durable agent occupies in this workspace", roleGuide);
@@ -106,7 +179,7 @@ public sealed class WorkspaceInitializerTests
     {
         using var workspace = new TestWorkspace();
 
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         var auditText = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson"));
         Assert.Contains(AuditSchema.Actors.Web, auditText);
@@ -122,7 +195,7 @@ public sealed class WorkspaceInitializerTests
         const string Unsupported = "{\"version\": 2}";
         await File.WriteAllTextAsync(paths.PermissionsPath, Unsupported);
 
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         Assert.Equal(Unsupported, await File.ReadAllTextAsync(paths.PermissionsPath));
         var evaluation = new PermissionPolicyStore().Load(paths).EvaluateDirectory(paths.ToolResponsesPath, FileSystemOperation.Read);
@@ -134,12 +207,12 @@ public sealed class WorkspaceInitializerTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var permissions = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
         permissions.Approved.RemoveAll(entry => string.Equals(entry.Path, PermissionsDocument.ToolResponseInspectionPath, StringComparison.Ordinal));
         await File.WriteAllTextAsync(paths.PermissionsPath, permissions.ToJson());
 
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         var preserved = Assert.IsType<PermissionsDocument>(PermissionsDocument.FromJson(await File.ReadAllTextAsync(paths.PermissionsPath)));
         Assert.Equal(PermissionsDocument.CurrentVersion, preserved.Version);
@@ -153,7 +226,7 @@ public sealed class WorkspaceInitializerTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var original = await File.ReadAllTextAsync(paths.PermissionsPath);
         var originalAttributes = File.GetAttributes(paths.PermissionsPath);
         UnixFileMode? originalMode = OperatingSystem.IsWindows() ? null : File.GetUnixFileMode(paths.PermissionsPath);
@@ -168,7 +241,7 @@ public sealed class WorkspaceInitializerTests
                 File.SetUnixFileMode(paths.PermissionsPath, UnixFileMode.UserRead);
             }
 
-            await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+            await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
             Assert.Equal(original, await File.ReadAllTextAsync(paths.PermissionsPath));
         }
@@ -191,7 +264,7 @@ public sealed class WorkspaceInitializerTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
 
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         var definition = await new LoopDefinitionStore(paths).LoadAsync("default-conversation");
         Assert.NotNull(definition);

@@ -21,6 +21,10 @@
     <ProjectReference Include="..\EmbodySense.Tests.Support\EmbodySense.Tests.Support.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\TestCapabilityAdmissionFactory.cs" Link="Support\TestCapabilityAdmissionFactory.cs" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using System.Collections.Concurrent;
@@ -10,6 +11,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Application.Capabilities;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
@@ -33,6 +35,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly ICustomLoopAttemptCancellationBroker? _attemptCancellationBroker;
+    private readonly ICapabilityAdmissionService? _capabilityAdmissionService;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
@@ -48,6 +51,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="authorityProvider">The authority provider.</param>
     /// <param name="timeProvider">The time provider.</param>
     /// <param name="attemptCancellationBroker">The attempt cancellation broker.</param>
+    /// <param name="capabilityAdmissionService">The current exact capability and narrower-authority revalidator.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -56,7 +60,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IAuditLog auditLog,
         ICustomLoopToolAuthorityProvider authorityProvider,
         TimeProvider? timeProvider = null,
-        ICustomLoopAttemptCancellationBroker? attemptCancellationBroker = null)
+        ICustomLoopAttemptCancellationBroker? attemptCancellationBroker = null,
+        ICapabilityAdmissionService? capabilityAdmissionService = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -66,6 +71,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _authorityProvider = authorityProvider ?? throw new ArgumentNullException(nameof(authorityProvider));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _attemptCancellationBroker = attemptCancellationBroker;
+        _capabilityAdmissionService = capabilityAdmissionService;
     }
 
     /// <summary>
@@ -96,6 +102,20 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return Result(CustomLoopOrderedRunStatus.NotFound, null, "The custom-loop run does not exist.");
         }
 
+        if (run.Status == CustomLoopRunStatus.Admitted && cancellationToken.IsCancellationRequested)
+        {
+            return await CancelBeforeDispatchAsync(run, request.Actor);
+        }
+
+        if (!run.IsTerminal)
+        {
+            var capabilityFailure = await GetCapabilityFailureAsync(run, cancellationToken);
+            if (capabilityFailure is not null)
+            {
+                return Result(CustomLoopOrderedRunStatus.InvalidState, run, capabilityFailure);
+            }
+        }
+
         var validation = CustomLoopRunValidator.ValidateForDispatch(run);
         if (!validation.IsValid)
         {
@@ -107,11 +127,6 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
 
         if (run.Status == CustomLoopRunStatus.Admitted)
         {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                return await CancelBeforeDispatchAsync(run, request.Actor);
-            }
-
             using var ownership = TryRegisterActiveRun(run.Id);
             if (ownership is null)
             {
@@ -396,6 +411,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopToolAssignment[] effectiveAssignments;
         try
         {
+            var capabilityFailure = await GetCapabilityFailureAsync(run, cancellationToken);
+            if (capabilityFailure is not null)
+            {
+                throw new InvalidOperationException(capabilityFailure);
+            }
+
             authority = await _authorityProvider.ResolveAsync(run.AdmittedDefinition.RoleId, run.AdmittedDefinition.ToolAssignments, cancellationToken);
             EnsureAuthorityBound(run, authority, run.AdmittedDefinition.ToolAssignments);
 
@@ -482,7 +503,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             assignments,
             run.Checkpoint.ToolRequestsUsed,
             assembly.Request,
-            authority);
+            authority)
+        {
+            CapabilityAdmission = run.CapabilityAdmission
+        };
 
         CustomLoopInferenceAttemptResult result;
         // This flag is the effect boundary: cancellation before the callback is safe to report as
@@ -619,6 +643,12 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CustomLoopToolAuthoritySnapshot authority;
         try
         {
+            var capabilityFailure = await GetCapabilityFailureAsync(run, cancellationToken);
+            if (capabilityFailure is not null)
+            {
+                throw new InvalidOperationException(capabilityFailure);
+            }
+
             authority = await _authorityProvider.ResolveAsync(run.AdmittedDefinition.RoleId, [], cancellationToken);
             EnsureAuthorityBound(run, authority, []);
 
@@ -696,7 +726,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             Array.Empty<CustomLoopToolAssignment>(),
             run.Checkpoint.ToolRequestsUsed,
             assembly.Request,
-            authority);
+            authority)
+        {
+            CapabilityAdmission = run.CapabilityAdmission
+        };
 
         CustomLoopInferenceAttemptResult result;
         // Exit inference has the same effect boundary as an ordinary step. Once dispatch starts,
@@ -1039,6 +1072,27 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             if (run.Status == CustomLoopRunStatus.CancelRequested)
             {
                 return new RunAdvance(run, null);
+            }
+
+            string? capabilityFailure;
+            try
+            {
+                capabilityFailure = await GetCapabilityFailureAsync(run, publicationToken.Token);
+            }
+            catch (OperationCanceledException) when (publicationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.Failed, "capability_revalidation_check_failed_before_publication", $"Custom-loop capability revalidation could not complete before conversation publication: {SafeExceptionClass(exception)}.");
+                return new RunAdvance(terminal.Run, terminal);
+            }
+
+            if (capabilityFailure is not null)
+            {
+                var terminal = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "capability_revalidation_failed_before_publication", $"Custom-loop capability revalidation failed closed before conversation publication: {capabilityFailure}");
+                return new RunAdvance(terminal.Run, terminal);
             }
 
             var request = new CustomLoopConversationPublicationRequest(operationId, run.Id, run.LoopId, run.Checkpoint.Iteration, stepId, conversation.ConversationId, conversation.CapturedVersion, output.Content, output.ContentHash, priorPublications, () => publicationDispatched = true);
@@ -2056,6 +2110,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private static CustomLoopOrderedRunResult Result(CustomLoopOrderedRunStatus status, CustomLoopRunRecord? run, string detail)
     {
         return new CustomLoopOrderedRunResult(status, run, detail);
+    }
+
+    private async Task<string?> GetCapabilityFailureAsync(CustomLoopRunRecord run, CancellationToken cancellationToken)
+    {
+        if (_capabilityAdmissionService is null)
+        {
+            return "No capability admission authority was composed for custom-loop execution.";
+        }
+
+        var allowed = LoopCapabilityRequirements.GetAssignedCapabilityIds(run.AdmittedDefinition.CapabilityRequirements);
+        var current = await _capabilityAdmissionService.RevalidateAsync(run.CapabilityAdmission, allowed, cancellationToken);
+        return current.IsValid ? null : $"Custom-loop capability revalidation failed closed: {current.Detail}";
     }
 
     private sealed record RunAdvance(CustomLoopRunRecord? Run, CustomLoopOrderedRunResult? Terminal);

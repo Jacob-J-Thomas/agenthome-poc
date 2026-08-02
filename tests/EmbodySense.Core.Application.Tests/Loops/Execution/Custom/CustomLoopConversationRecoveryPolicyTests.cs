@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
@@ -165,7 +166,10 @@ public sealed class CustomLoopConversationRecoveryPolicyTests
             [],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp)
+        };
     }
 
     private static CustomLoopRunEvent Event(
