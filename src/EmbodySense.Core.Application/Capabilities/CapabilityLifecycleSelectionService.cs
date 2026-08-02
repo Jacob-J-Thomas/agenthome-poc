@@ -35,7 +35,10 @@ public sealed class CapabilityLifecycleSelectionService
         CapabilityLifecyclePreviewRequest previewRequest;
         if (request.Kind is CapabilityLifecycleOperationKind.Enable or CapabilityLifecycleOperationKind.Upgrade)
         {
-            var resolution = await _targetResolver.ResolveAsync(new CapabilityLifecycleTargetResolutionRequest(request.Kind, request.CapabilityId, request.TargetVersion), cancellationToken);
+            var resolutionRequest = new CapabilityLifecycleTargetResolutionRequest(request.Kind, request.CapabilityId, request.TargetVersion);
+            var resolution = request.Kind == CapabilityLifecycleOperationKind.Enable
+                ? await _lifecycle.ResolveCurrentEnableTargetAsync(resolutionRequest, cancellationToken)
+                : await _targetResolver.ResolveAsync(resolutionRequest, cancellationToken);
             if (resolution.Status != CapabilityLifecycleTargetResolutionStatus.Available || resolution.Descriptor is null || resolution.ArtifactDigest is null)
             {
                 var status = resolution.Status switch

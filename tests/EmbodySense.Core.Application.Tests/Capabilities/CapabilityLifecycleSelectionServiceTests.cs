@@ -5,11 +5,10 @@ namespace EmbodySense.Core.Application.Tests.Capabilities;
 
 public sealed class CapabilityLifecycleSelectionServiceTests
 {
-    [Theory]
-    [InlineData(CapabilityLifecycleOperationKind.Enable)]
-    [InlineData(CapabilityLifecycleOperationKind.Upgrade)]
-    public async Task Artifact_bearing_selection_derives_full_preview_request_from_server_resolver(CapabilityLifecycleOperationKind kind)
+    [Fact]
+    public async Task Upgrade_selection_derives_full_preview_request_from_server_resolver()
     {
+        var kind = CapabilityLifecycleOperationKind.Upgrade;
         var manifest = CapabilityArtifactTestData.Manifest();
         var resolver = new StubCapabilityLifecycleTargetResolver { Resolution = new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.Available, manifest.Descriptor, manifest.Checksum, "available") };
         var preview = Preview(manifest, kind, CapabilityLifecyclePreviewStatus.Ready);
@@ -24,6 +23,85 @@ public sealed class CapabilityLifecycleSelectionServiceTests
         Assert.Equal(manifest.Descriptor.Version, resolver.Request.TargetVersion);
         Assert.Equal(manifest.Descriptor, store.PreviewRequest!.TargetDescriptor);
         Assert.Equal(manifest.Checksum, store.PreviewRequest.TargetArtifactDigest);
+    }
+
+    [Fact]
+    public async Task Enable_selection_reproves_only_the_exact_current_lifecycle_target()
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        var resolver = new StubCapabilityLifecycleTargetResolver { Resolution = new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.Ambiguous, null, null, "retained upgrade candidates are ambiguous") };
+        var artifactEvidence = new StubCapabilityLifecycleArtifactEvidenceSource();
+        var preview = Preview(manifest, CapabilityLifecycleOperationKind.Enable, CapabilityLifecyclePreviewStatus.Ready);
+        var store = new StubCapabilityLifecycleMutationStore
+        {
+            ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, new CapabilityLifecycleState(manifest.Descriptor, manifest.Checksum, false, false, 7, "disable-current", DateTimeOffset.Parse("2026-08-01T12:00:00Z")), [], [], 7, "available"),
+            PreviewResult = preview
+        };
+        var service = Service(resolver, store, artifactEvidence);
+
+        var result = await service.PreviewAsync(new CapabilityLifecycleSelectionRequest("enable-current", CapabilityLifecycleOperationKind.Enable, manifest.Descriptor.Id, manifest.Descriptor.Version));
+
+        Assert.Equal(CapabilityLifecycleSelectionStatus.Ready, result.Status);
+        Assert.Equal(0, resolver.Calls);
+        Assert.Equal(1, store.ReadCount);
+        Assert.Equal(manifest.Descriptor, artifactEvidence.Descriptor);
+        Assert.Equal(manifest.Checksum, artifactEvidence.ArtifactDigest);
+        Assert.Equal(manifest.Descriptor, store.PreviewRequest!.TargetDescriptor);
+        Assert.Equal(manifest.Checksum, store.PreviewRequest.TargetArtifactDigest);
+    }
+
+    [Theory]
+    [InlineData(CapabilityLifecycleReadStatus.NotFound, CapabilityLifecycleSelectionStatus.NotFound)]
+    [InlineData(CapabilityLifecycleReadStatus.RecoveredLastProved, CapabilityLifecycleSelectionStatus.Unavailable)]
+    [InlineData(CapabilityLifecycleReadStatus.Unavailable, CapabilityLifecycleSelectionStatus.Unavailable)]
+    public async Task Enable_requires_one_current_authenticated_lifecycle_entry(CapabilityLifecycleReadStatus readStatus, CapabilityLifecycleSelectionStatus expected)
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        var state = readStatus == CapabilityLifecycleReadStatus.NotFound ? null : new CapabilityLifecycleState(manifest.Descriptor, manifest.Checksum, false, false, 7, "disable-current", DateTimeOffset.Parse("2026-08-01T12:00:00Z"));
+        var store = new StubCapabilityLifecycleMutationStore { ReadResult = new CapabilityLifecycleReadResult(readStatus, state, [], [], state is null ? null : 7, "read") };
+        var resolver = new StubCapabilityLifecycleTargetResolver();
+
+        var result = await Service(resolver, store).PreviewAsync(new CapabilityLifecycleSelectionRequest("enable-current-read", CapabilityLifecycleOperationKind.Enable, manifest.Descriptor.Id));
+
+        Assert.Equal(expected, result.Status);
+        Assert.Null(result.Preview);
+        Assert.Equal(0, resolver.Calls);
+        Assert.Null(store.PreviewRequest);
+    }
+
+    [Fact]
+    public async Task Enable_rejects_a_version_other_than_the_current_lifecycle_descriptor()
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        var store = new StubCapabilityLifecycleMutationStore
+        {
+            ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, new CapabilityLifecycleState(manifest.Descriptor, manifest.Checksum, false, false, 7, "disable-current", DateTimeOffset.Parse("2026-08-01T12:00:00Z")), [], [], 7, "available")
+        };
+
+        var result = await Service(new StubCapabilityLifecycleTargetResolver(), store).PreviewAsync(new CapabilityLifecycleSelectionRequest("enable-wrong-version", CapabilityLifecycleOperationKind.Enable, manifest.Descriptor.Id, CapabilityArtifactTestData.Version("2.0.0")));
+
+        Assert.Equal(CapabilityLifecycleSelectionStatus.NotFound, result.Status);
+        Assert.Null(store.PreviewRequest);
+    }
+
+    [Theory]
+    [InlineData(CapabilityLifecycleArtifactEvidenceStatus.NotFound, CapabilityLifecycleSelectionStatus.NotFound)]
+    [InlineData(CapabilityLifecycleArtifactEvidenceStatus.Unavailable, CapabilityLifecycleSelectionStatus.Unavailable)]
+    public async Task Enable_fails_closed_when_the_exact_current_artifact_cannot_be_reproved(CapabilityLifecycleArtifactEvidenceStatus evidenceStatus, CapabilityLifecycleSelectionStatus expected)
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        var store = new StubCapabilityLifecycleMutationStore
+        {
+            ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, new CapabilityLifecycleState(manifest.Descriptor, manifest.Checksum, false, false, 7, "disable-current", DateTimeOffset.Parse("2026-08-01T12:00:00Z")), [], [], 7, "available")
+        };
+        var evidence = new StubCapabilityLifecycleArtifactEvidenceSource { Evidence = new CapabilityLifecycleArtifactEvidence(evidenceStatus, "evidence") };
+
+        var result = await Service(new StubCapabilityLifecycleTargetResolver(), store, evidence).PreviewAsync(new CapabilityLifecycleSelectionRequest("enable-evidence", CapabilityLifecycleOperationKind.Enable, manifest.Descriptor.Id));
+
+        Assert.Equal(expected, result.Status);
+        Assert.Null(store.PreviewRequest);
+        Assert.Equal(manifest.Descriptor, evidence.Descriptor);
+        Assert.Equal(manifest.Checksum, evidence.ArtifactDigest);
     }
 
     [Theory]
@@ -157,9 +235,9 @@ public sealed class CapabilityLifecycleSelectionServiceTests
         Assert.Same(preview, store.MutatedPreview);
     }
 
-    private static CapabilityLifecycleSelectionService Service(StubCapabilityLifecycleTargetResolver resolver, StubCapabilityLifecycleMutationStore store)
+    private static CapabilityLifecycleSelectionService Service(StubCapabilityLifecycleTargetResolver resolver, StubCapabilityLifecycleMutationStore store, StubCapabilityLifecycleArtifactEvidenceSource? artifactEvidence = null)
     {
-        var lifecycle = new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, new RecordingCapabilityAuditLog(), new StubCapabilityAuthorityTransaction());
+        var lifecycle = new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), artifactEvidence ?? new StubCapabilityLifecycleArtifactEvidenceSource(), store, new RecordingCapabilityAuditLog(), new StubCapabilityAuthorityTransaction());
         return new CapabilityLifecycleSelectionService(resolver, lifecycle);
     }
 

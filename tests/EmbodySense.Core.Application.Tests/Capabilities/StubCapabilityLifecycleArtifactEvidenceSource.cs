@@ -9,10 +9,12 @@ internal sealed class StubCapabilityLifecycleArtifactEvidenceSource : ICapabilit
 {
     internal CapabilityLifecycleArtifactEvidence Evidence { get; set; } = new(CapabilityLifecycleArtifactEvidenceStatus.Proved, "proved");
     internal CapabilityDescriptor? Descriptor { get; private set; }
+    internal CapabilityIntegrityDigest? ArtifactDigest { get; private set; }
 
     public Task<CapabilityLifecycleArtifactEvidence> VerifyAsync(CapabilityDescriptor descriptor, CapabilityIntegrityDigest artifactDigest, CancellationToken cancellationToken = default)
     {
         Descriptor = descriptor;
+        ArtifactDigest = artifactDigest;
         return Task.FromResult(Evidence);
     }
 }

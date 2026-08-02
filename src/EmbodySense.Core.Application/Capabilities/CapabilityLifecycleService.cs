@@ -9,6 +9,7 @@ public sealed class CapabilityLifecycleService
 {
     private readonly ICapabilityDependentIndex _dependentIndex;
     private readonly ICapabilityLifecycleBaselineSource _baselineSource;
+    private readonly ICapabilityLifecycleArtifactEvidenceSource _artifactEvidence;
     private readonly ICapabilityLifecycleMutationStore _store;
     private readonly IAuditLog _auditLog;
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
@@ -25,6 +26,7 @@ public sealed class CapabilityLifecycleService
         ArgumentNullException.ThrowIfNull(authorityTransaction);
         _dependentIndex = dependentIndex;
         _baselineSource = baselineSource;
+        _artifactEvidence = artifactEvidence;
         _store = store;
         _auditLog = auditLog;
         _authorityTransaction = authorityTransaction;
@@ -71,6 +73,44 @@ public sealed class CapabilityLifecycleService
         var outcome = preview.Status == CapabilityLifecyclePreviewStatus.Replayed ? AuditSchema.Outcomes.Succeeded : preview.Status == CapabilityLifecyclePreviewStatus.Conflict ? AuditSchema.Outcomes.Conflict : AuditSchema.Outcomes.Failed;
         await AppendAsync(AuditSchema.Actions.CapabilityLifecyclePreview, auditTarget, outcome, request.OperationId, request.Kind, preview, preview.Detail);
         return preview;
+    }
+
+    internal Task<CapabilityLifecycleTargetResolution> ResolveCurrentEnableTargetAsync(CapabilityLifecycleTargetResolutionRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.CapabilityId is null || request.Kind != CapabilityLifecycleOperationKind.Enable)
+        {
+            return Task.FromResult(new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "Only enable may resolve the current proved lifecycle target."));
+        }
+
+        return _authorityTransaction.ExecuteAsync(async transactionCancellationToken =>
+        {
+            var current = await _store.ReadAsync(request.CapabilityId, transactionCancellationToken);
+            if (current.Status == CapabilityLifecycleReadStatus.NotFound)
+            {
+                return new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.NotFound, null, null, "No current lifecycle entry is registered for this capability.");
+            }
+            if (current.Status != CapabilityLifecycleReadStatus.Available || current.State is null)
+            {
+                return new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The current authenticated lifecycle entry is unavailable.");
+            }
+            if (!current.State.Descriptor.Id.Equals(request.CapabilityId))
+            {
+                return new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The current lifecycle entry does not match the selected capability identity.");
+            }
+            if (request.TargetVersion is not null && !current.State.Descriptor.Version.Equals(request.TargetVersion))
+            {
+                return new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.NotFound, null, null, "The selected version is not the current proved lifecycle descriptor.");
+            }
+
+            var evidence = await _artifactEvidence.VerifyAsync(current.State.Descriptor, current.State.ArtifactDigest, transactionCancellationToken);
+            return evidence.Status switch
+            {
+                CapabilityLifecycleArtifactEvidenceStatus.Proved => new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.Available, current.State.Descriptor, current.State.ArtifactDigest, evidence.Detail),
+                CapabilityLifecycleArtifactEvidenceStatus.NotFound => new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.NotFound, null, null, evidence.Detail),
+                _ => new CapabilityLifecycleTargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, evidence.Detail)
+            };
+        }, cancellationToken);
     }
 
     /// <summary>Recaptures every dependent and atomically applies or rejects the exact audited preview.</summary>
