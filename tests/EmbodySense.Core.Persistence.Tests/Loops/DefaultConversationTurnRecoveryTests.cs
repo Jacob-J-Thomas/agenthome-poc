@@ -594,6 +594,28 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
+    public async Task Active_discovery_bounds_all_entries_and_fails_closed_on_interrupted_or_unrecognized_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var interruptedPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, ".turn.json.0123456789abcdef0123456789abcdef.tmp");
+        await File.WriteAllTextAsync(interruptedPath, "staged");
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
+        Assert.Equal("staged", await File.ReadAllTextAsync(interruptedPath));
+
+        File.Delete(interruptedPath);
+        for (var index = 0; index < 129; index++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, $"unexpected-{index:D3}.tmp"), "staged");
+        }
+
+        await Assert.ThrowsAsync<IOException>(() => turns.ListIncompleteAsync());
+    }
+
+    [Fact]
     public async Task Active_discovery_enforces_aggregate_bytes_from_the_opened_artifacts()
     {
         using var workspace = new TestWorkspace();
@@ -770,6 +792,24 @@ public sealed class DefaultConversationTurnRecoveryTests
         Directory.CreateDirectory(directory);
         var json = JsonSerializer.Serialize(record, CreateTurnJsonOptions());
         json = misCased ? json.Replace("\"schemaVersion\"", "\"SchemaVersion\"", StringComparison.Ordinal) : json.Insert(json.LastIndexOf('}'), ",\"unknownField\":true");
+        await File.WriteAllTextAsync(Path.Combine(directory, record.TurnId + ".json"), json);
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(record.TurnId));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Store_rejects_duplicate_properties_in_active_and_history_artifacts(bool history)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var record = await CreateAdmittedRecordAsync(paths, $"request-duplicate-json-{history}");
+        var directory = history ? paths.DefaultConversationTurnHistoryPath : paths.DefaultConversationActiveTurnsPath;
+        Directory.CreateDirectory(directory);
+        var json = JsonSerializer.Serialize(record, CreateTurnJsonOptions());
+        json = json.Insert(1, "\"schemaVersion\":2,");
         await File.WriteAllTextAsync(Path.Combine(directory, record.TurnId + ".json"), json);
 
         await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(record.TurnId));

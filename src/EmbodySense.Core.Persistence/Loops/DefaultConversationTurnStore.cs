@@ -30,6 +30,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     };
     private static readonly TimeSpan _leaseRetryDelay = TimeSpan.FromMilliseconds(25);
     private const int MaximumActiveArtifacts = 128;
+    private const int MaximumActiveDirectoryEntries = MaximumActiveArtifacts + 1;
     private const long MaximumActiveArtifactBytes = 1024 * 1024;
     private const long MaximumActiveAggregateBytes = 8 * 1024 * 1024;
     private readonly WorkspacePaths _paths;
@@ -317,6 +318,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 throw new FormatException("The bounded default-conversation active-turn set contains an invalid artifact size.");
             }
 
+            EnsureNoDuplicateJsonProperties(bytes);
             record = JsonSerializer.Deserialize<DefaultConversationTurnRecord>(bytes, _jsonOptions);
         }
         catch (JsonException exception)
@@ -345,6 +347,39 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return bytes;
     }
 
+    private static void EnsureNoDuplicateJsonProperties(ReadOnlyMemory<byte> bytes)
+    {
+        using var document = JsonDocument.Parse(bytes);
+        EnsureNoDuplicateJsonProperties(document.RootElement);
+    }
+
+    private static void EnsureNoDuplicateJsonProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw new FormatException("A default-conversation turn artifact contains duplicate JSON properties.");
+                }
+
+                EnsureNoDuplicateJsonProperties(property.Value);
+            }
+
+            return;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                EnsureNoDuplicateJsonProperties(item);
+            }
+        }
+    }
+
     private static async Task WriteAsync(string path, byte[] bytes, CancellationToken cancellationToken)
     {
         await LoopArtifactFileWriter.WriteTextAsync(path, Encoding.UTF8.GetString(bytes), cancellationToken);
@@ -366,7 +401,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
     private void EnsureActiveCapacity()
     {
-        if (Directory.Exists(_paths.DefaultConversationActiveTurnsPath) && Directory.EnumerateFiles(_paths.DefaultConversationActiveTurnsPath, "*.json", SearchOption.TopDirectoryOnly).Take(MaximumActiveArtifacts).Count() >= MaximumActiveArtifacts)
+        if (Directory.Exists(_paths.DefaultConversationActiveTurnsPath) && EnumerateBoundedActivePaths().Count >= MaximumActiveArtifacts)
         {
             throw new IOException("The bounded default-conversation active-turn set is exhausted.");
         }
@@ -416,8 +451,38 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
     private IReadOnlyList<string> EnumerateBoundedActivePaths()
     {
-        var paths = Directory.EnumerateFiles(_paths.DefaultConversationActiveTurnsPath, "*.json", SearchOption.TopDirectoryOnly).Take(MaximumActiveArtifacts + 1).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
-        if (paths.Length > MaximumActiveArtifacts)
+        var entries = Directory.EnumerateFileSystemEntries(_paths.DefaultConversationActiveTurnsPath, "*", SearchOption.TopDirectoryOnly)
+            .Take(MaximumActiveDirectoryEntries + 1)
+            .ToArray();
+        if (entries.Length > MaximumActiveDirectoryEntries)
+        {
+            throw new IOException("The bounded default-conversation active-turn set is exhausted.");
+        }
+
+        var paths = new List<string>(MaximumActiveArtifacts);
+        foreach (var entry in entries.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            var fileName = Path.GetFileName(entry);
+            var attributes = File.GetAttributes(entry);
+            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+            {
+                throw new FormatException("The bounded default-conversation active-turn set contains an unexpected entry.");
+            }
+
+            if (string.Equals(fileName, ".active-set.lock", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!string.Equals(Path.GetExtension(fileName), ".json", StringComparison.Ordinal))
+            {
+                throw new FormatException("The bounded default-conversation active-turn set contains an unexpected entry.");
+            }
+
+            paths.Add(entry);
+        }
+
+        if (paths.Count > MaximumActiveArtifacts)
         {
             throw new IOException("The bounded default-conversation active-turn set is exhausted.");
         }
