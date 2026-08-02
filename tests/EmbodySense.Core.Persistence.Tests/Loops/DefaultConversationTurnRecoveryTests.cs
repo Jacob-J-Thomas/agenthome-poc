@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -31,6 +32,9 @@ public sealed class DefaultConversationTurnRecoveryTests
     private const string PublicationReadyVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_READY";
     private const string PublicationReleaseVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_RELEASE";
     private const string PublicationResultVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_RESULT";
+    private const string TurnLeaseWorkspaceVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_WORKSPACE";
+    private const string TurnLeaseReadyVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_READY";
+    private const string TurnLeaseReleaseVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_RELEASE";
 
     public static TheoryData<DefaultConversationTurnBoundary, LoopRunStatus, int> DurableBoundaries => new()
     {
@@ -444,6 +448,70 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
+    public async Task Cross_process_active_set_lease_contention_remains_cancellation_aware()
+    {
+        using var workspace = new TestWorkspace();
+        var readyPath = workspace.File("turn-lease-ready");
+        var releasePath = workspace.File("turn-lease-release");
+        using var process = StartSelfTest(
+            nameof(Cross_process_active_set_lease_worker_holds_until_released),
+            new Dictionary<string, string>
+            {
+                [TurnLeaseWorkspaceVariable] = workspace.RootPath,
+                [TurnLeaseReadyVariable] = readyPath,
+                [TurnLeaseReleaseVariable] = releasePath
+            });
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await WaitForFileAsync(readyPath, process, TimeSpan.FromSeconds(20));
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+            var turns = new DefaultConversationTurnStore(new WorkspacePaths(workspace.RootPath));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => turns.ListIncompleteAsync(cancellation.Token));
+
+            await File.WriteAllTextAsync(releasePath, "release");
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            var output = await outputTask;
+            var error = await errorTask;
+            Assert.True(process.ExitCode == 0, $"Turn-lease worker exited with `{process.ExitCode}`. stdout: {output} stderr: {error}");
+        }
+        finally
+        {
+            if (!File.Exists(releasePath))
+            {
+                await File.WriteAllTextAsync(releasePath, "release");
+            }
+
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Cross_process_active_set_lease_worker_holds_until_released()
+    {
+        var workspaceRoot = Environment.GetEnvironmentVariable(TurnLeaseWorkspaceVariable);
+        if (string.IsNullOrWhiteSpace(workspaceRoot))
+        {
+            return;
+        }
+
+        var readyPath = Environment.GetEnvironmentVariable(TurnLeaseReadyVariable) ?? throw new InvalidOperationException("The turn-lease ready path is required.");
+        var releasePath = Environment.GetEnvironmentVariable(TurnLeaseReleaseVariable) ?? throw new InvalidOperationException("The turn-lease release path is required.");
+        var coordination = new FileBlockingTurnStoreCoordination(readyPath, releasePath);
+        var paths = new WorkspacePaths(workspaceRoot);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var turns = new DefaultConversationTurnStore(paths, coordination);
+
+        _ = await turns.ListIncompleteAsync();
+    }
+
+    [Fact]
     public async Task Store_replays_exact_updates_and_rejects_mutated_append_only_history()
     {
         using var workspace = new TestWorkspace();
@@ -815,6 +883,58 @@ public sealed class DefaultConversationTurnRecoveryTests
         await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(record.TurnId));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Store_rejects_unix_fifo_artifacts_and_leases_without_blocking(bool lease)
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var fifoPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, lease ? ".active-set.lock" : "malicious.json");
+        Assert.Equal(0, mkfifo(fifoPath, 0x180));
+
+        var operation = turns.ListIncompleteAsync();
+        var completed = await Task.WhenAny(operation, Task.Delay(TimeSpan.FromSeconds(2)));
+
+        Assert.Same(operation, completed);
+        var exception = await Assert.ThrowsAsync<IOException>(() => operation);
+        Assert.Contains("not a regular file", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Store_refuses_symbolic_links_for_active_artifacts_and_leases(bool lease)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var targetPath = workspace.File("symbolic-link-target");
+        await File.WriteAllTextAsync(targetPath, "do not follow");
+        var linkPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, lease ? ".active-set.lock" : "malicious.json");
+        try
+        {
+            File.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        Task operation = lease ? turns.ListIncompleteAsync() : turns.LoadAsync("malicious");
+
+        await Assert.ThrowsAsync<IOException>(() => operation);
+        Assert.Equal("do not follow", await File.ReadAllTextAsync(targetPath));
+    }
+
     [Fact]
     public async Task Concurrent_admission_at_active_capacity_allows_only_one_new_turn()
     {
@@ -1089,6 +1209,9 @@ public sealed class DefaultConversationTurnRecoveryTests
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The default-conversation test worker did not start.");
     }
 
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int mkfifo(string path, int mode);
+
     private static async Task WaitForFileAsync(string path, Process process, TimeSpan timeout)
     {
         var elapsed = Stopwatch.StartNew();
@@ -1144,6 +1267,18 @@ public sealed class DefaultConversationTurnRecoveryTests
             cancellationToken.ThrowIfCancellationRequested();
             QuarantineCount++;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FileBlockingTurnStoreCoordination(string readyPath, string releasePath) : IDefaultConversationTurnStoreCoordination
+    {
+        public async Task BeforeActiveSetOperationAsync(DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken = default)
+        {
+            await File.WriteAllTextAsync(readyPath, operation.ToString(), cancellationToken);
+            while (!File.Exists(releasePath))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(15), cancellationToken);
+            }
         }
     }
 

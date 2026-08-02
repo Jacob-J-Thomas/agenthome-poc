@@ -205,14 +205,13 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            try
+            var lease = DefaultConversationTurnNativeFileSystem.TryAcquireExclusiveLease(leasePath);
+            if (lease is not null)
             {
-                return new FileStream(leasePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.Asynchronous);
+                return lease;
             }
-            catch (IOException)
-            {
-                await Task.Delay(_leaseRetryDelay, cancellationToken);
-            }
+
+            await Task.Delay(_leaseRetryDelay, cancellationToken);
         }
     }
 
@@ -294,7 +293,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         byte[] bytes;
         try
         {
-            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4_096, FileOptions.Asynchronous);
+            await using var stream = DefaultConversationTurnNativeFileSystem.OpenRegularRead(path);
             if (stream.Length <= 0 || stream.Length > maximumBytes)
             {
                 throw new FormatException("The bounded default-conversation active-turn set contains an invalid artifact size.");
