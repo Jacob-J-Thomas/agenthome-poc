@@ -109,6 +109,32 @@ public sealed class ContextualRoleRevisionStoreTests
     }
 
     [Fact]
+    public async Task Maximum_length_identifiers_publish_and_reopen_exact_artifact_names()
+    {
+        using var workspace = new TestWorkspace();
+        var roleId = new string('r', ContextualRoleLimits.MaxIdentifierCharacters);
+        var operationId = new string('o', ContextualRoleLimits.MaxIdentifierCharacters);
+        var revision = ContextualRoleRevisionContentHash.Apply(Revision(roleId, 1) with
+        {
+            ContentHash = string.Empty,
+            InstructionSource = new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, "role-source", ContextualRoleInstructionClassification.RoleInstruction)
+        });
+        var created = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").MutateAsync(CreateRequest(operationId, revision));
+        var reopened = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
+        var root = StoreRoot(workspace.RootPath);
+
+        Assert.True(created.Status == ContextualRoleRevisionMutationStatus.Accepted, string.Join("; ", created.ValidationErrors.Select(error => $"{error.Field}:{error.Code}")));
+        Assert.Equal(ContextualRoleRevisionReadStatus.Found, reopened.Status);
+        AssertRevision(revision, reopened.Revision);
+        Assert.True(File.Exists(Path.Combine(root, "revisions", $"{roleId}.1.json")));
+        Assert.True(File.Exists(Path.Combine(root, "states", $"{roleId}.json")));
+        Assert.True(File.Exists(Path.Combine(root, "operations", $"{operationId}.intent.json")));
+        Assert.True(File.Exists(Path.Combine(root, "proofs", $"{operationId}.json")));
+        Assert.True(File.Exists(Path.Combine(root, "operations", $"{operationId}.result.json")));
+        Assert.Empty(Directory.EnumerateFiles(root, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public async Task Replacement_preserves_history_and_stale_revision_conflict_as_immutable_evidence()
     {
         using var workspace = new TestWorkspace();

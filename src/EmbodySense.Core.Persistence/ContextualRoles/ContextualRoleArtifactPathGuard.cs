@@ -1031,11 +1031,14 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
             var nameBytes = Encoding.Unicode.GetBytes(targetName);
             var pointerOffset = Marshal.OffsetOf<FileRenameInformationHeader>(nameof(FileRenameInformationHeader.RootDirectory)).ToInt32();
             var lengthOffset = Marshal.OffsetOf<FileRenameInformationHeader>(nameof(FileRenameInformationHeader.FileNameLength)).ToInt32();
-            var nameOffset = lengthOffset + sizeof(int);
-            var buffer = Marshal.AllocHGlobal(nameOffset + nameBytes.Length);
+            var nameOffset = Marshal.OffsetOf<FileRenameInformationHeader>(nameof(FileRenameInformationHeader.FileName)).ToInt32();
+            var bufferSize = checked(Marshal.SizeOf<FileRenameInformationHeader>() + nameBytes.Length);
+            var directoryReferenceAdded = false;
+            var buffer = Marshal.AllocHGlobal(bufferSize);
             try
             {
-                for (var index = 0; index < nameOffset + nameBytes.Length; index++)
+                directory.DangerousAddRef(ref directoryReferenceAdded);
+                for (var index = 0; index < bufferSize; index++)
                 {
                     Marshal.WriteByte(buffer, index, 0);
                 }
@@ -1044,7 +1047,7 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
                 Marshal.WriteIntPtr(buffer, pointerOffset, directory.DangerousGetHandle());
                 Marshal.WriteInt32(buffer, lengthOffset, nameBytes.Length);
                 Marshal.Copy(nameBytes, 0, buffer + nameOffset, nameBytes.Length);
-                if (!SetFileInformationByHandle(source, FileRenameInfo, buffer, (uint)(nameOffset + nameBytes.Length)))
+                if (!SetFileInformationByHandle(source, FileRenameInfo, buffer, checked((uint)bufferSize)))
                 {
                     throw NativeIOException("SetFileInformationByHandle rename", Marshal.GetLastPInvokeError());
                 }
@@ -1052,6 +1055,10 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
             finally
             {
                 Marshal.FreeHGlobal(buffer);
+                if (directoryReferenceAdded)
+                {
+                    directory.DangerousRelease();
+                }
             }
 
             return;
