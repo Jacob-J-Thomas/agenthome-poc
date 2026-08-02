@@ -298,7 +298,7 @@ public sealed class CapabilityPostureService
         }
         while (cursor is not null);
 
-        return new CatalogEntryRead(CapabilityPostureReadStatus.NotFound, null);
+        return new CatalogEntryRead(recovered ? CapabilityPostureReadStatus.Unavailable : CapabilityPostureReadStatus.NotFound, null);
     }
 
     private CapabilityPostureProjection? Project(CapabilityCatalogEntry entry, CapabilityLifecycleReadResult lifecycle, CapabilityDependentIndexSnapshot dependents, bool catalogRecovered)

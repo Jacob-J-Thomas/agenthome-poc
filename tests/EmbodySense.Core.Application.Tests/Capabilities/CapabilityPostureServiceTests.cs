@@ -99,6 +99,24 @@ public sealed class CapabilityPostureServiceTests
         Assert.Equal(9, result.Posture?.LifecycleRevision);
     }
 
+    [Fact]
+    public async Task Absence_from_a_recovered_catalog_is_unavailable_instead_of_not_found()
+    {
+        var capabilityId = CapabilityPostureTestData.Entry().Descriptor.Id;
+        var catalog = new StubCapabilityPostureCatalogStore { Status = CapabilityCatalogReadStatus.RecoveredLastProved };
+        var service = Service(catalog);
+
+        var read = await service.ReadAsync(capabilityId);
+        var preview = await service.PreviewAsync(new CapabilityPosturePreviewQuery(capabilityId, CapabilityLifecycleOperationKind.Disable));
+
+        Assert.Equal(CapabilityPostureReadStatus.Unavailable, read.Status);
+        Assert.Null(read.Posture);
+        Assert.Equal("capability_posture_unavailable", read.Error?.Code);
+        Assert.Equal(CapabilityPostureReadStatus.Unavailable, preview.Status);
+        Assert.Null(preview.Preview);
+        Assert.Equal("capability_posture_unavailable", preview.Error?.Code);
+    }
+
     [Theory]
     [InlineData("2.0.0", "upgrade-v2")]
     [InlineData("0.9.0", "rollback-v1")]
