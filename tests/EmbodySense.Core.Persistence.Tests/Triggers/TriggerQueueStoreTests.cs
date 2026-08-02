@@ -21,6 +21,7 @@ public sealed class TriggerQueueStoreTests
     private const string CrossProcessDelivery = "EMBODYSENSE_TRIGGER_QUEUE_DELIVERY";
     private const string CrossProcessDeduplication = "EMBODYSENSE_TRIGGER_QUEUE_DEDUPLICATION";
     private const string CrossProcessLoop = "EMBODYSENSE_TRIGGER_QUEUE_LOOP";
+    private const string CrossProcessCrashAfterStaged = "EMBODYSENSE_TRIGGER_QUEUE_CRASH_AFTER_STAGED";
 
     [Fact]
     public async Task Windows_staging_path_identity_check_allows_publication_and_prior_generation_cleanup()
@@ -401,7 +402,10 @@ public sealed class TriggerQueueStoreTests
             await Task.Delay(10);
         }
 
-        var store = new TriggerQueueStore(new WorkspacePaths(workspace), RaceQuota());
+        var observer = string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterStaged), "1", StringComparison.Ordinal)
+            ? new CallbackObserver(onStaged: (_, _, _) => Environment.FailFast("simulated process death after authenticated staging"))
+            : null;
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace), RaceQuota(), observer);
         var result = await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope(delivery, deduplication, loop)));
         await File.WriteAllTextAsync(output, result.Status.ToString());
     }
@@ -726,6 +730,48 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Restart_reclaims_an_exact_authenticated_staging_artifact_after_process_death()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        var gate = Path.Combine(workspace.RootPath, "release-crashing-trigger-queue-host");
+        var ready = Path.Combine(workspace.RootPath, "crashing-trigger-queue-ready");
+        var output = Path.Combine(workspace.RootPath, "crashing-trigger-queue-result");
+        using var process = StartCrossProcessHost(workspace.RootPath, gate, ready, output, ("delivery-crash", "dedup-crash", "loop-crash"), crashAfterStaged: true);
+        await WaitForPathAsync(ready);
+        await File.WriteAllTextAsync(gate, "go");
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.Single(Directory.EnumerateFiles(root, ".staged-*.tmp"));
+
+        var restartedStore = new TriggerQueueStore(paths);
+        var restarted = await restartedStore.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
+        var admitted = await TriggerQueueTestData.Service(restartedStore).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope("delivery-after-restart", "dedup-after-restart", "loop-after-restart")));
+
+        Assert.Empty(restarted.Entries);
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admitted.Status);
+        Assert.DoesNotContain(Directory.EnumerateFiles(root), path => Path.GetFileName(path).StartsWith(".staged-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".discard-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Authenticated_staging_name_with_a_different_identity_is_preserved_and_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, $".staged-{1:D19}-{0UL:X16}-{1UL:X16}.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(path, "unowned staging evidence");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
+
+        Assert.Equal("unowned staging evidence", await File.ReadAllTextAsync(path));
+    }
+
+    [Fact]
     public async Task Repeated_post_publication_uncertainty_keeps_two_generations_and_remains_restart_recoverable()
     {
         using var workspace = new TestWorkspace();
@@ -1044,6 +1090,26 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Unix_queue_root_creation_refuses_a_symlinked_missing_ancestor_without_mutating_its_target()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var outside = Path.Combine(workspace.RootPath, "outside-trigger-target");
+        Directory.CreateDirectory(outside);
+        Directory.CreateDirectory(paths.AgentPath);
+        File.CreateSymbolicLink(paths.AgentFile("triggers"), outside);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
+
+        Assert.Empty(Directory.EnumerateFileSystemEntries(outside));
+    }
+
+    [Fact]
     public async Task Queue_root_replacement_after_native_directory_binding_never_mutates_the_replacement_tree()
     {
         if (OperatingSystem.IsWindows())
@@ -1220,7 +1286,7 @@ public sealed class TriggerQueueStoreTests
         }
     }
 
-    private static Process StartCrossProcessHost(string workspace, string gate, string ready, string output, (string Delivery, string Deduplication, string Loop) delivery)
+    private static Process StartCrossProcessHost(string workspace, string gate, string ready, string output, (string Delivery, string Deduplication, string Loop) delivery, bool crashAfterStaged = false)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -1241,6 +1307,11 @@ public sealed class TriggerQueueStoreTests
         startInfo.Environment[CrossProcessDelivery] = delivery.Delivery;
         startInfo.Environment[CrossProcessDeduplication] = delivery.Deduplication;
         startInfo.Environment[CrossProcessLoop] = delivery.Loop;
+        if (crashAfterStaged)
+        {
+            startInfo.Environment[CrossProcessCrashAfterStaged] = "1";
+        }
+
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process trigger queue test host did not start.");
     }
 

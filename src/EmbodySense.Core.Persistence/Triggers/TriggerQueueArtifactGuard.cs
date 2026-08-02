@@ -109,6 +109,7 @@ internal sealed class TriggerQueueArtifactGuard
         ValidateMutationLease(mutationLease);
         var artifacts = new List<TriggerQueueArtifactSnapshot>();
         var cleanupArtifacts = new List<TriggerQueueArtifactSnapshot>();
+        var abandonedArtifacts = new List<TriggerQueueArtifactSnapshot>();
         var tombstoneCount = 0;
         var entries = Directory.EnumerateFileSystemEntries(_queueRoot, "*", SearchOption.TopDirectoryOnly).Take(MaxDirectoryEntries + 1).ToArray();
         if (entries.Length > MaxDirectoryEntries)
@@ -174,6 +175,21 @@ internal sealed class TriggerQueueArtifactGuard
                 continue;
             }
 
+            if (TryParseStagedName(name, out generation, out expectedIdentity)
+                || TryParseDiscardName(name, out generation, out expectedIdentity))
+            {
+                var identity = TriggerQueueNativeFileInspector.InspectPath(path);
+                if (identity != expectedIdentity)
+                {
+                    throw new InvalidOperationException("Trigger queue persistence found a substituted authenticated staging artifact.");
+                }
+
+                var length = new FileInfo(path).Length;
+                aggregateBytes = checked(aggregateBytes + length);
+                abandonedArtifacts.Add(new TriggerQueueArtifactSnapshot(path, generation, identity, length, string.Empty));
+                continue;
+            }
+
             throw new FormatException($"Trigger queue persistence found an unsupported artifact: `{name}`.");
         }
 
@@ -184,6 +200,26 @@ internal sealed class TriggerQueueArtifactGuard
 
         artifacts = artifacts.Select(BindArtifactContent).ToList();
         cleanupArtifacts = cleanupArtifacts.Select(BindArtifactContent).ToList();
+        abandonedArtifacts = abandonedArtifacts.Select(BindArtifactContent).ToList();
+
+        if (!OperatingSystem.IsWindows() && tombstoneCount + abandonedArtifacts.Count > _maxTombstoneArtifacts)
+        {
+            throw new TriggerQueuePersistenceBackpressureException();
+        }
+
+        foreach (var abandoned in abandonedArtifacts)
+        {
+            ClaimAndReclaimExact(abandoned, recoverAsLedger: false, NullTriggerQueueDurabilityObserver.Instance, mutationLease);
+        }
+
+        if (abandonedArtifacts.Count > 0)
+        {
+            FlushDirectory();
+            if (!OperatingSystem.IsWindows())
+            {
+                tombstoneCount = checked(tombstoneCount + abandonedArtifacts.Count);
+            }
+        }
 
         foreach (var cleanup in cleanupArtifacts)
         {
@@ -584,6 +620,16 @@ internal sealed class TriggerQueueArtifactGuard
         return TryParseClaimName(name, ".tombstone-", out generation, out identity);
     }
 
+    private static bool TryParseStagedName(string name, out long generation, out TriggerQueueFileIdentity identity)
+    {
+        return TryParseClaimName(name, ".staged-", out generation, out identity);
+    }
+
+    private static bool TryParseDiscardName(string name, out long generation, out TriggerQueueFileIdentity identity)
+    {
+        return TryParseClaimName(name, ".discard-", out generation, out identity);
+    }
+
     private static bool TryParseClaimName(string name, string prefix, out long generation, out TriggerQueueFileIdentity identity)
     {
         generation = 0;
@@ -641,6 +687,12 @@ internal sealed class TriggerQueueArtifactGuard
 
     private void PrepareRoot()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            PrepareRootUnix();
+            return;
+        }
+
         EnsureNoReparsePoints(_queueRoot);
         var missing = new List<string>();
         var current = _queueRoot;
@@ -655,27 +707,117 @@ internal sealed class TriggerQueueArtifactGuard
         {
             var path = missing[index];
             var parent = Path.GetDirectoryName(path) ?? throw new InvalidOperationException("Trigger queue directory does not have a containing directory.");
-            if (OperatingSystem.IsWindows())
+            var temporary = Path.Combine(parent, $".trigger-queue-directory-{Guid.NewGuid():N}.tmp");
+            Directory.CreateDirectory(temporary);
+            try
             {
-                var temporary = Path.Combine(parent, $".trigger-queue-directory-{Guid.NewGuid():N}.tmp");
-                Directory.CreateDirectory(temporary);
-                try
-                {
-                    MoveNoReplaceDurably(temporary, path, null);
-                }
-                catch (IOException exception) when (IsCompetingDirectoryCreation(exception, path))
-                {
-                    EnsureNoReparsePoints(path);
-                    Directory.Delete(temporary);
-                }
+                MoveNoReplaceDurably(temporary, path, null);
             }
-            else
+            catch (IOException exception) when (IsCompetingDirectoryCreation(exception, path))
             {
-                Directory.CreateDirectory(path);
-                FlushDirectoryPath(parent);
+                EnsureNoReparsePoints(path);
+                Directory.Delete(temporary);
             }
 
             EnsureNoReparsePoints(path);
+        }
+
+        EnsureNoReparsePoints(_queueRoot);
+    }
+
+    private void PrepareRootUnix()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Descriptor-relative trigger queue directory creation is not available on this platform.");
+        }
+
+        EnsureContained(_workspaceRoot, _queueRoot);
+        var directoryFlag = OperatingSystem.IsMacOS() ? 0x100000 : 0x10000;
+        var closeOnExecFlag = OperatingSystem.IsMacOS() ? 0x1000000 : 0x80000;
+        var noFollowFlag = OperatingSystem.IsMacOS() ? 0x100 : 0x20000;
+        var openFlags = directoryFlag | closeOnExecFlag | noFollowFlag;
+        var descriptor = Open(_workspaceRoot, openFlags);
+        if (descriptor < 0)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Trigger queue workspace root could not be pinned for directory creation.");
+        }
+
+        SafeFileHandle? currentHandle = new(new IntPtr(descriptor), ownsHandle: true);
+        try
+        {
+            var expectedWorkspaceIdentity = TriggerQueueNativeFileInspector.InspectDirectoryPath(_workspaceRoot);
+            var pinnedWorkspaceIdentity = TriggerQueueNativeFileInspector.InspectDirectoryHandle(currentHandle, _workspaceRoot);
+            if (pinnedWorkspaceIdentity.Device != expectedWorkspaceIdentity.Device || pinnedWorkspaceIdentity.File != expectedWorkspaceIdentity.File)
+            {
+                throw new InvalidOperationException("Trigger queue workspace root changed while binding descriptor-relative directory authority.");
+            }
+
+            var relative = Path.GetRelativePath(_workspaceRoot, _queueRoot);
+            var currentPath = _workspaceRoot;
+            foreach (var segment in relative.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (segment is "." or "..")
+                {
+                    throw new InvalidOperationException("Trigger queue root contains an invalid directory segment.");
+                }
+
+                var parentDescriptor = currentHandle.DangerousGetHandle().ToInt32();
+                var childDescriptor = OpenAt(parentDescriptor, segment, openFlags);
+                if (childDescriptor < 0)
+                {
+                    const int NoSuchFileOrDirectory = 2;
+                    const int AlreadyExists = 17;
+                    var openError = Marshal.GetLastWin32Error();
+                    if (openError != NoSuchFileOrDirectory)
+                    {
+                        throw new Win32Exception(openError, "Trigger queue directory segment could not be opened without following links.");
+                    }
+
+                    if (MkdirAt(parentDescriptor, segment, 0x1FF) != 0)
+                    {
+                        var createError = Marshal.GetLastWin32Error();
+                        if (createError != AlreadyExists)
+                        {
+                            throw new Win32Exception(createError, "Trigger queue directory segment could not be created through pinned parent authority.");
+                        }
+                    }
+                    else if (Fsync(parentDescriptor) != 0)
+                    {
+                        throw new Win32Exception(Marshal.GetLastWin32Error(), "Trigger queue parent directory durability flush failed after directory creation.");
+                    }
+
+                    childDescriptor = OpenAt(parentDescriptor, segment, openFlags);
+                    if (childDescriptor < 0)
+                    {
+                        throw new Win32Exception(Marshal.GetLastWin32Error(), "Trigger queue directory segment could not be pinned after bounded creation race.");
+                    }
+                }
+
+                var childHandle = new SafeFileHandle(new IntPtr(childDescriptor), ownsHandle: true);
+                currentPath = Path.Combine(currentPath, segment);
+                try
+                {
+                    var pinnedChildIdentity = TriggerQueueNativeFileInspector.InspectDirectoryHandle(childHandle, currentPath);
+                    var pathChildIdentity = TriggerQueueNativeFileInspector.InspectDirectoryPath(currentPath);
+                    if (pinnedChildIdentity.Device != pathChildIdentity.Device || pinnedChildIdentity.File != pathChildIdentity.File)
+                    {
+                        throw new InvalidOperationException("Trigger queue directory chain changed during descriptor-relative creation.");
+                    }
+                }
+                catch
+                {
+                    childHandle.Dispose();
+                    throw;
+                }
+
+                currentHandle.Dispose();
+                currentHandle = childHandle;
+            }
+        }
+        finally
+        {
+            currentHandle?.Dispose();
         }
 
         EnsureNoReparsePoints(_queueRoot);
@@ -926,6 +1068,12 @@ internal sealed class TriggerQueueArtifactGuard
 
     [DllImport("libc", EntryPoint = "open", SetLastError = true)]
     private static extern int Open(string path, int flags);
+
+    [DllImport("libc", EntryPoint = "openat", SetLastError = true)]
+    private static extern int OpenAt(int directoryDescriptor, string path, int flags);
+
+    [DllImport("libc", EntryPoint = "mkdirat", SetLastError = true)]
+    private static extern int MkdirAt(int directoryDescriptor, string path, uint mode);
 
     [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
     private static extern int Fsync(int descriptor);
