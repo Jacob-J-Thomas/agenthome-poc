@@ -1019,12 +1019,19 @@ public sealed class CredentialRegistryStoreTests
     }
 
     [Fact]
-    public async Task Default_public_store_fails_closed_without_server_owned_trust_state()
+    public async Task Default_public_store_uses_platform_trust_or_fails_closed_when_unavailable()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
 
         var read = await new CredentialRegistryStore(paths).ReadAsync();
+
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.True(read.Succeeded);
+            Assert.Empty(read.Entries);
+            return;
+        }
 
         Assert.False(read.Succeeded);
         Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
