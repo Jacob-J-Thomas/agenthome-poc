@@ -18,7 +18,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_returns_initialized_workspace_configuration_details()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await WriteTranscriptAsync(paths.CurrentConversationPath, "current", "current prompt", "current answer");
         Directory.CreateDirectory(paths.ArchivedConversationMemoryPath);
@@ -92,7 +92,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_caps_sensitive_snapshot_content()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await File.WriteAllTextAsync(paths.PermissionsPath, """{"version":2,"scope":"test","access_token":"secret-value","approved":[],"denied":[]}""");
         await File.WriteAllTextAsync(paths.AgentFile("ROLE.md"), "api_key=secret-value" + Environment.NewLine + new string('a', 41_000));
@@ -121,7 +121,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_coordinates_a_consistent_snapshot_with_conversation_rotation()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("overlap prompt"));
@@ -168,8 +168,8 @@ public sealed class WorkspaceConfigurationReaderTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, $$"""
-            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","role":"user","content":"{{prompt}}"}
-            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","role":"assistant","content":"{{answer}}"}
+            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"{{prompt}}"}
+            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","messageId":"message-2","publicationId":"publication-2","role":"assistant","content":"{{answer}}"}
             """);
     }
 
@@ -179,7 +179,7 @@ public sealed class WorkspaceConfigurationReaderTests
         var lines = Enumerable.Range(1, 205).Select(index =>
         {
             var role = index % 2 == 0 ? "assistant" : "user";
-            return $$"""{"schemaVersion":1,"conversationId":"current","sequence":{{index}},"timestampUtc":"2026-06-01T00:01:00+00:00","role":"{{role}}","content":"message {{index}}"}""";
+            return $$"""{"schemaVersion":1,"conversationId":"current","sequence":{{index}},"timestampUtc":"2026-06-01T00:01:00+00:00","messageId":"message-{{index}}","publicationId":"publication-{{index}}","role":"{{role}}","content":"message {{index}}"}""";
         });
         await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
     }

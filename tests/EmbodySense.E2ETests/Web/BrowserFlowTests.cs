@@ -86,9 +86,9 @@ public sealed class BrowserFlowTests
     {
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
         var currentTranscriptPath = workspace.File(".agent", "memory", "conversations", "current.ndjson");
-        await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
+        await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
         await using var externalLease = new FileStream(currentTranscriptPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
@@ -153,7 +153,7 @@ public sealed class BrowserFlowTests
             Assert.DoesNotContain("Manual trigger", systemCanvas, StringComparison.Ordinal);
             Assert.DoesNotContain("Respond in role", systemCanvas, StringComparison.Ordinal);
             Assert.Contains("5 nodes · 4 edges", await browser.EvaluateStringAsync("document.getElementById('loopHeaderMeta').textContent"), StringComparison.Ordinal);
-            Assert.Contains("not dispatched by the custom-loop or a generic graph executor", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
+            Assert.Contains("does not certify the nodes and edges as an exact execution-order contract", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
             await ClickAsync(browser, "#loopSettingsButton");
             var systemPolicy = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
             Assert.Contains("Human message", systemPolicy, StringComparison.Ordinal);

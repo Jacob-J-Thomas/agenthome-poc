@@ -10,6 +10,10 @@ public enum SystemLoopExecutionSemantics
     /// </summary>
     Unknown = 0,
     /// <summary>
+    /// Identifies a system-owned authority topology that the dedicated runner accepts without certifying its nodes and edges as an exact execution-order contract.
+    /// </summary>
+    AuthorityTopologyOnly,
+    /// <summary>
     /// Identifies graph structure that is validated as the contract for a dedicated runner rather than dispatched node-by-node by a generic graph executor.
     /// </summary>
     ValidatedRunnerContract

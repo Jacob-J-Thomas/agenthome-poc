@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Capabilities.Models;
 namespace EmbodySense.Core.Common.Loops.Custom;
 
 /// <summary>
@@ -51,6 +52,9 @@ public sealed record CustomLoopDefinition(
     /// </summary>
     public const string DefaultExitDecisionInstruction = "Request another iteration only when the latest result still has a concrete, recoverable gap. Otherwise complete.";
 
+    /// <summary>Gets the bounded capability requirements derived from explicit authoring choices.</summary>
+    public CapabilityDependencyManifest CapabilityRequirements { get; init; } = null!;
+
     /// <summary>
     /// Creates a version-1 custom-loop definition with one inference step, no tool assignments, and the canonical content hash applied.
     /// </summary>
@@ -82,7 +86,10 @@ public sealed record CustomLoopDefinition(
             [new CustomLoopInferenceStep(inferenceStepId, "First step", DefaultInferenceInstruction, CustomLoopNodeContextPolicy.Inherit())],
             [],
             new CustomLoopExitPolicy(0, DefaultExitDecisionInstruction, CustomLoopNodeContextPolicy.Inherit()),
-            lastMutationOperationId);
+            lastMutationOperationId)
+        {
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(id, [])
+        };
 
         return CustomLoopDefinitionContentHash.Apply(seed);
     }
