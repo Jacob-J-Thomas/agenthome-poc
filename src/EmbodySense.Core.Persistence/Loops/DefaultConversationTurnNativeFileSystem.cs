@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
+using EmbodySense.Core.Persistence.Loops.Models;
 using Microsoft.Win32.SafeHandles;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -27,6 +28,7 @@ internal static class DefaultConversationTurnNativeFileSystem
     private const ushort UnixFileTypeMask = 0xF000;
     private const ushort UnixRegularFile = 0x8000;
     private const uint StatxMode = 0x2;
+    private const uint StatxInode = 0x100;
 
     public static FileStream? TryAcquireExclusiveLease(string path)
     {
@@ -68,6 +70,61 @@ internal static class DefaultConversationTurnNativeFileSystem
 
         var unixHandle = OpenUnixRegularFile(path, readWrite: false, create: false);
         return new FileStream(unixHandle, FileAccess.Read, 4_096, isAsync: false);
+    }
+
+    public static DefaultConversationTurnFileIdentity GetIdentity(FileStream stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (OperatingSystem.IsWindows())
+        {
+            return GetWindowsIdentity(stream.SafeFileHandle);
+        }
+
+        return GetUnixIdentity(stream.SafeFileHandle);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Windows; Windows is unreachable in Unix coverage runs.")]
+    private static DefaultConversationTurnFileIdentity GetWindowsIdentity(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            throw NativeIOException("Default-conversation persistence file identity could not be read", Marshal.GetLastPInvokeError());
+        }
+
+        var fileId = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
+        return new DefaultConversationTurnFileIdentity(information.VolumeSerialNumber, fileId);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Unix; Unix is unreachable in Windows coverage runs.")]
+    private static DefaultConversationTurnFileIdentity GetUnixIdentity(SafeFileHandle handle)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            if (statx(handle, string.Empty, AtEmptyPath, StatxMode | StatxInode, out var information) != 0)
+            {
+                throw NativeIOException("Default-conversation persistence file identity could not be read", Marshal.GetLastPInvokeError());
+            }
+
+            if ((information.Mask & StatxInode) == 0)
+            {
+                throw new IOException("Default-conversation persistence file metadata omitted its filesystem identity.");
+            }
+
+            var deviceId = ((ulong)information.DeviceIdMajor << 32) | information.DeviceIdMinor;
+            return new DefaultConversationTurnFileIdentity(deviceId, information.Inode);
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            if (fstat(handle, out var information) != 0)
+            {
+                throw NativeIOException("Default-conversation persistence file identity could not be read", Marshal.GetLastPInvokeError());
+            }
+
+            return new DefaultConversationTurnFileIdentity(information.Device, information.Inode);
+        }
+
+        throw new PlatformNotSupportedException("Default-conversation file identity supports Windows, Linux, and macOS.");
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Windows; Windows is unreachable in Unix coverage runs.")]
@@ -212,6 +269,20 @@ internal static class DefaultConversationTurnNativeFileSystem
         public uint ReparseTag;
     }
 
+    private struct WindowsByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
     private struct StatxTimestamp
     {
         public long Seconds;
@@ -293,6 +364,10 @@ internal static class DefaultConversationTurnNativeFileSystem
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, FileInfoByHandleClass fileInformationClass, out WindowsFileAttributeTagInfo fileInformation, uint bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out WindowsByHandleFileInformation fileInformation);
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int open(string path, int flags, int mode);

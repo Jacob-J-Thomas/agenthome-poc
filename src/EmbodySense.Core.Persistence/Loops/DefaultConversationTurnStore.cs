@@ -16,7 +16,10 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// </summary>
 /// <remarks>
 /// Each lifecycle version is atomically published through a same-directory replacement. A process-local gate and exclusive
-/// workspace active-set lease serialize cooperating operations across processes. Unsupported schemas and altered transition history fail closed.
+/// workspace active-set lease serialize cooperating operations across processes. Terminal archival first claims and re-proves the
+/// exact source identity and bytes, then publishes immutable history atomically without replacement. Unsupported schemas, pathname
+/// substitutions, and altered transition history fail closed. Each terminal history artifact retains one byte-identical immutable
+/// source-proof sidecar so cleanup never unlinks an unverified pathname; terminal history therefore consumes roughly twice the record bytes.
 /// </remarks>
 public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 {
@@ -38,7 +41,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
     /// <summary>Initializes the store for one workspace.</summary>
     /// <param name="paths">The workspace paths that own the active and historical turn artifacts.</param>
-    /// <param name="coordination">An optional observer invoked while an operation owns the active-turn-set lease.</param>
+    /// <param name="coordination">An optional observer invoked at active-set and archival phases while the store owns the active-turn-set lease.</param>
     public DefaultConversationTurnStore(WorkspacePaths paths, IDefaultConversationTurnStoreCoordination? coordination = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -60,10 +63,11 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         try
         {
             await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.Create, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.Create, cancellationToken);
             var activeBytes = await ArchiveResolvedActiveAsync(cancellationToken);
             var existingRead = await ReadOptionalAsync(path, record.TurnId, MaximumActiveArtifactBytes, cancellationToken);
-            var historicalRead = await ReadOptionalAsync(GetHistoryPath(record.TurnId), record.TurnId, MaximumActiveArtifactBytes, cancellationToken);
+            var historicalRead = await ReadHistoryOptionalAsync(record.TurnId, cancellationToken);
             var existing = existingRead?.Record;
             var historical = historicalRead?.Record;
             RequireNoDuplicate(existing, historical, record.TurnId);
@@ -109,10 +113,11 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         try
         {
             await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.Update, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.Update, cancellationToken);
             var activeBytes = await MeasureActiveAggregateBytesAsync(cancellationToken);
             var existingRead = await ReadOptionalAsync(path, record.TurnId, MaximumActiveArtifactBytes, cancellationToken);
-            var historicalRead = await ReadOptionalAsync(GetHistoryPath(record.TurnId), record.TurnId, MaximumActiveArtifactBytes, cancellationToken);
+            var historicalRead = await ReadHistoryOptionalAsync(record.TurnId, cancellationToken);
             var existing = existingRead?.Record;
             var historical = historicalRead?.Record;
             RequireNoDuplicate(existing, historical, record.TurnId);
@@ -136,10 +141,15 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             }
 
             EnsureActiveAggregateBytes(activeBytes - existingRead!.Value.ByteCount, serializedRecord.LongLength);
-            await WriteAsync(path, serializedRecord, cancellationToken);
             if (ShouldArchive(record))
             {
-                MoveToHistory(path, record.TurnId);
+                var written = await WriteWithProofAsync(path, record, serializedRecord, cancellationToken);
+                await ObserveArchivePhaseAsync(DefaultConversationTurnStoreOperation.Update, record.TurnId, DefaultConversationTurnArchivePhase.AfterTerminalWritePublication, cancellationToken);
+                await ArchiveActiveAsync(path, written, DefaultConversationTurnStoreOperation.Update, cancellationToken);
+            }
+            else
+            {
+                await WriteAsync(path, serializedRecord, cancellationToken);
             }
             return new DefaultConversationTurnStoreResult(DefaultConversationTurnStoreStatus.Updated, record);
         }
@@ -161,9 +171,10 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         try
         {
             await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.Load, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.Load, cancellationToken);
             var active = await ReadOptionalAsync(path, turnId, MaximumActiveArtifactBytes, cancellationToken);
-            var history = await ReadOptionalAsync(GetHistoryPath(turnId), turnId, MaximumActiveArtifactBytes, cancellationToken);
+            var history = await ReadHistoryOptionalAsync(turnId, cancellationToken);
             RequireNoDuplicate(active?.Record, history?.Record, turnId);
             return active?.Record ?? history?.Record;
         }
@@ -220,7 +231,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return _coordination?.BeforeActiveSetOperationAsync(operation, cancellationToken) ?? Task.CompletedTask;
     }
 
-    private static async Task<(DefaultConversationTurnRecord Record, long ByteCount)?> ReadOptionalAsync(string path, string expectedTurnId, long maximumBytes, CancellationToken cancellationToken)
+    private static async Task<(DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity)?> ReadOptionalAsync(string path, string expectedTurnId, long maximumBytes, CancellationToken cancellationToken)
     {
         try
         {
@@ -242,6 +253,33 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
     }
 
+    private async Task<(DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity)?> ReadHistoryOptionalAsync(string turnId, CancellationToken cancellationToken)
+    {
+        var history = await ReadOptionalAsync(GetHistoryPath(turnId), turnId, MaximumActiveArtifactBytes, cancellationToken);
+        var sourceProof = await ReadOptionalAsync(GetHistorySourceProofPath(turnId), turnId, MaximumActiveArtifactBytes, cancellationToken);
+        if (EntryExists(GetPendingArchiveHistoryPath(turnId)))
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has interrupted archival staging outside recovery.");
+        }
+
+        if (history is null && sourceProof is null)
+        {
+            return null;
+        }
+
+        if (history is null || sourceProof is null)
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has incomplete immutable archival evidence.");
+        }
+
+        if (!history.Value.Bytes.AsSpan().SequenceEqual(sourceProof.Value.Bytes))
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has conflicting immutable archival evidence.");
+        }
+
+        return history;
+    }
+
     private async Task<IReadOnlyList<DefaultConversationTurnRecord>> ListAsync(Func<DefaultConversationTurnRecord, bool> predicate, CancellationToken cancellationToken)
     {
         EnsureSupportedLayout();
@@ -256,13 +294,14 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         try
         {
             await using var activeSetLease = await AcquireLeaseAsync(activeSetPath, cancellationToken);
+            await RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation.List, cancellationToken);
             await CoordinateActiveSetAsync(DefaultConversationTurnStoreOperation.List, cancellationToken);
             var records = new List<DefaultConversationTurnRecord>();
             var totalBytes = 0L;
             foreach (var path in EnumerateBoundedActivePaths())
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var read = await ReadActiveAsync(path, MaximumActiveAggregateBytes - totalBytes, archiveResolved: true, cancellationToken);
+                var read = await ReadActiveAsync(path, MaximumActiveAggregateBytes - totalBytes, archiveResolved: true, DefaultConversationTurnStoreOperation.List, cancellationToken);
                 if (read is null)
                 {
                     continue;
@@ -287,9 +326,8 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
     }
 
-    private static async Task<(DefaultConversationTurnRecord Record, long ByteCount)> ReadRequiredAsync(string path, long maximumBytes, CancellationToken cancellationToken)
+    private static async Task<(DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity)> ReadRequiredAsync(string path, long maximumBytes, CancellationToken cancellationToken)
     {
-        DefaultConversationTurnRecord? record;
         byte[] bytes;
         try
         {
@@ -317,21 +355,23 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 throw new FormatException("The bounded default-conversation active-turn set contains an invalid artifact size.");
             }
 
+            var identity = DefaultConversationTurnNativeFileSystem.GetIdentity(stream);
             EnsureNoDuplicateJsonProperties(bytes);
-            record = JsonSerializer.Deserialize<DefaultConversationTurnRecord>(bytes, _jsonOptions);
+            var record = JsonSerializer.Deserialize<DefaultConversationTurnRecord>(bytes, _jsonOptions);
+
+            if (record is null)
+            {
+                throw new FormatException($"Default-conversation turn artifact `{path}` was empty.");
+            }
+
+            ValidateRecord(record);
+            return (record, bytes.LongLength, bytes, identity);
         }
         catch (JsonException exception)
         {
             throw new FormatException($"Default-conversation turn artifact `{path}` contains invalid JSON or unsupported enum values.", exception);
         }
 
-        if (record is null)
-        {
-            throw new FormatException($"Default-conversation turn artifact `{path}` was empty.");
-        }
-
-        ValidateRecord(record);
-        return (record, bytes.LongLength);
     }
 
     private static byte[] SerializeRecord(DefaultConversationTurnRecord record)
@@ -384,6 +424,23 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         await LoopArtifactFileWriter.WriteTextAsync(path, Encoding.UTF8.GetString(bytes), cancellationToken);
     }
 
+    private static async Task<(DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity)> WriteWithProofAsync(
+        string path,
+        DefaultConversationTurnRecord record,
+        byte[] bytes,
+        CancellationToken cancellationToken)
+    {
+        return await LoopArtifactFileWriter.WriteTextWithProofAsync(path, Encoding.UTF8.GetString(bytes), (stream, writtenBytes) =>
+        {
+            if (!writtenBytes.AsSpan().SequenceEqual(bytes))
+            {
+                throw new FormatException("The default-conversation turn artifact changed while its terminal write was staged.");
+            }
+
+            return (record, writtenBytes.LongLength, writtenBytes, DefaultConversationTurnNativeFileSystem.GetIdentity(stream));
+        }, cancellationToken);
+    }
+
     private void EnsureSupportedLayout()
     {
         if (Directory.Exists(_paths.DefaultConversationTurnsPath) && Directory.EnumerateFiles(_paths.DefaultConversationTurnsPath, "*.json", SearchOption.TopDirectoryOnly).Any())
@@ -418,7 +475,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         foreach (var path in EnumerateBoundedActivePaths())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var read = await ReadActiveAsync(path, MaximumActiveAggregateBytes - scannedBytes, archiveResolved: true, cancellationToken);
+            var read = await ReadActiveAsync(path, MaximumActiveAggregateBytes - scannedBytes, archiveResolved: true, DefaultConversationTurnStoreOperation.Create, cancellationToken);
             if (read is not null)
             {
                 scannedBytes += read.Value.ByteCount;
@@ -438,7 +495,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         foreach (var path in EnumerateBoundedActivePaths())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var read = await ReadActiveAsync(path, MaximumActiveAggregateBytes - totalBytes, archiveResolved: false, cancellationToken);
+            var read = await ReadActiveAsync(path, MaximumActiveAggregateBytes - totalBytes, archiveResolved: false, DefaultConversationTurnStoreOperation.Update, cancellationToken);
             if (read is not null)
             {
                 totalBytes += read.Value.ByteCount;
@@ -448,7 +505,186 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return totalBytes;
     }
 
+    private string GetPendingArchiveSourcePath(string turnId)
+    {
+        return Path.Combine(_paths.DefaultConversationActiveTurnsPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source");
+    }
+
+    private string GetPendingArchiveHistoryPath(string turnId)
+    {
+        return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-history.tmp");
+    }
+
+    private string GetHistorySourceProofPath(string turnId)
+    {
+        return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof");
+    }
+
+    private async Task ArchiveActiveAsync(string activePath, (DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity) proof, DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
+    {
+        await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeSourceClaim, cancellationToken);
+        var pendingSourcePath = GetPendingArchiveSourcePath(proof.Record.TurnId);
+        var pendingHistoryPath = GetPendingArchiveHistoryPath(proof.Record.TurnId);
+        var historyPath = GetHistoryPath(proof.Record.TurnId);
+        var sourceProofPath = GetHistorySourceProofPath(proof.Record.TurnId);
+        Directory.CreateDirectory(_paths.DefaultConversationTurnHistoryPath);
+        File.Move(activePath, pendingSourcePath, overwrite: false);
+        try
+        {
+            var claimed = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
+            if (claimed.Identity != proof.Identity || !claimed.Bytes.AsSpan().SequenceEqual(proof.Bytes))
+            {
+                throw new FormatException("The default-conversation turn artifact pathname was substituted before archival.");
+            }
+
+            if (EntryExists(activePath))
+            {
+                throw new FormatException("The default-conversation turn artifact pathname was replaced during archival.");
+            }
+
+            await WriteHistoryStageAsync(pendingHistoryPath, proof.Bytes, cancellationToken);
+            var stagedHistory = await ReadRequiredAsync(pendingHistoryPath, MaximumActiveArtifactBytes, cancellationToken);
+            if (!stagedHistory.Bytes.AsSpan().SequenceEqual(proof.Bytes))
+            {
+                throw new FormatException("The default-conversation turn history staging artifact changed before publication.");
+            }
+
+            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, cancellationToken);
+            File.Move(pendingHistoryPath, historyPath, overwrite: false);
+            await RevalidatePublishedHistoryAsync(historyPath, proof.Record.TurnId, stagedHistory.Identity, proof.Bytes, cancellationToken);
+            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterHistoryPublication, cancellationToken);
+            File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
+            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublication, cancellationToken);
+            var sourceProof = await ReadSourceProofOrRestoreAsync(sourceProofPath, activePath, cancellationToken);
+            if (sourceProof.Identity != proof.Identity || !sourceProof.Bytes.AsSpan().SequenceEqual(proof.Bytes))
+            {
+                TryRestorePendingSource(sourceProofPath, activePath);
+                throw new FormatException("The default-conversation turn source proof was substituted during archival.");
+            }
+
+            if (EntryExists(activePath))
+            {
+                throw new FormatException("The default-conversation turn artifact pathname was replaced during archival.");
+            }
+
+            await RevalidatePublishedHistoryAsync(historyPath, proof.Record.TurnId, stagedHistory.Identity, sourceProof.Bytes, cancellationToken);
+        }
+        catch
+        {
+            TryRestorePendingSource(pendingSourcePath, activePath);
+            TryRestorePendingSource(sourceProofPath, activePath);
+            throw;
+        }
+    }
+
+    private async Task RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(_paths.DefaultConversationActiveTurnsPath))
+        {
+            return;
+        }
+
+        var (_, pendingSourcePaths) = EnumerateBoundedActiveEntries();
+        foreach (var pendingSourcePath in pendingSourcePaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var turnId = ParsePendingArchiveTurnId(pendingSourcePath);
+            var activePath = GetActivePath(turnId);
+            var historyPath = GetHistoryPath(turnId);
+            var pendingHistoryPath = GetPendingArchiveHistoryPath(turnId);
+            var sourceProofPath = GetHistorySourceProofPath(turnId);
+            if (EntryExists(activePath))
+            {
+                throw new FormatException($"Default-conversation turn `{turnId}` has both active and interrupted archival sources.");
+            }
+
+            var pending = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
+            if (!ShouldArchive(pending.Record))
+            {
+                throw new FormatException($"Default-conversation turn `{turnId}` has an invalid interrupted archival source.");
+            }
+
+            var history = await ReadOptionalAsync(historyPath, turnId, MaximumActiveArtifactBytes, cancellationToken);
+            var sourceProof = await ReadOptionalAsync(sourceProofPath, turnId, MaximumActiveArtifactBytes, cancellationToken);
+            if (history is not null)
+            {
+                if (!history.Value.Bytes.AsSpan().SequenceEqual(pending.Bytes))
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has conflicting interrupted archival history.");
+                }
+
+                if (EntryExists(pendingHistoryPath) || sourceProof is not null)
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has duplicate interrupted archival evidence.");
+                }
+
+                File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
+                try
+                {
+                    var recoveredProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
+                    if (recoveredProof.Identity != pending.Identity || !recoveredProof.Bytes.AsSpan().SequenceEqual(history.Value.Bytes))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has a substituted interrupted source proof.");
+                    }
+
+                    await RevalidatePublishedHistoryAsync(historyPath, turnId, history.Value.Identity, recoveredProof.Bytes, cancellationToken);
+                }
+                catch
+                {
+                    TryRestorePendingSource(sourceProofPath, activePath);
+                    throw;
+                }
+
+                continue;
+            }
+
+            if (sourceProof is not null)
+            {
+                throw new FormatException($"Default-conversation turn `{turnId}` has a source proof without canonical history.");
+            }
+
+            if (EntryExists(pendingHistoryPath))
+            {
+                var staged = await ReadRequiredAsync(pendingHistoryPath, MaximumActiveArtifactBytes, cancellationToken);
+                if (!staged.Bytes.AsSpan().SequenceEqual(pending.Bytes))
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has conflicting interrupted archival staging.");
+                }
+
+                await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, cancellationToken);
+                File.Move(pendingHistoryPath, historyPath, overwrite: false);
+                try
+                {
+                    await RevalidatePublishedHistoryAsync(historyPath, turnId, staged.Identity, pending.Bytes, cancellationToken);
+                    File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
+                    var recoveredProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
+                    if (recoveredProof.Identity != pending.Identity || !recoveredProof.Bytes.AsSpan().SequenceEqual(staged.Bytes))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has a substituted interrupted source proof.");
+                    }
+
+                    await RevalidatePublishedHistoryAsync(historyPath, turnId, staged.Identity, recoveredProof.Bytes, cancellationToken);
+                }
+                catch
+                {
+                    TryRestorePendingSource(pendingSourcePath, activePath);
+                    TryRestorePendingSource(sourceProofPath, activePath);
+                    throw;
+                }
+
+                continue;
+            }
+
+            File.Move(pendingSourcePath, activePath, overwrite: false);
+        }
+    }
+
     private IReadOnlyList<string> EnumerateBoundedActivePaths()
+    {
+        return EnumerateBoundedActiveEntries().ActivePaths;
+    }
+
+    private (IReadOnlyList<string> ActivePaths, IReadOnlyList<string> PendingSourcePaths) EnumerateBoundedActiveEntries()
     {
         var entries = Directory.EnumerateFileSystemEntries(_paths.DefaultConversationActiveTurnsPath, "*", SearchOption.TopDirectoryOnly)
             .Take(MaximumActiveDirectoryEntries + 1)
@@ -458,18 +694,20 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             throw new IOException("The bounded default-conversation active-turn set is exhausted.");
         }
 
-        var paths = new List<string>(MaximumActiveArtifacts);
+        var activePaths = new List<string>(MaximumActiveArtifacts);
+        var pendingSourcePaths = new List<string>();
         foreach (var entry in entries.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             var fileName = Path.GetFileName(entry);
-            var attributes = File.GetAttributes(entry);
-            if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
-            {
-                throw new FormatException("The bounded default-conversation active-turn set contains an unexpected entry.");
-            }
-
             if (string.Equals(fileName, ".active-set.lock", StringComparison.Ordinal))
             {
+                continue;
+            }
+
+            if (fileName.Length > 0 && fileName[0] == '.' && fileName.EndsWith(".json.archive-source", StringComparison.Ordinal))
+            {
+                _ = ParsePendingArchiveTurnId(entry);
+                pendingSourcePaths.Add(entry);
                 continue;
             }
 
@@ -478,29 +716,95 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 throw new FormatException("The bounded default-conversation active-turn set contains an unexpected entry.");
             }
 
-            paths.Add(entry);
+            activePaths.Add(entry);
         }
 
-        if (paths.Count > MaximumActiveArtifacts)
+        if (activePaths.Count + pendingSourcePaths.Count > MaximumActiveArtifacts)
         {
             throw new IOException("The bounded default-conversation active-turn set is exhausted.");
         }
 
-        return paths;
+        return (activePaths, pendingSourcePaths);
     }
 
-    private void MoveToHistory(string activePath, string turnId)
+    private static string ParsePendingArchiveTurnId(string path)
     {
-        var historyPath = GetHistoryPath(turnId);
-        Directory.CreateDirectory(_paths.DefaultConversationTurnHistoryPath);
-        if (File.Exists(historyPath))
+        const string Suffix = ".json.archive-source";
+        var fileName = Path.GetFileName(path);
+        if (fileName.Length <= Suffix.Length + 1 || fileName[0] != '.' || !fileName.EndsWith(Suffix, StringComparison.Ordinal))
         {
-            throw new IOException("The immutable default-conversation terminal history already contains this turn.");
+            throw new FormatException("The bounded default-conversation active-turn set contains an invalid interrupted archive source.");
         }
-        File.Move(activePath, historyPath);
+
+        return LoopArtifactPaths.ValidateArtifactId(fileName[1..^Suffix.Length]);
     }
 
-    private async Task<(DefaultConversationTurnRecord Record, long ByteCount, bool Archived)?> ReadActiveAsync(string activePath, long remainingAggregateBytes, bool archiveResolved, CancellationToken cancellationToken)
+    private static async Task WriteHistoryStageAsync(string path, byte[] bytes, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(bytes, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
+    }
+
+    private static void TryRestorePendingSource(string pendingSourcePath, string activePath)
+    {
+        try
+        {
+            File.Move(pendingSourcePath, activePath, overwrite: false);
+        }
+        catch (FileNotFoundException)
+        {
+        }
+        catch (IOException) when (EntryExists(activePath))
+        {
+        }
+    }
+
+    private static async Task<(DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity)> ReadSourceProofOrRestoreAsync(string sourceProofPath, string activePath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
+        }
+        catch
+        {
+            TryRestorePendingSource(sourceProofPath, activePath);
+            throw;
+        }
+    }
+
+    private static async Task RevalidatePublishedHistoryAsync(string historyPath, string turnId, DefaultConversationTurnFileIdentity expectedIdentity, byte[] expectedBytes, CancellationToken cancellationToken)
+    {
+        var published = await ReadOptionalAsync(historyPath, turnId, MaximumActiveArtifactBytes, cancellationToken);
+        if (published is null || published.Value.Identity != expectedIdentity || !published.Value.Bytes.AsSpan().SequenceEqual(expectedBytes))
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` canonical history was substituted during publication.");
+        }
+    }
+
+    private static bool EntryExists(string path)
+    {
+        try
+        {
+            _ = File.GetAttributes(path);
+            return true;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private Task ObserveArchivePhaseAsync(DefaultConversationTurnStoreOperation operation, string turnId, DefaultConversationTurnArchivePhase phase, CancellationToken cancellationToken)
+    {
+        return _coordination?.ObserveArchivePhaseAsync(operation, turnId, phase, cancellationToken) ?? Task.CompletedTask;
+    }
+
+    private async Task<(DefaultConversationTurnRecord Record, long ByteCount, bool Archived)?> ReadActiveAsync(string activePath, long remainingAggregateBytes, bool archiveResolved, DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
     {
         var expectedTurnId = Path.GetFileNameWithoutExtension(activePath);
         var activeRead = await ReadOptionalAsync(activePath, expectedTurnId, Math.Min(MaximumActiveArtifactBytes, remainingAggregateBytes), cancellationToken);
@@ -510,11 +814,11 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
 
         var active = activeRead.Value.Record;
-        var history = await ReadOptionalAsync(GetHistoryPath(active.TurnId), active.TurnId, MaximumActiveArtifactBytes, cancellationToken);
+        var history = await ReadHistoryOptionalAsync(active.TurnId, cancellationToken);
         RequireNoDuplicate(active, history?.Record, active.TurnId);
         if (archiveResolved && ShouldArchive(active))
         {
-            MoveToHistory(activePath, active.TurnId);
+            await ArchiveActiveAsync(activePath, activeRead.Value, operation, cancellationToken);
             return (active, activeRead.Value.ByteCount, true);
         }
 
