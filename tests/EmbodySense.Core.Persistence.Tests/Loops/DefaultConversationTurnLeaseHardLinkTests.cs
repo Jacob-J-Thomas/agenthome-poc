@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Models;
 using EmbodySense.Tests.Support;
+using System.Runtime.InteropServices;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
 
@@ -14,6 +15,33 @@ public sealed class DefaultConversationTurnLeaseHardLinkTests
         | UnixFileMode.GroupExecute
         | UnixFileMode.OtherRead
         | UnixFileMode.OtherExecute;
+
+    [Fact]
+    public async Task Store_restores_owner_only_mode_for_a_new_unix_lease_under_a_restrictive_umask()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var leasePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, ".active-set.lock");
+        var originalMask = umask(0x1FF);
+        try
+        {
+            Assert.Empty(await new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+            Assert.Equal(OwnerOnly, File.GetUnixFileMode(leasePath));
+        }
+        finally
+        {
+            umask(originalMask);
+        }
+
+        Assert.Empty(await new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+        Assert.Equal(OwnerOnly, File.GetUnixFileMode(leasePath));
+    }
 
     [Theory]
     [InlineData(false)]
@@ -157,4 +185,7 @@ public sealed class DefaultConversationTurnLeaseHardLinkTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         Assert.Empty(await new DefaultConversationTurnStore(paths).ListIncompleteAsync(cancellation.Token));
     }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern uint umask(uint mask);
 }

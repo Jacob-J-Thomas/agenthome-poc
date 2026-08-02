@@ -244,6 +244,11 @@ internal static class DefaultConversationTurnNativeFileSystem
             {
                 try
                 {
+                    if (fchmod(createdStream.SafeFileHandle, PermissionUserReadWrite) != 0)
+                    {
+                        throw NativeIOException($"Default-conversation persistence file permissions for `{path}` could not be restricted", Marshal.GetLastPInvokeError());
+                    }
+
                     RequireUnixRegularFile(createdStream.SafeFileHandle, path, requireLeasePosture: true);
                     return createdStream;
                 }
@@ -473,6 +478,9 @@ internal static class DefaultConversationTurnNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int flock(SafeFileHandle file, int operation);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fchmod(SafeFileHandle file, int mode);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int statx(SafeFileHandle file, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out LinuxStatx information);
