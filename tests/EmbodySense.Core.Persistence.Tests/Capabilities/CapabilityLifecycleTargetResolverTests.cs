@@ -194,10 +194,18 @@ public sealed class CapabilityLifecycleTargetResolverTests
 
         var result = await resolver.ResolveAsync(Request(first));
 
-        Assert.True(observer.Swapped);
-        Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Available, result.Status);
-        Assert.Equal(first.Manifest.Descriptor.Version, result.Descriptor!.Version);
-        Assert.Equal(first.Manifest.Checksum, result.ArtifactDigest);
+        Assert.True(observer.Attempted);
+        if (observer.Swapped)
+        {
+            Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Available, result.Status);
+            Assert.Equal(first.Manifest.Descriptor.Version, result.Descriptor!.Version);
+            Assert.Equal(first.Manifest.Checksum, result.ArtifactDigest);
+        }
+        else
+        {
+            Assert.NotNull(observer.RejectedByOperatingSystem);
+            Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, result.Status);
+        }
     }
 
     private static CapabilityLifecycleTargetResolutionRequest Request(CapabilityArtifactStageRequest stage) => new(CapabilityLifecycleOperationKind.Enable, stage.Manifest.Descriptor.Id);

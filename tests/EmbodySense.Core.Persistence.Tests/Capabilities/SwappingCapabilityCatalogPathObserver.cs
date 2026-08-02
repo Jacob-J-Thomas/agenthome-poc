@@ -6,6 +6,10 @@ internal sealed class SwappingCapabilityCatalogPathObserver(string sourcePath, s
 {
     private bool _swapActive;
 
+    public bool Attempted { get; private set; }
+
+    public Exception? RejectedByOperatingSystem { get; private set; }
+
     public bool Swapped { get; private set; }
 
     public void BeforeDirectoryChildOpen(string parentPath, string childName)
@@ -21,10 +25,30 @@ internal sealed class SwappingCapabilityCatalogPathObserver(string sourcePath, s
             return;
         }
 
-        Directory.Move(sourcePath, retainedPath);
-        Directory.CreateSymbolicLink(sourcePath, replacementTargetPath);
-        _swapActive = true;
-        Swapped = true;
+        Attempted = true;
+        try
+        {
+            Directory.Move(sourcePath, retainedPath);
+            Directory.CreateSymbolicLink(sourcePath, replacementTargetPath);
+            _swapActive = true;
+            Swapped = true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            RejectedByOperatingSystem = exception;
+            if (!Directory.Exists(sourcePath) && Directory.Exists(retainedPath))
+            {
+                try
+                {
+                    Directory.Move(retainedPath, sourcePath);
+                }
+                catch (Exception restoreException) when (restoreException is IOException or UnauthorizedAccessException)
+                {
+                    RejectedByOperatingSystem = new AggregateException(exception, restoreException);
+                }
+            }
+            throw;
+        }
     }
 
     public void AfterFileChildOpen(string parentPath, string childName)
