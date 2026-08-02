@@ -10,5 +10,9 @@ public enum ContextualRoleRevisionReadStatus
     /// <summary>No revision exists for the exact identity.</summary>
     NotFound = 2,
     /// <summary>The request was malformed and no read was performed.</summary>
-    Invalid = 3
+    Invalid = 3,
+    /// <summary>The persistence boundary was unavailable before a trusted read could complete.</summary>
+    Unavailable = 4,
+    /// <summary>The exact revision could not be proved because durable workspace evidence was inconsistent.</summary>
+    Ambiguous = 5
 }
