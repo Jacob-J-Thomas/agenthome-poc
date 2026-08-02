@@ -41,6 +41,7 @@ internal static class CapabilityCatalogNativeFileSystem
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
     private const int ErrorNoMoreFiles = 18;
+    private const int FileRenameInformation = 10;
     private const int InitialWindowsDirectoryBufferBytes = 16 * 1_024;
     private const int MaximumWindowsDirectoryBufferBytes = 60 * 1_024;
     private const int AtEmptyPath = 0x1000;
@@ -131,7 +132,7 @@ internal static class CapabilityCatalogNativeFileSystem
         {
             using var source = OpenWindowsRelative(parent, sourceName, DeleteAccess | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new FileNotFoundException("The capability catalog staging artifact disappeared before its retained-handle move.", sourceFullPath);
             ValidateWindowsHandle(source, sourceName, requireDirectory: false);
-            RenameWindowsByHandle(source, destinationName, replaceExisting: true, destinationFullPath);
+            RenameWindowsByHandle(source, parent, destinationName, replaceExisting: true, destinationFullPath);
             return;
         }
 
@@ -448,7 +449,7 @@ internal static class CapabilityCatalogNativeFileSystem
             ValidateWindowsHandle(staging, temporaryName, requireDirectory: true);
             var expectedIdentity = GetWindowsFileIdentity(staging, temporaryPath);
             durabilityBarrier.BeforeDirectoryMove(temporaryPath, fullPath);
-            RenameWindowsByHandle(staging, name, replaceExisting: false, fullPath);
+            RenameWindowsByHandle(staging, parent, name, replaceExisting: false, fullPath);
             renamed = true;
             if (!FlushFileBuffers(staging))
             {
@@ -487,21 +488,32 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    private static void RenameWindowsByHandle(SafeFileHandle source, string destinationName, bool replaceExisting, string destinationPath)
+    private static void RenameWindowsByHandle(SafeFileHandle source, SafeFileHandle parent, string destinationName, bool replaceExisting, string destinationPath)
     {
         var fileName = Encoding.Unicode.GetBytes(destinationName);
         var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
         var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
         var fileNameOffset = fileNameLengthOffset + sizeof(uint);
-        var information = new byte[fileNameOffset + fileName.Length];
-        information[0] = replaceExisting ? (byte)1 : (byte)0;
-        // Every caller renames within the source entry's already-retained directory. Windows' simple-name
-        // form therefore keeps RootDirectory null and resolves the target beside the proved source handle.
-        BitConverter.GetBytes(fileName.Length).CopyTo(information, fileNameLengthOffset);
-        fileName.CopyTo(information, fileNameOffset);
-        if (!SetFileInformationByHandle(source, FileInfoByHandleClass.FileRenameInfo, information, (uint)information.Length))
+        var unalignedBufferSize = checked(fileNameOffset + fileName.Length + sizeof(char));
+        var bufferSize = checked((unalignedBufferSize + IntPtr.Size - 1) & -IntPtr.Size);
+        var information = Marshal.AllocHGlobal(bufferSize);
+        try
         {
-            throw NativeIOException($"Capability catalog entry could not be moved by retained handle to `{destinationPath}`", Marshal.GetLastPInvokeError());
+            Marshal.Copy(new byte[bufferSize], 0, information, bufferSize);
+            Marshal.WriteByte(information, replaceExisting ? (byte)1 : (byte)0);
+            Marshal.WriteIntPtr(information, rootDirectoryOffset, parent.DangerousGetHandle());
+            Marshal.WriteInt32(information, fileNameLengthOffset, fileName.Length);
+            Marshal.Copy(fileName, 0, IntPtr.Add(information, fileNameOffset), fileName.Length);
+            var status = NtSetInformationFile(source, out _, information, (uint)bufferSize, FileRenameInformation);
+            GC.KeepAlive(parent);
+            if (status < 0)
+            {
+                throw NativeIOException($"Capability catalog entry could not be moved by retained handle to `{destinationPath}`", unchecked((int)RtlNtStatusToDosError(status)));
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(information);
         }
     }
 
@@ -810,6 +822,9 @@ internal static class CapabilityCatalogNativeFileSystem
 
     [DllImport("ntdll.dll")]
     private static extern int NtCreateFile(out IntPtr fileHandle, uint desiredAccess, ref CapabilityCatalogWindowsObjectAttributes objectAttributes, out CapabilityCatalogWindowsIoStatusBlock ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtSetInformationFile(SafeFileHandle fileHandle, out CapabilityCatalogWindowsIoStatusBlock ioStatusBlock, IntPtr fileInformation, uint length, int fileInformationClass);
 
     [DllImport("ntdll.dll")]
     private static extern uint RtlNtStatusToDosError(int status);
