@@ -23,6 +23,43 @@ public sealed class CapabilityAuthorityWorkspaceMutationCommitBoundaryTests
     }
 
     [Theory]
+    [InlineData(".agent/SKILLS/manifest.json")]
+    [InlineData(".AGENT/skills")]
+    [InlineData(".AGENT")]
+    public async Task ExecuteAsync_fences_case_aliased_skill_trees_on_case_insensitive_hosts(string relativePath)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authority = new StubCapabilityAuthorityTransaction();
+        var boundary = new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, authority);
+
+        await boundary.ExecuteAsync([Path.Combine(paths.RootPath, relativePath)], _ => Task.FromResult(true));
+
+        var expectedExecutions = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? 1 : 0;
+        Assert.Equal(expectedExecutions, authority.Executions);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_fences_canonically_equivalent_skill_trees_on_macos()
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var canonicalWorkspaceRoot = Path.Combine(workspace.RootPath, "caf\u00e9");
+        var paths = new WorkspacePaths(canonicalWorkspaceRoot);
+        var authority = new StubCapabilityAuthorityTransaction();
+        var boundary = new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, authority);
+        var aliasedWorkspaceRoot = Path.Combine(workspace.RootPath, "cafe\u0301");
+
+        await boundary.ExecuteAsync([Path.Combine(aliasedWorkspaceRoot, ".agent", "skills", "manifest.json")], _ => Task.FromResult(true));
+
+        Assert.Equal(1, authority.Executions);
+    }
+
+    [Theory]
     [InlineData(".agent/skills")]
     [InlineData(".agent")]
     [InlineData(".")]
@@ -51,15 +88,17 @@ public sealed class CapabilityAuthorityWorkspaceMutationCommitBoundaryTests
         Assert.Equal(1, authority.Executions);
     }
 
-    [Fact]
-    public async Task ExecuteAsync_bypasses_capability_authority_for_non_skill_sibling_commits()
+    [Theory]
+    [InlineData("skills-generated")]
+    [InlineData("SKILLS-generated")]
+    public async Task ExecuteAsync_bypasses_capability_authority_for_non_skill_sibling_commits(string siblingDirectory)
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var authority = new StubCapabilityAuthorityTransaction();
         var boundary = new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, authority);
 
-        var result = await boundary.ExecuteAsync([Path.Combine(paths.AgentPath, "skills-generated", "note.txt")], _ => Task.FromResult("committed"));
+        var result = await boundary.ExecuteAsync([Path.Combine(paths.AgentPath, siblingDirectory, "note.txt")], _ => Task.FromResult("committed"));
 
         Assert.Equal("committed", result);
         Assert.Equal(0, authority.Executions);

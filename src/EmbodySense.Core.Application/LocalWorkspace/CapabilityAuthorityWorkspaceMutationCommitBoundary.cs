@@ -1,10 +1,12 @@
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Common;
 using EmbodySense.Core.Common.Workspace;
+using System.Text;
 
 namespace EmbodySense.Core.Application.LocalWorkspace;
 
 /// <summary>Fences exact filesystem commits whose target trees overlap the configured skill-authority root.</summary>
+/// <remarks>macOS overlap checks conservatively normalize Unicode and ignore case at this authority boundary without broadening the global permission-policy path comparison.</remarks>
 public sealed class CapabilityAuthorityWorkspaceMutationCommitBoundary : IWorkspaceMutationCommitBoundary
 {
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
@@ -38,10 +40,27 @@ public sealed class CapabilityAuthorityWorkspaceMutationCommitBoundary : IWorksp
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(affectedPath);
             var normalizedPath = Path.GetFullPath(affectedPath);
-            requiresCapabilityAuthority |= FileSystemPathComparer.IsWithinOrEqual(normalizedPath, _skillsRootPath)
-                || FileSystemPathComparer.IsWithinOrEqual(_skillsRootPath, normalizedPath);
+            requiresCapabilityAuthority |= IsWithinOrEqualAuthorityPath(normalizedPath, _skillsRootPath)
+                || IsWithinOrEqualAuthorityPath(_skillsRootPath, normalizedPath);
         }
 
         return requiresCapabilityAuthority ? _authorityTransaction.ExecuteAsync(commit, cancellationToken) : commit(cancellationToken);
+    }
+
+    private static bool IsWithinOrEqualAuthorityPath(string candidatePath, string rootPath)
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            return FileSystemPathComparer.IsWithinOrEqual(candidatePath, rootPath);
+        }
+
+        var normalizedCandidatePath = EnsureTrailingSeparator(candidatePath.Normalize(NormalizationForm.FormC));
+        var normalizedRootPath = EnsureTrailingSeparator(rootPath.Normalize(NormalizationForm.FormC));
+        return normalizedCandidatePath.StartsWith(normalizedRootPath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string EnsureTrailingSeparator(string path)
+    {
+        return Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
     }
 }
