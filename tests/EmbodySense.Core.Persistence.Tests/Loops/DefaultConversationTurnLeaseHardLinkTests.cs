@@ -43,6 +43,77 @@ public sealed class DefaultConversationTurnLeaseHardLinkTests
         Assert.Equal(OwnerOnly, File.GetUnixFileMode(leasePath));
     }
 
+    [Fact]
+    public async Task Store_boundedly_retries_a_peer_lease_creation_window_without_normalizing_the_inode()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var leasePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, ".active-set.lock");
+        await File.WriteAllTextAsync(leasePath, string.Empty);
+        File.SetUnixFileMode(leasePath, UnixFileMode.None);
+        var operation = new DefaultConversationTurnStore(paths).ListIncompleteAsync();
+
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        Assert.False(operation.IsCompleted);
+        Assert.Equal(UnixFileMode.None, File.GetUnixFileMode(leasePath));
+        File.SetUnixFileMode(leasePath, OwnerOnly);
+        Assert.Empty(await operation.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(OwnerOnly, File.GetUnixFileMode(leasePath));
+    }
+
+    [Fact]
+    public async Task Store_boundedly_retries_a_peer_visible_temporary_posture_without_normalizing_the_inode()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var leasePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, ".active-set.lock");
+        var temporaryMode = OwnerOnly | UnixFileMode.GroupRead | UnixFileMode.OtherRead;
+        await File.WriteAllTextAsync(leasePath, string.Empty);
+        File.SetUnixFileMode(leasePath, temporaryMode);
+        var operation = new DefaultConversationTurnStore(paths).ListIncompleteAsync();
+
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        Assert.False(operation.IsCompleted);
+        Assert.Equal(temporaryMode, File.GetUnixFileMode(leasePath));
+        File.SetUnixFileMode(leasePath, OwnerOnly);
+        Assert.Empty(await operation.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(OwnerOnly, File.GetUnixFileMode(leasePath));
+    }
+
+    [Fact]
+    public async Task Store_boundedly_rejects_a_permanently_inaccessible_unix_lease_without_normalizing_it()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var leasePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, ".active-set.lock");
+        await File.WriteAllTextAsync(leasePath, string.Empty);
+        File.SetUnixFileMode(leasePath, UnixFileMode.None);
+
+        await Assert.ThrowsAsync<IOException>(() => new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+
+        Assert.Equal(UnixFileMode.None, File.GetUnixFileMode(leasePath));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

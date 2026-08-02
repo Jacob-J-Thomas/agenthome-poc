@@ -21,6 +21,8 @@ internal static class DefaultConversationTurnNativeFileSystem
     private const int ErrorPathNotFound = 3;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
+    private const int UnixPermissionDenied = 13;
+    private const int MaximumLeaseInitializationOpenAttempts = 8;
     private const int AtEmptyPath = 0x1000;
     private const int LockExclusive = 2;
     private const int LockNonBlocking = 4;
@@ -59,7 +61,30 @@ internal static class DefaultConversationTurnNativeFileSystem
         Func<DefaultConversationTurnLeasePhase, CancellationToken, Task>? observeLeasePhase,
         CancellationToken cancellationToken)
     {
-        var unixStream = OpenUnixRegularFile(path, readWrite: true, create: true);
+        FileStream unixStream;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                unixStream = OpenUnixRegularFile(path, readWrite: true, create: true);
+                break;
+            }
+            catch (IOException exception) when (
+                (IsNativeError(exception, UnixPermissionDenied)
+                    || exception is UnixLeasePostureException)
+                && attempt < MaximumLeaseInitializationOpenAttempts)
+            {
+                // A peer creating this lease under a restrictive umask can publish the pathname
+                // immediately before it restores exact owner-only mode on its own new handle.
+                // Retry that one bounded native failure without ever changing a pre-existing inode.
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken);
+            }
+            catch (UnixLeasePostureException exception)
+            {
+                throw new IOException(exception.Message, exception);
+            }
+        }
+
         var ownsStream = true;
         try
         {
@@ -276,7 +301,11 @@ internal static class DefaultConversationTurnNativeFileSystem
         var handle = new SafeFileHandle(new IntPtr(descriptor), ownsHandle: true);
         try
         {
-            RequireUnixRegularFile(handle, path, requireLeasePosture: create);
+            RequireUnixRegularFile(
+                handle,
+                path,
+                requireLeasePosture: create,
+                identifyLeaseInitializationPosture: create);
             return new FileStream(handle, readWrite ? FileAccess.ReadWrite : FileAccess.Read, readWrite ? 1 : 4_096, isAsync: false);
         }
         catch
@@ -287,7 +316,11 @@ internal static class DefaultConversationTurnNativeFileSystem
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public FIFO and symbolic-link store behavior; its alternate Unix ABI is unreachable in any one coverage run.")]
-    private static void RequireUnixRegularFile(SafeFileHandle handle, string path, bool requireLeasePosture = false)
+    private static void RequireUnixRegularFile(
+        SafeFileHandle handle,
+        string path,
+        bool requireLeasePosture = false,
+        bool identifyLeaseInitializationPosture = false)
     {
         ushort mode;
         ulong linkCount = 0;
@@ -335,7 +368,13 @@ internal static class DefaultConversationTurnNativeFileSystem
                 || (mode & UnixPostureMask) != PermissionUserReadWrite
                 || userId != geteuid()))
         {
-            throw new IOException($"Default-conversation active-set lease `{path}` does not have exclusive owner-only file posture.");
+            var message = $"Default-conversation active-set lease `{path}` does not have exclusive owner-only file posture.";
+            if (identifyLeaseInitializationPosture)
+            {
+                throw new UnixLeasePostureException(message);
+            }
+
+            throw new IOException(message);
         }
     }
 
@@ -354,6 +393,11 @@ internal static class DefaultConversationTurnNativeFileSystem
     private static IOException NativeIOException(string message, int error)
     {
         return new IOException($"{message}: {new Win32Exception(error).Message}", unchecked((int)(0x80070000U | (uint)error)));
+    }
+
+    private static bool IsNativeError(IOException exception, int error)
+    {
+        return (exception.HResult & 0xFFFF) == error;
     }
 
     private static int UnixOpenReadOnly => 0;
