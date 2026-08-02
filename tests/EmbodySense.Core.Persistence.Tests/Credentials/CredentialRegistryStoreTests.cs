@@ -522,6 +522,25 @@ public sealed class CredentialRegistryStoreTests
         Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
         var mutation = await Store(paths).MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id("health-1"), 1, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null));
         Assert.Equal(CredentialRegistryMutationStatus.Unavailable, mutation.Status);
+        var corruptStore = Store(paths);
+        Assert.Equal(CredentialFailureCode.Unavailable, (await corruptStore.GetAsync(ReferenceId(), default)).Failure!.Code);
+        Assert.False(await corruptStore.AcknowledgeAuditAsync(Id("corrupt-audit")));
+        Assert.Equal(CredentialFailureCode.Unavailable, (await corruptStore.AppendAsync(Evidence(Binding()), default)).Failure!.Code);
+    }
+
+    [Fact]
+    public async Task Audit_delivery_acknowledgement_is_durable_and_idempotent()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var intentId = Id("ack-intent");
+        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginCreate, intentId, 0, ReferenceId(), Reference(), Binding(), Id("ack-consent"), CredentialProviderHealthStatus.NeedsRepair, null, false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, Hash('a'), CredentialLifecycleMutationPhase.Intent, intentId, null, "workspace-1", IntentAuditPayload());
+
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(intent)).Status);
+        Assert.True(await store.AcknowledgeAuditAsync(intentId));
+        Assert.True(await Store(paths).AcknowledgeAuditAsync(intentId));
+        Assert.Empty((await Store(paths).ReadAsync()).PendingAudits);
     }
 
     [Fact]
@@ -599,6 +618,53 @@ public sealed class CredentialRegistryStoreTests
         Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
         Assert.Equal(originalPublic, await File.ReadAllBytesAsync(paths.CredentialRegistryDocumentPath));
         Assert.Equal(originalPrivate, await File.ReadAllBytesAsync(paths.CredentialRegistryPrivateDocumentPath));
+    }
+
+    [Theory]
+    [InlineData("entry-health")]
+    [InlineData("entry-order")]
+    [InlineData("locator-order")]
+    [InlineData("duplicate-locator")]
+    [InlineData("operation-id")]
+    [InlineData("duplicate-operation")]
+    [InlineData("unexpected-audit-outbox")]
+    [InlineData("invalid-audit-delivery")]
+    [InlineData("invalid-evidence")]
+    [InlineData("invalid-tombstone")]
+    [InlineData("invalid-lifecycle-shape")]
+    public async Task Authenticated_structural_corruption_is_rejected_without_using_the_proof_as_a_migration(string corruption)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var bootstrapTrust = new TestCapabilityLifecycleTrustProvider();
+        var bootstrap = new CredentialRegistryStore(paths, bootstrapTrust, new AcceptingLocatorVerifier());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await bootstrap.MutateAsync(Register(1, 0))).Status);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await bootstrap.MutateAsync(Register(2, 1))).Status);
+        if (corruption == "invalid-tombstone")
+        {
+            var tombstone = new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("corrupt-tombstone"), 2, ReferenceId(1), null, null, null, null, null);
+            Assert.Equal(CredentialRegistryMutationStatus.Applied, (await bootstrap.MutateAsync(tombstone)).Status);
+        }
+
+        var publicNode = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!.AsObject();
+        var privateNode = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!.AsObject();
+        CorruptRegistry(publicNode, privateNode, corruption);
+        publicNode["stateDigest"] = ComputeStateDigest(publicNode, privateNode);
+        privateNode["stateDigest"] = publicNode["stateDigest"]!.GetValue<string>();
+        publicNode["contentDigest"] = ComputeContentDigest(publicNode);
+        var identity = publicNode["workspaceIdentity"]!.GetValue<string>();
+        var generation = publicNode["generation"]!.GetValue<long>();
+        var contentDigest = publicNode["contentDigest"]!.GetValue<string>();
+        var corruptedTrust = new TestCapabilityLifecycleTrustProvider();
+        _ = await corruptedTrust.InitializeAsync(identity, generation, contentDigest);
+        publicNode["authenticationTag"] = await corruptedTrust.AuthenticateArtifactAsync(identity, generation, contentDigest);
+        await File.WriteAllTextAsync(paths.CredentialRegistryDocumentPath, publicNode.ToJsonString(JsonOptions(writeIndented: true)));
+        await File.WriteAllTextAsync(paths.CredentialRegistryPrivateDocumentPath, privateNode.ToJsonString(JsonOptions(writeIndented: true)));
+
+        var read = await new CredentialRegistryStore(paths, corruptedTrust, new AcceptingLocatorVerifier()).ReadAsync();
+
+        Assert.False(read.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
     }
 
     [Fact]
@@ -932,6 +998,40 @@ public sealed class CredentialRegistryStoreTests
     }
 
     [Fact]
+    public async Task Public_operations_fail_closed_for_precancelled_and_unsafe_lock_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.False((await store.ReadAsync(cancelled.Token)).Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, (await store.GetAsync(ReferenceId(), cancelled.Token)).Failure!.Code);
+        Assert.Equal(CredentialRegistryMutationStatus.Unavailable, (await store.MutateAsync(Register(0), cancelled.Token)).Status);
+        Assert.False(await store.AcknowledgeAuditAsync(Id("cancelled-audit"), cancelled.Token));
+        Assert.Equal(CredentialFailureCode.Unavailable, (await store.AppendAsync(Evidence(Binding()), cancelled.Token)).Failure!.Code);
+
+        Directory.CreateDirectory(paths.CredentialRegistryLockPath);
+        var unsafeStore = Store(paths);
+        Assert.False(await unsafeStore.AcknowledgeAuditAsync(Id("unsafe-lock-audit")));
+        Assert.Equal(CredentialFailureCode.Unavailable, (await unsafeStore.AppendAsync(Evidence(Binding()), default)).Failure!.Code);
+    }
+
+    [Fact]
+    public async Task Default_public_store_fails_closed_without_server_owned_trust_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        var read = await new CredentialRegistryStore(paths).ReadAsync();
+
+        Assert.False(read.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
+        Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
+    }
+
+    [Fact]
     public async Task Invalid_mutation_shapes_fail_before_storage_access()
     {
         using var workspace = new TestWorkspace();
@@ -946,7 +1046,11 @@ public sealed class CredentialRegistryStoreTests
             await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("invalid-tombstone"), 0, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null)),
             await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Bind, Id("invalid-bind"), 0, ReferenceId(), null, null, null, null, null)),
             await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Consent, Id("invalid-consent"), 0, ReferenceId(), null, null, null, null, null)),
-            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, Id("invalid-posture"), 0, ReferenceId(), Reference(), null, null, null, null))
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, Id("invalid-posture"), 0, ReferenceId(), Reference(), null, null, null, null)),
+            await store.MutateAsync(Register(0) with { OperationId = Id("invalid-active-runs"), AffectedActiveRuns = ["z", "a"] }),
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.RecordLocatorUncertain, Id("invalid-locator-uncertain"), 0, ReferenceId(), Reference(), null, null, null, null)),
+            await store.MutateAsync(Register(0) with { OperationId = Id("invalid-lifecycle-shape"), LifecycleOperation = (int)CredentialLifecycleOperationKind.Create, LifecyclePhase = CredentialLifecycleMutationPhase.LocatorPrepared, LifecycleIntentOperationId = Id("invalid-lifecycle-intent") }),
+            await store.MutateAsync(Register(0) with { OperationId = Id("invalid-audit-shape"), LifecycleAudit = IntentAuditPayload() })
         };
 
         Assert.Equal(CredentialFailureCode.Unauthorized, invalid[1].Failure!.Code);
@@ -1099,6 +1203,72 @@ public sealed class CredentialRegistryStoreTests
 
     private static JsonSerializerOptions JsonOptions(bool writeIndented) => new(JsonSerializerDefaults.Web) { WriteIndented = writeIndented };
     private static string Hash(char value) => "sha256:" + new string(value, 64);
+
+    private static void CorruptRegistry(JsonObject publicNode, JsonObject privateNode, string corruption)
+    {
+        var entries = publicNode["entries"]!.AsArray();
+        var operations = publicNode["operations"]!.AsArray();
+        var locators = privateNode["locators"]!.AsArray();
+        switch (corruption)
+        {
+            case "entry-health":
+                entries[0]!["health"] = 999;
+                break;
+            case "entry-order":
+                (entries[0], entries[1]) = (entries[1]!.DeepClone(), entries[0]!.DeepClone());
+                break;
+            case "locator-order":
+                (locators[0], locators[1]) = (locators[1]!.DeepClone(), locators[0]!.DeepClone());
+                break;
+            case "duplicate-locator":
+                locators.Add(locators[0]!.DeepClone());
+                break;
+            case "operation-id":
+                operations[0]!["operationId"] = string.Empty;
+                break;
+            case "duplicate-operation":
+                operations.Add(operations[0]!.DeepClone());
+                break;
+            case "unexpected-audit-outbox":
+                operations[0]!["auditOutbox"] = new JsonObject
+                {
+                    ["occurredAtUtc"] = "2026-08-02T12:00:00+00:00",
+                    ["registryRevision"] = operations[0]!["revision"]!.GetValue<long>(),
+                    ["action"] = "unexpected",
+                    ["outcome"] = "unexpected",
+                    ["detail"] = "Unexpected unaudited outbox."
+                };
+                break;
+            case "invalid-audit-delivery":
+                publicNode["auditDeliveries"]!.AsArray().Add(new JsonObject { ["terminalOperationId"] = string.Empty, ["deliveredAtUtc"] = "2026-08-02T12:00:00+00:00" });
+                break;
+            case "invalid-evidence":
+                publicNode["evidence"]!.AsArray().Add(new JsonObject { ["evidenceJson"] = "{}" });
+                break;
+            case "invalid-tombstone":
+                publicNode["tombstones"]!.AsArray()[0]!["tombstonedAtUtc"] = "2026-08-02T07:00:00-05:00";
+                break;
+            case "invalid-lifecycle-shape":
+                var operation = operations[0]!.AsObject();
+                operation["lifecycleOperation"] = (int)CredentialLifecycleOperationKind.Create;
+                operation["actorId"] = "user-1";
+                operation["workspaceId"] = "workspace-1";
+                operation["lifecycleRequestHash"] = Hash('c');
+                operation["lifecyclePhase"] = (int)CredentialLifecycleMutationPhase.Intent;
+                operation["lifecycleIntentOperationId"] = operation["operationId"]!.GetValue<string>();
+                operation["auditOutbox"] = new JsonObject
+                {
+                    ["occurredAtUtc"] = "2026-08-02T12:00:00+00:00",
+                    ["registryRevision"] = operation["revision"]!.GetValue<long>(),
+                    ["action"] = AuditSchema.Actions.CredentialLifecycleIntent,
+                    ["outcome"] = AuditSchema.Outcomes.Started,
+                    ["detail"] = "Credential lifecycle intent durably recorded."
+                };
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(corruption));
+        }
+    }
 
     private sealed class AcceptingLocatorVerifier : ICredentialProviderLocatorVerifier
     {
