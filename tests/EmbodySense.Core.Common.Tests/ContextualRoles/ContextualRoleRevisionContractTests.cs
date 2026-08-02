@@ -130,6 +130,58 @@ public sealed class ContextualRoleRevisionContractTests
     }
 
     [Theory]
+    [InlineData("displayName", true)]
+    [InlineData("displayName", false)]
+    [InlineData("purpose", true)]
+    [InlineData("purpose", false)]
+    public void Unpaired_surrogates_in_user_visible_text_return_structured_errors_without_throwing(string field, bool highSurrogate)
+    {
+        var malformedText = new string(highSurrogate ? '\ud800' : '\udc00', 1);
+        var revision = field == "displayName"
+            ? ValidRevision() with { DisplayName = malformedText }
+            : ValidRevision() with { Purpose = malformedText };
+
+        var result = ContextualRoleRevisionValidator.Validate(revision);
+
+        Assert.Contains(result.Errors, error => error.Code == "unsafe_text_characters" && error.Field == field);
+    }
+
+    [Theory]
+    [InlineData("roleId", "invalid_role_id")]
+    [InlineData("purpose", "unsafe_text_characters")]
+    [InlineData("workspace", "invalid_workspace_id")]
+    [InlineData("instructionSource", "invalid_instruction_source_reference")]
+    [InlineData("policyMaximum", "invalid_capability_maximum")]
+    public void Unpaired_surrogates_in_semantic_hash_inputs_return_structured_errors_without_hashing(string input, string errorCode)
+    {
+        var malformedText = new string('\ud800', 1);
+        var revision = input switch
+        {
+            "roleId" => ValidRevision() with { Identity = new ContextualRoleRevisionIdentity(malformedText, 1) },
+            "purpose" => ValidRevision() with { Purpose = malformedText },
+            "workspace" => ValidRevision() with { WorkspaceApplicability = new ContextualRoleWorkspaceApplicability([malformedText]) },
+            "instructionSource" => ValidRevision() with { InstructionSource = new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.RoleArtifact, malformedText, ContextualRoleInstructionClassification.RoleInstruction) },
+            _ => ValidRevision() with { PolicyMaxima = new ContextualRolePolicyMaxima([malformedText]) }
+        };
+
+        var result = ContextualRoleRevisionValidator.Validate(revision);
+
+        Assert.Contains(result.Errors, error => error.Code == errorCode);
+        Assert.DoesNotContain(result.Errors, error => error.Code == "content_hash_mismatch");
+    }
+
+    [Fact]
+    public void Missing_semantic_text_remains_safe_for_hash_validation()
+    {
+        var revision = ValidRevision() with { Purpose = null! };
+
+        var result = ContextualRoleRevisionValidator.Validate(revision);
+
+        Assert.Contains(result.Errors, error => error.Code == "purpose_required");
+        Assert.Contains(result.Errors, error => error.Code == "content_hash_mismatch");
+    }
+
+    [Theory]
     [InlineData("\u202E")]
     [InlineData("\u200B")]
     [InlineData("\U000E0001")]

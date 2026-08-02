@@ -37,7 +37,7 @@ public static class ContextualRoleRevisionValidator
         {
             Add(errors, "invalid_content_hash", "contentHash", "Content hash must be a 64-character lowercase SHA-256 hexadecimal value.");
         }
-        else if (!ContextualRoleRevisionContentHash.Matches(revision))
+        else if (CanVerifyContentHash(revision) && !ContextualRoleRevisionContentHash.Matches(revision))
         {
             Add(errors, "content_hash_mismatch", "contentHash", "Content hash does not match the canonical semantic revision content.");
         }
@@ -186,7 +186,7 @@ public static class ContextualRoleRevisionValidator
             Add(errors, $"{field}_too_long", field, $"{field} cannot exceed {maximumLength} characters.");
         }
 
-        if (!value.IsNormalized(NormalizationForm.FormC) || ContainsUnsafeCharacters(value))
+        if (ContainsUnsafeCharacters(value) || !value.IsNormalized(NormalizationForm.FormC))
         {
             Add(errors, "unsafe_text_characters", field, $"{field} contains unsupported Unicode or control characters.");
         }
@@ -194,7 +194,43 @@ public static class ContextualRoleRevisionValidator
 
     private static bool IsSha256Hex(string? value) => value is { Length: ContextualRoleLimits.Sha256HexCharacters } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
+    private static bool CanVerifyContentHash(ContextualRoleRevision revision)
+    {
+        return IsWellFormedUtf16(revision.Identity?.RoleId)
+            && IsWellFormedUtf16(revision.Purpose)
+            && IsWellFormedUtf16(revision.InstructionSource?.ReferenceId)
+            && (revision.WorkspaceApplicability?.WorkspaceIds ?? []).All(IsWellFormedUtf16)
+            && (revision.PolicyMaxima?.CapabilityIds ?? []).All(IsWellFormedUtf16);
+    }
+
     private static bool IsUtcTimestamp(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;
+
+    private static bool IsWellFormedUtf16(string? value)
+    {
+        if (value is null)
+        {
+            return true;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]))
+            {
+                if (index + 1 >= value.Length || !char.IsLowSurrogate(value[index + 1]))
+                {
+                    return false;
+                }
+
+                index++;
+            }
+            else if (char.IsLowSurrogate(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool ContainsUnsafeCharacters(string value)
     {
