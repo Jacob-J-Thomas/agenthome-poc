@@ -144,6 +144,15 @@ public static partial class AuditSchema
         /// <summary>Identifies the final durable lifecycle outcome.</summary>
         public const string CapabilityLifecycleFinal = "capability.lifecycle.final";
 
+        /// <summary>Identifies credential lifecycle intent recorded before provider mutation.</summary>
+        public const string CredentialLifecycleIntent = "credential.lifecycle.intent";
+
+        /// <summary>Identifies an exact value-free credential impact preview.</summary>
+        public const string CredentialLifecyclePreview = "credential.lifecycle.preview";
+
+        /// <summary>Identifies a credential lifecycle terminal or repair-required outcome.</summary>
+        public const string CredentialLifecycleOutcome = "credential.lifecycle.outcome";
+
         /// <summary>
         /// Identifies a capability executable invocation intent or outcome.
         /// </summary>

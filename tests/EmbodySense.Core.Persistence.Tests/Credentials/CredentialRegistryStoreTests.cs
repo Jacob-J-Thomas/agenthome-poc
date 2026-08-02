@@ -1,16 +1,20 @@
 using EmbodySense.Core.Application.Credentials;
 using EmbodySense.Core.Application.Credentials.Models;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Credentials;
 using EmbodySense.Core.Persistence.Credentials.Models;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Capabilities.Models;
+using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Tests.Capabilities;
 using EmbodySense.Tests.Support;
 using Microsoft.Win32.SafeHandles;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -20,6 +24,388 @@ namespace EmbodySense.Core.Persistence.Tests.Credentials;
 
 public sealed class CredentialRegistryStoreTests
 {
+    [Fact]
+    public async Task Lifecycle_binding_consent_and_restrictive_posture_are_revisioned_and_restart_safe()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
+        var rebound = Binding() with { Scope = Binding().Scope with { LoopRevision = 2 } };
+        var bind = await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Bind, Id("bind-1"), 1, ReferenceId(), null, rebound, null, null, null, null, (int)CredentialLifecycleOperationKind.Bind, "user-1"));
+        var consent = await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Consent, Id("consent-2"), 2, ReferenceId(), null, null, Id("consent-document-2"), null, null, true, (int)CredentialLifecycleOperationKind.Consent, "user-1"));
+        var revokedReference = Reference() with { Status = CredentialLifecycleStatus.Revoked, UpdatedAtUtc = new DateTimeOffset(2026, 8, 1, 12, 1, 0, TimeSpan.Zero) };
+
+        var revoked = await new CredentialRegistryStore(paths, TestTrust(paths), new RejectingCredentialProviderLocatorVerifier()).MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, Id("revoke-1"), 3, ReferenceId(), revokedReference, null, null, CredentialProviderHealthStatus.Revoked, null, null, (int)CredentialLifecycleOperationKind.Revoke, "user-1", "sha256:" + new string('b', 64), null, null, null, ["run-1", "run-2"]));
+
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, bind.Status);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, consent.Status);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, revoked.Status);
+        var entry = Assert.Single((await Store(paths).ReadAsync()).Entries);
+        Assert.Equal(2, entry.Binding.Scope.LoopRevision);
+        Assert.True(entry.ConsentGranted);
+        Assert.Equal("consent-document-2", entry.ConsentReference.Value);
+        Assert.Equal(CredentialLifecycleStatus.Revoked, entry.Reference.Status);
+        Assert.Equal(CredentialProviderHealthStatus.Revoked, entry.Health);
+        Assert.Equal(["run-1", "run-2"], Assert.Single((await Store(paths).ReadAsync()).Operations, operation => operation.OperationId.Value == "revoke-1").AffectedActiveRuns);
+        var publicDocument = await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath);
+        Assert.Contains("\"lifecycleShape\": 1", publicDocument, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProviderCompletionPhaseCannotBeReservedWithoutExactDurableIntent()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+        var intentId = Id("phase-intent");
+        var completion = new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id("phase-complete"), 0, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Create, ActorId: "user-1", LifecycleRequestHash: Hash('d'), LifecyclePhase: CredentialLifecycleMutationPhase.Complete, LifecycleIntentOperationId: intentId, WorkspaceId: "workspace-1", LifecycleAudit: AuditPayload("succeeded"));
+
+        var result = await store.MutateAsync(completion);
+
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, result.Status);
+    }
+
+    [Theory]
+    [InlineData(CredentialLifecycleMutationPhase.Complete, CredentialProviderHealthStatus.Available, "succeeded")]
+    [InlineData(CredentialLifecycleMutationPhase.Rollback, CredentialProviderHealthStatus.Missing, "failed")]
+    [InlineData(CredentialLifecycleMutationPhase.Uncertain, CredentialProviderHealthStatus.NeedsRepair, "failed")]
+    public async Task CorrelatedProviderTerminalPhasesPersistExactOutboxAndProjection(CredentialLifecycleMutationPhase phase, CredentialProviderHealthStatus health, string auditOutcome)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var intentId = Id($"matrix-intent-{phase.ToString().ToLowerInvariant()}");
+        var requestHash = Hash('6');
+        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginCreate, intentId, 0, ReferenceId(), Reference(), Binding(), Id("consent-matrix"), CredentialProviderHealthStatus.NeedsRepair, null, false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, requestHash, CredentialLifecycleMutationPhase.Intent, intentId, null, "workspace-1", IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(intent)).Status);
+        var locatorPrepared = new CredentialRegistryMutation(CredentialRegistryMutationKind.Register, Id($"matrix-locator-{phase.ToString().ToLowerInvariant()}"), 1, ReferenceId(), Reference(), Binding(), Id("consent-matrix"), CredentialProviderHealthStatus.NeedsRepair, Locator(), false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, requestHash, CredentialLifecycleMutationPhase.LocatorPrepared, intentId, null, "workspace-1");
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(locatorPrepared)).Status);
+        var terminal = new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id($"matrix-terminal-{phase.ToString().ToLowerInvariant()}"), 2, ReferenceId(), null, null, null, health, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Create, ActorId: "user-1", LifecycleRequestHash: requestHash, LifecyclePhase: phase, LifecycleIntentOperationId: intentId, WorkspaceId: "workspace-1", LifecycleAudit: AuditPayload(auditOutcome));
+
+        var result = await store.MutateAsync(terminal);
+        var restarted = await Store(paths).ReadAsync();
+
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, result.Status);
+        Assert.Equal(health, Assert.Single(restarted.Entries).Health);
+        Assert.Equal(2, restarted.PendingAudits.Count);
+        Assert.Equal(intent.OperationId, restarted.PendingAudits[0].AuditOperationId);
+        Assert.Equal(AuditSchema.Actions.CredentialLifecycleIntent, restarted.PendingAudits[0].Action);
+        Assert.Equal(terminal.OperationId, restarted.PendingAudits[1].AuditOperationId);
+        Assert.Equal(auditOutcome, restarted.PendingAudits[1].Outcome);
+        Assert.Equal(phase, Assert.Single(restarted.Operations, operation => operation.OperationId.Equals(terminal.OperationId)).LifecyclePhase);
+    }
+
+    [Fact]
+    public async Task LocatorUncertaintyRemainsValueFreeAndCannotBeBypassedAcrossRestart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var intentId = Id("locator-uncertain-intent");
+        var requestHash = Hash('9');
+        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginCreate, intentId, 0, ReferenceId(), Reference(), Binding(), Id("locator-uncertain-consent"), CredentialProviderHealthStatus.NeedsRepair, null, false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, requestHash, CredentialLifecycleMutationPhase.Intent, intentId, null, "workspace-1", IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(intent)).Status);
+        var uncertain = new CredentialRegistryMutation(CredentialRegistryMutationKind.RecordLocatorUncertain, Id("locator-uncertain-terminal"), 1, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Create, ActorId: "user-1", LifecycleRequestHash: requestHash, LifecyclePhase: CredentialLifecycleMutationPhase.LocatorUncertain, LifecycleIntentOperationId: intentId, WorkspaceId: "workspace-1", LifecycleAudit: AuditPayload(AuditSchema.Outcomes.Failed));
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(uncertain)).Status);
+
+        var restartedStore = Store(paths);
+        var restarted = await restartedStore.ReadAsync();
+        var bypass = await restartedStore.MutateAsync(Register(2));
+        var competingId = Id("locator-uncertain-competing");
+        var competing = intent with { OperationId = competingId, LifecycleIntentOperationId = competingId, ExpectedRegistryRevision = 2 };
+
+        Assert.Empty(restarted.Entries);
+        Assert.Empty(JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!["locators"]!.AsArray());
+        Assert.Equal([CredentialLifecycleMutationPhase.Intent, CredentialLifecycleMutationPhase.LocatorUncertain], restarted.Operations.Select(item => item.LifecyclePhase).ToArray());
+        Assert.Equal([AuditSchema.Actions.CredentialLifecycleIntent, AuditSchema.Actions.CredentialLifecycleOutcome], restarted.PendingAudits.Select(item => item.Action).ToArray());
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, bypass.Status);
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, (await restartedStore.MutateAsync(competing)).Status);
+        Assert.Equal(2, (await restartedStore.ReadAsync()).RegistryRevision);
+    }
+
+    [Fact]
+    public async Task PreparedCreateCanBeExplicitlyRepairedAcrossRestartWithoutLocatorLeakage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var createIntentId = Id("prepared-repair-create");
+        var createHash = Hash('3');
+        var createIntent = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginCreate, createIntentId, 0, ReferenceId(), Reference(), Binding(), Id("prepared-repair-consent"), CredentialProviderHealthStatus.NeedsRepair, null, false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, createHash, CredentialLifecycleMutationPhase.Intent, createIntentId, null, "workspace-1", IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(createIntent)).Status);
+        var locatorPrepared = new CredentialRegistryMutation(CredentialRegistryMutationKind.Register, Id("prepared-repair-locator"), 1, ReferenceId(), Reference(), Binding(), Id("prepared-repair-consent"), CredentialProviderHealthStatus.NeedsRepair, Locator(), false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, createHash, CredentialLifecycleMutationPhase.LocatorPrepared, createIntentId, null, "workspace-1");
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(locatorPrepared)).Status);
+
+        var restarted = Store(paths);
+        Assert.Equal(CredentialRegistryMutationStatus.Replayed, (await restarted.MutateAsync(locatorPrepared)).Status);
+        var directTombstone = new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("prepared-repair-bypass"), 2, ReferenceId(), null, null, null, null, null);
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, (await restarted.MutateAsync(directTombstone)).Status);
+        var service = ReconciliationService(paths);
+        var preview = await service.PreviewAsync(new CredentialLifecyclePreviewRequest(Id("prepared-repair-cleanup"), CredentialLifecycleOperationKind.Repair, ReferenceId(), "workspace-1", Environment.UserName, 2));
+        Assert.Equal(CredentialLifecyclePreviewStatus.Ready, preview.Status);
+        var repair = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Repair, Id("prepared-repair-cleanup"), ReferenceId(), "workspace-1", Environment.UserName, 2, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), Preview: preview, Confirmed: true);
+        Assert.Equal(CredentialLifecycleResultStatus.Applied, (await service.ExecuteAsync(repair)).Status);
+
+        var repaired = await Store(paths).ReadAsync();
+        Assert.Empty(repaired.Entries);
+        Assert.False(Assert.Single(repaired.Tombstones).NeedsRepair);
+        Assert.Empty(repaired.PendingAudits);
+        Assert.Equal([CredentialLifecycleMutationPhase.Intent, CredentialLifecycleMutationPhase.LocatorPrepared, CredentialLifecycleMutationPhase.Intent, CredentialLifecycleMutationPhase.RepairComplete], repaired.Operations.Select(item => item.LifecyclePhase).ToArray());
+        var publicArtifact = await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath);
+        Assert.DoesNotContain(Locator().Value, publicArtifact, StringComparison.Ordinal);
+        Assert.Contains("\"schemaVersion\": 1", publicArtifact, StringComparison.Ordinal);
+        Assert.Contains("\"lifecycleShape\": 1", publicArtifact, StringComparison.Ordinal);
+        Assert.Empty(JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!["locators"]!.AsArray());
+    }
+
+    [Fact]
+    public async Task LocatorUncertainCanFollowCommittedPreparedLocatorAtRefreshedRevision()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var intentId = Id("prepared-ack-intent");
+        var requestHash = Hash('7');
+        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginCreate, intentId, 0, ReferenceId(), Reference(), Binding(), Id("prepared-ack-consent"), CredentialProviderHealthStatus.NeedsRepair, null, false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, requestHash, CredentialLifecycleMutationPhase.Intent, intentId, null, "workspace-1", IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(intent)).Status);
+        var locatorPrepared = new CredentialRegistryMutation(CredentialRegistryMutationKind.Register, Id("prepared-ack-locator"), 1, ReferenceId(), Reference(), Binding(), Id("prepared-ack-consent"), CredentialProviderHealthStatus.NeedsRepair, Locator(), false, (int)CredentialLifecycleOperationKind.Create, "user-1", null, requestHash, CredentialLifecycleMutationPhase.LocatorPrepared, intentId, null, "workspace-1");
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(locatorPrepared)).Status);
+        var locatorUncertain = new CredentialRegistryMutation(CredentialRegistryMutationKind.RecordLocatorUncertain, Id("prepared-ack-uncertain"), 2, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Create, ActorId: "user-1", LifecycleRequestHash: requestHash, LifecyclePhase: CredentialLifecycleMutationPhase.LocatorUncertain, LifecycleIntentOperationId: intentId, WorkspaceId: "workspace-1", LifecycleAudit: AuditPayload(AuditSchema.Outcomes.Failed));
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(locatorUncertain)).Status);
+
+        var restarted = Store(paths);
+        var read = await restarted.ReadAsync();
+        var bypass = await restarted.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("prepared-ack-bypass"), 3, ReferenceId(), null, null, null, null, null));
+
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, bypass.Status);
+        Assert.Equal(CredentialProviderHealthStatus.NeedsRepair, Assert.Single(read.Entries).Health);
+        Assert.Equal([CredentialLifecycleMutationPhase.Intent, CredentialLifecycleMutationPhase.LocatorPrepared, CredentialLifecycleMutationPhase.LocatorUncertain], read.Operations.Select(item => item.LifecyclePhase).ToArray());
+        Assert.Equal([AuditSchema.Actions.CredentialLifecycleIntent, AuditSchema.Actions.CredentialLifecycleOutcome], read.PendingAudits.Select(item => item.Action).ToArray());
+        Assert.Single(JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!["locators"]!.AsArray());
+        Assert.DoesNotContain(Locator().Value, await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawRepairAuthorityCannotBeForgedOrCompletedThroughPublicComposition()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var createIntentId = Id("reconcile-prepared-create");
+        var createHash = Hash('a');
+        var createIntent = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginCreate, createIntentId, 0, ReferenceId(), Reference(), Binding(), Id("reconcile-prepared-consent"), CredentialProviderHealthStatus.NeedsRepair, null, false, (int)CredentialLifecycleOperationKind.Create, Environment.UserName, null, createHash, CredentialLifecycleMutationPhase.Intent, createIntentId, null, "workspace-1", IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(createIntent)).Status);
+        var locatorPrepared = new CredentialRegistryMutation(CredentialRegistryMutationKind.Register, Id("reconcile-prepared-locator"), 1, ReferenceId(), Reference(), Binding(), Id("reconcile-prepared-consent"), CredentialProviderHealthStatus.NeedsRepair, Locator(), false, (int)CredentialLifecycleOperationKind.Create, Environment.UserName, null, createHash, CredentialLifecycleMutationPhase.LocatorPrepared, createIntentId, null, "workspace-1");
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(locatorPrepared)).Status);
+        var interruptedRepairId = Id("reconcile-prepared-interrupted");
+        var interruptedRepair = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginRepair, interruptedRepairId, 2, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Repair, ActorId: Environment.UserName, PreviewHash: Hash('c'), LifecycleRequestHash: Hash('b'), LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: interruptedRepairId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+        var forgedIntent = await store.MutateAsync(interruptedRepair);
+        Assert.Equal(CredentialRegistryMutationStatus.Invalid, forgedIntent.Status);
+        Assert.Equal(CredentialFailureCode.Unauthorized, forgedIntent.Failure!.Code);
+        Assert.Equal(CredentialActorAuthentication.Unauthenticated, await store.AuthenticateActorAsync(Environment.UserName, CancellationToken.None));
+
+        var service = ReconciliationService(paths);
+        var preview = await service.PreviewAsync(new CredentialLifecyclePreviewRequest(Id("reconcile-prepared-terminal"), CredentialLifecycleOperationKind.ReconcileRepair, ReferenceId(), "workspace-1", Environment.UserName, 2, interruptedRepairId));
+        Assert.Equal(CredentialLifecyclePreviewStatus.Conflict, preview.Status);
+        var request = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.ReconcileRepair, Id("reconcile-prepared-terminal"), ReferenceId(), "workspace-1", Environment.UserName, 2, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), Preview: preview, Confirmed: true, InterruptedRepairOperationId: interruptedRepairId);
+        Assert.Equal(CredentialLifecycleResultStatus.Conflict, (await service.ExecuteAsync(request)).Status);
+        var read = await Store(paths).ReadAsync();
+        Assert.Equal(2, read.RegistryRevision);
+        Assert.DoesNotContain(read.Operations, operation => operation.OperationId.Equals(interruptedRepairId) || operation.OperationId.Equals(request.OperationId));
+    }
+
+    [Fact]
+    public async Task PublicStoreRejectsRepairAuthoritySemanticsAcrossEveryMutationKind()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+
+        foreach (var kind in Enum.GetValues<CredentialRegistryMutationKind>())
+        {
+            var operationId = Id($"repair-authority-{(int)kind}");
+            var mutation = new CredentialRegistryMutation(kind, operationId, 0, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Repair, ActorId: Environment.UserName, PreviewHash: Hash('a'), LifecycleRequestHash: Hash('b'), LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: operationId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+            var result = await store.MutateAsync(mutation);
+
+            Assert.Equal(CredentialRegistryMutationStatus.Invalid, result.Status);
+            Assert.Equal(CredentialFailureCode.Unauthorized, result.Failure!.Code);
+        }
+
+        Assert.Equal(0, (await store.ReadAsync()).RegistryRevision);
+    }
+
+    [Fact]
+    public async Task PublicStoreDefaultsEveryUnclassifiedMutationKindToUnauthorized()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+        CredentialRegistryMutationKind[] publicRawKinds = [CredentialRegistryMutationKind.Register, CredentialRegistryMutationKind.SetHealth, CredentialRegistryMutationKind.Tombstone, CredentialRegistryMutationKind.Bind, CredentialRegistryMutationKind.Consent, CredentialRegistryMutationKind.UpdatePosture, CredentialRegistryMutationKind.BeginCreate, CredentialRegistryMutationKind.RecordLocatorUncertain];
+
+        foreach (var kind in Enum.GetValues<CredentialRegistryMutationKind>())
+        {
+            var mutation = new CredentialRegistryMutation(kind, Id($"unclassified-{(int)kind}"), 0, ReferenceId(), null, null, null, null, null);
+            var result = await store.MutateAsync(mutation);
+
+            if (publicRawKinds.Contains(kind))
+            {
+                Assert.NotEqual(CredentialFailureCode.Unauthorized, result.Failure?.Code);
+            }
+            else
+            {
+                Assert.Equal(CredentialRegistryMutationStatus.Invalid, result.Status);
+                Assert.Equal(CredentialFailureCode.Unauthorized, result.Failure!.Code);
+            }
+        }
+
+    }
+
+    [Fact]
+    public async Task RawTombstoneRepairForgeryIsDeniedBeforeLegitimateRepair()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
+        var deleteIntentId = Id("reconcile-tombstone-delete");
+        var deleteHash = Hash('3');
+        var deleteIntent = new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, deleteIntentId, 1, ReferenceId(), Reference(), null, null, CredentialProviderHealthStatus.NeedsRepair, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Delete, ActorId: "user-1", PreviewHash: Hash('4'), LifecycleRequestHash: deleteHash, LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: deleteIntentId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(deleteIntent)).Status);
+        var tombstone = new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("reconcile-tombstone-uncertain"), 2, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Delete, ActorId: "user-1", PreviewHash: Hash('4'), LifecycleRequestHash: deleteHash, LifecyclePhase: CredentialLifecycleMutationPhase.TombstoneUncertain, LifecycleIntentOperationId: deleteIntentId, WorkspaceId: "workspace-1", LifecycleAudit: AuditPayload(AuditSchema.Outcomes.Failed));
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(tombstone)).Status);
+        var originalTombstone = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!["tombstones"]![0]!.ToJsonString();
+        var interruptedRepairId = Id("reconcile-tombstone-interrupted");
+        var interruptedRepair = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginRepair, interruptedRepairId, 3, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Repair, ActorId: Environment.UserName, PreviewHash: Hash('5'), LifecycleRequestHash: Hash('6'), LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: interruptedRepairId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+        var forgedIntent = await store.MutateAsync(interruptedRepair);
+        Assert.Equal(CredentialRegistryMutationStatus.Invalid, forgedIntent.Status);
+        Assert.Equal(CredentialFailureCode.Unauthorized, forgedIntent.Failure!.Code);
+
+        var service = ReconciliationService(paths);
+        var reconcilePreview = await service.PreviewAsync(new CredentialLifecyclePreviewRequest(Id("reconcile-tombstone-terminal"), CredentialLifecycleOperationKind.ReconcileRepair, ReferenceId(), "workspace-1", Environment.UserName, 3, interruptedRepairId));
+        Assert.Equal(CredentialLifecyclePreviewStatus.Conflict, reconcilePreview.Status);
+        var repairPreview = await service.PreviewAsync(new CredentialLifecyclePreviewRequest(Id("reconcile-tombstone-repair"), CredentialLifecycleOperationKind.Repair, ReferenceId(), "workspace-1", Environment.UserName, 3));
+        Assert.Equal(CredentialLifecyclePreviewStatus.Ready, repairPreview.Status);
+        var repair = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Repair, Id("reconcile-tombstone-repair"), ReferenceId(), "workspace-1", Environment.UserName, 3, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), Preview: repairPreview, Confirmed: true);
+        Assert.Equal(CredentialLifecycleResultStatus.Applied, (await service.ExecuteAsync(repair)).Status);
+
+        var restarted = await Store(paths).ReadAsync();
+        Assert.Empty(restarted.Entries);
+        Assert.False(Assert.Single(restarted.Tombstones).NeedsRepair);
+        Assert.Equal(originalTombstone, JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!["tombstones"]![0]!.ToJsonString());
+        Assert.Empty(JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!["locators"]!.AsArray());
+        Assert.Equal([CredentialLifecycleMutationPhase.Intent, CredentialLifecycleMutationPhase.TombstoneUncertain, CredentialLifecycleMutationPhase.Intent, CredentialLifecycleMutationPhase.RepairComplete], restarted.Operations.Where(operation => operation.LifecyclePhase is not null).Select(operation => operation.LifecyclePhase).ToArray());
+        Assert.Empty(restarted.PendingAudits);
+    }
+
+    [Fact]
+    public async Task UncertainTombstoneRetainsPrivateLocatorAcrossRestartUntilExplicitRepairCompletion()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
+        var deleteIntentId = Id("repair-delete-intent");
+        var previewHash = Hash('e');
+        var requestHash = Hash('f');
+        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, deleteIntentId, 1, ReferenceId(), Reference(), null, null, CredentialProviderHealthStatus.NeedsRepair, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Delete, ActorId: "user-1", PreviewHash: previewHash, LifecycleRequestHash: requestHash, LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: deleteIntentId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(intent)).Status);
+        var tombstone = new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("repair-delete-tombstone"), 2, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Delete, ActorId: "user-1", PreviewHash: previewHash, LifecycleRequestHash: requestHash, LifecyclePhase: CredentialLifecycleMutationPhase.TombstoneUncertain, LifecycleIntentOperationId: deleteIntentId, WorkspaceId: "workspace-1", LifecycleAudit: AuditPayload("failed"));
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(tombstone)).Status);
+        var originalTombstone = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!["tombstones"]![0]!.ToJsonString();
+
+        var restarted = await Store(paths).ReadAsync();
+        var repairRequired = Assert.Single(restarted.Tombstones);
+        Assert.True(repairRequired.NeedsRepair);
+        Assert.NotNull(repairRequired.RepairBinding);
+        var retainedLocator = Assert.Single(JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!["locators"]!.AsArray());
+        Assert.Equal(Locator().Value, retainedLocator!["locator"]!.GetValue<string>());
+
+        var uncertainService = ReconciliationService(paths, deleteSucceeds: false);
+        var uncertainPreview = await uncertainService.PreviewAsync(new CredentialLifecyclePreviewRequest(Id("repair-uncertain-intent"), CredentialLifecycleOperationKind.Repair, ReferenceId(), "workspace-1", Environment.UserName, 3));
+        Assert.Equal(CredentialLifecyclePreviewStatus.Ready, uncertainPreview.Status);
+        var uncertainRepair = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Repair, Id("repair-uncertain-intent"), ReferenceId(), "workspace-1", Environment.UserName, 3, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), Preview: uncertainPreview, Confirmed: true);
+        Assert.Equal(CredentialLifecycleResultStatus.NeedsRepair, (await uncertainService.ExecuteAsync(uncertainRepair)).Status);
+        Assert.True(Assert.Single((await Store(paths).ReadAsync()).Tombstones).NeedsRepair);
+        var finalService = ReconciliationService(paths);
+        var finalPreview = await finalService.PreviewAsync(new CredentialLifecyclePreviewRequest(Id("repair-explicit-intent"), CredentialLifecycleOperationKind.Repair, ReferenceId(), "workspace-1", Environment.UserName, 5));
+        Assert.Equal(CredentialLifecyclePreviewStatus.Ready, finalPreview.Status);
+        var finalRepair = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Repair, Id("repair-explicit-intent"), ReferenceId(), "workspace-1", Environment.UserName, 5, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), Preview: finalPreview, Confirmed: true);
+        Assert.Equal(CredentialLifecycleResultStatus.Applied, (await finalService.ExecuteAsync(finalRepair)).Status);
+
+        var completed = await Store(paths).ReadAsync();
+        Assert.False(Assert.Single(completed.Tombstones).NeedsRepair);
+        Assert.Equal(originalTombstone, JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!["tombstones"]![0]!.ToJsonString());
+        Assert.Empty(JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!["locators"]!.AsArray());
+        Assert.Empty(completed.PendingAudits);
+        Assert.False(await Store(paths).AcknowledgeAuditAsync(Id("repair-unknown-audit")));
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        Assert.False(await Store(paths).AcknowledgeAuditAsync(finalRepair.OperationId, canceled.Token));
+        var acknowledged = await Store(paths).ReadAsync();
+        Assert.Equal(completed.RegistryRevision, acknowledged.RegistryRevision);
+        Assert.Empty(acknowledged.PendingAudits);
+        Assert.Equal(originalTombstone, JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!["tombstones"]![0]!.ToJsonString());
+    }
+
+    [Fact]
+    public async Task SetHealthCannotWidenRestrictiveReferencePosture()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
+        var disabledReference = Reference() with { Status = CredentialLifecycleStatus.Disabled, UpdatedAtUtc = new DateTimeOffset(2026, 8, 1, 12, 1, 0, TimeSpan.Zero) };
+        var disable = new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, Id("disable-safe"), 1, ReferenceId(), disabledReference, null, null, CredentialProviderHealthStatus.Disabled, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Disable, ActorId: "user-1", PreviewHash: Hash('3'), AffectedActiveRuns: []);
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(disable)).Status);
+
+        var widened = await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id("widen-health"), 2, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null));
+
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, widened.Status);
+        var entry = Assert.Single((await store.ReadAsync()).Entries);
+        Assert.Equal(CredentialLifecycleStatus.Disabled, entry.Reference.Status);
+        Assert.Equal(CredentialProviderHealthStatus.Disabled, entry.Health);
+    }
+
+    [Fact]
+    public async Task UnresolvedProviderIntentCannotBeWidenedOrUsedByDirectStoreCalls()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
+        var intentId = Id("store-unresolved-intent");
+        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, intentId, 1, ReferenceId(), Reference(), null, null, CredentialProviderHealthStatus.NeedsRepair, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Replace, ActorId: "user-1", PreviewHash: Hash('4'), LifecycleRequestHash: Hash('5'), LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: intentId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(intent)).Status);
+
+        var widened = await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id("store-unresolved-widen"), 2, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null));
+        var consent = await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Consent, Id("store-unresolved-consent"), 2, ReferenceId(), null, null, Id("store-unresolved-consent-document"), null, null, true));
+        var evidence = await store.AppendAsync(Evidence(Binding(), "store-unresolved-evidence"), default);
+
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, widened.Status);
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, consent.Status);
+        Assert.False(evidence.Succeeded);
+        Assert.Equal(CredentialFailureCode.Conflict, evidence.Failure!.Code);
+        Assert.Equal(2, (await store.ReadAsync()).RegistryRevision);
+        Assert.Equal(CredentialProviderHealthStatus.NeedsRepair, Assert.Single((await store.ReadAsync()).Entries).Health);
+    }
+
+    [Fact]
+    public async Task RepairMutationShapesAndMissingTombstoneFailClosed()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+        var intentId = Id("missing-repair-intent");
+        var missingTombstone = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginRepair, intentId, 0, ReferenceId(), null, null, null, null, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Repair, ActorId: "user-1", LifecycleRequestHash: Hash('7'), LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: intentId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+        var extraReference = missingTombstone with { OperationId = Id("invalid-repair-reference"), LifecycleIntentOperationId = Id("invalid-repair-reference"), Reference = Reference() };
+        var missingWorkspace = missingTombstone with { OperationId = Id("invalid-repair-workspace"), LifecycleIntentOperationId = Id("invalid-repair-workspace"), WorkspaceId = null };
+        var missingIntentAudit = missingTombstone with { OperationId = Id("invalid-repair-audit-missing"), LifecycleIntentOperationId = Id("invalid-repair-audit-missing"), LifecycleAudit = null };
+        var wrongIntentAudit = missingTombstone with { OperationId = Id("invalid-repair-audit-action"), LifecycleIntentOperationId = Id("invalid-repair-audit-action"), LifecycleAudit = AuditPayload(AuditSchema.Outcomes.Started) };
+
+        foreach (var mutation in new[] { missingTombstone, extraReference, missingWorkspace, missingIntentAudit, wrongIntentAudit })
+        {
+            var result = await store.MutateAsync(mutation);
+            Assert.Equal(CredentialRegistryMutationStatus.Invalid, result.Status);
+            Assert.Equal(CredentialFailureCode.Unauthorized, result.Failure!.Code);
+        }
+        Assert.Equal(0, (await store.ReadAsync()).RegistryRevision);
+    }
+
     [Fact]
     public async Task Restart_readback_preserves_safe_state_evidence_and_tombstone()
     {
@@ -139,6 +525,83 @@ public sealed class CredentialRegistryStoreTests
     }
 
     [Fact]
+    public async Task AuthenticatedPriorSchemaOneShapeIsRejectedWithoutRewriteOrMigration()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var bootstrapTrust = new TestCapabilityLifecycleTrustProvider();
+        var bootstrap = new CredentialRegistryStore(paths, bootstrapTrust, new AcceptingLocatorVerifier());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await bootstrap.MutateAsync(Register(0))).Status);
+        var publicNode = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!.AsObject();
+        var privateNode = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!.AsObject();
+        Assert.True(publicNode.Remove("auditDeliveries"));
+        foreach (var operation in publicNode["operations"]!.AsArray())
+        {
+            Assert.True(operation!.AsObject().Remove("workspaceId"));
+            Assert.True(operation.AsObject().Remove("auditOutbox"));
+        }
+        publicNode["stateDigest"] = ComputeStateDigest(publicNode, privateNode);
+        privateNode["stateDigest"] = publicNode["stateDigest"]!.GetValue<string>();
+        publicNode["contentDigest"] = ComputeContentDigest(publicNode);
+        var workspaceIdentity = publicNode["workspaceIdentity"]!.GetValue<string>();
+        var generation = publicNode["generation"]!.GetValue<long>();
+        var contentDigest = publicNode["contentDigest"]!.GetValue<string>();
+        var priorShapeTrust = new TestCapabilityLifecycleTrustProvider();
+        _ = await priorShapeTrust.InitializeAsync(workspaceIdentity, generation, contentDigest);
+        publicNode["authenticationTag"] = await priorShapeTrust.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest);
+        Assert.True(await priorShapeTrust.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, publicNode["authenticationTag"]!.GetValue<string>()));
+        await File.WriteAllTextAsync(paths.CredentialRegistryDocumentPath, publicNode.ToJsonString(JsonOptions(writeIndented: true)));
+        await File.WriteAllTextAsync(paths.CredentialRegistryPrivateDocumentPath, privateNode.ToJsonString(JsonOptions(writeIndented: true)));
+        var originalPublic = await File.ReadAllBytesAsync(paths.CredentialRegistryDocumentPath);
+        var originalPrivate = await File.ReadAllBytesAsync(paths.CredentialRegistryPrivateDocumentPath);
+
+        var read = await new CredentialRegistryStore(paths, priorShapeTrust, new AcceptingLocatorVerifier()).ReadAsync();
+
+        Assert.False(read.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
+        Assert.Equal(originalPublic, await File.ReadAllBytesAsync(paths.CredentialRegistryDocumentPath));
+        Assert.Equal(originalPrivate, await File.ReadAllBytesAsync(paths.CredentialRegistryPrivateDocumentPath));
+    }
+
+    [Fact]
+    public async Task AuthenticatedSchemaOneOutboxWithoutActionIsRejectedWithoutRewriteOrMigration()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var bootstrapTrust = new TestCapabilityLifecycleTrustProvider();
+        var bootstrap = new CredentialRegistryStore(paths, bootstrapTrust, new AcceptingLocatorVerifier());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await bootstrap.MutateAsync(Register(0))).Status);
+        var intentId = Id("prior-outbox-intent");
+        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, intentId, 1, ReferenceId(), Reference(), null, null, CredentialProviderHealthStatus.NeedsRepair, null, LifecycleOperation: (int)CredentialLifecycleOperationKind.Replace, ActorId: "user-1", LifecycleRequestHash: Hash('8'), LifecyclePhase: CredentialLifecycleMutationPhase.Intent, LifecycleIntentOperationId: intentId, WorkspaceId: "workspace-1", LifecycleAudit: IntentAuditPayload());
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await bootstrap.MutateAsync(intent)).Status);
+        var publicNode = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryDocumentPath))!.AsObject();
+        var privateNode = JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!.AsObject();
+        var outbox = publicNode["operations"]!.AsArray()[1]!["auditOutbox"]!.AsObject();
+        Assert.True(outbox.Remove("action"));
+        publicNode["stateDigest"] = ComputeStateDigest(publicNode, privateNode);
+        privateNode["stateDigest"] = publicNode["stateDigest"]!.GetValue<string>();
+        publicNode["contentDigest"] = ComputeContentDigest(publicNode);
+        var workspaceIdentity = publicNode["workspaceIdentity"]!.GetValue<string>();
+        var generation = publicNode["generation"]!.GetValue<long>();
+        var contentDigest = publicNode["contentDigest"]!.GetValue<string>();
+        var priorShapeTrust = new TestCapabilityLifecycleTrustProvider();
+        _ = await priorShapeTrust.InitializeAsync(workspaceIdentity, generation, contentDigest);
+        publicNode["authenticationTag"] = await priorShapeTrust.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest);
+        Assert.True(await priorShapeTrust.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, publicNode["authenticationTag"]!.GetValue<string>()));
+        await File.WriteAllTextAsync(paths.CredentialRegistryDocumentPath, publicNode.ToJsonString(JsonOptions(writeIndented: true)));
+        await File.WriteAllTextAsync(paths.CredentialRegistryPrivateDocumentPath, privateNode.ToJsonString(JsonOptions(writeIndented: true)));
+        var originalPublic = await File.ReadAllBytesAsync(paths.CredentialRegistryDocumentPath);
+        var originalPrivate = await File.ReadAllBytesAsync(paths.CredentialRegistryPrivateDocumentPath);
+
+        var read = await new CredentialRegistryStore(paths, priorShapeTrust, new AcceptingLocatorVerifier()).ReadAsync();
+
+        Assert.False(read.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, read.Failure!.Code);
+        Assert.Equal(originalPublic, await File.ReadAllBytesAsync(paths.CredentialRegistryDocumentPath));
+        Assert.Equal(originalPrivate, await File.ReadAllBytesAsync(paths.CredentialRegistryPrivateDocumentPath));
+    }
+
+    [Fact]
     public async Task Evidence_is_bound_to_a_live_exact_registered_reference()
     {
         using var workspace = new TestWorkspace();
@@ -183,7 +646,7 @@ public sealed class CredentialRegistryStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var result = await new CredentialRegistryStore(paths).MutateAsync(Register(0));
+        var result = await new CredentialRegistryStore(paths, TestTrust(paths), new RejectingCredentialProviderLocatorVerifier()).MutateAsync(Register(0));
         Assert.Equal(CredentialRegistryMutationStatus.Unavailable, result.Status);
         Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
         Assert.False(File.Exists(paths.CredentialRegistryPrivateDocumentPath));
@@ -195,7 +658,7 @@ public sealed class CredentialRegistryStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var barrier = new FailOnDurabilityCallBarrier(8);
-        var store = new CredentialRegistryStore(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), durabilityBarrier: barrier);
+        var store = new CredentialRegistryStore(paths, TestTrust(paths), new AcceptingLocatorVerifier(), durabilityBarrier: barrier);
         Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
 
         var failed = await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id("health-1"), 1, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Corrupt, null));
@@ -213,7 +676,7 @@ public sealed class CredentialRegistryStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var trust = new FailingCapabilityCatalogTrustProvider(FileCapabilityCatalogTrustProvider.CreateDefault());
+        var trust = new FailingCapabilityCatalogTrustProvider(TestTrust(paths));
         var store = new CredentialRegistryStore(paths, trust, new AcceptingLocatorVerifier());
         Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
         trust.FailNextAdvance = true;
@@ -347,7 +810,7 @@ public sealed class CredentialRegistryStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var trust = new BlockingCapabilityCatalogTrustProvider(FileCapabilityCatalogTrustProvider.CreateDefault());
+        var trust = new BlockingCapabilityCatalogTrustProvider(TestTrust(paths));
         var store = new CredentialRegistryStore(paths, trust, new AcceptingLocatorVerifier());
         Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
 
@@ -397,7 +860,7 @@ public sealed class CredentialRegistryStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var verifier = new RecordingLocatorVerifier();
-        var store = new CredentialRegistryStore(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), verifier);
+        var store = new CredentialRegistryStore(paths, TestTrust(paths), verifier);
         var locatorCanary = Locator("loc_c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de");
 
         var registered = await store.MutateAsync(Register(1, 0, locatorCanary));
@@ -418,7 +881,8 @@ public sealed class CredentialRegistryStoreTests
     {
         using var workspace = new TestWorkspace();
         var quota = new CredentialRegistryQuota(2, 2, 4, 4, 128 * 1024);
-        var store = new CredentialRegistryStore(new WorkspacePaths(workspace.RootPath), FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), quota: quota);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CredentialRegistryStore(paths, TestTrust(paths), new AcceptingLocatorVerifier(), quota: quota);
         for (var index = 0; index < quota.MaximumEntries; index++)
         {
             Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(index, index))).Status);
@@ -439,7 +903,7 @@ public sealed class CredentialRegistryStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var trust = new LongAuthenticationTagTrustProvider(FileCapabilityCatalogTrustProvider.CreateDefault(), 2048);
+        var trust = new LongAuthenticationTagTrustProvider(TestTrust(paths), 2048);
         var quota = new CredentialRegistryQuota(2, 2, 4, 4, 4096);
         var store = new CredentialRegistryStore(paths, trust, new AcceptingLocatorVerifier(), quota: quota);
 
@@ -463,8 +927,8 @@ public sealed class CredentialRegistryStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => new CredentialRegistryStore(paths, new LongAuthenticationTagTrustProvider(FileCapabilityCatalogTrustProvider.CreateDefault(), 0), new AcceptingLocatorVerifier()));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new CredentialRegistryStore(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), quota: new CredentialRegistryQuota(0, 1, 1, 1, 1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CredentialRegistryStore(paths, new LongAuthenticationTagTrustProvider(TestTrust(paths), 0), new AcceptingLocatorVerifier()));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CredentialRegistryStore(paths, TestTrust(paths), new AcceptingLocatorVerifier(), quota: new CredentialRegistryQuota(0, 1, 1, 1, 1)));
     }
 
     [Fact]
@@ -479,15 +943,37 @@ public sealed class CredentialRegistryStoreTests
             await store.MutateAsync(new CredentialRegistryMutation((CredentialRegistryMutationKind)999, Id("invalid-kind"), 0, ReferenceId(), null, null, null, null, null)),
             await store.MutateAsync(Register(0) with { ReferenceId = ReferenceId(2) }),
             await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, Id("invalid-health"), 0, ReferenceId(), Reference(), null, null, CredentialProviderHealthStatus.Available, null)),
-            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("invalid-tombstone"), 0, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null))
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Tombstone, Id("invalid-tombstone"), 0, ReferenceId(), null, null, null, CredentialProviderHealthStatus.Available, null)),
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Bind, Id("invalid-bind"), 0, ReferenceId(), null, null, null, null, null)),
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.Consent, Id("invalid-consent"), 0, ReferenceId(), null, null, null, null, null)),
+            await store.MutateAsync(new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, Id("invalid-posture"), 0, ReferenceId(), Reference(), null, null, null, null))
         };
 
-        Assert.All(invalid, result =>
+        Assert.Equal(CredentialFailureCode.Unauthorized, invalid[1].Failure!.Code);
+        Assert.All(invalid.Where((_, index) => index != 1), result =>
         {
             Assert.Equal(CredentialRegistryMutationStatus.Invalid, result.Status);
             Assert.Equal(CredentialFailureCode.InvalidRequest, result.Failure!.Code);
         });
         Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
+    }
+
+    [Fact]
+    public async Task BindAndPostureCannotChangeImmutableProviderOrReferenceMetadata()
+    {
+        using var workspace = new TestWorkspace();
+        var store = Store(new WorkspacePaths(workspace.RootPath));
+        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(Register(0))).Status);
+        Assert.True(CapabilityProviderId.TryParse("org.other", out var foreignProvider, out _));
+        var foreignImplementation = Binding().Implementation with { ProviderId = foreignProvider! };
+        var foreignBinding = Binding() with { Implementation = foreignImplementation, Scope = Binding().Scope with { Implementation = foreignImplementation } };
+        var bind = new CredentialRegistryMutation(CredentialRegistryMutationKind.Bind, Id("bind-immutable"), 1, ReferenceId(), null, foreignBinding, null, null, null);
+        var changedReference = Reference() with { Purpose = "Changed outside the lifecycle posture fields.", Status = CredentialLifecycleStatus.Disabled };
+        var posture = new CredentialRegistryMutation(CredentialRegistryMutationKind.UpdatePosture, Id("posture-immutable"), 1, ReferenceId(), changedReference, null, null, CredentialProviderHealthStatus.Disabled, null);
+
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, (await store.MutateAsync(bind)).Status);
+        Assert.Equal(CredentialRegistryMutationStatus.Conflict, (await store.MutateAsync(posture)).Status);
+        Assert.Equal(1, (await store.ReadAsync()).RegistryRevision);
     }
 
     [Fact]
@@ -523,7 +1009,7 @@ public sealed class CredentialRegistryStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var tag = oversized ? new string('a', 65) : string.Empty;
-        var trust = new InvalidAuthenticationTagTrustProvider(FileCapabilityCatalogTrustProvider.CreateDefault(), tag);
+        var trust = new InvalidAuthenticationTagTrustProvider(TestTrust(paths), tag);
         var result = await new CredentialRegistryStore(paths, trust, new AcceptingLocatorVerifier()).MutateAsync(Register(0));
 
         Assert.Equal(CredentialRegistryMutationStatus.Unavailable, result.Status);
@@ -537,7 +1023,7 @@ public sealed class CredentialRegistryStoreTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var quota = new CredentialRegistryQuota(2, 2, 4, 1, 128 * 1024);
-        var store = new CredentialRegistryStore(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), quota: quota);
+        var store = new CredentialRegistryStore(paths, TestTrust(paths), new AcceptingLocatorVerifier(), quota: quota);
         var missing = await store.GetAsync(ReferenceId(), default);
         Assert.False(missing.Succeeded);
         Assert.Equal(CredentialFailureCode.NotFound, missing.Failure!.Code);
@@ -576,7 +1062,20 @@ public sealed class CredentialRegistryStoreTests
         return new CredentialRegistryMutation(CredentialRegistryMutationKind.Register, Id($"register-{index}"), revision, referenceId, reference, binding, Id("consent-1"), CredentialProviderHealthStatus.Available, locator ?? Locator());
     }
 
-    private static CredentialRegistryStore Store(WorkspacePaths paths, TimeProvider? timeProvider = null) => new(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), new AcceptingLocatorVerifier(), timeProvider);
+    private static CredentialRegistryStore Store(WorkspacePaths paths, TimeProvider? timeProvider = null) => new(paths, TestTrust(paths), new AcceptingLocatorVerifier(), timeProvider);
+
+    private static CredentialLifecycleService ReconciliationService(WorkspacePaths paths, bool deleteSucceeds = true)
+    {
+        var dependentIndex = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
+        return CredentialLifecyclePersistenceFactory.Create(paths, TestTrust(paths), CredentialLifecyclePersistenceTestAdapter.Instance, new CountingCredentialValueProvider(new StrongBox<int>(), deleteSucceeds), CredentialLifecyclePersistenceTestAdapter.Instance, dependentIndex, CredentialLifecyclePersistenceTestAdapter.Instance, new AuditLog(paths));
+    }
+
+    private static FileCapabilityCatalogTrustProvider TestTrust(WorkspacePaths paths)
+    {
+        var workspaceRoot = new DirectoryInfo(paths.WorkspacePath);
+        var temporaryRoot = workspaceRoot.Parent?.Parent ?? throw new InvalidOperationException("The test workspace root is invalid.");
+        return new FileCapabilityCatalogTrustProvider(Path.Combine(temporaryRoot.FullName, "embodysense-test-server-state", workspaceRoot.Name, "credential-registry-trust"));
+    }
 
     private static string ComputeStateDigest(JsonObject publicDocument, JsonObject privateDocument)
     {
@@ -590,7 +1089,16 @@ public sealed class CredentialRegistryStoreTests
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
     }
 
+    private static string ComputeContentDigest(JsonObject publicDocument)
+    {
+        var contentDocument = publicDocument.DeepClone().AsObject();
+        contentDocument["contentDigest"] = string.Empty;
+        contentDocument["authenticationTag"] = string.Empty;
+        return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(contentDocument.ToJsonString(JsonOptions(writeIndented: false))))).ToLowerInvariant();
+    }
+
     private static JsonSerializerOptions JsonOptions(bool writeIndented) => new(JsonSerializerDefaults.Web) { WriteIndented = writeIndented };
+    private static string Hash(char value) => "sha256:" + new string(value, 64);
 
     private sealed class AcceptingLocatorVerifier : ICredentialProviderLocatorVerifier
     {
@@ -717,6 +1225,10 @@ public sealed class CredentialRegistryStoreTests
         Assert.True(CredentialProviderLocator.TryParse(value, out var parsed));
         return parsed!;
     }
+
+    private static CredentialLifecycleAuditPayload AuditPayload(string outcome) => new(AuditSchema.Actions.CredentialLifecycleOutcome, outcome, "Credential lifecycle terminal outcome recorded.");
+
+    private static CredentialLifecycleAuditPayload IntentAuditPayload() => new(AuditSchema.Actions.CredentialLifecycleIntent, AuditSchema.Outcomes.Started, "Credential lifecycle intent durably recorded.");
 
     private sealed class FixedTimeProvider : TimeProvider
     {

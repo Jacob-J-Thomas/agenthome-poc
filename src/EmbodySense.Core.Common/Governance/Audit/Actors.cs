@@ -34,5 +34,8 @@ public static partial class AuditSchema
         /// Identifies server-owned capability intake and hosting infrastructure.
         /// </summary>
         public const string CapabilityHost = "embodysense.capability-host";
+
+        /// <summary>Identifies server-owned credential lifecycle infrastructure.</summary>
+        public const string CredentialHost = "embodysense.credential-host";
     }
 }

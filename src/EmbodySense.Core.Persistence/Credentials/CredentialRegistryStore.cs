@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Capabilities.Models;
@@ -17,6 +18,7 @@ namespace EmbodySense.Core.Persistence.Credentials;
 /// <remarks>Provider locators are strictly shaped opaque tokens retained only beneath the workspace private boundary. This store never resolves a locator or accepts credential bytes, encrypted envelopes, or key material.</remarks>
 public sealed class CredentialRegistryStore : ICredentialRegistryStore
 {
+    private const int MaximumActiveRuns = 1_024;
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true, UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow };
     private static readonly JsonSerializerOptions _canonicalJson = new(JsonSerializerDefaults.Web) { UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow };
     private static readonly UTF8Encoding _utf8 = new(false, true);
@@ -47,6 +49,9 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         _pathGuard = new CapabilityCatalogPathGuard(paths.WorkspacePath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
+
+    /// <summary>Rejects raw actor claims because only the private lifecycle projection owns process identity.</summary>
+    public ValueTask<CredentialActorAuthentication> AuthenticateActorAsync(string actorId, CancellationToken cancellationToken) => ValueTask.FromResult(CredentialActorAuthentication.Unauthenticated);
 
     /// <inheritdoc />
     public async ValueTask<CredentialReferenceLookupResult> GetAsync(CredentialReferenceId referenceId, CancellationToken cancellationToken)
@@ -81,9 +86,26 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         }
     }
 
-    /// <inheritdoc />
-    public async Task<CredentialRegistryMutationResult> MutateAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default)
+    /// <summary>Applies one raw value-free registry mutation while rejecting repair-authority transitions and evidence.</summary>
+    /// <remarks>Lifecycle services use a private assembly boundary. Public callers cannot mint repair intents, repair outcomes, or equivalent operation and phase shapes later sufficient for privileged repair reconciliation.</remarks>
+    public Task<CredentialRegistryMutationResult> MutateAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default) => MutateAsync(mutation, lifecycleAuthorized: false, cancellationToken);
+
+    internal Task<CredentialRegistryMutationResult> MutateLifecycleAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default) => MutateAsync(mutation, lifecycleAuthorized: true, cancellationToken);
+
+    private async Task<CredentialRegistryMutationResult> MutateAsync(CredentialRegistryMutation mutation, bool lifecycleAuthorized, CancellationToken cancellationToken)
     {
+        if (mutation is null)
+        {
+            return Mutation(CredentialRegistryMutationStatus.Invalid, null, null, null, CredentialFailureCode.InvalidRequest);
+        }
+        if (mutation.AffectedActiveRuns is not null)
+        {
+            mutation = mutation with { AffectedActiveRuns = Array.AsReadOnly(mutation.AffectedActiveRuns.ToArray()) };
+        }
+        if (!lifecycleAuthorized && RequiresLifecycleAuthority(mutation))
+        {
+            return Mutation(CredentialRegistryMutationStatus.Invalid, mutation.OperationId, null, null, CredentialFailureCode.Unauthorized);
+        }
         if (!ValidateMutation(mutation, out var requestHash))
         {
             return Mutation(CredentialRegistryMutationStatus.Invalid, mutation?.OperationId, null, null, CredentialFailureCode.InvalidRequest);
@@ -108,6 +130,11 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
 
                 var replayEntry = prior.ResultEntry is not null && TryMapEntry(prior.ResultEntry, out var mappedReceipt) ? mappedReceipt : null;
                 return Mutation(CredentialRegistryMutationStatus.Replayed, mutation.OperationId, prior.Revision, replayEntry, null);
+            }
+
+            if (!ValidateLifecyclePhaseAgainstState(current, mutation))
+            {
+                return Mutation(CredentialRegistryMutationStatus.Conflict, mutation.OperationId, current.Public.Revision, null, CredentialFailureCode.Conflict);
             }
 
             if (!await VerifyLocatorAsync(current, mutation, cancellationToken))
@@ -145,6 +172,44 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
     }
 
     /// <inheritdoc />
+    public async Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(auditOperationId);
+        try
+        {
+            await using var session = await AcquireAsync(cancellationToken);
+            var current = await LoadAsync(session, cancellationToken);
+            if (current is null || current.Recovered)
+            {
+                return false;
+            }
+            var auditOperation = current.Public.Operations.SingleOrDefault(item => string.Equals(item.OperationId, auditOperationId.Value, StringComparison.Ordinal));
+            if (auditOperation?.AuditOutbox is null)
+            {
+                return false;
+            }
+            if (current.Public.AuditDeliveries!.Any(item => string.Equals(item.TerminalOperationId, auditOperationId.Value, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            var delivery = new CredentialRegistryAuditDeliveryDocument(auditOperationId.Value, _timeProvider.GetUtcNow());
+            var publicCandidate = current.Public with { Generation = checked(current.Public.Generation + 1), AuditDeliveries = [.. current.Public.AuditDeliveries!, delivery] };
+            var candidate = Complete(current.WorkspaceIdentity, publicCandidate, current.Private);
+            await CommitAsync(session, current, candidate, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception exception) when (IsStorageFailure(exception))
+        {
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
     public async ValueTask<CredentialEvidenceWriteResult> AppendAsync(CredentialUseEvidence evidence, CancellationToken cancellationToken)
     {
         if (!CredentialContractJson.TrySerialize(evidence, out var evidenceJson, out _))
@@ -171,6 +236,11 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             if (reference is null)
             {
                 return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.NotFound));
+            }
+
+            if (reference.Health == CredentialProviderHealthStatus.NeedsRepair)
+            {
+                return CredentialEvidenceWriteResult.Failed(CredentialFailure.FromCode(CredentialFailureCode.Conflict));
             }
 
             if (!reference.BindingHash.FixedTimeEquals(evidence.BindingHash))
@@ -264,9 +334,10 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         var tombstones = current.Public.Tombstones.ToList();
         var locators = current.Private.Locators.ToList();
         var existing = entries.SingleOrDefault(item => Matches(item, mutation.ReferenceId));
-        if (mutation.Kind == CredentialRegistryMutationKind.Register)
+        CredentialRegistryEntryDocument? operationResultEntry = null;
+        if (mutation.Kind == CredentialRegistryMutationKind.BeginCreate)
         {
-            if (existing is not null || tombstones.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal)))
+            if (existing is not null || tombstones.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal)) || current.Public.Operations.Any(item => item.Kind == (int)CredentialRegistryMutationKind.BeginCreate && string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal)))
             {
                 return null;
             }
@@ -274,12 +345,27 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             CredentialContractJson.TrySerialize(mutation.Reference, out var referenceJson, out _);
             CredentialContractJson.TrySerialize(mutation.Binding, out var bindingJson, out _);
             CredentialContractJson.TryHash(mutation.Binding, out var bindingHash, out _);
-            entries.Add(new CredentialRegistryEntryDocument(referenceJson!, bindingJson!, bindingHash!.Value, mutation.ConsentReference!.Value, (int)mutation.Health!.Value, revision, mutation.OperationId.Value));
-            locators.Add(new CredentialRegistryLocatorDocument(mutation.ReferenceId.Value, mutation.ProviderLocator!.Value));
+            operationResultEntry = new CredentialRegistryEntryDocument(referenceJson!, bindingJson!, bindingHash!.Value, mutation.ConsentReference!.Value, (int)mutation.Health!.Value, revision, mutation.OperationId.Value, false);
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.Register)
+        {
+            var unresolvedCreateIntent = current.Public.Operations.Any(item => item.Kind == (int)CredentialRegistryMutationKind.BeginCreate && string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal));
+            if (existing is not null || tombstones.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal)) || unresolvedCreateIntent && mutation.LifecyclePhase != CredentialLifecycleMutationPhase.LocatorPrepared)
+            {
+                return null;
+            }
+
+            CredentialContractJson.TrySerialize(mutation.Reference, out var referenceJson, out _);
+            CredentialContractJson.TrySerialize(mutation.Binding, out var bindingJson, out _);
+            CredentialContractJson.TryHash(mutation.Binding, out var bindingHash, out _);
+            entries.Add(new CredentialRegistryEntryDocument(referenceJson!, bindingJson!, bindingHash!.Value, mutation.ConsentReference!.Value, (int)mutation.Health!.Value, revision, mutation.OperationId.Value, false));
+            locators.Add(new CredentialRegistryLocatorDocument(mutation.ReferenceId.Value, mutation.ProviderLocator!.Value, false));
         }
         else if (mutation.Kind == CredentialRegistryMutationKind.SetHealth)
         {
-            if (existing is null)
+            var existingHealth = existing is null ? (CredentialProviderHealthStatus?)null : (CredentialProviderHealthStatus)existing.Health;
+            var resolvesIntent = mutation.LifecyclePhase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.Rollback or CredentialLifecycleMutationPhase.Uncertain;
+            if (existing is null || IsRestrictive(existing) && mutation.Health is not (CredentialProviderHealthStatus.Revoked or CredentialProviderHealthStatus.Disabled or CredentialProviderHealthStatus.Expired) || existingHealth == CredentialProviderHealthStatus.NeedsRepair && !resolvesIntent)
             {
                 return null;
             }
@@ -288,22 +374,110 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         }
         else if (mutation.Kind == CredentialRegistryMutationKind.Tombstone)
         {
-            if (existing is null || !CredentialContractJson.TryDeserializeReference(existing.ReferenceJson, out var reference, out _) || !CredentialContractJson.TryHash(reference, out var referenceHash, out _))
+            var resolvesIntent = mutation.LifecyclePhase is CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain or CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.RepairUncertain;
+            if (existing is null || (CredentialProviderHealthStatus)existing.Health == CredentialProviderHealthStatus.NeedsRepair && !resolvesIntent || !CredentialContractJson.TryDeserializeReference(existing.ReferenceJson, out var reference, out _) || !CredentialContractJson.TryHash(reference, out var referenceHash, out _))
             {
                 return null;
             }
 
+            var repairRequired = mutation.LifecyclePhase is CredentialLifecycleMutationPhase.TombstoneUncertain or CredentialLifecycleMutationPhase.RepairUncertain;
             entries.Remove(existing);
+            if (repairRequired)
+            {
+                var locatorIndex = locators.FindIndex(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal));
+                if (locatorIndex < 0)
+                {
+                    return null;
+                }
+                locators[locatorIndex] = locators[locatorIndex] with { RepairRequired = true };
+            }
+            else
+            {
+                locators.RemoveAll(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal));
+            }
+            tombstones.Add(new CredentialRegistryTombstoneDocument(mutation.ReferenceId.Value, revision, mutation.OperationId.Value, _timeProvider.GetUtcNow(), referenceHash!.Value, repairRequired, repairRequired ? existing.BindingJson : null, repairRequired ? reference!.ProviderId.Value : null));
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.Bind)
+        {
+            if (existing is null || (CredentialProviderHealthStatus)existing.Health == CredentialProviderHealthStatus.NeedsRepair || !CredentialContractJson.TryDeserializeReference(existing.ReferenceJson, out var existingReference, out _) || !string.Equals(existingReference!.ProviderId.Value, mutation.Binding!.Implementation.ProviderId.Value, StringComparison.Ordinal) || !CredentialContractJson.TrySerialize(mutation.Binding, out var bindingJson, out _) || !CredentialContractJson.TryHash(mutation.Binding, out var bindingHash, out _))
+            {
+                return null;
+            }
+
+            entries[entries.IndexOf(existing)] = existing with { BindingJson = bindingJson!, BindingHash = bindingHash!.Value, Revision = revision, LastOperationId = mutation.OperationId.Value };
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.Consent)
+        {
+            if (existing is null || (CredentialProviderHealthStatus)existing.Health == CredentialProviderHealthStatus.NeedsRepair)
+            {
+                return null;
+            }
+
+            entries[entries.IndexOf(existing)] = existing with { ConsentReference = mutation.ConsentReference!.Value, ConsentGranted = mutation.ConsentGranted!.Value, Revision = revision, LastOperationId = mutation.OperationId.Value };
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.UpdatePosture)
+        {
+            if (existing is null || (CredentialProviderHealthStatus)existing.Health == CredentialProviderHealthStatus.NeedsRepair || !CredentialContractJson.TryDeserializeReference(existing.ReferenceJson, out var existingReference, out _) || !CredentialContractJson.TrySerialize(mutation.Reference, out var referenceJson, out _) || !CredentialContractJson.TrySerialize(mutation.Reference! with { Status = existingReference!.Status, UpdatedAtUtc = existingReference.UpdatedAtUtc }, out var normalizedJson, out _) || !string.Equals(normalizedJson, existing.ReferenceJson, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            entries[entries.IndexOf(existing)] = existing with { ReferenceJson = referenceJson!, Health = (int)mutation.Health!.Value, Revision = revision, LastOperationId = mutation.OperationId.Value };
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.BeginRepair)
+        {
+            var repair = tombstones.SingleOrDefault(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal));
+            var preparedCreate = IsPreparedCreateState(current.Public, existing, locators, mutation.ReferenceId);
+            var tombstoneRepair = existing is null && repair is { NeedsRepair: true } && locators.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && item.RepairRequired);
+            if (!preparedCreate && !tombstoneRepair || HasUnresolvedRepairIntent(current.Public, mutation.ReferenceId))
+            {
+                return null;
+            }
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.CompleteRepair)
+        {
+            var repair = tombstones.SingleOrDefault(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && item.NeedsRepair);
+            if (existing is not null || repair is null || !locators.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && item.RepairRequired))
+            {
+                return null;
+            }
             locators.RemoveAll(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal));
-            tombstones.Add(new CredentialRegistryTombstoneDocument(mutation.ReferenceId.Value, revision, mutation.OperationId.Value, _timeProvider.GetUtcNow(), referenceHash!.Value));
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.RecordRepairUncertain)
+        {
+            var repair = tombstones.SingleOrDefault(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && item.NeedsRepair);
+            if (existing is not null || repair is null || !locators.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && item.RepairRequired))
+            {
+                return null;
+            }
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.ReconcileRepair)
+        {
+            if (existing is not null)
+            {
+                _ = TryMapEntry(existing, out var mapped);
+                _ = CredentialContractJson.TryHash(mapped!.Reference, out var referenceHash, out _);
+                var locatorIndex = locators.FindIndex(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && !item.RepairRequired);
+                entries.Remove(existing);
+                locators[locatorIndex] = locators[locatorIndex] with { RepairRequired = true };
+                tombstones.Add(new CredentialRegistryTombstoneDocument(mutation.ReferenceId.Value, revision, mutation.OperationId.Value, _timeProvider.GetUtcNow(), referenceHash!.Value, true, existing.BindingJson, mapped.Reference.ProviderId.Value));
+            }
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.RecordLocatorUncertain)
+        {
+            if (tombstones.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal)) || existing is not null && !IsPreparedCreateState(current.Public, existing, locators, mutation.ReferenceId))
+            {
+                return null;
+            }
         }
         else
         {
             return null;
         }
 
-        var resultEntry = mutation.Kind == CredentialRegistryMutationKind.Tombstone ? null : entries.Single(item => Matches(item, mutation.ReferenceId));
-        var operation = new CredentialRegistryOperationDocument(mutation.OperationId.Value, requestHash, (int)mutation.Kind, revision, mutation.ReferenceId.Value, resultEntry);
+        var resultEntry = operationResultEntry ?? (mutation.Kind is CredentialRegistryMutationKind.Tombstone or CredentialRegistryMutationKind.BeginRepair or CredentialRegistryMutationKind.CompleteRepair or CredentialRegistryMutationKind.RecordRepairUncertain or CredentialRegistryMutationKind.RecordLocatorUncertain or CredentialRegistryMutationKind.ReconcileRepair ? null : entries.Single(item => Matches(item, mutation.ReferenceId)));
+        var auditOutbox = mutation.LifecycleAudit is null ? null : new CredentialRegistryAuditOutboxDocument(_timeProvider.GetUtcNow(), revision, mutation.LifecycleAudit.Action, mutation.LifecycleAudit.Outcome, mutation.LifecycleAudit.Detail);
+        var operation = new CredentialRegistryOperationDocument(mutation.OperationId.Value, requestHash, (int)mutation.Kind, revision, mutation.ReferenceId.Value, resultEntry, mutation.LifecycleOperation, mutation.ActorId, mutation.PreviewHash, mutation.LifecycleRequestHash, (int?)mutation.LifecyclePhase, mutation.LifecycleIntentOperationId?.Value, mutation.AffectedActiveRuns?.ToArray(), mutation.WorkspaceId, auditOutbox);
         var publicCandidate = current.Public with { Generation = checked(current.Public.Generation + 1), Revision = revision, Entries = entries.OrderBy(GetReferenceId, StringComparer.Ordinal).ToArray(), Tombstones = tombstones.OrderBy(item => item.ReferenceId, StringComparer.Ordinal).ToArray(), Operations = [.. current.Public.Operations, operation] };
         var privateCandidate = current.Private with { Revision = revision, Locators = locators.OrderBy(item => item.ReferenceId, StringComparer.Ordinal).ToArray() };
         return Complete(current.WorkspaceIdentity, publicCandidate, privateCandidate);
@@ -379,7 +553,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
 
     private async ValueTask<bool> VerifyLocatorAsync(State current, CredentialRegistryMutation mutation, CancellationToken cancellationToken)
     {
-        if (mutation.Kind == CredentialRegistryMutationKind.Tombstone)
+        if (mutation.Kind is CredentialRegistryMutationKind.Tombstone or CredentialRegistryMutationKind.BeginRepair or CredentialRegistryMutationKind.CompleteRepair or CredentialRegistryMutationKind.RecordRepairUncertain or CredentialRegistryMutationKind.BeginCreate or CredentialRegistryMutationKind.RecordLocatorUncertain or CredentialRegistryMutationKind.ReconcileRepair || mutation.LifecyclePhase == CredentialLifecycleMutationPhase.Uncertain || mutation.Kind == CredentialRegistryMutationKind.UpdatePosture && mutation.Health is CredentialProviderHealthStatus.NeedsRepair or CredentialProviderHealthStatus.Revoked or CredentialProviderHealthStatus.Disabled or CredentialProviderHealthStatus.Expired)
         {
             return true;
         }
@@ -401,26 +575,69 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
     private static bool ValidateMutation(CredentialRegistryMutation? mutation, out string? requestHash)
     {
         requestHash = null;
-        if (mutation is null || !Enum.IsDefined(mutation.Kind) || mutation.ExpectedRegistryRevision < 0 || mutation.OperationId is null || mutation.ReferenceId is null)
+        if (mutation is null || !Enum.IsDefined(mutation.Kind) || mutation.ExpectedRegistryRevision < 0 || mutation.OperationId is null || mutation.ReferenceId is null || mutation.LifecycleOperation is < 1 or > 13 || mutation.ActorId is not null && !IsSafe(mutation.ActorId, 128) || mutation.WorkspaceId is not null && !IsSafe(mutation.WorkspaceId, 256) || mutation.PreviewHash is not null && !CredentialContractHash.TryParse(mutation.PreviewHash, out _, out _) || mutation.LifecycleRequestHash is not null && !CredentialContractHash.TryParse(mutation.LifecycleRequestHash, out _, out _) || mutation.LifecyclePhase is not null && !Enum.IsDefined(mutation.LifecyclePhase.Value) || mutation.LifecyclePhase is null != (mutation.LifecycleIntentOperationId is null) || !ValidateActiveRuns(mutation.AffectedActiveRuns))
         {
             return false;
         }
 
-        if (mutation.Kind == CredentialRegistryMutationKind.Register)
+        if (mutation.Kind is CredentialRegistryMutationKind.Register or CredentialRegistryMutationKind.BeginCreate)
         {
-            if (mutation.Reference is null || mutation.Binding is null || mutation.ConsentReference is null || mutation.Health is null || mutation.ProviderLocator is null || !Enum.IsDefined(mutation.Health.Value) || !mutation.Reference.Id.Equals(mutation.ReferenceId) || !mutation.Binding.ReferenceId.Equals(mutation.ReferenceId) || !string.Equals(mutation.Reference.ProviderId.Value, mutation.Binding.Implementation.ProviderId.Value, StringComparison.Ordinal) || !CredentialContractJson.TrySerialize(mutation.Reference, out _, out _) || !CredentialContractJson.TrySerialize(mutation.Binding, out _, out _))
+            var locatorShapeIsValid = mutation.Kind == CredentialRegistryMutationKind.Register ? mutation.ProviderLocator is not null : mutation.ProviderLocator is null;
+            if (mutation.Reference is null || mutation.Binding is null || mutation.ConsentReference is null || mutation.Health is null || !locatorShapeIsValid || mutation.ConsentGranted is true || !Enum.IsDefined(mutation.Health.Value) || !mutation.Reference.Id.Equals(mutation.ReferenceId) || !mutation.Binding.ReferenceId.Equals(mutation.ReferenceId) || !string.Equals(mutation.Reference.ProviderId.Value, mutation.Binding.Implementation.ProviderId.Value, StringComparison.Ordinal) || !CredentialContractJson.TrySerialize(mutation.Reference, out _, out _) || !CredentialContractJson.TrySerialize(mutation.Binding, out _, out _))
             {
                 return false;
             }
         }
         else if (mutation.Kind == CredentialRegistryMutationKind.SetHealth)
         {
-            if (mutation.Health is null || mutation.Reference is not null || mutation.Binding is not null || mutation.ConsentReference is not null || mutation.ProviderLocator is not null || !Enum.IsDefined(mutation.Health.Value))
+            if (mutation.Health is null || mutation.Reference is not null || mutation.Binding is not null || mutation.ConsentReference is not null || mutation.ProviderLocator is not null || mutation.ConsentGranted is not null || !Enum.IsDefined(mutation.Health.Value))
             {
                 return false;
             }
         }
-        else if (mutation.Reference is not null || mutation.Binding is not null || mutation.ConsentReference is not null || mutation.Health is not null || mutation.ProviderLocator is not null)
+        else if (mutation.Kind == CredentialRegistryMutationKind.Tombstone)
+        {
+            if (mutation.Reference is not null || mutation.Binding is not null || mutation.ConsentReference is not null || mutation.Health is not null || mutation.ProviderLocator is not null || mutation.ConsentGranted is not null)
+            {
+                return false;
+            }
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.Bind)
+        {
+            if (mutation.Reference is not null || mutation.Binding is null || mutation.ConsentReference is not null || mutation.Health is not null || mutation.ProviderLocator is not null || mutation.ConsentGranted is not null || !mutation.Binding.ReferenceId.Equals(mutation.ReferenceId) || !CredentialContractJson.TrySerialize(mutation.Binding, out _, out _))
+            {
+                return false;
+            }
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.Consent)
+        {
+            if (mutation.Reference is not null || mutation.Binding is not null || mutation.ConsentReference is null || mutation.Health is not null || mutation.ProviderLocator is not null || mutation.ConsentGranted is null)
+            {
+                return false;
+            }
+        }
+        else if (mutation.Kind == CredentialRegistryMutationKind.UpdatePosture)
+        {
+            if (mutation.Reference is null || mutation.Binding is not null || mutation.ConsentReference is not null || mutation.Health is null || mutation.ProviderLocator is not null || mutation.ConsentGranted is not null || !mutation.Reference.Id.Equals(mutation.ReferenceId) || !Enum.IsDefined(mutation.Health.Value) || !CredentialContractJson.TrySerialize(mutation.Reference, out _, out _))
+            {
+                return false;
+            }
+        }
+        else if (mutation.Kind is CredentialRegistryMutationKind.BeginRepair or CredentialRegistryMutationKind.CompleteRepair or CredentialRegistryMutationKind.RecordRepairUncertain or CredentialRegistryMutationKind.RecordLocatorUncertain or CredentialRegistryMutationKind.ReconcileRepair)
+        {
+            if (mutation.Reference is not null || mutation.Binding is not null || mutation.ConsentReference is not null || mutation.Health is not null || mutation.ProviderLocator is not null || mutation.ConsentGranted is not null)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
+
+        var restrictive = mutation.Kind == CredentialRegistryMutationKind.UpdatePosture && mutation.LifecyclePhase is null && (mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Expire || mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Revoke || mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Disable);
+        var audited = mutation.LifecyclePhase == CredentialLifecycleMutationPhase.Intent || IsTerminalPhase(mutation.LifecyclePhase);
+        if (restrictive != (mutation.AffectedActiveRuns is not null) || audited != (mutation.LifecycleAudit is not null) || mutation.LifecycleAudit is not null && (!string.Equals(mutation.LifecycleAudit.Action, ExpectedAuditAction(mutation.LifecyclePhase), StringComparison.Ordinal) || !string.Equals(mutation.LifecycleAudit.Outcome, ExpectedAuditOutcome(mutation.LifecyclePhase), StringComparison.Ordinal) || !IsSafe(mutation.LifecycleAudit.Detail, 512)) || !ValidateLifecyclePhaseShape(mutation))
         {
             return false;
         }
@@ -429,9 +646,140 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         return true;
     }
 
+    private static bool RequiresLifecycleAuthority(CredentialRegistryMutation mutation)
+    {
+        return !IsPublicRawMutationKind(mutation.Kind)
+            || mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Repair or (int)CredentialLifecycleOperationKind.ReconcileRepair
+            || mutation.LifecyclePhase is CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.RepairUncertain or CredentialLifecycleMutationPhase.RepairReconciledUncertain;
+    }
+
+    private static bool IsPublicRawMutationKind(CredentialRegistryMutationKind kind)
+    {
+        return kind is CredentialRegistryMutationKind.Register or CredentialRegistryMutationKind.SetHealth or CredentialRegistryMutationKind.Tombstone or CredentialRegistryMutationKind.Bind or CredentialRegistryMutationKind.Consent or CredentialRegistryMutationKind.UpdatePosture or CredentialRegistryMutationKind.BeginCreate or CredentialRegistryMutationKind.RecordLocatorUncertain;
+    }
+
+    private static bool ValidateActiveRuns(IReadOnlyList<string>? runs)
+    {
+        return runs is null || runs.Count <= MaximumActiveRuns && runs.All(run => run.Length is > 0 and <= 256 && run.All(character => character >= (char)0x20 && character != (char)0x7f)) && runs.Distinct(StringComparer.Ordinal).Count() == runs.Count && runs.SequenceEqual(runs.Order(StringComparer.Ordinal), StringComparer.Ordinal);
+    }
+
+    private static bool ValidateLifecyclePhaseShape(CredentialRegistryMutation mutation)
+    {
+        if (mutation.LifecyclePhase is null)
+        {
+            return true;
+        }
+        if (mutation.LifecycleOperation is null || mutation.ActorId is null || mutation.WorkspaceId is null || mutation.LifecycleRequestHash is null || mutation.LifecycleIntentOperationId is null)
+        {
+            return false;
+        }
+        return mutation.LifecyclePhase switch
+        {
+            CredentialLifecycleMutationPhase.Intent => mutation.OperationId.Equals(mutation.LifecycleIntentOperationId) && (mutation.Kind == CredentialRegistryMutationKind.BeginCreate && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import && mutation.Health == CredentialProviderHealthStatus.NeedsRepair || mutation.Kind == CredentialRegistryMutationKind.UpdatePosture && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace or (int)CredentialLifecycleOperationKind.Delete && mutation.Health == CredentialProviderHealthStatus.NeedsRepair || mutation.Kind == CredentialRegistryMutationKind.BeginRepair && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair),
+            CredentialLifecycleMutationPhase.LocatorPrepared => mutation.Kind == CredentialRegistryMutationKind.Register && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import && mutation.Health == CredentialProviderHealthStatus.NeedsRepair,
+            CredentialLifecycleMutationPhase.LocatorUncertain => mutation.Kind == CredentialRegistryMutationKind.RecordLocatorUncertain && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import,
+            CredentialLifecycleMutationPhase.Complete => mutation.Kind == CredentialRegistryMutationKind.SetHealth && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && mutation.Health == CredentialProviderHealthStatus.Available,
+            CredentialLifecycleMutationPhase.Rollback => mutation.Kind == CredentialRegistryMutationKind.SetHealth && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && mutation.Health is not null and not CredentialProviderHealthStatus.NeedsRepair,
+            CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain => mutation.Kind == CredentialRegistryMutationKind.Tombstone && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Delete,
+            CredentialLifecycleMutationPhase.RepairComplete => mutation.Kind is CredentialRegistryMutationKind.CompleteRepair or CredentialRegistryMutationKind.Tombstone && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair,
+            CredentialLifecycleMutationPhase.Uncertain => mutation.Kind == CredentialRegistryMutationKind.SetHealth && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && mutation.Health == CredentialProviderHealthStatus.NeedsRepair,
+            CredentialLifecycleMutationPhase.RepairUncertain => mutation.Kind is CredentialRegistryMutationKind.RecordRepairUncertain or CredentialRegistryMutationKind.Tombstone && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair,
+            CredentialLifecycleMutationPhase.RepairReconciledUncertain => mutation.Kind == CredentialRegistryMutationKind.ReconcileRepair && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.ReconcileRepair && mutation.PreviewHash is not null,
+            _ => false
+        };
+    }
+
+    private static bool ValidateLifecyclePhaseAgainstState(State current, CredentialRegistryMutation mutation)
+    {
+        if (mutation.LifecyclePhase is null or CredentialLifecycleMutationPhase.Intent)
+        {
+            return true;
+        }
+        var intentOperationId = mutation.LifecycleIntentOperationId;
+        if (intentOperationId is null)
+        {
+            return false;
+        }
+        var intent = current.Public.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, intentOperationId.Value, StringComparison.Ordinal));
+        var latest = current.Public.Operations.LastOrDefault(operation => string.Equals(operation.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal));
+        if (mutation.LifecyclePhase == CredentialLifecycleMutationPhase.RepairReconciledUncertain)
+        {
+            var existing = current.Public.Entries.SingleOrDefault(entry => Matches(entry, mutation.ReferenceId));
+            var repair = current.Public.Tombstones.SingleOrDefault(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal));
+            var repairRequiredState = IsPreparedCreateState(current.Public, existing, current.Private.Locators, mutation.ReferenceId) || existing is null && repair is { NeedsRepair: true } && current.Private.Locators.Any(item => string.Equals(item.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && item.RepairRequired);
+            return repairRequiredState && intent is not null && latest is not null && intent.Kind == (int)CredentialRegistryMutationKind.BeginRepair && intent.LifecyclePhase == (int)CredentialLifecycleMutationPhase.Intent && intent.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair && string.Equals(intent.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) && string.Equals(intent.ReferenceId, mutation.ReferenceId.Value, StringComparison.Ordinal) && string.Equals(intent.WorkspaceId, mutation.WorkspaceId, StringComparison.Ordinal) && string.Equals(latest.OperationId, intent.OperationId, StringComparison.Ordinal) && !current.Public.Operations.Any(operation => string.Equals(operation.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) && operation.LifecyclePhase is (int)CredentialLifecycleMutationPhase.RepairComplete or (int)CredentialLifecycleMutationPhase.RepairUncertain or (int)CredentialLifecycleMutationPhase.RepairReconciledUncertain);
+        }
+        if (intent is null || latest is null || intent.LifecyclePhase != (int)CredentialLifecycleMutationPhase.Intent || !string.Equals(intent.LifecycleIntentOperationId, intentOperationId.Value, StringComparison.Ordinal) || intent.ReferenceId != mutation.ReferenceId.Value || intent.LifecycleOperation != mutation.LifecycleOperation || !string.Equals(intent.ActorId, mutation.ActorId, StringComparison.Ordinal) || !string.Equals(intent.WorkspaceId, mutation.WorkspaceId, StringComparison.Ordinal) || !string.Equals(intent.PreviewHash, mutation.PreviewHash, StringComparison.Ordinal) || !string.Equals(intent.LifecycleRequestHash, mutation.LifecycleRequestHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        var phase = mutation.LifecyclePhase!.Value;
+        var createIntent = intent.Kind == (int)CredentialRegistryMutationKind.BeginCreate && intent.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair;
+        var latestIsExpected = phase == CredentialLifecycleMutationPhase.LocatorPrepared
+            ? string.Equals(latest.OperationId, intent.OperationId, StringComparison.Ordinal)
+            : phase == CredentialLifecycleMutationPhase.LocatorUncertain
+                ? string.Equals(latest.OperationId, intent.OperationId, StringComparison.Ordinal) || latest.LifecyclePhase == (int)CredentialLifecycleMutationPhase.LocatorPrepared && string.Equals(latest.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal)
+            : createIntent ? latest.LifecyclePhase == (int)CredentialLifecycleMutationPhase.LocatorPrepared && string.Equals(latest.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) : string.Equals(latest.OperationId, intent.OperationId, StringComparison.Ordinal);
+        if (!latestIsExpected)
+        {
+            return false;
+        }
+        return phase switch
+        {
+            CredentialLifecycleMutationPhase.LocatorPrepared or CredentialLifecycleMutationPhase.LocatorUncertain => createIntent,
+            CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.RepairUncertain => intent.Kind == (int)CredentialRegistryMutationKind.BeginRepair && intent.ResultEntry is null,
+            CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain => intent.Kind == (int)CredentialRegistryMutationKind.UpdatePosture && intent.LifecycleOperation == (int)CredentialLifecycleOperationKind.Delete && intent.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair,
+            _ => createIntent || intent.Kind == (int)CredentialRegistryMutationKind.UpdatePosture && intent.LifecycleOperation is (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && intent.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair
+        };
+    }
+
+    private static bool IsPreparedCreateState(CredentialRegistryDocument document, CredentialRegistryEntryDocument? entry, IReadOnlyList<CredentialRegistryLocatorDocument> locators, CredentialReferenceId referenceId)
+    {
+        if (entry is null || (CredentialProviderHealthStatus)entry.Health != CredentialProviderHealthStatus.NeedsRepair || !locators.Any(locator => string.Equals(locator.ReferenceId, referenceId.Value, StringComparison.Ordinal) && !locator.RepairRequired))
+        {
+            return false;
+        }
+        var intent = document.Operations.SingleOrDefault(operation => string.Equals(operation.ReferenceId, referenceId.Value, StringComparison.Ordinal) && operation.Kind == (int)CredentialRegistryMutationKind.BeginCreate && operation.LifecyclePhase == (int)CredentialLifecycleMutationPhase.Intent);
+        return intent is not null && document.Operations.Any(operation => string.Equals(operation.ReferenceId, referenceId.Value, StringComparison.Ordinal) && operation.Kind == (int)CredentialRegistryMutationKind.Register && operation.LifecyclePhase == (int)CredentialLifecycleMutationPhase.LocatorPrepared && string.Equals(operation.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal)) && !document.Operations.Any(operation => string.Equals(operation.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) && operation.LifecyclePhase is (int)CredentialLifecycleMutationPhase.Complete or (int)CredentialLifecycleMutationPhase.Rollback);
+    }
+
+    private static bool HasUnresolvedRepairIntent(CredentialRegistryDocument document, CredentialReferenceId referenceId, CredentialContractId? operationId = null)
+    {
+        return document.Operations.Where(operation => string.Equals(operation.ReferenceId, referenceId.Value, StringComparison.Ordinal) && operation.Kind == (int)CredentialRegistryMutationKind.BeginRepair && operation.LifecyclePhase == (int)CredentialLifecycleMutationPhase.Intent && (operationId is null || string.Equals(operation.OperationId, operationId.Value, StringComparison.Ordinal))).Any(intent => !document.Operations.Any(operation => string.Equals(operation.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) && operation.LifecyclePhase is (int)CredentialLifecycleMutationPhase.RepairComplete or (int)CredentialLifecycleMutationPhase.RepairUncertain or (int)CredentialLifecycleMutationPhase.RepairReconciledUncertain));
+    }
+
+    private static bool ValidateTombstone(CredentialRegistryTombstoneDocument item, long registryRevision, IReadOnlySet<string> entryIds, ISet<string> tombstoneIds)
+    {
+        if (!CredentialReferenceId.TryParse(item.ReferenceId, out var referenceId, out _) || item.Revision < 1 || item.Revision > registryRevision || !CredentialContractId.TryParse(item.OperationId, out _, out _) || !CredentialContractHash.TryParse(item.ReferenceHash, out _, out _) || item.TombstonedAtUtc.Offset != TimeSpan.Zero || !tombstoneIds.Add(item.ReferenceId) || entryIds.Contains(item.ReferenceId))
+        {
+            return false;
+        }
+        var hasRepairMetadata = item.RepairBindingJson is not null || item.RepairProviderId is not null;
+        if (!hasRepairMetadata)
+        {
+            return !item.NeedsRepair;
+        }
+        return item.NeedsRepair && item.RepairBindingJson is not null && item.RepairProviderId is not null && CredentialContractJson.TryDeserializeBinding(item.RepairBindingJson, out var binding, out _) && binding!.ReferenceId.Equals(referenceId) && CredentialProviderId.TryParse(item.RepairProviderId, out var providerId, out _) && string.Equals(providerId!.Value, binding.Implementation.ProviderId.Value, StringComparison.Ordinal);
+    }
+
+    private static bool IsTerminalPhase(CredentialLifecycleMutationPhase? phase) => phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.Rollback or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain or CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.Uncertain or CredentialLifecycleMutationPhase.RepairUncertain or CredentialLifecycleMutationPhase.LocatorUncertain or CredentialLifecycleMutationPhase.RepairReconciledUncertain;
+
+    private static string? ExpectedAuditAction(CredentialLifecycleMutationPhase? phase) => phase == CredentialLifecycleMutationPhase.Intent ? AuditSchema.Actions.CredentialLifecycleIntent : IsTerminalPhase(phase) ? AuditSchema.Actions.CredentialLifecycleOutcome : null;
+
+    private static string? ExpectedAuditOutcome(CredentialLifecycleMutationPhase? phase) => phase == CredentialLifecycleMutationPhase.Intent ? AuditSchema.Outcomes.Started : phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.RepairComplete ? AuditSchema.Outcomes.Succeeded : IsTerminalPhase(phase) ? AuditSchema.Outcomes.Failed : null;
+
+    private static bool IsSafe(string? value, int maximum) => value is not null && value.Length is > 0 && value.Length <= maximum && value.All(character => character >= (char)0x20 && character != (char)0x7f);
+
+    private static bool IsRestrictive(CredentialRegistryEntryDocument document)
+    {
+        var referenceIsRestrictive = CredentialContractJson.TryDeserializeReference(document.ReferenceJson, out var reference, out _) && reference!.Status is CredentialLifecycleStatus.Revoked or CredentialLifecycleStatus.Disabled or CredentialLifecycleStatus.Expired;
+        var healthIsRestrictive = (CredentialProviderHealthStatus)document.Health is CredentialProviderHealthStatus.Revoked or CredentialProviderHealthStatus.Disabled or CredentialProviderHealthStatus.Expired;
+        return referenceIsRestrictive || healthIsRestrictive;
+    }
+
     private bool ValidatePair(CredentialRegistryDocument publicDocument, CredentialRegistryPrivateDocument privateDocument, string identity)
     {
-        if (publicDocument.SchemaVersion != CredentialRegistryDocument.CurrentSchemaVersion || privateDocument.SchemaVersion != CredentialRegistryPrivateDocument.CurrentSchemaVersion || publicDocument.Revision < 0 || privateDocument.Revision != publicDocument.Revision || !string.Equals(publicDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || !string.Equals(privateDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || string.IsNullOrEmpty(publicDocument.AuthenticationTag) || _utf8.GetByteCount(publicDocument.AuthenticationTag) > _trustProvider.MaximumAuthenticationTagUtf8Bytes || publicDocument.Entries is null || publicDocument.Tombstones is null || publicDocument.Operations is null || publicDocument.Evidence is null || privateDocument.Locators is null || publicDocument.Entries.Count > _quota.MaximumEntries || publicDocument.Tombstones.Count > _quota.MaximumTombstones || publicDocument.Operations.Count > _quota.MaximumOperations || publicDocument.Evidence.Count > _quota.MaximumEvidence)
+        if (publicDocument.SchemaVersion != CredentialRegistryDocument.CurrentSchemaVersion || publicDocument.LifecycleShape != CredentialRegistryDocument.CurrentLifecycleShape || privateDocument.SchemaVersion != CredentialRegistryPrivateDocument.CurrentSchemaVersion || publicDocument.Revision < 0 || privateDocument.Revision != publicDocument.Revision || !string.Equals(publicDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || !string.Equals(privateDocument.WorkspaceIdentity, identity, StringComparison.Ordinal) || string.IsNullOrEmpty(publicDocument.AuthenticationTag) || _utf8.GetByteCount(publicDocument.AuthenticationTag) > _trustProvider.MaximumAuthenticationTagUtf8Bytes || publicDocument.Entries is null || publicDocument.Tombstones is null || publicDocument.Operations is null || publicDocument.Evidence is null || publicDocument.AuditDeliveries is null || privateDocument.Locators is null || publicDocument.Entries.Count > _quota.MaximumEntries || publicDocument.Tombstones.Count > _quota.MaximumTombstones || publicDocument.Operations.Count > _quota.MaximumOperations || publicDocument.Evidence.Count > _quota.MaximumEvidence || publicDocument.AuditDeliveries.Count > publicDocument.Operations.Count)
         {
             return false;
         }
@@ -450,7 +798,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         var entryIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in publicDocument.Entries)
         {
-            if (!TryMapEntry(entry, out var mapped) || mapped!.Revision > publicDocument.Revision || !entryIds.Add(mapped.Reference.Id.Value) || !privateDocument.Locators.Any(locator => string.Equals(locator.ReferenceId, mapped.Reference.Id.Value, StringComparison.Ordinal)))
+            if (!TryMapEntry(entry, out var mapped) || mapped!.Revision > publicDocument.Revision || !entryIds.Add(mapped.Reference.Id.Value) || !privateDocument.Locators.Any(locator => string.Equals(locator.ReferenceId, mapped.Reference.Id.Value, StringComparison.Ordinal) && !locator.RepairRequired))
             {
                 return false;
             }
@@ -461,26 +809,141 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             return false;
         }
 
-        var locatorIds = new HashSet<string>(StringComparer.Ordinal);
-        if (privateDocument.Locators.Any(item => !locatorIds.Add(item.ReferenceId) || !entryIds.Contains(item.ReferenceId) || !CredentialProviderLocator.TryParse(item.Locator, out _)))
-        {
-            return false;
-        }
-
         var tombstoneIds = new HashSet<string>(StringComparer.Ordinal);
-        if (publicDocument.Tombstones.Any(item => !CredentialReferenceId.TryParse(item.ReferenceId, out _, out _) || item.Revision < 1 || item.Revision > publicDocument.Revision || !CredentialContractId.TryParse(item.OperationId, out _, out _) || !CredentialContractHash.TryParse(item.ReferenceHash, out _, out _) || item.TombstonedAtUtc.Offset != TimeSpan.Zero || !tombstoneIds.Add(item.ReferenceId) || entryIds.Contains(item.ReferenceId)))
+        if (publicDocument.Tombstones.Any(item => !ValidateTombstone(item, publicDocument.Revision, entryIds, tombstoneIds)))
         {
             return false;
         }
 
         var operationIds = new HashSet<string>(StringComparer.Ordinal);
-        if (publicDocument.Operations.Any(item => !CredentialContractId.TryParse(item.OperationId, out _, out _) || !CredentialContractHash.TryParse(item.RequestHash, out _, out _) || item.Revision < 1 || item.Revision > publicDocument.Revision || !operationIds.Add(item.OperationId) || !CredentialReferenceId.TryParse(item.ReferenceId, out _, out _) || item.ResultEntry is not null && !TryMapEntry(item.ResultEntry, out _)))
+        if (publicDocument.Operations.Any(item => !CredentialContractId.TryParse(item.OperationId, out _, out _) || !CredentialContractHash.TryParse(item.RequestHash, out _, out _) || item.Revision < 1 || item.Revision > publicDocument.Revision || !operationIds.Add(item.OperationId) || !CredentialReferenceId.TryParse(item.ReferenceId, out _, out _) || item.ResultEntry is not null && !TryMapEntry(item.ResultEntry, out _) || item.LifecycleOperation is < 1 or > 13 || item.ActorId is not null && !IsSafe(item.ActorId, 128) || item.WorkspaceId is not null && !IsSafe(item.WorkspaceId, 256) || item.PreviewHash is not null && !CredentialContractHash.TryParse(item.PreviewHash, out _, out _) || item.LifecycleRequestHash is not null && !CredentialContractHash.TryParse(item.LifecycleRequestHash, out _, out _) || item.LifecyclePhase is not null && !Enum.IsDefined((CredentialLifecycleMutationPhase)item.LifecyclePhase.Value) || item.LifecyclePhase is null != (item.LifecycleIntentOperationId is null) || item.LifecyclePhase is not null && item.WorkspaceId is null || item.LifecycleIntentOperationId is not null && !CredentialContractId.TryParse(item.LifecycleIntentOperationId, out _, out _) || !ValidateActiveRuns(item.AffectedActiveRuns) || !ValidateAuditOutbox(item)))
+        {
+            return false;
+        }
+
+        if (!ValidatePersistedLifecyclePhases(publicDocument.Operations))
+        {
+            return false;
+        }
+
+        if (publicDocument.Tombstones.Any(tombstone => !publicDocument.Operations.Any(operation => string.Equals(operation.OperationId, tombstone.OperationId, StringComparison.Ordinal) && string.Equals(operation.ReferenceId, tombstone.ReferenceId, StringComparison.Ordinal) && (tombstone.NeedsRepair ? operation.Kind == (int)CredentialRegistryMutationKind.Tombstone && operation.LifecyclePhase is (int)CredentialLifecycleMutationPhase.TombstoneUncertain or (int)CredentialLifecycleMutationPhase.RepairUncertain || operation.Kind == (int)CredentialRegistryMutationKind.ReconcileRepair && operation.LifecyclePhase == (int)CredentialLifecycleMutationPhase.RepairReconciledUncertain : operation.Kind == (int)CredentialRegistryMutationKind.Tombstone && operation.LifecyclePhase is null or (int)CredentialLifecycleMutationPhase.TombstoneComplete or (int)CredentialLifecycleMutationPhase.RepairComplete))))
+        {
+            return false;
+        }
+
+        var deliveredIds = new HashSet<string>(StringComparer.Ordinal);
+        if (publicDocument.AuditDeliveries.Any(item => !CredentialContractId.TryParse(item.TerminalOperationId, out _, out _) || item.DeliveredAtUtc.Offset != TimeSpan.Zero || !deliveredIds.Add(item.TerminalOperationId) || !publicDocument.Operations.Any(operation => operation.AuditOutbox is not null && string.Equals(operation.OperationId, item.TerminalOperationId, StringComparison.Ordinal))))
+        {
+            return false;
+        }
+
+        var completedRepairs = publicDocument.Operations.Where(item => item.LifecyclePhase == (int)CredentialLifecycleMutationPhase.RepairComplete).ToArray();
+        var completedRepairIds = completedRepairs.Select(item => item.ReferenceId).ToArray();
+        if (completedRepairIds.Distinct(StringComparer.Ordinal).Count() != completedRepairIds.Length || completedRepairs.Any(repair => !publicDocument.Tombstones.Any(item => string.Equals(item.ReferenceId, repair.ReferenceId, StringComparison.Ordinal) && (item.NeedsRepair || repair.Kind == (int)CredentialRegistryMutationKind.Tombstone && string.Equals(item.OperationId, repair.OperationId, StringComparison.Ordinal)))))
+        {
+            return false;
+        }
+        var completedRepairSet = completedRepairIds.ToHashSet(StringComparer.Ordinal);
+        var unresolvedRepairIds = publicDocument.Tombstones.Where(item => item.NeedsRepair && !completedRepairSet.Contains(item.ReferenceId)).Select(item => item.ReferenceId).ToHashSet(StringComparer.Ordinal);
+        var locatorIds = new HashSet<string>(StringComparer.Ordinal);
+        if (privateDocument.Locators.Any(item => !locatorIds.Add(item.ReferenceId) || !CredentialProviderLocator.TryParse(item.Locator, out _) || (item.RepairRequired ? !unresolvedRepairIds.Contains(item.ReferenceId) : !entryIds.Contains(item.ReferenceId))) || unresolvedRepairIds.Any(referenceId => !privateDocument.Locators.Any(locator => locator.RepairRequired && string.Equals(locator.ReferenceId, referenceId, StringComparison.Ordinal))) || completedRepairSet.Any(referenceId => privateDocument.Locators.Any(locator => string.Equals(locator.ReferenceId, referenceId, StringComparison.Ordinal))))
         {
             return false;
         }
 
         var evidenceIds = new HashSet<string>(StringComparer.Ordinal);
         return publicDocument.Evidence.All(item => CredentialContractJson.TryDeserializeEvidence(item.EvidenceJson, out var evidence, out _) && evidenceIds.Add(evidence!.EvidenceId.Value));
+    }
+
+    private static bool ValidateAuditOutbox(CredentialRegistryOperationDocument operation)
+    {
+        var phase = operation.LifecyclePhase is null ? (CredentialLifecycleMutationPhase?)null : (CredentialLifecycleMutationPhase)operation.LifecyclePhase.Value;
+        var audited = phase == CredentialLifecycleMutationPhase.Intent || IsTerminalPhase(phase);
+        if (audited != (operation.AuditOutbox is not null))
+        {
+            return false;
+        }
+        return operation.AuditOutbox is null || operation.AuditOutbox.OccurredAtUtc.Offset == TimeSpan.Zero && operation.AuditOutbox.RegistryRevision == operation.Revision && string.Equals(operation.AuditOutbox.Action, ExpectedAuditAction(phase), StringComparison.Ordinal) && string.Equals(operation.AuditOutbox.Outcome, ExpectedAuditOutcome(phase), StringComparison.Ordinal) && IsSafe(operation.AuditOutbox.Detail, 512);
+    }
+
+    private static bool ValidatePersistedLifecyclePhases(IReadOnlyList<CredentialRegistryOperationDocument> operations)
+    {
+        var priorById = new Dictionary<string, CredentialRegistryOperationDocument>(StringComparer.Ordinal);
+        var latestByReference = new Dictionary<string, CredentialRegistryOperationDocument>(StringComparer.Ordinal);
+        foreach (var operation in operations)
+        {
+            if (!ValidatePersistedLifecyclePhaseShape(operation))
+            {
+                return false;
+            }
+            if (operation.LifecyclePhase is not null and not (int)CredentialLifecycleMutationPhase.Intent)
+            {
+                if (!priorById.TryGetValue(operation.LifecycleIntentOperationId!, out var intent) || !latestByReference.TryGetValue(operation.ReferenceId, out var latestPrior))
+                {
+                    return false;
+                }
+                if (operation.LifecyclePhase == (int)CredentialLifecycleMutationPhase.RepairReconciledUncertain)
+                {
+                    var exactReconciliation = intent.Kind == (int)CredentialRegistryMutationKind.BeginRepair && intent.LifecyclePhase == (int)CredentialLifecycleMutationPhase.Intent && intent.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair && string.Equals(intent.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) && string.Equals(intent.ReferenceId, operation.ReferenceId, StringComparison.Ordinal) && string.Equals(intent.WorkspaceId, operation.WorkspaceId, StringComparison.Ordinal) && string.Equals(latestPrior.OperationId, intent.OperationId, StringComparison.Ordinal);
+                    if (!exactReconciliation)
+                    {
+                        return false;
+                    }
+                    priorById.Add(operation.OperationId, operation);
+                    latestByReference[operation.ReferenceId] = operation;
+                    continue;
+                }
+                var exactCorrelation = intent.LifecyclePhase == (int)CredentialLifecycleMutationPhase.Intent && string.Equals(intent.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) && string.Equals(intent.ReferenceId, operation.ReferenceId, StringComparison.Ordinal) && intent.LifecycleOperation == operation.LifecycleOperation && string.Equals(intent.ActorId, operation.ActorId, StringComparison.Ordinal) && string.Equals(intent.WorkspaceId, operation.WorkspaceId, StringComparison.Ordinal) && string.Equals(intent.PreviewHash, operation.PreviewHash, StringComparison.Ordinal) && string.Equals(intent.LifecycleRequestHash, operation.LifecycleRequestHash, StringComparison.Ordinal);
+                if (!exactCorrelation)
+                {
+                    return false;
+                }
+                var phase = (CredentialLifecycleMutationPhase)operation.LifecyclePhase.Value;
+                var createIntent = intent.Kind == (int)CredentialRegistryMutationKind.BeginCreate && intent.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair;
+                var latestIsExpected = phase == CredentialLifecycleMutationPhase.LocatorPrepared
+                    ? string.Equals(latestPrior.OperationId, intent.OperationId, StringComparison.Ordinal)
+                    : phase == CredentialLifecycleMutationPhase.LocatorUncertain
+                        ? string.Equals(latestPrior.OperationId, intent.OperationId, StringComparison.Ordinal) || latestPrior.LifecyclePhase == (int)CredentialLifecycleMutationPhase.LocatorPrepared && string.Equals(latestPrior.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal)
+                    : createIntent ? latestPrior.LifecyclePhase == (int)CredentialLifecycleMutationPhase.LocatorPrepared && string.Equals(latestPrior.LifecycleIntentOperationId, intent.OperationId, StringComparison.Ordinal) : string.Equals(latestPrior.OperationId, intent.OperationId, StringComparison.Ordinal);
+                var correctIntentKind = phase switch
+                {
+                    CredentialLifecycleMutationPhase.LocatorPrepared or CredentialLifecycleMutationPhase.LocatorUncertain => createIntent,
+                    CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.RepairUncertain => intent.Kind == (int)CredentialRegistryMutationKind.BeginRepair && intent.ResultEntry is null,
+                    CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain => intent.Kind == (int)CredentialRegistryMutationKind.UpdatePosture && intent.LifecycleOperation == (int)CredentialLifecycleOperationKind.Delete && intent.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair,
+                    _ => createIntent || intent.Kind == (int)CredentialRegistryMutationKind.UpdatePosture && intent.LifecycleOperation is (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && intent.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair
+                };
+                if (!latestIsExpected || !correctIntentKind)
+                {
+                    return false;
+                }
+            }
+            priorById.Add(operation.OperationId, operation);
+            latestByReference[operation.ReferenceId] = operation;
+        }
+        return true;
+    }
+
+    private static bool ValidatePersistedLifecyclePhaseShape(CredentialRegistryOperationDocument operation)
+    {
+        if (operation.LifecyclePhase is null)
+        {
+            return true;
+        }
+        var phase = (CredentialLifecycleMutationPhase)operation.LifecyclePhase.Value;
+        return phase switch
+        {
+            CredentialLifecycleMutationPhase.Intent => string.Equals(operation.OperationId, operation.LifecycleIntentOperationId, StringComparison.Ordinal) && (operation.Kind == (int)CredentialRegistryMutationKind.BeginCreate && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import && operation.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair || operation.Kind == (int)CredentialRegistryMutationKind.UpdatePosture && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace or (int)CredentialLifecycleOperationKind.Delete && operation.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair || operation.Kind == (int)CredentialRegistryMutationKind.BeginRepair && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair && operation.ResultEntry is null),
+            CredentialLifecycleMutationPhase.LocatorPrepared => operation.Kind == (int)CredentialRegistryMutationKind.Register && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import && operation.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair,
+            CredentialLifecycleMutationPhase.LocatorUncertain => operation.Kind == (int)CredentialRegistryMutationKind.RecordLocatorUncertain && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import && operation.ResultEntry is null,
+            CredentialLifecycleMutationPhase.Complete => operation.Kind == (int)CredentialRegistryMutationKind.SetHealth && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && operation.ResultEntry?.Health == (int)CredentialProviderHealthStatus.Available,
+            CredentialLifecycleMutationPhase.Rollback => operation.Kind == (int)CredentialRegistryMutationKind.SetHealth && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && operation.ResultEntry is not null && operation.ResultEntry.Health != (int)CredentialProviderHealthStatus.NeedsRepair,
+            CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain => operation.Kind == (int)CredentialRegistryMutationKind.Tombstone && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Delete && operation.ResultEntry is null,
+            CredentialLifecycleMutationPhase.RepairComplete => operation.Kind is (int)CredentialRegistryMutationKind.CompleteRepair or (int)CredentialRegistryMutationKind.Tombstone && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair && operation.ResultEntry is null,
+            CredentialLifecycleMutationPhase.Uncertain => operation.Kind == (int)CredentialRegistryMutationKind.SetHealth && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && operation.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair,
+            CredentialLifecycleMutationPhase.RepairUncertain => operation.Kind is (int)CredentialRegistryMutationKind.RecordRepairUncertain or (int)CredentialRegistryMutationKind.Tombstone && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair && operation.ResultEntry is null,
+            CredentialLifecycleMutationPhase.RepairReconciledUncertain => operation.Kind == (int)CredentialRegistryMutationKind.ReconcileRepair && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.ReconcileRepair && operation.PreviewHash is not null && operation.ResultEntry is null,
+            _ => false
+        };
     }
 
     private static bool TryMapEntry(CredentialRegistryEntryDocument document, out CredentialRegistryEntry? entry)
@@ -491,7 +954,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             return false;
         }
 
-        entry = new CredentialRegistryEntry(reference, binding, bindingHash, consent!, (CredentialProviderHealthStatus)document.Health, document.Revision, operation!);
+        entry = new CredentialRegistryEntry(reference, binding, bindingHash, consent!, (CredentialProviderHealthStatus)document.Health, document.Revision, operation!, document.ConsentGranted);
         return true;
     }
 
@@ -504,13 +967,33 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
     private static CredentialRegistryReadResult ToReadResult(State state)
     {
         var entries = state.Public.Entries.Select(item => TryMapEntry(item, out var mapped) ? mapped! : throw new FormatException()).ToArray();
-        var tombstones = state.Public.Tombstones.Select(item => new CredentialRegistryTombstone(ParseReferenceId(item.ReferenceId), item.Revision, ParseContractId(item.OperationId), item.TombstonedAtUtc, ParseHash(item.ReferenceHash))).ToArray();
-        var operations = state.Public.Operations.Select(item => new CredentialRegistryOperationEvidence(ParseContractId(item.OperationId), ParseHash(item.RequestHash), item.Kind, item.Revision, ParseReferenceId(item.ReferenceId))).ToArray();
+        var completedRepairIds = state.Public.Operations.Where(item => item.LifecyclePhase == (int)CredentialLifecycleMutationPhase.RepairComplete).Select(item => item.ReferenceId).ToHashSet(StringComparer.Ordinal);
+        var tombstones = state.Public.Tombstones.Select(item => MapTombstone(item, completedRepairIds.Contains(item.ReferenceId))).ToArray();
+        var operations = state.Public.Operations.Select(item => new CredentialRegistryOperationEvidence(ParseContractId(item.OperationId), ParseHash(item.RequestHash), item.Kind, item.Revision, ParseReferenceId(item.ReferenceId), item.LifecycleOperation, item.ActorId, item.PreviewHash, item.LifecycleRequestHash, item.LifecyclePhase is null ? null : (CredentialLifecycleMutationPhase)item.LifecyclePhase.Value, item.LifecycleIntentOperationId is null ? null : ParseContractId(item.LifecycleIntentOperationId), item.ResultEntry is null ? null : (CredentialProviderHealthStatus)item.ResultEntry.Health, item.AffectedActiveRuns, item.WorkspaceId)).ToArray();
         var evidence = state.Public.Evidence.Select(item => CredentialContractJson.TryDeserializeEvidence(item.EvidenceJson, out var mapped, out _) ? mapped! : throw new FormatException()).ToArray();
-        return new CredentialRegistryReadResult(state.Public.Revision, entries, tombstones, operations, evidence, null);
+        var delivered = state.Public.AuditDeliveries!.Select(item => item.TerminalOperationId).ToHashSet(StringComparer.Ordinal);
+        var pendingAudits = state.Public.Operations.Where(item => item.AuditOutbox is not null && !delivered.Contains(item.OperationId)).Select(MapAuditOutbox).OrderBy(item => item.RegistryRevision).ThenBy(item => item.AuditOperationId.Value, StringComparer.Ordinal).ToArray();
+        return new CredentialRegistryReadResult(state.Public.Revision, entries, tombstones, operations, evidence, null, pendingAudits);
     }
 
-    private static State Empty(string identity) => Complete(identity, new CredentialRegistryDocument(1, identity, 0, 0, [], [], [], [], string.Empty, string.Empty, string.Empty), new CredentialRegistryPrivateDocument(1, identity, 0, [], string.Empty));
+    private static CredentialRegistryTombstone MapTombstone(CredentialRegistryTombstoneDocument item, bool repairCompleted)
+    {
+        CredentialCapabilityBinding? repairBinding = null;
+        if (item.RepairBindingJson is not null && !CredentialContractJson.TryDeserializeBinding(item.RepairBindingJson, out repairBinding, out _))
+        {
+            throw new FormatException();
+        }
+        var providerId = item.RepairProviderId is null ? null : CredentialProviderId.TryParse(item.RepairProviderId, out var parsed, out _) ? parsed : throw new FormatException();
+        return new CredentialRegistryTombstone(ParseReferenceId(item.ReferenceId), item.Revision, ParseContractId(item.OperationId), item.TombstonedAtUtc, ParseHash(item.ReferenceHash), item.NeedsRepair && !repairCompleted, repairBinding, providerId);
+    }
+
+    private static CredentialLifecycleAuditOutboxItem MapAuditOutbox(CredentialRegistryOperationDocument item)
+    {
+        var audit = item.AuditOutbox ?? throw new FormatException();
+        return new CredentialLifecycleAuditOutboxItem(ParseContractId(item.OperationId), ParseContractId(item.LifecycleIntentOperationId!), ParseReferenceId(item.ReferenceId), item.WorkspaceId!, item.ActorId!, (CredentialLifecycleOperationKind)item.LifecycleOperation!.Value, audit.OccurredAtUtc, audit.RegistryRevision, item.PreviewHash, audit.Action, audit.Outcome, audit.Detail);
+    }
+
+    private static State Empty(string identity) => Complete(identity, new CredentialRegistryDocument(1, 1, identity, 0, 0, [], [], [], [], string.Empty, string.Empty, string.Empty, []), new CredentialRegistryPrivateDocument(1, identity, 0, [], string.Empty));
 
     private static State Complete(string identity, CredentialRegistryDocument publicDocument, CredentialRegistryPrivateDocument privateDocument)
     {
