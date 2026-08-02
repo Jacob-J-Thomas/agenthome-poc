@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.Loops;
 using Microsoft.Win32.SafeHandles;
@@ -14,6 +15,7 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     private const int MaxArtifactBytes = 64 * 1024;
     private const int MaxDirectoryEntries = ContextualRoleRevisionStoreOptions.MaximumOperationArtifacts * 4;
     private const int NativeDirectoryBufferBytes = 64 * 1024;
+    private const string MutationDiagnosticDataKey = "EmbodySense.ContextualRoleMutationDiagnostic";
     private static readonly UTF8Encoding _strictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private readonly ContextualRoleStorePaths _paths;
     private readonly Func<ContextualRolePhysicalPersistenceBoundary, CancellationToken, ValueTask>? _boundaryObserver;
@@ -132,7 +134,9 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         return stream;
     }
 
-    public bool FileExists(string path)
+    public bool FileExists(string path) => Diagnose(ContextualRolePersistenceDiagnosticStage.ArtifactExistenceCheck, () => FileExistsCore(path));
+
+    private bool FileExistsCore(string path)
     {
         PrepareRoots();
         var (directory, _, name) = ResolveFile(path);
@@ -202,7 +206,9 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     public async Task WriteProjectionAsync(string path, byte[] bytes, CancellationToken cancellationToken)
         => await WriteAsync(path, bytes, overwrite: true, cancellationToken);
 
-    public IReadOnlyList<string> EnumerateJsonFiles(string directory)
+    public IReadOnlyList<string> EnumerateJsonFiles(string directory) => Diagnose(ContextualRolePersistenceDiagnosticStage.ArtifactEnumeration, () => EnumerateJsonFilesCore(directory));
+
+    private IReadOnlyList<string> EnumerateJsonFilesCore(string directory)
     {
         PrepareRoots();
         var (handle, _, canonicalPath) = ResolveDirectory(directory);
@@ -265,7 +271,9 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         return total;
     }
 
-    public void CleanupTemporaryArtifacts()
+    public void CleanupTemporaryArtifacts() => Diagnose(ContextualRolePersistenceDiagnosticStage.TemporaryFileCleanup, CleanupTemporaryArtifactsCore);
+
+    private void CleanupTemporaryArtifactsCore()
     {
         PrepareRoots();
         CleanupTemporaryArtifacts(_rootHandle!);
@@ -308,6 +316,19 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         }
     }
 
+    internal static ContextualRoleRevisionMutationDiagnostic? GetMutationDiagnostic(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current.Data[MutationDiagnosticDataKey] is ContextualRoleRevisionMutationDiagnostic diagnostic)
+            {
+                return diagnostic;
+            }
+        }
+
+        return null;
+    }
+
     private async Task WriteAsync(string path, byte[] bytes, bool overwrite, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(bytes);
@@ -316,45 +337,48 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
             throw new InvalidOperationException("A contextual-role artifact exceeds the bounded 64 KiB schema-1 limit.");
         }
 
-        PrepareRoots();
-        var (directory, _, name) = ResolveFile(path);
-        VerifyAllMappings();
+        Diagnose(ContextualRolePersistenceDiagnosticStage.RootPreparation, PrepareRoots);
+        var (directory, _, name) = Diagnose(ContextualRolePersistenceDiagnosticStage.RootPreparation, () => ResolveFile(path));
+        Diagnose(ContextualRolePersistenceDiagnosticStage.RootPreparation, VerifyAllMappings);
         if (overwrite)
         {
-            using var existing = OpenRelativeFile(directory, name, allowMissing: true, create: false, exclusiveCreate: false, write: false);
+            using var existing = Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetOpen, () => OpenRelativeFile(directory, name, allowMissing: true, create: false, exclusiveCreate: false, write: false));
             if (existing is not null)
             {
-                _ = ValidateRegularFile(existing, "contextual-role projection target");
+                _ = Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetIdentityValidation, () => ValidateRegularFile(existing, "contextual-role projection target"));
             }
         }
 
         var temporaryName = $".{name}.{Guid.NewGuid():N}.tmp";
-        using var temporaryHandle = OpenRelativeFile(directory, temporaryName, allowMissing: false, create: true, exclusiveCreate: true, write: true) ?? throw new IOException("The contextual-role temporary artifact could not be created.");
-        var temporaryIdentity = ValidateRegularFile(temporaryHandle, "contextual-role temporary artifact");
+        using var temporaryHandle = Diagnose(ContextualRolePersistenceDiagnosticStage.TemporaryFileOpen, () => OpenRelativeFile(directory, temporaryName, allowMissing: false, create: true, exclusiveCreate: true, write: true) ?? throw new IOException("The contextual-role temporary artifact could not be created."));
+        var temporaryIdentity = Diagnose(ContextualRolePersistenceDiagnosticStage.TemporaryFileIdentityValidation, () => ValidateRegularFile(temporaryHandle, "contextual-role temporary artifact"));
         var published = false;
-        await using var stream = new FileStream(temporaryHandle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: false);
+        await using var stream = Diagnose(ContextualRolePersistenceDiagnosticStage.TemporaryFileOpen, () => new FileStream(temporaryHandle, FileAccess.ReadWrite, bufferSize: 4096, isAsync: false));
         try
         {
-            await stream.WriteAsync(bytes, cancellationToken);
-            await stream.FlushAsync(cancellationToken);
-            FlushFile(temporaryHandle);
-            ValidateIdentity(temporaryHandle, temporaryIdentity, requireSingleLink: true, "contextual-role temporary artifact");
-            await ObserveAsync(ContextualRolePhysicalPersistenceBoundary.BeforeHandleRelativePublication, cancellationToken);
-            RenameRelative(temporaryHandle, directory, temporaryName, name, overwrite);
+            await DiagnoseAsync(ContextualRolePersistenceDiagnosticStage.TemporaryFileWrite, async () =>
+            {
+                await stream.WriteAsync(bytes, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+            });
+            Diagnose(ContextualRolePersistenceDiagnosticStage.TemporaryFileFlush, () => FlushFile(temporaryHandle));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.TemporaryFilePostFlushIdentityValidation, () => ValidateIdentity(temporaryHandle, temporaryIdentity, requireSingleLink: true, "contextual-role temporary artifact"));
+            await DiagnoseAsync(ContextualRolePersistenceDiagnosticStage.PrePublicationObservation, async () => await ObserveAsync(ContextualRolePhysicalPersistenceBoundary.BeforeHandleRelativePublication, cancellationToken));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublicationRename, () => RenameRelative(temporaryHandle, directory, temporaryName, name, overwrite));
             published = true;
 
-            using var target = OpenRelativeFile(directory, name, allowMissing: false, create: false, exclusiveCreate: false, write: true) ?? throw new ContextualRolePersistenceUnavailableException("The published contextual-role target could not be reopened by retained directory handle.");
-            ValidateIdentity(target, temporaryIdentity, requireSingleLink: true, "published contextual-role target");
-            ValidatePublishedContent(target, bytes);
-            FlushFile(target);
-            await ObserveAsync(ContextualRolePhysicalPersistenceBoundary.AfterTargetFlushBeforeDirectoryFlush, cancellationToken);
-            ValidateIdentity(target, temporaryIdentity, requireSingleLink: true, "published contextual-role target");
-            ValidatePublishedContent(target, bytes);
-            FlushFile(target);
-            FlushDirectory(directory);
-            ValidateIdentity(target, temporaryIdentity, requireSingleLink: true, "published contextual-role target");
-            ValidatePublishedContent(target, bytes);
-            VerifyAllMappings();
+            using var target = Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetOpen, () => OpenRelativeFile(directory, name, allowMissing: false, create: false, exclusiveCreate: false, write: true) ?? throw new ContextualRolePersistenceUnavailableException("The published contextual-role target could not be reopened by retained directory handle."));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetIdentityValidation, () => ValidateIdentity(target, temporaryIdentity, requireSingleLink: true, "published contextual-role target"));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetContentValidation, () => ValidatePublishedContent(target, bytes));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetFlush, () => FlushFile(target));
+            await DiagnoseAsync(ContextualRolePersistenceDiagnosticStage.PostTargetFlushObservation, async () => await ObserveAsync(ContextualRolePhysicalPersistenceBoundary.AfterTargetFlushBeforeDirectoryFlush, cancellationToken));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetIdentityValidation, () => ValidateIdentity(target, temporaryIdentity, requireSingleLink: true, "published contextual-role target"));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetContentValidation, () => ValidatePublishedContent(target, bytes));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetFlush, () => FlushFile(target));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.ParentDirectoryFlush, () => FlushDirectory(directory));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetIdentityValidation, () => ValidateIdentity(target, temporaryIdentity, requireSingleLink: true, "published contextual-role target"));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedTargetContentValidation, () => ValidatePublishedContent(target, bytes));
+            Diagnose(ContextualRolePersistenceDiagnosticStage.PublishedMappingValidation, VerifyAllMappings);
         }
         catch (Exception exception) when (published && exception is not ContextualRolePublicationAmbiguousException)
         {
@@ -364,8 +388,11 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         {
             if (!published)
             {
-                DeleteExactTemporary(directory, temporaryName, temporaryHandle, temporaryIdentity);
-                FlushDirectory(directory);
+                Diagnose(ContextualRolePersistenceDiagnosticStage.TemporaryFileCleanup, () =>
+                {
+                    DeleteExactTemporary(directory, temporaryName, temporaryHandle, temporaryIdentity);
+                    FlushDirectory(directory);
+                });
             }
         }
     }
@@ -633,6 +660,64 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         }
     }
 
+    private static void Diagnose(ContextualRolePersistenceDiagnosticStage stage, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception exception)
+        {
+            AttachMutationDiagnostic(exception, stage);
+            throw;
+        }
+    }
+
+    private static T Diagnose<T>(ContextualRolePersistenceDiagnosticStage stage, Func<T> action)
+    {
+        try
+        {
+            return action();
+        }
+        catch (Exception exception)
+        {
+            AttachMutationDiagnostic(exception, stage);
+            throw;
+        }
+    }
+
+    private static async Task DiagnoseAsync(ContextualRolePersistenceDiagnosticStage stage, Func<Task> action)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception exception)
+        {
+            AttachMutationDiagnostic(exception, stage);
+            throw;
+        }
+    }
+
+    private static void AttachMutationDiagnostic(Exception exception, ContextualRolePersistenceDiagnosticStage stage)
+    {
+        var native = FindNativeException(exception);
+        exception.Data[MutationDiagnosticDataKey] = new ContextualRoleRevisionMutationDiagnostic(stage, native?.ErrorKind ?? ContextualRoleNativeErrorKind.None, native?.ErrorCode);
+    }
+
+    private static ContextualRoleNativeIOException? FindNativeException(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is ContextualRoleNativeIOException native)
+            {
+                return native;
+            }
+        }
+
+        return null;
+    }
+
     // Native adapters are exercised through public behavior on each supported host; per-host coverage cannot execute mutually exclusive Windows, Linux, and macOS branches.
     [ExcludeFromCodeCoverage]
     private static SafeFileHandle? OpenAbsoluteDirectory(string path, bool allowMissing)
@@ -710,7 +795,8 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
 
                 if (status < 0)
                 {
-                    throw new IOException($"NtQueryDirectoryFile failed closed with NTSTATUS 0x{unchecked((uint)status):x8}.");
+                    var unsignedStatus = unchecked((uint)status);
+                    throw new ContextualRoleNativeIOException($"NtQueryDirectoryFile failed closed with NTSTATUS 0x{unsignedStatus:x8}.", ContextualRoleNativeErrorKind.NtStatus, unsignedStatus);
                 }
 
                 var returnedBytes = ioStatus.Information.ToInt64();
@@ -1014,7 +1100,7 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
                 return null;
             }
 
-            throw new IOException($"NtCreateFile failed closed with NTSTATUS 0x{unsignedStatus:x8}.");
+            throw new ContextualRoleNativeIOException($"NtCreateFile failed closed with NTSTATUS 0x{unsignedStatus:x8}.", ContextualRoleNativeErrorKind.NtStatus, unsignedStatus);
         }
         finally
         {
@@ -1232,7 +1318,11 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         }
     }
 
-    private static IOException NativeIOException(string operation, int error) => new($"{operation} failed closed with native error {error}.", new Win32Exception(error));
+    private static IOException NativeIOException(string operation, int error)
+    {
+        var errorKind = OperatingSystem.IsWindows() ? ContextualRoleNativeErrorKind.Win32 : ContextualRoleNativeErrorKind.PosixErrno;
+        return new ContextualRoleNativeIOException($"{operation} failed closed with native error {error}.", errorKind, error, new Win32Exception(error));
+    }
 
     private static bool SameIdentity(NativeIdentity left, NativeIdentity right) => left.Device == right.Device && left.File == right.File;
 

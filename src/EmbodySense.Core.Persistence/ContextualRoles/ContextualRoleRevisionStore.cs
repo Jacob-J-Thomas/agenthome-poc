@@ -107,33 +107,33 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
             await ObserveAsync(ContextualRolePersistenceBoundary.IntentPublished, cancellationToken);
             return await CompleteIntentAsync(planned, anchor, recovering: false, cancellationToken);
         }
-        catch (OperationCanceledException) when (intentPublished)
+        catch (OperationCanceledException exception) when (intentPublished)
         {
-            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null);
+            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
         }
-        catch (FormatException)
+        catch (FormatException exception)
         {
-            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null);
+            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
         }
-        catch (ContextualRolePublicationAmbiguousException)
+        catch (ContextualRolePublicationAmbiguousException exception)
         {
-            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null);
+            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
         }
-        catch (ContextualRolePersistenceUnavailableException)
+        catch (ContextualRolePersistenceUnavailableException exception)
         {
-            return Outcome(intentPublished ? ContextualRoleRevisionMutationStatus.Ambiguous : ContextualRoleRevisionMutationStatus.Unavailable, request, null, null);
+            return Outcome(intentPublished ? ContextualRoleRevisionMutationStatus.Ambiguous : ContextualRoleRevisionMutationStatus.Unavailable, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException exception)
         {
-            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null);
+            return Outcome(ContextualRoleRevisionMutationStatus.Ambiguous, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
         }
-        catch (IOException)
+        catch (IOException exception)
         {
-            return Outcome(intentPublished ? ContextualRoleRevisionMutationStatus.Ambiguous : ContextualRoleRevisionMutationStatus.Unavailable, request, null, null);
+            return Outcome(intentPublished ? ContextualRoleRevisionMutationStatus.Ambiguous : ContextualRoleRevisionMutationStatus.Unavailable, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException exception)
         {
-            return Outcome(intentPublished ? ContextualRoleRevisionMutationStatus.Ambiguous : ContextualRoleRevisionMutationStatus.Unavailable, request, null, null);
+            return Outcome(intentPublished ? ContextualRoleRevisionMutationStatus.Ambiguous : ContextualRoleRevisionMutationStatus.Unavailable, request, null, null, ContextualRoleArtifactPathGuard.GetMutationDiagnostic(exception));
         }
     }
 
@@ -846,8 +846,8 @@ public sealed class ContextualRoleRevisionStore : IContextualRoleRevisionMutatio
     private static ContextualRoleRevisionMutationResult ToPublic(ContextualRoleMutationResultArtifact result)
         => new(result.Status, result.OperationId, result.RequestHash, result.Kind, result.Revision, result.Evidence, []);
 
-    private static ContextualRoleRevisionMutationResult Outcome(ContextualRoleRevisionMutationStatus status, ContextualRoleRevisionMutationRequest request, ContextualRoleRevision? revision, ContextualRoleLifecycleEvidence? evidence)
-        => new(status, request.OperationId, request.RequestHash, request.Kind, revision, evidence, []);
+    private static ContextualRoleRevisionMutationResult Outcome(ContextualRoleRevisionMutationStatus status, ContextualRoleRevisionMutationRequest request, ContextualRoleRevision? revision, ContextualRoleLifecycleEvidence? evidence, ContextualRoleRevisionMutationDiagnostic? diagnostic = null)
+        => new ContextualRoleRevisionMutationResult(status, request.OperationId, request.RequestHash, request.Kind, revision, evidence, []) { Diagnostic = diagnostic };
 
     private static void ValidateOptions(ContextualRoleRevisionStoreOptions options)
     {

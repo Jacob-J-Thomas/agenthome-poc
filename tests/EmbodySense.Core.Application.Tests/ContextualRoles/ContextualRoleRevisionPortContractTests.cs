@@ -16,6 +16,8 @@ public sealed class ContextualRoleRevisionPortContractTests
         var mutation = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest("replace-reviewer", string.Empty, ContextualRoleRevisionMutationKind.Replace, "reviewer", "user-jake", CreateRevision(identity), predecessor, DateTimeOffset.UnixEpoch));
         var readResult = new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.NotFound, null, ContextualRoleRevisionDisposition.Unknown, []);
         var mutationResult = new ContextualRoleRevisionMutationResult(ContextualRoleRevisionMutationStatus.Conflict, mutation.OperationId, mutation.RequestHash, mutation.Kind, null, null, []);
+        var diagnostic = new ContextualRoleRevisionMutationDiagnostic(ContextualRolePersistenceDiagnosticStage.PublicationRename, ContextualRoleNativeErrorKind.Win32, 5);
+        var unavailable = mutationResult with { Status = ContextualRoleRevisionMutationStatus.Unavailable, Diagnostic = diagnostic };
 
         Assert.Same(identity, read.Identity);
         Assert.Same(predecessor, mutation.ExpectedPreviousIdentity);
@@ -24,6 +26,8 @@ public sealed class ContextualRoleRevisionPortContractTests
         Assert.Empty(readResult.ValidationErrors);
         Assert.Equal(ContextualRoleRevisionMutationStatus.Conflict, mutationResult.Status);
         Assert.Empty(mutationResult.ValidationErrors);
+        Assert.Null(mutationResult.Diagnostic);
+        Assert.Equal(diagnostic, unavailable.Diagnostic);
     }
 
     [Fact]

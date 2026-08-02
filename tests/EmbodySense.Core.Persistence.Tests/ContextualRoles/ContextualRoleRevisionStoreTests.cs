@@ -103,9 +103,28 @@ public sealed class ContextualRoleRevisionStoreTests
 
         Assert.True(
             result.Status == ContextualRoleRevisionMutationStatus.Accepted,
-            $"status={result.Status}; root={Directory.Exists(root)}; revisions={Directory.Exists(revisions)}; states={Directory.Exists(states)}; operations={Directory.Exists(operations)}; proofs={Directory.Exists(proofs)}; lock={File.Exists(lockPath)}; anchor={File.Exists(anchor)}; intent={File.Exists(intent)}; revision={File.Exists(revision)}; state={File.Exists(state)}; proof={File.Exists(proof)}; terminal={File.Exists(terminal)}");
+            $"status={result.Status}; diagnostic={FormatDiagnostic(result.Diagnostic)}; root={Directory.Exists(root)}; revisions={Directory.Exists(revisions)}; states={Directory.Exists(states)}; operations={Directory.Exists(operations)}; proofs={Directory.Exists(proofs)}; lock={File.Exists(lockPath)}; anchor={File.Exists(anchor)}; intent={File.Exists(intent)}; revision={File.Exists(revision)}; state={File.Exists(state)}; proof={File.Exists(proof)}; terminal={File.Exists(terminal)}");
         Assert.All([root, revisions, states, operations, proofs], path => Assert.True(Directory.Exists(path), path));
         Assert.All([lockPath, anchor, intent, revision, state, proof, terminal], path => Assert.True(File.Exists(path), path));
+        Assert.Null(result.Diagnostic);
+    }
+
+    [Fact]
+    public async Task Failed_publication_reports_only_bounded_stage_and_native_code_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var options = new ContextualRoleRevisionStoreOptions
+        {
+            PhysicalBoundaryObserver = (boundary, _) => boundary == ContextualRolePhysicalPersistenceBoundary.BeforeHandleRelativePublication
+                ? ValueTask.FromException(new IOException("Simulated pre-publication failure."))
+                : ValueTask.CompletedTask
+        };
+        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one", options).MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
+
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Unavailable, result.Status);
+        Assert.Equal(new ContextualRoleRevisionMutationDiagnostic(ContextualRolePersistenceDiagnosticStage.PrePublicationObservation, ContextualRoleNativeErrorKind.None, null), result.Diagnostic);
+        Assert.Empty(result.ValidationErrors);
+        Assert.False(File.Exists(Path.Combine(StoreRoot(workspace.RootPath), "workspace-anchor.json")));
     }
 
     [Fact]
@@ -123,7 +142,7 @@ public sealed class ContextualRoleRevisionStoreTests
         var reopened = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one").ReadAsync(new ContextualRoleRevisionReadRequest(revision.Identity));
         var root = StoreRoot(workspace.RootPath);
 
-        Assert.True(created.Status == ContextualRoleRevisionMutationStatus.Accepted, string.Join("; ", created.ValidationErrors.Select(error => $"{error.Field}:{error.Code}")));
+        Assert.True(created.Status == ContextualRoleRevisionMutationStatus.Accepted, $"validation={string.Join("; ", created.ValidationErrors.Select(error => $"{error.Field}:{error.Code}"))}; diagnostic={FormatDiagnostic(created.Diagnostic)}");
         Assert.Equal(ContextualRoleRevisionReadStatus.Found, reopened.Status);
         AssertRevision(revision, reopened.Revision);
         Assert.True(File.Exists(Path.Combine(root, "revisions", $"{roleId}.1.json")));
@@ -1044,6 +1063,9 @@ public sealed class ContextualRoleRevisionStoreTests
     private static string StoreRoot(string workspaceRoot) => Path.Combine(workspaceRoot, ".agent", "contextual-roles");
 
     private static long ArtifactBytes(string root) => Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length);
+
+    private static string FormatDiagnostic(ContextualRoleRevisionMutationDiagnostic? diagnostic)
+        => diagnostic is null ? "none" : $"{diagnostic.Stage}/{diagnostic.NativeErrorKind}/{diagnostic.NativeErrorCode?.ToString() ?? "none"}";
 
     private static string ArtifactPath(string workspaceRoot, string artifactFamily)
     {
