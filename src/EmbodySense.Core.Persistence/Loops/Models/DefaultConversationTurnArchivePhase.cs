@@ -16,5 +16,11 @@ public enum DefaultConversationTurnArchivePhase
     AfterSourceProofPublication,
 
     /// <summary>A terminal update has atomically published its staged object and is about to claim that exact object for archival.</summary>
-    AfterTerminalWritePublication
+    AfterTerminalWritePublication,
+
+    /// <summary>Canonical history has been published and is about to be revalidated before source-proof publication.</summary>
+    BeforeInitialHistoryRevalidation,
+
+    /// <summary>Canonical history and its source proof have been validated independently and are about to be revalidated together.</summary>
+    BeforeFinalHistoryRevalidation
 }

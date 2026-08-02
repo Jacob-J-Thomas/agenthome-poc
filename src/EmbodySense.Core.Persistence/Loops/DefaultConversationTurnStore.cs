@@ -529,6 +529,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         var sourceProofPath = GetHistorySourceProofPath(proof.Record.TurnId);
         Directory.CreateDirectory(_paths.DefaultConversationTurnHistoryPath);
         File.Move(activePath, pendingSourcePath, overwrite: false);
+        var historyPublished = false;
         try
         {
             var claimed = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
@@ -551,11 +552,13 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
             await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, cancellationToken);
             File.Move(pendingHistoryPath, historyPath, overwrite: false);
+            historyPublished = true;
+            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, cancellationToken);
             await RevalidatePublishedHistoryAsync(historyPath, proof.Record.TurnId, stagedHistory.Identity, proof.Bytes, cancellationToken);
             await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterHistoryPublication, cancellationToken);
             File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
             await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublication, cancellationToken);
-            var sourceProof = await ReadSourceProofOrRestoreAsync(sourceProofPath, activePath, cancellationToken);
+            var sourceProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
             if (sourceProof.Identity != proof.Identity || !sourceProof.Bytes.AsSpan().SequenceEqual(proof.Bytes))
             {
                 TryRestorePendingSource(sourceProofPath, activePath);
@@ -567,12 +570,17 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 throw new FormatException("The default-conversation turn artifact pathname was replaced during archival.");
             }
 
+            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, cancellationToken);
             await RevalidatePublishedHistoryAsync(historyPath, proof.Record.TurnId, stagedHistory.Identity, sourceProof.Bytes, cancellationToken);
         }
-        catch
+        catch (Exception exception)
         {
-            TryRestorePendingSource(pendingSourcePath, activePath);
-            TryRestorePendingSource(sourceProofPath, activePath);
+            if (!historyPublished || exception is FormatException)
+            {
+                TryRestorePendingSource(pendingSourcePath, activePath);
+                TryRestorePendingSource(sourceProofPath, activePath);
+            }
+
             throw;
         }
     }
@@ -627,11 +635,16 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                         throw new FormatException($"Default-conversation turn `{turnId}` has a substituted interrupted source proof.");
                     }
 
+                    await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, cancellationToken);
                     await RevalidatePublishedHistoryAsync(historyPath, turnId, history.Value.Identity, recoveredProof.Bytes, cancellationToken);
                 }
-                catch
+                catch (Exception exception)
                 {
-                    TryRestorePendingSource(sourceProofPath, activePath);
+                    if (exception is FormatException)
+                    {
+                        TryRestorePendingSource(sourceProofPath, activePath);
+                    }
+
                     throw;
                 }
 
@@ -655,6 +668,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 File.Move(pendingHistoryPath, historyPath, overwrite: false);
                 try
                 {
+                    await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, cancellationToken);
                     await RevalidatePublishedHistoryAsync(historyPath, turnId, staged.Identity, pending.Bytes, cancellationToken);
                     File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
                     var recoveredProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
@@ -663,12 +677,17 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                         throw new FormatException($"Default-conversation turn `{turnId}` has a substituted interrupted source proof.");
                     }
 
+                    await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, cancellationToken);
                     await RevalidatePublishedHistoryAsync(historyPath, turnId, staged.Identity, recoveredProof.Bytes, cancellationToken);
                 }
-                catch
+                catch (Exception exception)
                 {
-                    TryRestorePendingSource(pendingSourcePath, activePath);
-                    TryRestorePendingSource(sourceProofPath, activePath);
+                    if (exception is FormatException)
+                    {
+                        TryRestorePendingSource(pendingSourcePath, activePath);
+                        TryRestorePendingSource(sourceProofPath, activePath);
+                    }
+
                     throw;
                 }
 
@@ -757,19 +776,6 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
         catch (IOException) when (EntryExists(activePath))
         {
-        }
-    }
-
-    private static async Task<(DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity)> ReadSourceProofOrRestoreAsync(string sourceProofPath, string activePath, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
-        }
-        catch
-        {
-            TryRestorePendingSource(sourceProofPath, activePath);
-            throw;
         }
     }
 

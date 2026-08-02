@@ -1216,6 +1216,120 @@ public sealed class DefaultConversationTurnRecoveryTests
         await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Terminal_update_keeps_the_pending_source_recoverable_when_initial_history_revalidation_fails(bool cancelRevalidation)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, $"request-initial-history-revalidation-{cancelRevalidation}");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, _ =>
+        {
+            if (cancelRevalidation)
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            }
+
+            return Task.FromException(new IOException("Injected initial history revalidation failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion, cancellation.Token);
+
+        if (cancelRevalidation)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.True(File.Exists(historyPath));
+        Assert.False(File.Exists(sourceProofPath));
+        var historyBytes = await File.ReadAllBytesAsync(historyPath);
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(pendingPath));
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.Equal(terminal.LifecycleVersion, loaded.LifecycleVersion);
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Terminal_update_keeps_the_completed_proof_recoverable_when_final_history_revalidation_fails(bool cancelRevalidation)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, $"request-final-history-revalidation-{cancelRevalidation}");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, _ =>
+        {
+            if (cancelRevalidation)
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            }
+
+            return Task.FromException(new IOException("Injected final history revalidation failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion, cancellation.Token);
+
+        if (cancelRevalidation)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.True(File.Exists(historyPath));
+        Assert.True(File.Exists(sourceProofPath));
+        var historyBytes = await File.ReadAllBytesAsync(historyPath);
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(sourceProofPath));
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.Equal(terminal.LifecycleVersion, loaded.LifecycleVersion);
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
     [Fact]
     public async Task Terminal_update_preserves_a_pending_source_replacement_after_history_publication()
     {
@@ -1365,6 +1479,64 @@ public sealed class DefaultConversationTurnRecoveryTests
 
         Assert.False(File.Exists(pendingPath));
         Assert.False(File.Exists(pendingHistoryPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Theory]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, false)]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, true)]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, false)]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, true)]
+    public async Task Restart_keeps_post_publication_evidence_recoverable_when_history_revalidation_fails(DefaultConversationTurnArchivePhase phase, bool cancelRevalidation)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, $"request-restart-revalidation-{phase}-{cancelRevalidation}", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        await File.WriteAllBytesAsync(pendingPath, bytes);
+        await File.WriteAllBytesAsync(pendingHistoryPath, bytes);
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.List, phase, _ =>
+        {
+            if (cancelRevalidation)
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            }
+
+            return Task.FromException(new IOException("Injected restart history revalidation failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).ListIncompleteAsync(cancellation.Token);
+
+        if (cancelRevalidation)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(historyPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        Assert.Equal(phase == DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, File.Exists(pendingPath));
+        Assert.Equal(phase == DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, File.Exists(sourceProofPath));
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(terminal.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
         Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
         Assert.Equal(bytes, await File.ReadAllBytesAsync(sourceProofPath));
     }
