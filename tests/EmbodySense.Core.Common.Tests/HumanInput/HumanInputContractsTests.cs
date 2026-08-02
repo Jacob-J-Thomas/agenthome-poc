@@ -395,6 +395,59 @@ public sealed class HumanInputContractsTests
     }
 
     [Fact]
+    public void Invalid_oversized_schema_and_response_identifiers_are_not_hashed_for_duplicate_or_lookup_tracking()
+    {
+        var oversizedId = new string('a', HumanInputLimits.MaxIdentifierCharacters + 1);
+        var choiceRequest = Request(HumanInputResponseKind.Choice) with
+        {
+            ResponseSchema = new HumanInputResponseSchema(
+                HumanInputResponseKind.Choice,
+                null,
+                [new HumanInputChoice(oversizedId, "One"), new HumanInputChoice(oversizedId, "Two")],
+                null,
+                null)
+        };
+        var structuredRequest = Request(HumanInputResponseKind.Structured) with
+        {
+            ResponseSchema = new HumanInputResponseSchema(
+                HumanInputResponseKind.Structured,
+                null,
+                null,
+                [
+                    new HumanInputStructuredFieldSchema(oversizedId, HumanInputStructuredFieldKind.Text, false, 8, null),
+                    new HumanInputStructuredFieldSchema(oversizedId, HumanInputStructuredFieldKind.Text, false, 8, null)
+                ],
+                null)
+        };
+
+        var choiceErrors = HumanInputValidator.ValidateRequest(choiceRequest).Errors;
+        var structuredErrors = HumanInputValidator.ValidateRequest(structuredRequest).Errors;
+        Assert.Equal(2, choiceErrors.Count(error => error.Code == "invalid_identifier"));
+        Assert.DoesNotContain(choiceErrors, error => error.Code == "duplicate_choice");
+        Assert.Equal(2, structuredErrors.Count(error => error.Code == "invalid_identifier"));
+        Assert.DoesNotContain(structuredErrors, error => error.Code == "duplicate_structured_field");
+
+        var validRequest = Request(HumanInputResponseKind.Structured);
+        var response = Response(validRequest) with
+        {
+            Value = new HumanInputResponseValue(
+                HumanInputResponseKind.Structured,
+                null,
+                null,
+                null,
+                [
+                    new HumanInputStructuredFieldValue(oversizedId, "one", null),
+                    new HumanInputStructuredFieldValue(oversizedId, "two", null)
+                ],
+                null)
+        };
+
+        var responseErrors = HumanInputValidator.ValidateResponse(validRequest, response).Errors;
+        Assert.Equal(2, responseErrors.Count(error => error.Code == "unknown_structured_field"));
+        Assert.DoesNotContain(responseErrors, error => error.Code == "duplicate_structured_value");
+    }
+
+    [Fact]
     public void Choice_and_structured_field_boundaries_accept_maximum_and_reject_plus_one()
     {
         var maximumDisplay = new string('d', HumanInputLimits.MaxChoiceDisplayCharacters);
@@ -471,6 +524,24 @@ public sealed class HumanInputContractsTests
         Assert.True(HumanInputValidator.ValidateRequest(maximum).IsValid);
         Assert.Contains(HumanInputValidator.ValidateRequest(belowMinimum).Errors, error => error.Code == "unbounded_timing");
         Assert.Contains(HumanInputValidator.ValidateRequest(aboveMaximum).Errors, error => error.Code == "unbounded_timing");
+    }
+
+    [Fact]
+    public void Canonical_hash_preserves_non_utc_offsets_so_invalid_timing_cannot_match_a_valid_request()
+    {
+        var request = Request(HumanInputResponseKind.Text);
+        var nonUtc = request with
+        {
+            Timing = new HumanInputTiming(
+                request.Timing.RequestedAtUtc.ToOffset(TimeSpan.FromHours(1)),
+                request.Timing.ExpiresAtUtc.ToOffset(TimeSpan.FromHours(1)))
+        };
+
+        Assert.NotEqual(request.RequestHash, HumanInputRequestHash.Compute(nonUtc));
+        Assert.False(HumanInputRequestHash.Matches(nonUtc));
+        var errors = HumanInputValidator.ValidateRequest(nonUtc).Errors;
+        Assert.Contains(errors, error => error.Code == "invalid_timing");
+        Assert.Contains(errors, error => error.Code == "request_hash_mismatch");
     }
 
     [Theory]

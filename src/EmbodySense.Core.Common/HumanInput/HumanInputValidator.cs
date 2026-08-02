@@ -269,8 +269,9 @@ public static class HumanInputValidator
                 continue;
             }
 
+            var fieldIdIsValid = HumanInputIdentifier.IsValid(item.FieldId);
             ValidateId(item.FieldId, $"{itemField}.fieldId", errors);
-            if (!ids.Add(item.FieldId ?? string.Empty))
+            if (fieldIdIsValid && !ids.Add(item.FieldId))
             {
                 Add(errors, "duplicate_structured_field", $"{itemField}.fieldId", "Structured field IDs must be unique.");
             }
@@ -311,9 +312,10 @@ public static class HumanInputValidator
                 continue;
             }
 
+            var choiceIdIsValid = HumanInputIdentifier.IsValid(choice.ChoiceId);
             ValidateId(choice.ChoiceId, $"{itemField}.choiceId", errors);
             ValidateText(choice.DisplayText, $"{itemField}.displayText", HumanInputLimits.MaxChoiceDisplayCharacters, true, errors);
-            if (!ids.Add(choice.ChoiceId ?? string.Empty))
+            if (choiceIdIsValid && !ids.Add(choice.ChoiceId))
             {
                 Add(errors, "duplicate_choice", $"{itemField}.choiceId", "Choice IDs must be unique.");
             }
@@ -408,13 +410,15 @@ public static class HumanInputValidator
         {
             var value = values[index];
             var field = $"value.structuredFields[{index}]";
-            if (value is null || !declared.TryGetValue(value.FieldId ?? string.Empty, out var fieldSchema))
+            if (value is null
+                || !HumanInputIdentifier.IsValid(value.FieldId)
+                || !declared.TryGetValue(value.FieldId, out var fieldSchema))
             {
                 Add(errors, "unknown_structured_field", field, "Structured response contains an undeclared field.");
                 continue;
             }
 
-            if (!submitted.Add(value.FieldId ?? string.Empty))
+            if (!submitted.Add(value.FieldId))
             {
                 Add(errors, "duplicate_structured_value", $"{field}.fieldId", "Structured response field IDs must be unique.");
             }

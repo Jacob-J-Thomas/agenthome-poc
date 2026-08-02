@@ -336,8 +336,8 @@ public static class HumanInputRequestHash
         }
 
         writer.WriteStartObject();
-        writer.WriteString("requestedAtUtc", timing.RequestedAtUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
-        writer.WriteString("expiresAtUtc", timing.ExpiresAtUtc.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));
+        writer.WriteString("requestedAtUtc", timing.RequestedAtUtc.ToString("O", CultureInfo.InvariantCulture));
+        writer.WriteString("expiresAtUtc", timing.ExpiresAtUtc.ToString("O", CultureInfo.InvariantCulture));
         writer.WriteEndObject();
     }
 
