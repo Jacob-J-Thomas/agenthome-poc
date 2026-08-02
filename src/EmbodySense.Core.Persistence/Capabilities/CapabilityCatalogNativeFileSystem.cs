@@ -37,9 +37,12 @@ internal static class CapabilityCatalogNativeFileSystem
     private const uint OpenExisting = 3;
     private const int ErrorFileNotFound = 2;
     private const int ErrorPathNotFound = 3;
+    private const int ErrorMoreData = 234;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
     private const int ErrorNoMoreFiles = 18;
+    private const int InitialWindowsDirectoryBufferBytes = 16 * 1_024;
+    private const int MaximumWindowsDirectoryBufferBytes = 60 * 1_024;
     private const int AtEmptyPath = 0x1000;
     private const int LockExclusive = 2;
     private const int LockNonBlocking = 4;
@@ -269,27 +272,40 @@ internal static class CapabilityCatalogNativeFileSystem
         return Directory.Exists(devicePath) ? devicePath : throw new IOException("No handle-relative directory enumeration surface is available on this platform.");
     }
 
-    public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateWindowsDirectory(SafeFileHandle directory)
+    public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateWindowsDirectory(SafeFileHandle directory, int maximumEntries)
     {
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException("Windows directory enumeration is available only on Windows.");
         }
+        if (maximumEntries < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEntries));
+        }
 
         const int FileNameLengthOffset = 60;
         const int FileAttributesOffset = 56;
-        const int FileNameOffset = 104;
+        const int FileNameOffset = 68;
         var entries = new List<CapabilityCatalogDirectoryEntry>();
-        var buffer = new byte[64 * 1_024];
-        var informationClass = FileInfoByHandleClass.FileIdBothDirectoryRestartInfo;
+        var buffer = new byte[InitialWindowsDirectoryBufferBytes];
+        var informationClass = FileInfoByHandleClass.FileFullDirectoryRestartInfo;
         while (true)
         {
             if (!GetFileInformationByHandleEx(directory, informationClass, buffer, (uint)buffer.Length))
             {
                 var error = Marshal.GetLastPInvokeError();
-                return error == ErrorNoMoreFiles ? entries : throw NativeIOException("The capability catalog directory handle could not be enumerated", error);
+                if (error == ErrorNoMoreFiles)
+                {
+                    return entries;
+                }
+                if (error == ErrorMoreData && entries.Count == 0 && buffer.Length < MaximumWindowsDirectoryBufferBytes)
+                {
+                    Array.Resize(ref buffer, Math.Min(checked(buffer.Length * 2), MaximumWindowsDirectoryBufferBytes));
+                    continue;
+                }
+                throw NativeIOException("The capability catalog directory handle could not be enumerated within its native buffer bound", error);
             }
-            informationClass = FileInfoByHandleClass.FileIdBothDirectoryInfo;
+            informationClass = FileInfoByHandleClass.FileFullDirectoryInfo;
 
             var offset = 0;
             while (true)
@@ -308,6 +324,10 @@ internal static class CapabilityCatalogNativeFileSystem
                 var name = Encoding.Unicode.GetString(buffer, offset + FileNameOffset, checked((int)fileNameLength));
                 if (name is not "." and not "..")
                 {
+                    if (entries.Count >= maximumEntries)
+                    {
+                        return entries;
+                    }
                     var kind = (attributes & FileAttributeReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (attributes & FileAttributeDirectory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile;
                     entries.Add(new CapabilityCatalogDirectoryEntry(name, kind));
                 }
@@ -315,7 +335,10 @@ internal static class CapabilityCatalogNativeFileSystem
                 {
                     break;
                 }
-                if (nextOffset < FileNameOffset || nextOffset > buffer.Length - offset)
+                var minimumNextOffset = checked((uint)FileNameOffset + fileNameLength);
+                if ((nextOffset & 7) != 0
+                    || nextOffset < minimumNextOffset
+                    || nextOffset > buffer.Length - offset)
                 {
                     throw new IOException("Windows returned an invalid capability catalog directory continuation offset.");
                 }
@@ -324,11 +347,15 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateMacDirectory(SafeFileHandle directory)
+    public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateMacDirectory(SafeFileHandle directory, int maximumEntries)
     {
         if (!OperatingSystem.IsMacOS())
         {
             throw new PlatformNotSupportedException("Native directory enumeration is required only on macOS.");
+        }
+        if (maximumEntries < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEntries));
         }
         var duplicate = dup(directory.DangerousGetHandle().ToInt32());
         if (duplicate < 0)
@@ -362,6 +389,10 @@ internal static class CapabilityCatalogNativeFileSystem
                 if (name is "." or "..")
                 {
                     continue;
+                }
+                if (entries.Count >= maximumEntries)
+                {
+                    return entries;
                 }
                 var kind = entry.Type switch { 4 => CapabilityCatalogDirectoryEntryKind.Directory, 8 => CapabilityCatalogDirectoryEntryKind.RegularFile, 0 => CapabilityCatalogDirectoryEntryKind.Unknown, _ => CapabilityCatalogDirectoryEntryKind.Unsafe };
                 entries.Add(new CapabilityCatalogDirectoryEntry(name, kind));
@@ -752,8 +783,8 @@ internal static class CapabilityCatalogNativeFileSystem
         FileRenameInfo = 3,
         FileDispositionInfo = 4,
         FileAttributeTagInfo = 9,
-        FileIdBothDirectoryInfo = 10,
-        FileIdBothDirectoryRestartInfo = 11,
+        FileFullDirectoryInfo = 14,
+        FileFullDirectoryRestartInfo = 15,
         FileIdInfo = 18
     }
 

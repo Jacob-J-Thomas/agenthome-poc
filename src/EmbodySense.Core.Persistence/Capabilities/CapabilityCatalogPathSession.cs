@@ -145,7 +145,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
         var directories = new List<string>();
         var entryCount = 0;
-        var entries = EnumerateEntries(safePath, directory);
+        var entries = EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries));
         foreach (var entry in entries)
         {
             if (entryCount >= maximumEntries)
@@ -192,7 +192,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         }
 
         var directories = new List<string>();
-        var entries = EnumerateEntries(safePath, directory);
+        var entries = EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries));
         foreach (var entry in entries)
         {
             if (directories.Count >= maximumEntries)
@@ -221,7 +221,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         var safePath = RequireContained(path);
         var directory = GetDirectory(safePath, create: false) ?? throw new DirectoryNotFoundException("The staged artifact directory is unavailable.");
         var results = new List<CapabilityCatalogDirectoryEntry>();
-        foreach (var entry in EnumerateEntries(safePath, directory))
+        foreach (var entry in EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries)))
         {
             if (results.Count >= maximumEntries)
             {
@@ -414,7 +414,7 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
         var entries = new List<(string Name, long Length)>();
         var totalBytes = 0L;
-        var directoryEntries = EnumerateEntries(safePath, directory);
+        var directoryEntries = EnumerateEntries(safePath, directory, ProbeLimit(maximumEntries));
         foreach (var entry in directoryEntries)
         {
             if (entries.Count >= maximumEntries)
@@ -498,14 +498,16 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         return parent;
     }
 
-    private static IEnumerable<CapabilityCatalogDirectoryEntry> EnumerateEntries(string safePath, SafeFileHandle directory)
+    private static IEnumerable<CapabilityCatalogDirectoryEntry> EnumerateEntries(string safePath, SafeFileHandle directory, int maximumEntries)
     {
         return OperatingSystem.IsWindows()
-            ? CapabilityCatalogNativeFileSystem.EnumerateWindowsDirectory(directory)
+            ? CapabilityCatalogNativeFileSystem.EnumerateWindowsDirectory(directory, maximumEntries)
             : OperatingSystem.IsMacOS()
-                ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory)
-                : Directory.EnumerateFileSystemEntries(CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory), "*", SearchOption.TopDirectoryOnly).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+                ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory, maximumEntries)
+                : Directory.EnumerateFileSystemEntries(CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory), "*", SearchOption.TopDirectoryOnly).Take(maximumEntries).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
     }
+
+    private static int ProbeLimit(int maximumEntries) => maximumEntries == int.MaxValue ? int.MaxValue : maximumEntries + 1;
 
     private SafeFileHandle? OpenRegularFile(string fullPath, SafeFileHandle parent, string name, FileMode mode, FileAccess access, FileShare share, bool writeThrough)
     {
