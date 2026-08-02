@@ -1598,6 +1598,92 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Renewal_budget_commits_the_exact_duration_limit_and_rejects_limit_plus_one()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath));
+        var acquiredAtUtc = TriggerQueueTestData.CreatedAtUtc.AddSeconds(4);
+        var entry = await AcquireWorkerLeaseAsync(store, acquiredAtUtc, TriggerWorkerLimits.MaxLeaseDuration);
+        var renewalLimit = TriggerWorkerLeaseRenewalPolicy.GetMaxLeaseRenewals(TriggerWorkerLimits.MaxLeaseDuration);
+
+        for (var renewal = 1; renewal <= renewalLimit; renewal++)
+        {
+            var result = await store.RenewAsync(entry.DeliveryId, "worker-1", entry.WorkerLease!.Generation, entry.Revision, acquiredAtUtc.AddTicks(renewal), TriggerWorkerLimits.MaxLeaseDuration);
+            Assert.Equal(TriggerWorkerMutationStatus.Committed, result.Status);
+            entry = Assert.IsType<TriggerQueueEntry>(result.Entry);
+            Assert.Equal(renewal, entry.WorkerLease!.RenewalCount);
+        }
+
+        var rejected = await store.RenewAsync(entry.DeliveryId, "worker-1", entry.WorkerLease!.Generation, entry.Revision, acquiredAtUtc.AddTicks(renewalLimit + 1), TriggerWorkerLimits.MaxLeaseDuration);
+
+        Assert.Equal(TriggerWorkerMutationStatus.StaleOwner, rejected.Status);
+        Assert.Equal(renewalLimit, rejected.Entry!.WorkerLease!.RenewalCount);
+        Assert.Equal(entry.Revision, rejected.Entry.Revision);
+    }
+
+    [Fact]
+    public async Task Renewal_allows_the_exact_ownership_horizon_and_rejects_one_tick_over()
+    {
+        using var exactWorkspace = new TestWorkspace();
+        var exactStore = new TriggerQueueStore(new WorkspacePaths(exactWorkspace.RootPath));
+        var acquiredAtUtc = TriggerQueueTestData.CreatedAtUtc.AddSeconds(4);
+        var exactEntry = await AcquireWorkerLeaseAsync(exactStore, acquiredAtUtc, TriggerWorkerLimits.MaxLeaseDuration);
+        exactEntry = await RenewAtHalfLeaseCadenceAsync(exactStore, exactEntry, acquiredAtUtc, 13);
+
+        var exact = await exactStore.RenewAsync(exactEntry.DeliveryId, "worker-1", exactEntry.WorkerLease!.Generation, exactEntry.Revision, acquiredAtUtc.AddMinutes(35), TriggerWorkerLimits.MaxLeaseDuration);
+
+        Assert.Equal(TriggerWorkerMutationStatus.Committed, exact.Status);
+        Assert.Equal(acquiredAtUtc + TriggerWorkerLimits.MaxLeaseOwnershipDuration, exact.Entry!.WorkerLease!.ExpiresAtUtc);
+
+        using var exceededWorkspace = new TestWorkspace();
+        var exceededStore = new TriggerQueueStore(new WorkspacePaths(exceededWorkspace.RootPath));
+        var exceededEntry = await AcquireWorkerLeaseAsync(exceededStore, acquiredAtUtc, TriggerWorkerLimits.MaxLeaseDuration);
+        exceededEntry = await RenewAtHalfLeaseCadenceAsync(exceededStore, exceededEntry, acquiredAtUtc, 13);
+
+        var switchedLeaseDuration = TriggerWorkerLimits.MaxLeaseDuration - TimeSpan.FromTicks(1);
+        Assert.True(exceededEntry.WorkerLease!.RenewalCount < TriggerWorkerLeaseRenewalPolicy.GetMaxLeaseRenewals(switchedLeaseDuration));
+        var exceeded = await exceededStore.RenewAsync(exceededEntry.DeliveryId, "worker-1", exceededEntry.WorkerLease.Generation, exceededEntry.Revision, acquiredAtUtc.AddMinutes(35).AddTicks(2), switchedLeaseDuration);
+
+        Assert.Equal(TriggerWorkerMutationStatus.StaleOwner, exceeded.Status);
+        Assert.Equal(13, exceeded.Entry!.WorkerLease!.RenewalCount);
+        Assert.Equal(exceededEntry.Revision, exceeded.Entry.Revision);
+    }
+
+    [Fact]
+    public async Task Renewal_expiry_overflow_fails_closed_without_changing_exact_ownership()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath));
+        var acquiredAtUtc = DateTimeOffset.MaxValue - TriggerWorkerLimits.MaxLeaseDuration;
+        var entry = await AcquireWorkerLeaseAsync(store, acquiredAtUtc, TriggerWorkerLimits.MaxLeaseDuration);
+
+        var result = await store.RenewAsync(entry.DeliveryId, "worker-1", entry.WorkerLease!.Generation, entry.Revision, acquiredAtUtc.AddTicks(1), TriggerWorkerLimits.MaxLeaseDuration);
+
+        Assert.Equal(TriggerWorkerMutationStatus.StaleOwner, result.Status);
+        Assert.Equal(DateTimeOffset.MaxValue, result.Entry!.WorkerLease!.ExpiresAtUtc);
+        Assert.Equal(0, result.Entry.WorkerLease.RenewalCount);
+        Assert.Equal(entry.Revision, result.Entry.Revision);
+    }
+
+    [Fact]
+    public async Task Selection_with_an_unrepresentable_lease_expiry_fails_without_mutating_the_queue()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new TriggerQueueStore(paths);
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var observedAtUtc = DateTimeOffset.MaxValue - TriggerWorkerLimits.MaxLeaseDuration + TimeSpan.FromTicks(1);
+        var before = await store.GetSnapshotAsync(observedAtUtc);
+        var request = new TriggerWorkerSelectionRequest("worker-1", before.Generation, observedAtUtc, TriggerWorkerLimits.MaxLeaseDuration, [], 2);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.SelectAsync(request));
+
+        var after = await new TriggerQueueStore(paths).GetSnapshotAsync(observedAtUtc);
+        Assert.Equal(before.Generation, after.Generation);
+        Assert.Equal(TriggerQueueEntryState.Queued, Assert.Single(after.Entries).State);
+    }
+
+    [Fact]
     public async Task Stale_owner_cannot_renew_release_or_begin_dispatch_after_takeover()
     {
         using var workspace = new TestWorkspace();
@@ -1992,6 +2078,28 @@ public sealed class TriggerQueueStoreTests
         }
 
         Assert.True(typeof(ITriggerWorkerStatePort).IsAssignableFrom(typeof(TriggerQueueStore)));
+    }
+
+    private static async Task<TriggerQueueEntry> AcquireWorkerLeaseAsync(TriggerQueueStore store, DateTimeOffset acquiredAtUtc, TimeSpan leaseDuration)
+    {
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var snapshot = await store.GetSnapshotAsync(acquiredAtUtc);
+        var selected = await store.SelectAsync(new TriggerWorkerSelectionRequest("worker-1", snapshot.Generation, acquiredAtUtc, leaseDuration, [], 2));
+        Assert.Equal(TriggerWorkerSelectionStatus.Acquired, selected.Status);
+        return Assert.IsType<TriggerQueueEntry>(selected.Entry);
+    }
+
+    private static async Task<TriggerQueueEntry> RenewAtHalfLeaseCadenceAsync(TriggerQueueStore store, TriggerQueueEntry entry, DateTimeOffset acquiredAtUtc, int renewalCount)
+    {
+        var halfLeaseTicks = TriggerWorkerLimits.MaxLeaseDuration.Ticks / 2;
+        for (var renewal = 1; renewal <= renewalCount; renewal++)
+        {
+            var result = await store.RenewAsync(entry.DeliveryId, "worker-1", entry.WorkerLease!.Generation, entry.Revision, acquiredAtUtc.AddTicks(renewal * halfLeaseTicks), TriggerWorkerLimits.MaxLeaseDuration);
+            Assert.Equal(TriggerWorkerMutationStatus.Committed, result.Status);
+            entry = Assert.IsType<TriggerQueueEntry>(result.Entry);
+        }
+
+        return entry;
     }
 
     private static TriggerDispatchEvidence Intent(TriggerQueueEntry entry, DateTimeOffset recordedAtUtc)

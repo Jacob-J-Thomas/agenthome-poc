@@ -254,7 +254,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
             }
 
             var leaseGeneration = checked((selected.WorkerLease?.Generation ?? 0) + 1);
-            var lease = new TriggerWorkerLease(request.WorkerId, leaseGeneration, request.ObservedAtUtc, request.ObservedAtUtc + request.LeaseDuration, 0);
+            var lease = new TriggerWorkerLease(request.WorkerId, leaseGeneration, request.ObservedAtUtc, AddLeaseDuration(request.ObservedAtUtc, request.LeaseDuration), 0);
             var owned = selected with { State = TriggerQueueEntryState.WorkerOwned, TerminalReason = TriggerQueueTerminalReason.None, Revision = checked(selected.Revision + 1), TerminalAtUtc = null, WorkerLease = lease, Dispatch = null };
             var updated = Replace(swept, selected, owned) with { LastWorkerObservedAtUtc = request.ObservedAtUtc };
             cancellationToken.ThrowIfCancellationRequested();
@@ -279,12 +279,15 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
                 return (TriggerWorkerMutationStatus.InvalidState, entry);
             }
 
-            if (renewedAtUtc >= lease.ExpiresAtUtc || lease.RenewalCount >= TriggerWorkerLimits.MaxLeaseRenewals)
+            if (renewedAtUtc >= lease.ExpiresAtUtc
+                || lease.RenewalCount >= TriggerWorkerLeaseRenewalPolicy.GetMaxLeaseRenewals(leaseDuration)
+                || !TryAddLeaseDuration(renewedAtUtc, leaseDuration, out var renewedExpiry)
+                || renewedExpiry - lease.AcquiredAtUtc > TriggerWorkerLimits.MaxLeaseOwnershipDuration)
             {
                 return (TriggerWorkerMutationStatus.StaleOwner, entry);
             }
 
-            var renewed = entry with { Revision = checked(entry.Revision + 1), WorkerLease = lease with { ExpiresAtUtc = renewedAtUtc + leaseDuration, RenewalCount = lease.RenewalCount + 1 } };
+            var renewed = entry with { Revision = checked(entry.Revision + 1), WorkerLease = lease with { ExpiresAtUtc = renewedExpiry, RenewalCount = lease.RenewalCount + 1 } };
             return (TriggerWorkerMutationStatus.Committed, renewed);
         });
     }
@@ -657,6 +660,28 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         }
     }
 
+    private static DateTimeOffset AddLeaseDuration(DateTimeOffset observedAtUtc, TimeSpan leaseDuration)
+    {
+        if (!TryAddLeaseDuration(observedAtUtc, leaseDuration, out var expiry))
+        {
+            throw new ArgumentOutOfRangeException(nameof(observedAtUtc), "The lease expiry exceeds the UTC timestamp range.");
+        }
+
+        return expiry;
+    }
+
+    private static bool TryAddLeaseDuration(DateTimeOffset observedAtUtc, TimeSpan leaseDuration, out DateTimeOffset expiry)
+    {
+        if (observedAtUtc > DateTimeOffset.MaxValue - leaseDuration)
+        {
+            expiry = default;
+            return false;
+        }
+
+        expiry = observedAtUtc + leaseDuration;
+        return true;
+    }
+
     private static void ValidateDispatchEvidence(TriggerDispatchEvidence evidence, TriggerDispatchOutcome expectedOutcome)
     {
         ArgumentNullException.ThrowIfNull(evidence);
@@ -987,6 +1012,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
                 || lease.ExpiresAtUtc.Offset != TimeSpan.Zero
                 || lease.AcquiredAtUtc < entry.RecordedAtUtc
                 || lease.ExpiresAtUtc <= lease.AcquiredAtUtc
+                || lease.ExpiresAtUtc - lease.AcquiredAtUtc > TriggerWorkerLimits.MaxLeaseOwnershipDuration
                 || lease.ReleasedAtUtc is { } releasedAtUtc && (releasedAtUtc.Offset != TimeSpan.Zero || releasedAtUtc < lease.AcquiredAtUtc))
             {
                 return false;
