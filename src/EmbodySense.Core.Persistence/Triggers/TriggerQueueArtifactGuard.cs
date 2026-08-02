@@ -663,8 +663,9 @@ internal sealed class TriggerQueueArtifactGuard
                 {
                     MoveNoReplaceDurably(temporary, path, null);
                 }
-                catch (Win32Exception) when (Directory.Exists(path))
+                catch (IOException exception) when (IsCompetingDirectoryCreation(exception, path))
                 {
+                    EnsureNoReparsePoints(path);
                     Directory.Delete(temporary);
                 }
             }
@@ -678,6 +679,13 @@ internal sealed class TriggerQueueArtifactGuard
         }
 
         EnsureNoReparsePoints(_queueRoot);
+    }
+
+    private static bool IsCompetingDirectoryCreation(IOException exception, string path)
+    {
+        const int ErrorAccessDenied = 5;
+        const int ErrorAlreadyExists = 183;
+        return exception.InnerException is Win32Exception { NativeErrorCode: ErrorAccessDenied or ErrorAlreadyExists } && Directory.Exists(path);
     }
 
     private IReadOnlyList<TriggerQueueDirectorySnapshot> CaptureRootSnapshot()

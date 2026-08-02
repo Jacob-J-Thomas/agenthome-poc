@@ -366,6 +366,7 @@ public sealed class TriggerQueueStoreTests
         var finalSnapshot = await new TriggerQueueStore(new WorkspacePaths(finalWorkspace.RootPath), RaceQuota()).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
         Assert.Equal(1, finalSnapshot.QueuedEntries);
         Assert.Equal(2, finalSnapshot.RetainedEntries);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(finalWorkspace.RootPath, ".trigger-queue-directory-*.tmp", SearchOption.AllDirectories));
 
         using var identityWorkspace = new TestWorkspace();
         var same = ("delivery-same", "dedup-same", "loop-same");
@@ -374,6 +375,7 @@ public sealed class TriggerQueueStoreTests
         Assert.Single(identityStatuses, status => status == TriggerQueueAdmissionStatus.Replayed.ToString());
         var identitySnapshot = await new TriggerQueueStore(new WorkspacePaths(identityWorkspace.RootPath), RaceQuota()).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
         Assert.Single(identitySnapshot.Entries);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(identityWorkspace.RootPath, ".trigger-queue-directory-*.tmp", SearchOption.AllDirectories));
     }
 
     [Fact]
