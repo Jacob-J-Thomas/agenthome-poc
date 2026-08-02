@@ -59,7 +59,7 @@ public sealed class TestBoundaryGuardTests
             .SelectMany(file => File.ReadLines(file)
                 .Select((line, index) => (Line: line, Number: index + 1))
                 .Where(item => item.Line.Contains("new CredentialLifecycleService(", StringComparison.Ordinal))
-                .Select(item => $"{Path.GetRelativePath(root, file)}:{item.Number}"))
+                .Select(item => $"{NormalizeRepositoryRelativePath(Path.GetRelativePath(root, file))}:{item.Number}"))
             .ToArray();
 
         Assert.Single(persistenceConstructionSites);
@@ -67,11 +67,14 @@ public sealed class TestBoundaryGuardTests
     }
 
     [Theory]
-    [InlineData("src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs")]
-    [InlineData("src\\EmbodySense.Core.Application\\Properties\\AssemblyInfo.cs")]
-    public void Repository_relative_source_paths_use_forward_slashes_for_allowlist_comparisons(string sourcePath)
+    [InlineData("src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs", "src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs")]
+    [InlineData("src\\EmbodySense.Core.Application\\Properties\\AssemblyInfo.cs", "src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs")]
+    [InlineData("src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs", "src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs")]
+    [InlineData("src\\EmbodySense.Core.Persistence\\Credentials\\CredentialLifecyclePersistenceFactory.cs", "src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs")]
+    public void Repository_relative_source_paths_are_normalized_for_allowlist_and_prefix_comparisons(string sourcePath, string expectedPath)
     {
-        Assert.Equal("src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs", NormalizeRepositoryRelativePath(sourcePath));
+        Assert.Equal(expectedPath, NormalizeRepositoryRelativePath(sourcePath));
+        Assert.StartsWith(expectedPath + ":", $"{NormalizeRepositoryRelativePath(sourcePath)}:123", StringComparison.Ordinal);
     }
 
     [Fact]
