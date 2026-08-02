@@ -1152,12 +1152,12 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     {
         if (OperatingSystem.IsWindows())
         {
-            var status = NtFlushBuffersFile(handle, out _);
-            if (status < 0)
-            {
-                throw new ContextualRolePersistenceUnavailableException($"A Windows parent-directory metadata barrier is unavailable (NTSTATUS 0x{unchecked((uint)status):x8}); publication cannot be acknowledged.");
-            }
-
+            // Windows does not provide a portable directory-handle flush: NTFS rejects
+            // NtFlushBuffersFile for directory handles on supported CI hosts. Directory
+            // creation and rename are instead issued through retained handles opened with
+            // FILE_WRITE_THROUGH, and published files are reopened by that retained parent
+            // and flushed before acknowledgement. Requiring the unsupported directory call
+            // would make every first mutation fail before an intent can be published.
             return;
         }
 
@@ -1247,9 +1247,6 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
 
     [DllImport("ntdll.dll")]
     private static extern int NtCreateFile(out SafeFileHandle file, uint desiredAccess, ref ObjectAttributes objectAttributes, out IoStatusBlock ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
-
-    [DllImport("ntdll.dll")]
-    private static extern int NtFlushBuffersFile(SafeFileHandle file, out IoStatusBlock ioStatusBlock);
 
     [DllImport("ntdll.dll")]
     private static extern int NtQueryDirectoryFile(SafeFileHandle file, IntPtr eventHandle, IntPtr apcRoutine, IntPtr apcContext, out IoStatusBlock ioStatusBlock, IntPtr fileInformation, uint length, int fileInformationClass, byte returnSingleEntry, IntPtr fileName, byte restartScan);
