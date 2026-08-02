@@ -7,6 +7,11 @@ internal sealed class DefaultConversationTurnRetirementEvidenceProof : IDisposab
 {
     private readonly Dictionary<string, RetainedFileProof> _files = new(StringComparer.Ordinal);
 
+    public bool CanReservePair(int maximumEntries)
+    {
+        return maximumEntries >= 2 && _files.Count <= maximumEntries - 2;
+    }
+
     public bool TryAddPair(string intentPath, string retiredPath, DefaultConversationTurnFileIdentity retiredIdentity)
     {
         FileStream? intentStream = null;

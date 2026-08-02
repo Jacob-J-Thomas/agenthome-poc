@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -20,8 +19,9 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// workspace active-set lease serialize cooperating operations across processes. Terminal archival first claims and re-proves the
 /// exact source identity and bytes, then publishes immutable history atomically without replacement. Unsupported schemas, pathname
 /// substitutions, and altered transition history fail closed. Each terminal history artifact retains one byte-identical immutable
-/// source-proof sidecar so cleanup never unlinks an unverified pathname. Incomplete stages are retired as inspectable evidence through
-/// a retained identity-proof handle; terminal history therefore consumes roughly twice the record bytes plus any failure evidence.
+/// source-proof sidecar and an identity-bound publication-completion receipt so cleanup never unlinks an unverified pathname or infers
+/// completion from the proof pathname alone. Incomplete stages are retired as inspectable evidence through a retained identity-proof
+/// handle; terminal history therefore consumes roughly twice the record bytes plus its small completion receipt and any failure evidence.
 /// </remarks>
 public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 {
@@ -36,7 +36,8 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     private static readonly TimeSpan _leaseRetryDelay = TimeSpan.FromMilliseconds(25);
     private const int MaximumActiveArtifacts = 128;
     private const int MaximumHistoryStageRetirementEvidenceEntries = MaximumActiveArtifacts * 2;
-    private const int MaximumActiveDirectoryEntries = MaximumActiveArtifacts + 1;
+    private const int MaximumSourceProofPublicationIntents = MaximumActiveArtifacts;
+    private const int MaximumActiveDirectoryEntries = (MaximumActiveArtifacts * 2) + 1;
     private const long MaximumActiveArtifactBytes = 1024 * 1024;
     private const long MaximumActiveAggregateBytes = 8 * 1024 * 1024;
     private readonly WorkspacePaths _paths;
@@ -271,12 +272,13 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     {
         var history = await ReadOptionalAsync(GetHistoryPath(turnId), turnId, MaximumActiveArtifactBytes, cancellationToken);
         var sourceProof = await ReadOptionalAsync(GetHistorySourceProofPath(turnId), turnId, MaximumActiveArtifactBytes, cancellationToken);
+        using var completedPublication = OpenCompletedSourceProofPublication(turnId);
         if (EntryExists(GetPendingArchiveHistoryPath(turnId)))
         {
             throw new FormatException($"Default-conversation turn `{turnId}` has interrupted archival staging outside recovery.");
         }
 
-        if (history is null && sourceProof is null)
+        if (history is null && sourceProof is null && completedPublication is null)
         {
             return null;
         }
@@ -289,6 +291,17 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         if (!history.Value.Bytes.AsSpan().SequenceEqual(sourceProof.Value.Bytes))
         {
             throw new FormatException($"Default-conversation turn `{turnId}` has conflicting immutable archival evidence.");
+        }
+
+        if (completedPublication is null)
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has incomplete immutable archival evidence.");
+        }
+
+        if (completedPublication.SourceIdentity != sourceProof.Value.Identity
+            || completedPublication.HistoryIdentity != history.Value.Identity)
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has identity-conflicting immutable archival evidence.");
         }
 
         return history;
@@ -534,6 +547,43 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof");
     }
 
+    private string GetSourceProofPublicationIntentTemporaryPath(string turnId)
+    {
+        return Path.Combine(_paths.DefaultConversationActiveTurnsPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof-publication.tmp");
+    }
+
+    private string GetSourceProofPublicationIntentPath(string turnId, DefaultConversationTurnFileIdentity identity)
+    {
+        return Path.Combine(_paths.DefaultConversationActiveTurnsPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof-publication.{DefaultConversationTurnSourceProofPublicationIntent.FormatIdentity(identity)}.incomplete");
+    }
+
+    private string GetCompletedSourceProofPublicationPath(string turnId, DefaultConversationTurnFileIdentity identity)
+    {
+        return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof-publication.{DefaultConversationTurnSourceProofPublicationIntent.FormatIdentity(identity)}.completed");
+    }
+
+    private async Task<DefaultConversationTurnSourceProofPublicationIntent> CreateSourceProofPublicationIntentAsync(string turnId, DefaultConversationTurnFileIdentity sourceIdentity, DefaultConversationTurnFileIdentity historyIdentity, DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
+    {
+        var intent = DefaultConversationTurnSourceProofPublicationIntent.Create(GetSourceProofPublicationIntentTemporaryPath(turnId), sourceIdentity, historyIdentity);
+        try
+        {
+            await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublicationIntentTemporaryWrite, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var intentPath = GetSourceProofPublicationIntentPath(turnId, intent.Identity);
+            if (intent.TryRelocate(intentPath))
+            {
+                return intent;
+            }
+
+            throw new FormatException($"Default-conversation turn `{turnId}` source-proof publication intent could not claim its exact identity-bound pathname.");
+        }
+        catch
+        {
+            intent.Dispose();
+            throw;
+        }
+    }
+
     private string GetHistoryStageRetirementIntentPath(string turnId, DefaultConversationTurnFileIdentity identity)
     {
         return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-history.{FormatFileIdentity(identity)}.retirement-intent");
@@ -552,6 +602,11 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             {
                 throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
             }
+
+            if (!initialRetirementEvidence.CanReservePair(MaximumHistoryStageRetirementEvidenceEntries))
+            {
+                throw new IOException($"Default-conversation turn `{proof.Record.TurnId}` has exhausted its bounded history-stage retirement-evidence capacity.");
+            }
         }
 
         await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeSourceClaim, cancellationToken);
@@ -559,6 +614,11 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         if (retainedRetirementEvidence is null)
         {
             throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
+        }
+
+        if (!retainedRetirementEvidence.CanReservePair(MaximumHistoryStageRetirementEvidenceEntries))
+        {
+            throw new IOException($"Default-conversation turn `{proof.Record.TurnId}` has exhausted its bounded history-stage retirement-evidence capacity.");
         }
 
         var pendingSourcePath = GetPendingArchiveSourcePath(proof.Record.TurnId);
@@ -587,6 +647,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         var historyStageProved = false;
         var historyPublished = false;
         var retirementEvidenceChanged = false;
+        DefaultConversationTurnSourceProofPublicationIntent? publicationIntent = null;
         try
         {
             var claimed = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
@@ -632,25 +693,35 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, cancellationToken);
             await RevalidatePublishedHistoryAsync(historyPath, proof.Record.TurnId, stagedHistory.Identity, proof.Bytes, cancellationToken);
             await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterHistoryPublication, cancellationToken);
-            File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
-            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublication, cancellationToken);
-            var sourceProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
-            if (sourceProof.Identity != proof.Identity || !sourceProof.Bytes.AsSpan().SequenceEqual(proof.Bytes))
+            publicationIntent = await CreateSourceProofPublicationIntentAsync(proof.Record.TurnId, proof.Identity, stagedHistory.Identity, operation, cancellationToken);
+            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublicationIntent, cancellationToken);
+            retirementEvidenceChanged = true;
+            if (!await TryPublishSourceProofWithRetirementEvidenceAsync(
+                pendingSourcePath,
+                sourceProofPath,
+                proof.Record.TurnId,
+                proof.Identity,
+                proof.Bytes,
+                operation,
+                retainedRetirementEvidence,
+                cancellationToken))
             {
-                TryRestorePendingSource(sourceProofPath, activePath);
-                throw new FormatException("The default-conversation turn source proof was substituted during archival.");
+                throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` retirement evidence changed before or across source-proof publication.");
             }
 
-            if (EntryExists(activePath))
-            {
-                throw new FormatException("The default-conversation turn artifact pathname was replaced during archival.");
-            }
-
-            await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, cancellationToken);
-            await RevalidatePublishedHistoryAsync(historyPath, proof.Record.TurnId, stagedHistory.Identity, sourceProof.Bytes, cancellationToken);
+            retirementEvidenceChanged = false;
+            await CompleteSourceProofPublicationAsync(historyPath, sourceProofPath, activePath, proof.Record.TurnId, stagedHistory.Identity, proof.Bytes, operation, retainedRetirementEvidence, publicationIntent, cancellationToken);
+            publicationIntent.Dispose();
+            publicationIntent = null;
         }
         catch (Exception exception)
         {
+            if (publicationIntent is not null || SourceProofPublicationIntentExists(proof.Record.TurnId))
+            {
+                _ = TryRollbackPublishedArtifact(sourceProofPath, pendingSourcePath, proof.Identity, proof.Bytes);
+                throw;
+            }
+
             var historyStageRetired = !historyPublished
                 && (!historyStageProved || retirementEvidenceChanged)
                 && await TryRetireOwnedIncompleteHistoryStageAsync(pendingHistoryPath, historyStageIdentity, operation, proof.Record.TurnId);
@@ -663,6 +734,10 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
             throw;
         }
+        finally
+        {
+            publicationIntent?.Dispose();
+        }
     }
 
     private async Task RecoverInterruptedArchivesAsync(DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
@@ -672,11 +747,30 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             return;
         }
 
-        var (_, pendingSourcePaths) = EnumerateBoundedActiveEntries();
-        foreach (var pendingSourcePath in pendingSourcePaths)
+        var entries = EnumerateBoundedActiveEntries();
+        if (entries.SourceProofPublicationIntentTemporaryPaths.Count > 0)
+        {
+            await PromoteTemporarySourceProofPublicationIntentsAsync(entries.SourceProofPublicationIntentTemporaryPaths, entries.SourceProofPublicationIntentPaths, cancellationToken);
+            entries = EnumerateBoundedActiveEntries();
+        }
+
+        var pendingSourcePaths = entries.PendingSourcePaths;
+        var publicationIntentPaths = entries.SourceProofPublicationIntentPaths;
+        var pendingSources = pendingSourcePaths.ToDictionary(ParsePendingArchiveTurnId, StringComparer.Ordinal);
+        var publicationIntents = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var publicationIntentPath in publicationIntentPaths)
+        {
+            if (!publicationIntents.TryAdd(ParseSourceProofPublicationIntentTurnId(publicationIntentPath), publicationIntentPath))
+            {
+                throw new FormatException("The bounded default-conversation active-turn set contains duplicate source-proof publication intents.");
+            }
+        }
+        var interruptedTurnIds = pendingSources.Keys.Concat(publicationIntents.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        foreach (var turnId in interruptedTurnIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var turnId = ParsePendingArchiveTurnId(pendingSourcePath);
+            pendingSources.TryGetValue(turnId, out var pendingSourcePath);
+            publicationIntents.TryGetValue(turnId, out var publicationIntentPath);
             var activePath = GetActivePath(turnId);
             var historyPath = GetHistoryPath(turnId);
             var pendingHistoryPath = GetPendingArchiveHistoryPath(turnId);
@@ -686,118 +780,275 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 throw new FormatException($"Default-conversation turn `{turnId}` has both active and interrupted archival sources.");
             }
 
+            using (var completedPublication = OpenCompletedSourceProofPublication(turnId))
+            {
+                if (completedPublication is not null)
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has both completed and interrupted source-proof publication evidence.");
+                }
+            }
+
             using var retainedRetirementEvidence = TryOpenHistoryStageRetirementEvidence(turnId);
             if (retainedRetirementEvidence is null)
             {
                 throw new FormatException($"Default-conversation turn `{turnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
             }
 
-            var pending = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
-            if (!ShouldArchive(pending.Record))
+            DefaultConversationTurnSourceProofPublicationIntent? publicationIntent = null;
+            try
             {
-                throw new FormatException($"Default-conversation turn `{turnId}` has an invalid interrupted archival source.");
+                if (publicationIntentPath is not null)
+                {
+                    publicationIntent = DefaultConversationTurnSourceProofPublicationIntent.Open(publicationIntentPath);
+                    var expectedPublicationIntentIdentity = ParseSourceProofPublicationIntent(publicationIntentPath).Identity;
+                    if (publicationIntent.Identity != expectedPublicationIntentIdentity || !publicationIntent.RevalidatesCurrentPathname())
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has substituted source-proof publication intent evidence.");
+                    }
+                }
+
+                var history = await ReadOptionalAsync(historyPath, turnId, MaximumActiveArtifactBytes, cancellationToken);
+                var sourceProof = await ReadOptionalAsync(sourceProofPath, turnId, MaximumActiveArtifactBytes, cancellationToken);
+                if (pendingSourcePath is null)
+                {
+                    if (publicationIntent is null || history is null || sourceProof is null || EntryExists(pendingHistoryPath))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has incomplete source-proof publication evidence.");
+                    }
+
+                    if (!ShouldArchive(history.Value.Record) || !ShouldArchive(sourceProof.Value.Record))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has non-terminal source-proof publication evidence.");
+                    }
+
+                    if (publicationIntent.HistoryIdentity != history.Value.Identity
+                        || publicationIntent.SourceIdentity != sourceProof.Value.Identity
+                        || !history.Value.Bytes.AsSpan().SequenceEqual(sourceProof.Value.Bytes))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has conflicting source-proof publication evidence.");
+                    }
+
+                    await CompleteSourceProofPublicationAsync(historyPath, sourceProofPath, activePath, turnId, history.Value.Identity, history.Value.Bytes, operation, retainedRetirementEvidence, publicationIntent, cancellationToken);
+                    publicationIntent.Dispose();
+                    publicationIntent = null;
+                    continue;
+                }
+
+                var pending = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
+                if (!ShouldArchive(pending.Record))
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has an invalid interrupted archival source.");
+                }
+
+                if (history is not null)
+                {
+                    if (!history.Value.Bytes.AsSpan().SequenceEqual(pending.Bytes))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has conflicting interrupted archival history.");
+                    }
+
+                    if (EntryExists(pendingHistoryPath) || sourceProof is not null)
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has duplicate interrupted archival evidence.");
+                    }
+
+                    if (publicationIntent is not null
+                        && (publicationIntent.SourceIdentity != pending.Identity || publicationIntent.HistoryIdentity != history.Value.Identity))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has identity-conflicting source-proof publication intent evidence.");
+                    }
+
+                    var retirementEvidenceChangedAcrossSourceProof = true;
+                    try
+                    {
+                        publicationIntent ??= await CreateSourceProofPublicationIntentAsync(turnId, pending.Identity, history.Value.Identity, operation, cancellationToken);
+                        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublicationIntent, cancellationToken);
+                        if (!await TryPublishSourceProofWithRetirementEvidenceAsync(
+                            pendingSourcePath,
+                            sourceProofPath,
+                            turnId,
+                            pending.Identity,
+                            pending.Bytes,
+                            operation,
+                            retainedRetirementEvidence,
+                            cancellationToken))
+                        {
+                            throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed before or across interrupted source-proof publication.");
+                        }
+
+                        retirementEvidenceChangedAcrossSourceProof = false;
+                        await CompleteSourceProofPublicationAsync(historyPath, sourceProofPath, activePath, turnId, history.Value.Identity, history.Value.Bytes, operation, retainedRetirementEvidence, publicationIntent, cancellationToken);
+                        publicationIntent.Dispose();
+                        publicationIntent = null;
+                    }
+                    catch (Exception exception)
+                    {
+                        if (publicationIntent is not null || SourceProofPublicationIntentExists(turnId))
+                        {
+                            _ = TryRollbackPublishedArtifact(sourceProofPath, pendingSourcePath, pending.Identity, pending.Bytes);
+                        }
+                        else if (exception is FormatException && !retirementEvidenceChangedAcrossSourceProof)
+                        {
+                            TryRestorePendingSource(sourceProofPath, activePath);
+                        }
+
+                        throw;
+                    }
+
+                    continue;
+                }
+
+                if (sourceProof is not null)
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has a source proof without canonical history.");
+                }
+
+                if (EntryExists(pendingHistoryPath))
+                {
+                    if (publicationIntent is not null)
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has a source-proof publication intent before canonical history publication.");
+                    }
+
+                    var staged = await ReadRequiredAsync(pendingHistoryPath, MaximumActiveArtifactBytes, cancellationToken);
+                    if (!staged.Bytes.AsSpan().SequenceEqual(pending.Bytes))
+                    {
+                        throw new FormatException($"Default-conversation turn `{turnId}` has conflicting interrupted archival staging.");
+                    }
+
+                    if (!await TryPublishHistoryStageWithRetirementEvidenceAsync(
+                        pendingHistoryPath,
+                        historyPath,
+                        turnId,
+                        staged.Identity,
+                        pending.Bytes,
+                        operation,
+                        retainedRetirementEvidence,
+                        cancellationToken))
+                    {
+                        var historyStageRetired = await TryRetireOwnedIncompleteHistoryStageAsync(pendingHistoryPath, staged.Identity, operation, turnId);
+                        if (historyStageRetired)
+                        {
+                            TryRestorePendingSource(pendingSourcePath, activePath);
+                        }
+
+                        throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed before or across interrupted history publication.");
+                    }
+
+                    var retirementEvidenceChangedAcrossSourceProof = false;
+                    try
+                    {
+                        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, cancellationToken);
+                        await RevalidatePublishedHistoryAsync(historyPath, turnId, staged.Identity, pending.Bytes, cancellationToken);
+                        retirementEvidenceChangedAcrossSourceProof = true;
+                        publicationIntent = await CreateSourceProofPublicationIntentAsync(turnId, pending.Identity, staged.Identity, operation, cancellationToken);
+                        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublicationIntent, cancellationToken);
+                        if (!await TryPublishSourceProofWithRetirementEvidenceAsync(
+                            pendingSourcePath,
+                            sourceProofPath,
+                            turnId,
+                            pending.Identity,
+                            pending.Bytes,
+                            operation,
+                            retainedRetirementEvidence,
+                            cancellationToken))
+                        {
+                            throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed before or across interrupted source-proof publication.");
+                        }
+
+                        retirementEvidenceChangedAcrossSourceProof = false;
+                        await CompleteSourceProofPublicationAsync(historyPath, sourceProofPath, activePath, turnId, staged.Identity, staged.Bytes, operation, retainedRetirementEvidence, publicationIntent, cancellationToken);
+                        publicationIntent.Dispose();
+                        publicationIntent = null;
+                    }
+                    catch (Exception exception)
+                    {
+                        if (publicationIntent is not null || SourceProofPublicationIntentExists(turnId))
+                        {
+                            _ = TryRollbackPublishedArtifact(sourceProofPath, pendingSourcePath, pending.Identity, pending.Bytes);
+                        }
+                        else if (exception is FormatException && !retirementEvidenceChangedAcrossSourceProof)
+                        {
+                            TryRestorePendingSource(pendingSourcePath, activePath);
+                            TryRestorePendingSource(sourceProofPath, activePath);
+                        }
+
+                        throw;
+                    }
+
+                    continue;
+                }
+
+                if (publicationIntent is not null)
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has a source-proof publication intent without canonical history.");
+                }
+
+                File.Move(pendingSourcePath, activePath, overwrite: false);
+            }
+            finally
+            {
+                publicationIntent?.Dispose();
+            }
+        }
+    }
+
+    private async Task PromoteTemporarySourceProofPublicationIntentsAsync(IReadOnlyList<string> temporaryPaths, IReadOnlyList<string> canonicalIntentPaths, CancellationToken cancellationToken)
+    {
+        var canonicalTurnIds = canonicalIntentPaths.Select(ParseSourceProofPublicationIntentTurnId).ToHashSet(StringComparer.Ordinal);
+        var temporaryTurnIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var temporaryPath in temporaryPaths.Order(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var turnId = ParseSourceProofPublicationIntentTemporaryTurnId(temporaryPath);
+            if (!temporaryTurnIds.Add(turnId) || canonicalTurnIds.Contains(turnId))
+            {
+                throw new FormatException($"Default-conversation turn `{turnId}` has duplicate source-proof publication intent evidence.");
             }
 
+            var activePath = GetActivePath(turnId);
+            var pendingSourcePath = GetPendingArchiveSourcePath(turnId);
+            var pendingHistoryPath = GetPendingArchiveHistoryPath(turnId);
+            var historyPath = GetHistoryPath(turnId);
+            var sourceProofPath = GetHistorySourceProofPath(turnId);
+            if (EntryExists(activePath) || EntryExists(pendingHistoryPath))
+            {
+                throw new FormatException($"Default-conversation turn `{turnId}` has a temporary source-proof publication intent outside its exact post-history-publication state.");
+            }
+
+            using (var completedPublication = OpenCompletedSourceProofPublication(turnId))
+            {
+                if (completedPublication is not null)
+                {
+                    throw new FormatException($"Default-conversation turn `{turnId}` has both completed and temporary source-proof publication evidence.");
+                }
+            }
+
+            var pending = await ReadOptionalAsync(pendingSourcePath, turnId, MaximumActiveArtifactBytes, cancellationToken);
             var history = await ReadOptionalAsync(historyPath, turnId, MaximumActiveArtifactBytes, cancellationToken);
             var sourceProof = await ReadOptionalAsync(sourceProofPath, turnId, MaximumActiveArtifactBytes, cancellationToken);
-            if (history is not null)
+            using var temporaryIntent = DefaultConversationTurnSourceProofPublicationIntent.Open(temporaryPath);
+            if (!temporaryIntent.RevalidatesCurrentPathname())
             {
-                if (!history.Value.Bytes.AsSpan().SequenceEqual(pending.Bytes))
-                {
-                    throw new FormatException($"Default-conversation turn `{turnId}` has conflicting interrupted archival history.");
-                }
-
-                if (EntryExists(pendingHistoryPath) || sourceProof is not null)
-                {
-                    throw new FormatException($"Default-conversation turn `{turnId}` has duplicate interrupted archival evidence.");
-                }
-
-                File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
-                try
-                {
-                    var recoveredProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
-                    if (recoveredProof.Identity != pending.Identity || !recoveredProof.Bytes.AsSpan().SequenceEqual(history.Value.Bytes))
-                    {
-                        throw new FormatException($"Default-conversation turn `{turnId}` has a substituted interrupted source proof.");
-                    }
-
-                    await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, cancellationToken);
-                    await RevalidatePublishedHistoryAsync(historyPath, turnId, history.Value.Identity, recoveredProof.Bytes, cancellationToken);
-                }
-                catch (Exception exception)
-                {
-                    if (exception is FormatException)
-                    {
-                        TryRestorePendingSource(sourceProofPath, activePath);
-                    }
-
-                    throw;
-                }
-
-                continue;
+                throw new FormatException($"Default-conversation turn `{turnId}` has substituted temporary source-proof publication intent evidence.");
             }
 
-            if (sourceProof is not null)
+            if (pending is null || history is null || sourceProof is not null || !ShouldArchive(pending.Value.Record) || !ShouldArchive(history.Value.Record))
             {
-                throw new FormatException($"Default-conversation turn `{turnId}` has a source proof without canonical history.");
+                throw new FormatException($"Default-conversation turn `{turnId}` has incomplete temporary source-proof publication evidence.");
             }
 
-            if (EntryExists(pendingHistoryPath))
+            if (temporaryIntent.SourceIdentity != pending.Value.Identity
+                || temporaryIntent.HistoryIdentity != history.Value.Identity
+                || !pending.Value.Bytes.AsSpan().SequenceEqual(history.Value.Bytes))
             {
-                var staged = await ReadRequiredAsync(pendingHistoryPath, MaximumActiveArtifactBytes, cancellationToken);
-                if (!staged.Bytes.AsSpan().SequenceEqual(pending.Bytes))
-                {
-                    throw new FormatException($"Default-conversation turn `{turnId}` has conflicting interrupted archival staging.");
-                }
-
-                if (!await TryPublishHistoryStageWithRetirementEvidenceAsync(
-                    pendingHistoryPath,
-                    historyPath,
-                    turnId,
-                    staged.Identity,
-                    pending.Bytes,
-                    operation,
-                    retainedRetirementEvidence,
-                    cancellationToken))
-                {
-                    var historyStageRetired = await TryRetireOwnedIncompleteHistoryStageAsync(pendingHistoryPath, staged.Identity, operation, turnId);
-                    if (historyStageRetired)
-                    {
-                        TryRestorePendingSource(pendingSourcePath, activePath);
-                    }
-
-                    throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed before or across interrupted history publication.");
-                }
-
-                try
-                {
-                    await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, cancellationToken);
-                    await RevalidatePublishedHistoryAsync(historyPath, turnId, staged.Identity, pending.Bytes, cancellationToken);
-                    File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
-                    var recoveredProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
-                    if (recoveredProof.Identity != pending.Identity || !recoveredProof.Bytes.AsSpan().SequenceEqual(staged.Bytes))
-                    {
-                        throw new FormatException($"Default-conversation turn `{turnId}` has a substituted interrupted source proof.");
-                    }
-
-                    await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, cancellationToken);
-                    await RevalidatePublishedHistoryAsync(historyPath, turnId, staged.Identity, recoveredProof.Bytes, cancellationToken);
-                }
-                catch (Exception exception)
-                {
-                    if (exception is FormatException)
-                    {
-                        TryRestorePendingSource(pendingSourcePath, activePath);
-                        TryRestorePendingSource(sourceProofPath, activePath);
-                    }
-
-                    throw;
-                }
-
-                continue;
+                throw new FormatException($"Default-conversation turn `{turnId}` has identity-conflicting temporary source-proof publication evidence.");
             }
 
-            File.Move(pendingSourcePath, activePath, overwrite: false);
+            if (!temporaryIntent.TryRelocate(GetSourceProofPublicationIntentPath(turnId, temporaryIntent.Identity)))
+            {
+                throw new FormatException($"Default-conversation turn `{turnId}` temporary source-proof publication intent could not claim its exact identity-bound pathname.");
+            }
         }
     }
 
@@ -806,7 +1057,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return EnumerateBoundedActiveEntries().ActivePaths;
     }
 
-    private (IReadOnlyList<string> ActivePaths, IReadOnlyList<string> PendingSourcePaths) EnumerateBoundedActiveEntries()
+    private (IReadOnlyList<string> ActivePaths, IReadOnlyList<string> PendingSourcePaths, IReadOnlyList<string> SourceProofPublicationIntentPaths, IReadOnlyList<string> SourceProofPublicationIntentTemporaryPaths) EnumerateBoundedActiveEntries()
     {
         var entries = Directory.EnumerateFileSystemEntries(_paths.DefaultConversationActiveTurnsPath, "*", SearchOption.TopDirectoryOnly)
             .Take(MaximumActiveDirectoryEntries + 1)
@@ -818,6 +1069,8 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
         var activePaths = new List<string>(MaximumActiveArtifacts);
         var pendingSourcePaths = new List<string>();
+        var sourceProofPublicationIntentPaths = new List<string>();
+        var sourceProofPublicationIntentTemporaryPaths = new List<string>();
         foreach (var entry in entries.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             var fileName = Path.GetFileName(entry);
@@ -833,6 +1086,23 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 continue;
             }
 
+            if (fileName.Length > 0 && fileName[0] == '.' && fileName.EndsWith(".json.archive-source-proof-publication.tmp", StringComparison.Ordinal))
+            {
+                _ = ParseSourceProofPublicationIntentTemporaryTurnId(entry);
+                sourceProofPublicationIntentTemporaryPaths.Add(entry);
+                continue;
+            }
+
+            if (fileName.Length > 0
+                && fileName[0] == '.'
+                && fileName.Contains(".json.archive-source-proof-publication.", StringComparison.Ordinal)
+                && fileName.EndsWith(".incomplete", StringComparison.Ordinal))
+            {
+                _ = ParseSourceProofPublicationIntentTurnId(entry);
+                sourceProofPublicationIntentPaths.Add(entry);
+                continue;
+            }
+
             if (!string.Equals(Path.GetExtension(fileName), ".json", StringComparison.Ordinal))
             {
                 throw new FormatException("The bounded default-conversation active-turn set contains an unexpected entry.");
@@ -841,12 +1111,18 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             activePaths.Add(entry);
         }
 
-        if (activePaths.Count + pendingSourcePaths.Count > MaximumActiveArtifacts)
+        var interruptedTurnIds = pendingSourcePaths.Select(ParsePendingArchiveTurnId)
+            .Concat(sourceProofPublicationIntentPaths.Select(ParseSourceProofPublicationIntentTurnId))
+            .Concat(sourceProofPublicationIntentTemporaryPaths.Select(ParseSourceProofPublicationIntentTemporaryTurnId))
+            .Distinct(StringComparer.Ordinal);
+        var activeTurnIds = activePaths.Select(path => LoopArtifactPaths.ValidateArtifactId(Path.GetFileNameWithoutExtension(path)));
+        if (activeTurnIds.Concat(interruptedTurnIds).Distinct(StringComparer.Ordinal).Count() > MaximumActiveArtifacts
+            || sourceProofPublicationIntentPaths.Count + sourceProofPublicationIntentTemporaryPaths.Count > MaximumSourceProofPublicationIntents)
         {
             throw new IOException("The bounded default-conversation active-turn set is exhausted.");
         }
 
-        return (activePaths, pendingSourcePaths);
+        return (activePaths, pendingSourcePaths, sourceProofPublicationIntentPaths, sourceProofPublicationIntentTemporaryPaths);
     }
 
     private static string ParsePendingArchiveTurnId(string path)
@@ -859,6 +1135,51 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
 
         return LoopArtifactPaths.ValidateArtifactId(fileName[1..^Suffix.Length]);
+    }
+
+    private static string ParseSourceProofPublicationIntentTurnId(string path)
+    {
+        return ParseSourceProofPublicationIntent(path).TurnId;
+    }
+
+    private static string ParseSourceProofPublicationIntentTemporaryTurnId(string path)
+    {
+        const string Suffix = ".json.archive-source-proof-publication.tmp";
+        var fileName = Path.GetFileName(path);
+        if (fileName.Length <= Suffix.Length + 1 || fileName[0] != '.' || !fileName.EndsWith(Suffix, StringComparison.Ordinal))
+        {
+            throw new FormatException("The bounded default-conversation active-turn set contains an invalid temporary source-proof publication intent.");
+        }
+
+        return LoopArtifactPaths.ValidateArtifactId(fileName[1..^Suffix.Length]);
+    }
+
+    private static (string TurnId, DefaultConversationTurnFileIdentity Identity) ParseSourceProofPublicationIntent(string path)
+    {
+        const string Middle = ".json.archive-source-proof-publication.";
+        const string Suffix = ".incomplete";
+        var fileName = Path.GetFileName(path);
+        var middleIndex = fileName.IndexOf(Middle, 1, StringComparison.Ordinal);
+        if (middleIndex <= 1
+            || fileName[0] != '.'
+            || !fileName.EndsWith(Suffix, StringComparison.Ordinal)
+            || !DefaultConversationTurnSourceProofPublicationIntent.TryParseIdentity(fileName[(middleIndex + Middle.Length)..^Suffix.Length], out var identity))
+        {
+            throw new FormatException("The bounded default-conversation active-turn set contains an invalid source-proof publication intent.");
+        }
+
+        return (LoopArtifactPaths.ValidateArtifactId(fileName[1..middleIndex]), identity);
+    }
+
+    private bool SourceProofPublicationIntentExists(string turnId)
+    {
+        if (EntryExists(GetSourceProofPublicationIntentTemporaryPath(turnId)))
+        {
+            return true;
+        }
+
+        var prefix = $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof-publication.";
+        return Directory.EnumerateFileSystemEntries(_paths.DefaultConversationActiveTurnsPath, prefix + "*.incomplete", SearchOption.TopDirectoryOnly).Take(1).Any();
     }
 
     private async Task WriteHistoryStageAsync(
@@ -886,6 +1207,14 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         if (expectedIdentity is null)
         {
             return !EntryExists(path);
+        }
+
+        using (var retirementEvidence = TryOpenHistoryStageRetirementEvidence(turnId))
+        {
+            if (retirementEvidence is null || !retirementEvidence.CanReservePair(MaximumHistoryStageRetirementEvidenceEntries))
+            {
+                return false;
+            }
         }
 
         var retirementIntentPath = GetHistoryStageRetirementIntentPath(turnId, expectedIdentity.Value);
@@ -1002,6 +1331,46 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return proof;
     }
 
+    private DefaultConversationTurnSourceProofPublicationIntent? OpenCompletedSourceProofPublication(string turnId)
+    {
+        if (!Directory.Exists(_paths.DefaultConversationTurnHistoryPath))
+        {
+            return null;
+        }
+
+        var prefix = $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof-publication.";
+        var entries = Directory.EnumerateFileSystemEntries(_paths.DefaultConversationTurnHistoryPath, prefix + "*", SearchOption.TopDirectoryOnly)
+            .Take(2)
+            .ToArray();
+        if (entries.Length == 0)
+        {
+            return null;
+        }
+
+        if (entries.Length != 1)
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has duplicate source-proof publication completion evidence.");
+        }
+
+        const string CompletedSuffix = ".completed";
+        var fileName = Path.GetFileName(entries[0]);
+        if (!fileName.StartsWith(prefix, StringComparison.Ordinal)
+            || !fileName.EndsWith(CompletedSuffix, StringComparison.Ordinal)
+            || !DefaultConversationTurnSourceProofPublicationIntent.TryParseIdentity(fileName[prefix.Length..^CompletedSuffix.Length], out var expectedIdentity))
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has invalid source-proof publication completion evidence.");
+        }
+
+        var completed = DefaultConversationTurnSourceProofPublicationIntent.Open(entries[0]);
+        if (completed.Identity == expectedIdentity)
+        {
+            return completed;
+        }
+
+        completed.Dispose();
+        throw new FormatException($"Default-conversation turn `{turnId}` has substituted source-proof publication completion evidence.");
+    }
+
     private bool RevalidateHistoryStageRetirementEvidence(string turnId, DefaultConversationTurnRetirementEvidenceProof retainedProof)
     {
         using var currentProof = TryOpenRevalidatedHistoryStageRetirementEvidence(turnId, retainedProof);
@@ -1055,7 +1424,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             return true;
         }
 
-        if (await TryRollbackPublishedHistoryAsync(historyPath, pendingHistoryPath, expectedIdentity, expectedBytes))
+        if (TryRollbackPublishedArtifact(historyPath, pendingHistoryPath, expectedIdentity, expectedBytes))
         {
             return false;
         }
@@ -1063,18 +1432,132 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed across canonical history publication, and exact published history could not be reclaimed.");
     }
 
-    private static async Task<bool> TryRollbackPublishedHistoryAsync(string historyPath, string pendingHistoryPath, DefaultConversationTurnFileIdentity expectedIdentity, byte[] expectedBytes)
+    private async Task<bool> TryPublishSourceProofWithRetirementEvidenceAsync(
+        string pendingSourcePath,
+        string sourceProofPath,
+        string turnId,
+        DefaultConversationTurnFileIdentity expectedIdentity,
+        byte[] expectedBytes,
+        DefaultConversationTurnStoreOperation operation,
+        DefaultConversationTurnRetirementEvidenceProof retainedProof,
+        CancellationToken cancellationToken)
+    {
+        using var publicationRetirementEvidence = TryOpenRevalidatedHistoryStageRetirementEvidence(turnId, retainedProof);
+        if (publicationRetirementEvidence is null)
+        {
+            return false;
+        }
+
+        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.AfterFinalRetirementEvidenceValidationBeforeSourceProofPublication, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        File.Move(pendingSourcePath, sourceProofPath, overwrite: false);
+        if (RevalidateHistoryStageRetirementEvidence(turnId, publicationRetirementEvidence))
+        {
+            return true;
+        }
+
+        if (TryRollbackPublishedArtifact(sourceProofPath, pendingSourcePath, expectedIdentity, expectedBytes))
+        {
+            return false;
+        }
+
+        throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed across source-proof publication, and the exact claimed source could not be reclaimed.");
+    }
+
+    private async Task CompleteSourceProofPublicationAsync(
+        string historyPath,
+        string sourceProofPath,
+        string activePath,
+        string turnId,
+        DefaultConversationTurnFileIdentity expectedHistoryIdentity,
+        byte[] expectedBytes,
+        DefaultConversationTurnStoreOperation operation,
+        DefaultConversationTurnRetirementEvidenceProof retainedRetirementEvidence,
+        DefaultConversationTurnSourceProofPublicationIntent publicationIntent,
+        CancellationToken cancellationToken)
+    {
+        if (publicationIntent.HistoryIdentity != expectedHistoryIdentity || !publicationIntent.RevalidatesCurrentPathname())
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` has substituted source-proof publication intent evidence.");
+        }
+
+        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.AfterSourceProofPublication, cancellationToken);
+        var sourceProof = await ReadRequiredAsync(sourceProofPath, MaximumActiveArtifactBytes, cancellationToken);
+        if (sourceProof.Identity != publicationIntent.SourceIdentity || !sourceProof.Bytes.AsSpan().SequenceEqual(expectedBytes))
+        {
+            throw new FormatException("The default-conversation turn source proof was substituted during archival.");
+        }
+
+        if (EntryExists(activePath))
+        {
+            throw new FormatException("The default-conversation turn artifact pathname was replaced during archival.");
+        }
+
+        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, cancellationToken);
+        await RevalidatePublishedHistoryAsync(historyPath, turnId, expectedHistoryIdentity, sourceProof.Bytes, cancellationToken);
+        if (!RevalidateHistoryStageRetirementEvidence(turnId, retainedRetirementEvidence))
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` retirement evidence changed before archival completion.");
+        }
+
+        var completedPath = GetCompletedSourceProofPublicationPath(turnId, publicationIntent.Identity);
+        if (!publicationIntent.TryRelocate(completedPath))
+        {
+            throw new FormatException($"Default-conversation turn `{turnId}` source-proof publication completion could not retire the exact incomplete intent.");
+        }
+    }
+
+    private static bool TryRollbackPublishedArtifact(string publishedPath, string pendingPath, DefaultConversationTurnFileIdentity expectedIdentity, byte[] expectedBytes)
     {
         try
         {
-            File.Move(historyPath, pendingHistoryPath, overwrite: false);
-            var rolledBack = await ReadRequiredAsync(pendingHistoryPath, MaximumActiveArtifactBytes, CancellationToken.None);
-            return rolledBack.Identity == expectedIdentity && rolledBack.Bytes.AsSpan().SequenceEqual(expectedBytes);
+            using var retained = DefaultConversationTurnNativeFileSystem.OpenRegularReadForRetirement(publishedPath);
+            if (DefaultConversationTurnNativeFileSystem.GetIdentity(retained) != expectedIdentity
+                || !ReadRetainedArtifactBytes(retained, expectedBytes.LongLength).AsSpan().SequenceEqual(expectedBytes))
+            {
+                return false;
+            }
+
+            File.Move(publishedPath, pendingPath, overwrite: false);
+            using var rolledBack = DefaultConversationTurnNativeFileSystem.OpenRegularReadForRetirement(pendingPath);
+            return DefaultConversationTurnNativeFileSystem.GetIdentity(retained) == expectedIdentity
+                && DefaultConversationTurnNativeFileSystem.GetIdentity(rolledBack) == expectedIdentity
+                && ReadRetainedArtifactBytes(retained, expectedBytes.LongLength).AsSpan().SequenceEqual(expectedBytes)
+                && ReadRetainedArtifactBytes(rolledBack, expectedBytes.LongLength).AsSpan().SequenceEqual(expectedBytes);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)
         {
             return false;
         }
+    }
+
+    private static byte[] ReadRetainedArtifactBytes(FileStream stream, long maximumBytes)
+    {
+        stream.Position = 0;
+        if (stream.Length <= 0 || stream.Length > maximumBytes)
+        {
+            throw new FormatException("The bounded default-conversation active-turn set contains an invalid artifact size.");
+        }
+
+        var bytes = new byte[checked((int)stream.Length)];
+        var offset = 0;
+        while (offset < bytes.Length)
+        {
+            var read = stream.Read(bytes, offset, bytes.Length - offset);
+            if (read == 0)
+            {
+                throw new FormatException("The default-conversation turn artifact changed while it was being revalidated.");
+            }
+
+            offset += read;
+        }
+
+        if (stream.ReadByte() != -1)
+        {
+            throw new FormatException("The default-conversation turn artifact changed while it was being revalidated.");
+        }
+
+        return bytes;
     }
 
     private static bool TryParseHistoryStageRetirementEvidence(string fileName, string prefix, out DefaultConversationTurnFileIdentity identity, out bool isIntent)
@@ -1103,20 +1586,17 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             return false;
         }
 
-        if (identityText.Length != 33 || identityText[16] != '-'
-            || !ulong.TryParse(identityText[..16], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var deviceId)
-            || !ulong.TryParse(identityText[17..], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var fileId))
+        if (!DefaultConversationTurnSourceProofPublicationIntent.TryParseIdentity(identityText, out identity))
         {
             return false;
         }
 
-        identity = new DefaultConversationTurnFileIdentity(deviceId, fileId);
         return true;
     }
 
     private static string FormatFileIdentity(DefaultConversationTurnFileIdentity identity)
     {
-        return $"{identity.DeviceId:x16}-{identity.FileId:x16}";
+        return DefaultConversationTurnSourceProofPublicationIntent.FormatIdentity(identity);
     }
 
     private static void TryRestorePendingSource(string pendingSourcePath, string activePath)

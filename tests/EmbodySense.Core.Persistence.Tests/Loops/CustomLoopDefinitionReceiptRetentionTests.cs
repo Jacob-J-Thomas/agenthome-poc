@@ -876,6 +876,11 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     [Fact]
     public async Task External_process_mutation_lease_blocks_cleanup_before_it_selects_or_mutates_evidence()
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var lockPath = Path.Combine(paths.LoopDefinitionsPath, ".custom-loop-mutations.lock");

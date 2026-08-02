@@ -14,6 +14,7 @@ internal static class DefaultConversationTurnNativeFileSystem
     private const uint FileFlagOpenReparsePoint = 0x00200000;
     private const uint FileShareDelete = 0x4;
     private const uint FileShareRead = 0x1;
+    private const uint FileShareWrite = 0x2;
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
     private const uint OpenExisting = 3;
@@ -183,6 +184,26 @@ internal static class DefaultConversationTurnNativeFileSystem
         RequireUnixRegularFile(stream.SafeFileHandle, "retirement evidence", requireSingleLink: true);
     }
 
+    public static bool RegularPathMatchesIdentity(string path, DefaultConversationTurnFileIdentity expectedIdentity)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            using var handle = OpenWindowsRegularFileMetadata(path);
+            return handle is not null && GetWindowsIdentity(handle) == expectedIdentity;
+        }
+
+        try
+        {
+            using var stream = OpenUnixRegularFile(path, readWrite: false, create: false);
+            RequireUnixRegularFile(stream.SafeFileHandle, path, requireSingleLink: true);
+            return GetUnixIdentity(stream.SafeFileHandle) == expectedIdentity;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+    }
+
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Windows; Windows is unreachable in Unix coverage runs.")]
     private static DefaultConversationTurnFileIdentity GetWindowsIdentity(SafeFileHandle handle)
     {
@@ -279,6 +300,34 @@ internal static class DefaultConversationTurnNativeFileSystem
         }
 
         return handle;
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This metadata-only Windows pathname revalidation is covered through public source-proof publication behavior on Windows; Windows is unreachable in Unix coverage runs.")]
+    private static SafeFileHandle? OpenWindowsRegularFileMetadata(string path)
+    {
+        var handle = CreateFile(path, 0, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, FileFlagOpenReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            if (error is ErrorFileNotFound or ErrorPathNotFound)
+            {
+                return null;
+            }
+
+            throw NativeIOException($"Default-conversation persistence metadata for `{path}` could not be opened safely", error);
+        }
+
+        try
+        {
+            RequireWindowsSingleLinkRegularFile(handle);
+            return handle;
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Unix; Unix is unreachable in Windows coverage runs.")]

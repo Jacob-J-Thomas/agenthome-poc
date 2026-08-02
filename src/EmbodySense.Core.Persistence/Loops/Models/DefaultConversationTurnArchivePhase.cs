@@ -37,5 +37,14 @@ public enum DefaultConversationTurnArchivePhase
     AfterPartialHistoryStageWrite,
 
     /// <summary>The incomplete history stage has been re-proved through a retained handle and is about to be claimed for retirement.</summary>
-    BeforeIncompleteHistoryStageRetirement
+    BeforeIncompleteHistoryStageRetirement,
+
+    /// <summary>The final retirement-evidence proof is held open and the claimed source is about to become its immutable identity proof.</summary>
+    AfterFinalRetirementEvidenceValidationBeforeSourceProofPublication,
+
+    /// <summary>An identity-bound incomplete-publication intent is durable and the claimed source is about to become its immutable identity proof.</summary>
+    AfterSourceProofPublicationIntent,
+
+    /// <summary>The deterministic publication-intent temporary file is durable but has not yet been promoted to its identity-bound incomplete pathname.</summary>
+    AfterSourceProofPublicationIntentTemporaryWrite
 }
