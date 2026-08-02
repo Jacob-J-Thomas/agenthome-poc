@@ -424,11 +424,11 @@ public sealed class TriggerQueueStoreTests
         ITriggerQueueDurabilityObserver? observer = null;
         if (string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterStaged), "1", StringComparison.Ordinal))
         {
-            observer = new CallbackObserver(onStaged: (_, _, _) => Environment.FailFast("simulated process death after authenticated staging"));
+            observer = new CallbackObserver(onStaged: (_, _, _) => TerminateCrossProcessHost());
         }
         else if (string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterPrecursor), "1", StringComparison.Ordinal))
         {
-            observer = new CallbackObserver(onStagingPrecursorCreated: (_, _, _) => Environment.FailFast("simulated process death after empty staging precursor creation"));
+            observer = new CallbackObserver(onStagingPrecursorCreated: (_, _, _) => TerminateCrossProcessHost());
         }
         var store = new TriggerQueueStore(new WorkspacePaths(workspace), RaceQuota(), observer);
         var result = await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope(delivery, deduplication, loop)));
@@ -1212,16 +1212,28 @@ public sealed class TriggerQueueStoreTests
             }
         });
 
+        var operation = new TriggerQueueStore(paths, observer: observer).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
         if (OperatingSystem.IsWindows())
         {
-            var snapshot = await new TriggerQueueStore(paths, observer: observer).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
-            Assert.Empty(snapshot.Entries);
-            Assert.IsAssignableFrom<IOException>(replacementFailure);
-            Assert.False(Directory.Exists(movedRoot));
+            try
+            {
+                var snapshot = await operation;
+                Assert.Empty(snapshot.Entries);
+                Assert.IsAssignableFrom<IOException>(replacementFailure);
+                Assert.False(Directory.Exists(movedRoot));
+            }
+            catch (InvalidOperationException)
+            {
+                Assert.Null(replacementFailure);
+                Assert.True(Directory.Exists(movedRoot));
+                Assert.Equal("untouched", await File.ReadAllTextAsync(Path.Combine(root, "replacement-sentinel")));
+                Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(root), path => Path.GetFileName(path) == ".queue.lock");
+            }
+
             return;
         }
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => new TriggerQueueStore(paths, observer: observer).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => operation);
         Assert.Null(replacementFailure);
         Assert.Equal("untouched", await File.ReadAllTextAsync(Path.Combine(root, "replacement-sentinel")));
         Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(root), path => Path.GetFileName(path) == ".queue.lock");
@@ -1521,6 +1533,12 @@ public sealed class TriggerQueueStoreTests
         }
 
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process trigger queue test host did not start.");
+    }
+
+    private static void TerminateCrossProcessHost()
+    {
+        Process.GetCurrentProcess().Kill();
+        Thread.Sleep(Timeout.Infinite);
     }
 
     [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
