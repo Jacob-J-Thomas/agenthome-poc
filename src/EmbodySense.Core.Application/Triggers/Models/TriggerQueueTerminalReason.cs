@@ -25,5 +25,14 @@ public enum TriggerQueueTerminalReason
     Expired,
 
     /// <summary>The inclusive deadline was exceeded.</summary>
-    DeadlineExceeded
+    DeadlineExceeded,
+
+    /// <summary>The governed runner accepted the dispatch request.</summary>
+    Dispatched,
+
+    /// <summary>Current authority or the governed runner rejected the request before provider dispatch.</summary>
+    DispatchRejected,
+
+    /// <summary>The exact provider outcome could not be proved.</summary>
+    AmbiguousDispatch
 }

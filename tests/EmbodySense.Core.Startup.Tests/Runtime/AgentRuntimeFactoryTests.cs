@@ -20,6 +20,12 @@ using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Application.Triggers.Models;
+using EmbodySense.Core.Persistence.Triggers;
+using EmbodySense.Core.Startup.Triggers;
+using EmbodySense.Core.Startup.Triggers.Models;
+using EmbodySense.Core.Startup.Tests.Triggers;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
@@ -42,6 +48,60 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(CodexRuntimeCompatibility.Compatible, runtime.CodexRuntimeStatus.Compatibility);
         Assert.Equal("codex-cli 999.0.0-test", runtime.CodexRuntimeStatus.Version);
         Assert.Equal("explicit --codex-path", runtime.CodexRuntimeStatus.Source);
+    }
+
+    [Fact]
+    public async Task Trigger_worker_created_by_runtime_rereads_current_authority_and_cannot_capture_a_prior_grant()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var evidencePath = Path.Combine(workspace.RootPath, "current-trigger-authority.txt");
+        await File.WriteAllTextAsync(evidencePath, "Authorized");
+        var authorizer = new FileCurrentTriggerEvidenceAuthorizer(evidencePath);
+        var worker = runtime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4)));
+        var envelope = TriggerWorkerTestData.Envelope();
+        var store = new TriggerQueueStore(paths);
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
+        var admission = await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
+        var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;
+        await File.WriteAllTextAsync(evidencePath, "Rejected");
+
+        var result = await worker.RunOnceAsync(new TriggerWorkerSelectionInput("worker-1", generation, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(30), [], 2));
+
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admission.Status);
+        Assert.Equal(1, authorizer.Reads);
+        Assert.Equal("DispatchRejected", result.Entry!.State);
+        Assert.Equal("Rejected", result.Entry.DispatchOutcome);
+        var durable = Assert.Single((await worker.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Entries);
+        Assert.Equal(result.Entry.DeliveryId, durable.DeliveryId);
+        Assert.Equal("DispatchRejected", durable.State);
+    }
+
+    [Fact]
+    public async Task Trigger_worker_uses_runtime_owned_custom_loop_gate_for_proved_not_found_rejection()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var evidencePath = Path.Combine(workspace.RootPath, "current-trigger-authority.txt");
+        await File.WriteAllTextAsync(evidencePath, "Authorized");
+        var authorizer = new FileCurrentTriggerEvidenceAuthorizer(evidencePath);
+        var worker = runtime.CreateTriggerWorkerRuntime(authorizer, new FixedTriggerTimeProvider(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4)));
+        var envelope = TriggerWorkerTestData.Envelope();
+        var store = new TriggerQueueStore(paths);
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(envelope, envelope.Loop, envelope.Adapter, true, envelope.ActorContext, envelope.Authority, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(3), out var delivery, out _));
+        await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(store), store).AdmitAsync(TriggerQueueAdmissionRequestFactory.Create(delivery!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
+        var generation = (await store.GetSnapshotAsync(TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4))).Generation;
+
+        var result = await worker.RunOnceAsync(new TriggerWorkerSelectionInput("worker-1", generation, TriggerWorkerTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(30), [], 2));
+
+        Assert.Equal(1, authorizer.Reads);
+        Assert.Equal("DispatchRejected", result.Entry!.State);
+        Assert.Equal("Rejected", result.Entry.DispatchOutcome);
+        Assert.Contains("does not exist", result.Entry.DispatchDetail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -721,13 +781,8 @@ public sealed class AgentRuntimeFactoryTests
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("The fake Codex app-server executable is currently implemented as a Windows command script.");
-        }
-
         var scriptPath = workspace.File("fake-codex.ps1");
-        var commandPath = workspace.File("fake-codex.cmd");
+        var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-codex.cmd" : "fake-codex");
         await File.WriteAllTextAsync(scriptPath, $$"""
             if ($args -contains "--version") {
                 Write-Output "codex-cli 999.0.0-test"
@@ -786,10 +841,19 @@ public sealed class AgentRuntimeFactoryTests
                 }
             }
             """);
-        await File.WriteAllTextAsync(commandPath, """
-            @echo off
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-codex.ps1" %*
-            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(commandPath, """
+                @echo off
+                powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fake-codex.ps1" %*
+                """);
+        }
+        else
+        {
+            var quotedScriptPath = scriptPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal).Replace("$", "\\$", StringComparison.Ordinal).Replace("`", "\\`", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(commandPath, $"#!/bin/sh\nexec pwsh -NoProfile -ExecutionPolicy Bypass -File \"{quotedScriptPath}\" \"$@\"\n");
+            File.SetUnixFileMode(commandPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
 
         return commandPath;
     }
@@ -814,6 +878,23 @@ public sealed class AgentRuntimeFactoryTests
         public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
         {
             return Task.FromResult((false, "test", "No approval needed during runtime construction."));
+        }
+    }
+
+    private sealed class FixedTriggerTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private sealed class FileCurrentTriggerEvidenceAuthorizer(string path) : ITriggerWorkerCurrentEvidenceAuthorizer
+    {
+        internal int Reads { get; private set; }
+
+        public async Task<TriggerWorkerAuthorizationResponse> AuthorizeAsync(TriggerWorkerCurrentEvidenceInput input, DateTimeOffset evaluatedAtUtc, CancellationToken cancellationToken = default)
+        {
+            Reads++;
+            var status = await File.ReadAllTextAsync(path, cancellationToken);
+            return new TriggerWorkerAuthorizationResponse(status, new string('a', 64), $"Current evidence reread for {input.DeliveryId} at {evaluatedAtUtc:O}.");
         }
     }
 

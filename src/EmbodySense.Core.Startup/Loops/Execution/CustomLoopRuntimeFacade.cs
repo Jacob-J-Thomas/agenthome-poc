@@ -14,11 +14,12 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Triggers;
 using System.Text;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
-internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
+internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable, ITriggerCustomLoopInvoker
 {
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
     private static readonly CustomExecutionAvailability _availableCustomExecution = new(true, "Available", "Custom-loop hosting is available and interrupted-run recovery is complete.");
