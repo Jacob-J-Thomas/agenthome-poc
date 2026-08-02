@@ -219,6 +219,7 @@ public sealed class LoopRunStoreTests
         var completed = run.Complete(completedAt);
         var failed = run.Fail(completedAt, "provider failure");
         var cancelled = run.Cancel(completedAt, "caller cancelled");
+        var needsReview = run.NeedsReview(completedAt, "provider outcome unknown");
 
         Assert.Equal(LoopRunStatus.Completed, completed.Status);
         Assert.Equal(completedAt, completed.CompletedAtUtc);
@@ -227,6 +228,10 @@ public sealed class LoopRunStoreTests
         Assert.Equal("provider failure", failed.FailureDetail);
         Assert.Equal(LoopRunStatus.Cancelled, cancelled.Status);
         Assert.Equal("caller cancelled", cancelled.FailureDetail);
+        Assert.Equal(LoopRunStatus.NeedsReview, needsReview.Status);
+        Assert.Equal(completedAt, needsReview.CompletedAtUtc);
+        Assert.Equal("provider outcome unknown", needsReview.FailureDetail);
+        Assert.Throws<ArgumentException>(() => run.NeedsReview(completedAt, " "));
     }
 
     [Fact]
@@ -272,9 +277,11 @@ public sealed class LoopRunStoreTests
         yield return [run with { CompletedAtUtc = completedAt }, "Started loop runs cannot include terminal timestamps"];
         yield return [run.Complete(completedAt) with { CompletedAtUtc = null }, "Completed loop runs must include a completion timestamp"];
         yield return [run.Complete(completedAt) with { FailureDetail = "unexpected failure" }, "Completed loop runs cannot include failure details"];
-        yield return [run.Fail(completedAt, "provider failed") with { CompletedAtUtc = null }, "Failed and cancelled loop runs must include a terminal timestamp"];
-        yield return [run.Fail(completedAt, "provider failed") with { FailureDetail = "" }, "Failed and cancelled loop runs must include a failure detail"];
-        yield return [run.Cancel(completedAt, "cancelled") with { CompletedAtUtc = null }, "Failed and cancelled loop runs must include a terminal timestamp"];
+        yield return [run.Fail(completedAt, "provider failed") with { CompletedAtUtc = null }, "Failed, cancelled, and needs-review loop runs must include a terminal timestamp"];
+        yield return [run.Fail(completedAt, "provider failed") with { FailureDetail = "" }, "Failed, cancelled, and needs-review loop runs must include a failure detail"];
+        yield return [run.Cancel(completedAt, "cancelled") with { CompletedAtUtc = null }, "Failed, cancelled, and needs-review loop runs must include a terminal timestamp"];
+        yield return [run.NeedsReview(completedAt, "provider outcome unknown") with { CompletedAtUtc = null }, "Failed, cancelled, and needs-review loop runs must include a terminal timestamp"];
+        yield return [run.NeedsReview(completedAt, "provider outcome unknown") with { FailureDetail = "" }, "Failed, cancelled, and needs-review loop runs must include a failure detail"];
         yield return [run.Complete(startedAt.AddMinutes(-1)), "completion timestamp cannot be earlier"];
     }
 }

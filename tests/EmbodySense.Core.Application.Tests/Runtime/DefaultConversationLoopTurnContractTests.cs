@@ -12,10 +12,14 @@ public sealed class DefaultConversationLoopTurnContractTests
     public void Loop_turn_request_requires_input_without_defaulting_context()
     {
         var request = new DefaultConversationLoopTurnRequest("hello");
+        var callerOwned = new DefaultConversationLoopTurnRequest("hello", requestId: " caller-request ");
 
         Assert.Equal("hello", request.Input);
+        Assert.StartsWith("request-", request.RequestId, StringComparison.Ordinal);
+        Assert.Equal("caller-request", callerOwned.RequestId);
         Assert.Equal(LlmMessageRole.User, request.ToUserMessage().Role);
         Assert.Throws<ArgumentException>(() => new DefaultConversationLoopTurnRequest(" "));
+        Assert.Throws<ArgumentException>(() => new DefaultConversationLoopTurnRequest("hello", requestId: new string('x', 257)));
     }
 
     [Fact]
@@ -57,6 +61,7 @@ public sealed class DefaultConversationLoopTurnContractTests
         var completed = DefaultConversationLoopTurnResult.Completed("done", transcript, run);
         var failed = DefaultConversationLoopTurnResult.Failed("provider failed", runIdentity: run);
         var cancelled = DefaultConversationLoopTurnResult.Cancelled("caller cancelled", runIdentity: run);
+        var needsReview = DefaultConversationLoopTurnResult.NeedsReview("provider outcome unknown", transcript, run, userMessageAccepted: true);
 
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, completed.Status);
         Assert.Equal("done", completed.AssistantOutput);
@@ -71,6 +76,11 @@ public sealed class DefaultConversationLoopTurnContractTests
         Assert.Equal("caller cancelled", cancelled.FailureDetail);
         Assert.Equal(run, cancelled.RunIdentity);
         Assert.False(cancelled.UserMessageAccepted);
+        Assert.Equal(DefaultConversationLoopTurnStatus.NeedsReview, needsReview.Status);
+        Assert.Equal("provider outcome unknown", needsReview.FailureDetail);
+        Assert.Equal(run, needsReview.RunIdentity);
+        Assert.True(needsReview.UserMessageAccepted);
+        Assert.Equal(transcript, needsReview.TranscriptMessages);
     }
 
     [Fact]
@@ -80,5 +90,6 @@ public sealed class DefaultConversationLoopTurnContractTests
         Assert.Throws<ArgumentException>(() => new RuntimeDiagnosticMessage(RuntimeDiagnosticKind.Status, " "));
         Assert.Throws<ArgumentException>(() => DefaultConversationLoopTurnResult.Completed(" "));
         Assert.Throws<ArgumentException>(() => DefaultConversationLoopTurnResult.Failed(" "));
+        Assert.Throws<ArgumentException>(() => DefaultConversationLoopTurnResult.NeedsReview(" "));
     }
 }

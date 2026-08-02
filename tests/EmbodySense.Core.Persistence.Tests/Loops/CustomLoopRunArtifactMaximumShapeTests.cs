@@ -14,6 +14,7 @@ using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
@@ -190,7 +191,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         var store = new MaximumRunStore(admitted);
         var executor = new MaximumExecutor(store, authority);
         var publisher = new PublishedConversation();
-        var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher, new NullAuditLog(), new FixedAuthorityProvider(authority), new FixedTimeProvider());
+        var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher, new NullAuditLog(), new FixedAuthorityProvider(authority), new FixedTimeProvider(), capabilityAdmissionService: new TestCapabilityAdmissionService());
         var admittedValidation = CustomLoopRunValidator.ValidateForDispatch(admitted);
         Assert.True(admittedValidation.IsValid, Format(admittedValidation.Errors));
 
@@ -269,7 +270,11 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             ToolAssignments = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search],
             ExitPolicy = new CustomLoopExitPolicy(CustomLoopLimits.MaxAdditionalIterations, MaxText("exit", CustomLoopLimits.MaxInstructionCharacters), CustomLoopNodeContextPolicy.Override(nodePolicy))
         };
-        return CustomLoopDefinitionContentHash.Apply(definition with { ContentHash = string.Empty });
+        return CustomLoopDefinitionContentHash.Apply(definition with
+        {
+            ContentHash = string.Empty,
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments)
+        });
     }
 
     private static CustomLoopRunRecord InitialRun(CustomLoopDefinition definition, CustomLoopToolAuthoritySnapshot authority)
@@ -299,7 +304,10 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
             [admitted],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _now)
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

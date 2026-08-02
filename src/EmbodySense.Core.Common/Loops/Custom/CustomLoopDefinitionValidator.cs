@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Capabilities;
 namespace EmbodySense.Core.Common.Loops.Custom;
 
 /// <summary>
@@ -27,6 +28,7 @@ public static class CustomLoopDefinitionValidator
         ValidateContextDefaults(definition.ContextDefaults, errors);
         ValidateInferenceSteps(definition.InferenceSteps, errors);
         ValidateToolAssignments(definition.ToolAssignments, errors);
+        ValidateCapabilityRequirements(definition, errors);
         ValidateExit(definition.ExitPolicy, errors);
 
         if (errors.Count == 0 && !CustomLoopDefinitionContentHash.Matches(definition))
@@ -35,6 +37,24 @@ public static class CustomLoopDefinitionValidator
         }
 
         return new CustomLoopValidationResult(errors);
+    }
+
+    private static void ValidateCapabilityRequirements(CustomLoopDefinition definition, List<CustomLoopValidationError> errors)
+    {
+        var validation = CapabilityDependencyManifestValidator.Validate(definition.CapabilityRequirements);
+        if (!validation.IsValid)
+        {
+            errors.Add(new CustomLoopValidationError("invalid_capability_requirements", "capabilityRequirements", "The loop capability requirement manifest is invalid."));
+            return;
+        }
+
+        var expected = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments ?? []);
+        if (!CapabilityDependencyManifestHash.TryCompute(definition.CapabilityRequirements, out var actualHash, out _)
+            || !CapabilityDependencyManifestHash.TryCompute(expected, out var expectedHash, out _)
+            || !actualHash!.Equals(expectedHash))
+        {
+            errors.Add(new CustomLoopValidationError("capability_requirement_mapping_mismatch", "capabilityRequirements", "Capability requirements must be the exact server-owned mapping of current authoring choices."));
+        }
     }
 
     private static void ValidateServerMetadata(CustomLoopDefinition definition, List<CustomLoopValidationError> errors)

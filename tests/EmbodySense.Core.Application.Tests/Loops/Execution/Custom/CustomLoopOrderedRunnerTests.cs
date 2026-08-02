@@ -6,6 +6,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Models;
@@ -13,8 +15,12 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
@@ -106,6 +112,25 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.Contains("disabled", deterministicExit.Detail, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ExitDecisionStarted);
         Assert.Contains(audit.Events, item => item.Action == AuditSchema.Actions.LoopRunLifecycle && item.Metadata.ContainsKey("terminalStatus"));
+    }
+
+    [Fact]
+    public async Task Exact_capability_drift_after_run_start_fails_before_provider_dispatch_and_preserves_admission_evidence()
+    {
+        var admitted = Run(Definition());
+        var admissionJson = JsonSerializer.Serialize(admitted.CapabilityAdmission);
+        var store = new FakeRunStore(admitted);
+        var executor = new QueueExecutor(Result("must not run"));
+        var capabilities = new TestCapabilityAdmissionService();
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(true, admitted.CapabilityAdmission.Pins, "Pins are current at run start."));
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(false, [], "The exact provider capability drifted."));
+
+        var result = await Runner(store, executor, capabilityAdmissionService: capabilities).RunAsync(new CustomLoopOrderedRunRequest(admitted.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Empty(executor.Requests);
+        Assert.Equal("invalid_inference_request", result.Run!.FailureCode);
+        Assert.Equal(admissionJson, JsonSerializer.Serialize(result.Run.CapabilityAdmission));
     }
 
     [Fact]
@@ -421,6 +446,55 @@ public sealed class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Capability_revocation_after_provider_outcome_stops_before_conversation_publication()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            maxAdditionalIterations: 0,
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var store = new FakeRunStore(Run(definition, new CustomLoopConversationReference("conversation-one", "version-one", _now)));
+        var publisher = new RecordingPublisher();
+        var capabilities = new TestCapabilityAdmissionService();
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(true, store.Current.CapabilityAdmission.Pins, "Capabilities are current at run start."));
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(true, store.Current.CapabilityAdmission.Pins, "Capabilities are current before provider dispatch."));
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(false, [], "The admitted capability was disabled."));
+
+        var result = await Runner(store, new QueueExecutor(Result("observed output")), publisher, capabilityAdmissionService: capabilities).RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, result.Run!.Status);
+        Assert.Equal("capability_revalidation_failed_before_publication", result.Run.FailureCode);
+        Assert.Empty(publisher.Requests);
+        Assert.Contains(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublicationStarted);
+        Assert.DoesNotContain(result.Run.Events, item => item.Kind == CustomLoopRunEventKind.ConversationPublished);
+    }
+
+    [Fact]
+    public async Task Capability_revalidation_exception_before_conversation_publication_is_definitively_failed()
+    {
+        var definition = Definition(
+            steps: [Step("step-only", "Only", "Do the work", Output(retain: false, publish: true))],
+            maxAdditionalIterations: 0,
+            exitPolicy: Policy(Output(retain: false, publish: false)));
+        var store = new FakeRunStore(Run(definition, new CustomLoopConversationReference("conversation-one", "version-one", _now)));
+        var publisher = new RecordingPublisher();
+
+        var runner = Runner(
+            store,
+            new QueueExecutor(Result("observed output")),
+            publisher,
+            capabilityAdmissionService: new ThrowingOnRevalidationCapabilityAdmissionService(3));
+
+        var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Failed, result.Run!.Status);
+        Assert.Equal("capability_revalidation_check_failed_before_publication", result.Run.FailureCode);
+        Assert.Empty(publisher.Requests);
+        Assert.Contains("IOException", result.Run.FailureDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Sequential_node_and_Exit_publications_advance_from_the_immutable_admission_version_using_durable_prior_outputs()
     {
         var publish = Output(retain: true, publish: true);
@@ -571,7 +645,8 @@ public sealed class CustomLoopOrderedRunnerTests
             new RecordingAuditLog(),
             new TestAuthorityProvider(),
             new FixedTimeProvider(_now),
-            broker);
+            broker,
+            new TestCapabilityAdmissionService());
 
         var result = await runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
         var signalResult = await signal!;
@@ -886,7 +961,8 @@ public sealed class CustomLoopOrderedRunnerTests
             new RecordingAuditLog(),
             new TestAuthorityProvider(),
             new FixedTimeProvider(_now),
-            broker);
+            broker,
+            new TestCapabilityAdmissionService());
         var execution = runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web));
         await executor.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
@@ -912,7 +988,8 @@ public sealed class CustomLoopOrderedRunnerTests
             new RecordingAuditLog(),
             new TestAuthorityProvider(),
             new FixedTimeProvider(_now),
-            broker);
+            broker,
+            new TestCapabilityAdmissionService());
         using var callerCancellation = new CancellationTokenSource();
         var execution = runner.RunAsync(new CustomLoopOrderedRunRequest(store.Current.Id, AuditSchema.Actors.Web), callerCancellation.Token);
         await executor.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -1981,9 +2058,9 @@ public sealed class CustomLoopOrderedRunnerTests
         Assert.DoesNotContain(store.ValidationFailures, error => error.Code == "too_many_trace_events");
     }
 
-    private static CustomLoopOrderedRunner Runner(FakeRunStore store, QueueExecutor executor, RecordingPublisher? publisher = null, RecordingAuditLog? audit = null, ICustomLoopToolAuthorityProvider? authorityProvider = null, TimeProvider? timeProvider = null)
+    private static CustomLoopOrderedRunner Runner(FakeRunStore store, QueueExecutor executor, RecordingPublisher? publisher = null, RecordingAuditLog? audit = null, ICustomLoopToolAuthorityProvider? authorityProvider = null, TimeProvider? timeProvider = null, ICapabilityAdmissionService? capabilityAdmissionService = null)
     {
-        return new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), timeProvider ?? new FixedTimeProvider(_now));
+        return new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher ?? new RecordingPublisher(), audit ?? new RecordingAuditLog(), authorityProvider ?? new TestAuthorityProvider(), timeProvider ?? new FixedTimeProvider(_now), capabilityAdmissionService: capabilityAdmissionService ?? new TestCapabilityAdmissionService());
     }
 
     private static CustomLoopDefinition Definition(
@@ -1999,7 +2076,11 @@ public sealed class CustomLoopOrderedRunnerTests
             ToolAssignments = tools ?? [],
             ExitPolicy = new CustomLoopExitPolicy(maxAdditionalIterations, CustomLoopDefinition.DefaultExitDecisionInstruction, exitPolicy is null ? CustomLoopNodeContextPolicy.Inherit() : CustomLoopNodeContextPolicy.Override(exitPolicy))
         };
-        return CustomLoopDefinitionContentHash.Apply(definition with { ContentHash = string.Empty });
+        return CustomLoopDefinitionContentHash.Apply(definition with
+        {
+            ContentHash = string.Empty,
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments)
+        });
     }
 
     private static CustomLoopInferenceStep Step(string id, string name, string instruction, CustomLoopContextOutputPolicy output)
@@ -2045,7 +2126,10 @@ public sealed class CustomLoopOrderedRunnerTests
             [admission, auditCompleted],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _now)
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
@@ -2662,6 +2746,27 @@ public sealed class CustomLoopOrderedRunnerTests
             request.AppendStarted?.Invoke();
 
             return ReturnNull ? null! : NextResult ?? new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Published, request.OperationId, "Published.");
+        }
+    }
+
+    private sealed class ThrowingOnRevalidationCapabilityAdmissionService(int throwOnRevalidation) : ICapabilityAdmissionService
+    {
+        private int _revalidationCount;
+
+        public Task<CapabilityAdmissionResult> AdmitAsync(CapabilityDependencyManifest requirements, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<CapabilityRevalidationResult> RevalidateAsync(CapabilityAdmissionSnapshot snapshot, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (++_revalidationCount == throwOnRevalidation)
+            {
+                throw new IOException("Catalog revalidation failed.");
+            }
+
+            return Task.FromResult(new CapabilityRevalidationResult(true, snapshot.Pins, "Capabilities are current."));
         }
     }
 

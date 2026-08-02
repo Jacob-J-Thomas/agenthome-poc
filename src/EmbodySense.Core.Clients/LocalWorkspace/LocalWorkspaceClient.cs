@@ -26,17 +26,21 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
     private const int MaxMatchLineCharacters = 500;
     private const int MaxSearchOutputCharacters = 120_000;
     private const long MaxSearchFileBytes = 1_048_576;
+    private readonly IWorkspaceMutationCommitBoundary _mutationCommitBoundary;
     private readonly WorkspacePaths _paths;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LocalWorkspaceClient"/> type.
     /// </summary>
     /// <param name="paths">The paths.</param>
-    public LocalWorkspaceClient(WorkspacePaths paths)
+    /// <param name="mutationCommitBoundary">The authority-aware exact filesystem commit boundary.</param>
+    public LocalWorkspaceClient(WorkspacePaths paths, IWorkspaceMutationCommitBoundary mutationCommitBoundary)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(mutationCommitBoundary);
 
         _paths = paths;
+        _mutationCommitBoundary = mutationCommitBoundary;
     }
 
     /// <summary>
@@ -197,14 +201,17 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             throw new IOException("Append requires text content.");
         }
 
-        var directory = Path.GetDirectoryName(resolvedPath);
-        if (!string.IsNullOrWhiteSpace(directory))
+        return await _mutationCommitBoundary.ExecuteAsync([resolvedPath], async commitCancellationToken =>
         {
-            Directory.CreateDirectory(directory);
-        }
+            var directory = Path.GetDirectoryName(resolvedPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
 
-        await File.AppendAllTextAsync(resolvedPath, content, cancellationToken);
-        return new LocalWorkspaceResult($"appended {content.Length} characters", new Dictionary<string, object?> { ["character_count"] = content.Length });
+            await File.AppendAllTextAsync(resolvedPath, content, commitCancellationToken);
+            return new LocalWorkspaceResult($"appended {content.Length} characters", new Dictionary<string, object?> { ["character_count"] = content.Length });
+        }, cancellationToken);
     }
 
     /// <summary>
@@ -221,14 +228,17 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
             throw new IOException("Write requires text content.");
         }
 
-        var directory = Path.GetDirectoryName(resolvedPath);
-        if (!string.IsNullOrWhiteSpace(directory))
+        return await _mutationCommitBoundary.ExecuteAsync([resolvedPath], async commitCancellationToken =>
         {
-            Directory.CreateDirectory(directory);
-        }
+            var directory = Path.GetDirectoryName(resolvedPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
 
-        await File.WriteAllTextAsync(resolvedPath, content, cancellationToken);
-        return new LocalWorkspaceResult($"wrote {content.Length} characters", new Dictionary<string, object?> { ["character_count"] = content.Length });
+            await File.WriteAllTextAsync(resolvedPath, content, commitCancellationToken);
+            return new LocalWorkspaceResult($"wrote {content.Length} characters", new Dictionary<string, object?> { ["character_count"] = content.Length });
+        }, cancellationToken);
     }
 
     /// <summary>
@@ -240,20 +250,23 @@ public sealed class LocalWorkspaceClient : IWorkspaceToolExecutor
     public Task<LocalWorkspaceResult> DeleteAsync(string resolvedPath, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-
-        if (File.Exists(resolvedPath))
+        return _mutationCommitBoundary.ExecuteAsync([resolvedPath], commitCancellationToken =>
         {
-            File.Delete(resolvedPath);
-            return Task.FromResult(new LocalWorkspaceResult("deleted file", new Dictionary<string, object?> { ["deleted_kind"] = "file" }));
-        }
+            commitCancellationToken.ThrowIfCancellationRequested();
+            if (File.Exists(resolvedPath))
+            {
+                File.Delete(resolvedPath);
+                return Task.FromResult(new LocalWorkspaceResult("deleted file", new Dictionary<string, object?> { ["deleted_kind"] = "file" }));
+            }
 
-        if (Directory.Exists(resolvedPath))
-        {
-            Directory.Delete(resolvedPath, recursive: true);
-            return Task.FromResult(new LocalWorkspaceResult("deleted directory", new Dictionary<string, object?> { ["deleted_kind"] = "directory" }));
-        }
+            if (Directory.Exists(resolvedPath))
+            {
+                Directory.Delete(resolvedPath, recursive: true);
+                return Task.FromResult(new LocalWorkspaceResult("deleted directory", new Dictionary<string, object?> { ["deleted_kind"] = "directory" }));
+            }
 
-        throw new FileNotFoundException($"Delete target not found: {resolvedPath}", resolvedPath);
+            throw new FileNotFoundException($"Delete target not found: {resolvedPath}", resolvedPath);
+        }, cancellationToken);
     }
 
     private static async Task<(string Text, bool Truncated)> ReadTextPrefixAsync(string file, CancellationToken cancellationToken)

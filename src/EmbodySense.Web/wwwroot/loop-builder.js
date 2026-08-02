@@ -2722,7 +2722,7 @@ function renderValidation() {
         ? "Draft is valid and ready to save"
         : `Definition v${draft.definitionVersion} is valid and runnable`;
     const detail = isSystemLoop()
-      ? `${draft.executionContract.runner} validates this five-boundary graph before executing its dedicated turn transaction. The nodes and edges are not dispatched by the custom-loop or a generic graph executor.`
+      ? draft.executionContract.detail
       : dirty
         ? "Save this definition before starting a run."
         : "The server will validate again before saving or admitting a run.";
@@ -2746,8 +2746,7 @@ function renderValidation() {
 function validateDraft() {
   if (!draft) return [];
   if (isSystemLoop()) {
-    if (draft.executionContract?.graphSemantics === "validated-runner-contract")
-      return [];
+    if (draft.executionContract?.graphSemantics !== "unknown") return [];
     return [
       draft.executionContract?.detail?.trim() ||
         "The dedicated runner did not validate this system definition.",
@@ -2791,7 +2790,9 @@ function validateDraft() {
 function runnerContractLabel(executionSemantics) {
   return executionSemantics === "validated-runner-contract"
     ? "Validated runner contract"
-    : "Runner contract not validated";
+    : executionSemantics === "authority-topology-only"
+      ? "Authority topology only"
+      : "Runner contract not validated";
 }
 
 function markDirty() {

@@ -24,5 +24,9 @@ public enum LoopRunStatus
     /// <summary>
     /// Identifies the cancelled loop run status.
     /// </summary>
-    Cancelled
+    Cancelled,
+    /// <summary>
+    /// Identifies a terminal run whose external outcome or projection requires explicit human reconciliation.
+    /// </summary>
+    NeedsReview
 }
