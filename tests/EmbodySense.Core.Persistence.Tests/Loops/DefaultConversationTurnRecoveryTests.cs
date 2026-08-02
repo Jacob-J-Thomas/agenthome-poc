@@ -1913,7 +1913,7 @@ public sealed class DefaultConversationTurnRecoveryTests
             async _ =>
             {
                 publicationIntentPath = Assert.Single(GetSourceProofPublicationIntentPaths(paths, terminal.TurnId));
-                intentBytes = await File.ReadAllBytesAsync(publicationIntentPath);
+                intentBytes = await ReadAllBytesWhilePublicationIntentIsRetainedAsync(publicationIntentPath);
                 File.Move(publicationIntentPath, displacedPath);
                 await File.WriteAllBytesAsync(publicationIntentPath, intentBytes);
             });
@@ -3169,7 +3169,6 @@ public sealed class DefaultConversationTurnRecoveryTests
             }
 
             var intentPath = Assert.Single(GetSourceProofPublicationIntentPaths(paths, terminal.TurnId));
-            var intentBytes = await File.ReadAllBytesAsync(intentPath);
             if (mutation == "marker-before-completion")
             {
                 File.Move(intentPath, displacedPath);
@@ -3183,6 +3182,7 @@ public sealed class DefaultConversationTurnRecoveryTests
                 return;
             }
 
+            var intentBytes = await ReadAllBytesWhilePublicationIntentIsRetainedAsync(intentPath);
             File.Move(intentPath, displacedPath);
             await File.WriteAllBytesAsync(intentPath, intentBytes);
             await File.WriteAllBytesAsync(displacedPath, [1]);
@@ -3638,6 +3638,14 @@ public sealed class DefaultConversationTurnRecoveryTests
     private static IReadOnlyList<string> GetCompletedSourceProofPublicationPaths(WorkspacePaths paths, string turnId)
     {
         return Directory.EnumerateFileSystemEntries(paths.DefaultConversationTurnHistoryPath, $".{turnId}.json.archive-source-proof-publication.*.completed", SearchOption.TopDirectoryOnly).ToArray();
+    }
+
+    private static async Task<byte[]> ReadAllBytesWhilePublicationIntentIsRetainedAsync(string path)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer);
+        return buffer.ToArray();
     }
 
     private static async Task<(byte[] Bytes, string PendingSourcePath, string HistoryPath, string SourceProofPath, string TemporaryIntentPath)> CreateInterruptedTemporarySourceProofPublicationIntentAsync(WorkspacePaths paths, DefaultConversationTurnRecord terminal)
