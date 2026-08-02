@@ -82,13 +82,14 @@ public sealed class CapabilityPostureServiceTests
     public async Task Administrative_posture_marks_recovered_and_lifecycle_drift_honestly()
     {
         var entry = CapabilityPostureTestData.Entry();
-        var driftedDescriptor = entry.Descriptor with { Purpose = "A drifted but still public description." };
-        var lifecycleState = new CapabilityLifecycleState(driftedDescriptor, CapabilityIntegrityDigest.Compute("drift"u8), true, false, 9, "drift", CapabilityPostureTestData.Now);
+        var contradictoryDescriptor = entry.Descriptor with { Purpose = "A descriptor that contradicts its catalog identity." };
+        var contradictoryEntry = entry with { Descriptor = contradictoryDescriptor };
+        var lifecycleState = new CapabilityLifecycleState(contradictoryDescriptor, CapabilityIntegrityDigest.Compute("drift"u8), true, false, 9, "drift", CapabilityPostureTestData.Now);
         var lifecycle = new StubCapabilityLifecycleMutationStore
         {
             ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.RecoveredLastProved, lifecycleState, [], [], 9, "recovered")
         };
-        var catalog = new StubCapabilityPostureCatalogStore { Status = CapabilityCatalogReadStatus.RecoveredLastProved, Entries = [entry] };
+        var catalog = new StubCapabilityPostureCatalogStore { Status = CapabilityCatalogReadStatus.RecoveredLastProved, Entries = [contradictoryEntry] };
 
         var result = await Service(catalog, lifecycle).ReadAsync(entry.Descriptor.Id);
 
@@ -96,6 +97,70 @@ public sealed class CapabilityPostureServiceTests
         Assert.Equal(CapabilityPostureState.DependencyConflict, result.Posture?.State);
         Assert.True(result.Posture?.IsRecovered);
         Assert.Equal(9, result.Posture?.LifecycleRevision);
+    }
+
+    [Theory]
+    [InlineData("2.0.0", "upgrade-v2")]
+    [InlineData("0.9.0", "rollback-v1")]
+    public async Task Lifecycle_replacement_descriptor_is_the_effective_upgrade_or_rollback_posture(string version, string operationId)
+    {
+        var entry = CapabilityPostureTestData.Entry();
+        var replacement = entry.Descriptor with { Version = CapabilityPostureTestData.Version(version), Purpose = $"Effective {operationId} descriptor." };
+        var lifecycleState = new CapabilityLifecycleState(replacement, CapabilityIntegrityDigest.Compute("replacement"u8), true, false, 9, operationId, CapabilityPostureTestData.Now);
+        var lifecycle = new StubCapabilityLifecycleMutationStore
+        {
+            ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, lifecycleState, [], [], 9, "available")
+        };
+
+        var result = await Service(new StubCapabilityPostureCatalogStore { Entries = [entry] }, lifecycle).ReadAsync(entry.Descriptor.Id);
+
+        Assert.Equal(CapabilityPostureReadStatus.Available, result.Status);
+        var posture = Assert.IsType<CapabilityPostureProjection>(result.Posture);
+        Assert.Equal(CapabilityPostureState.Available, posture.State);
+        Assert.Equal(version, posture.Version);
+        Assert.Equal(replacement.Purpose, posture.Purpose);
+        Assert.True(CapabilityDescriptorIdentity.TryCreate(replacement, out var identity, out _));
+        Assert.Equal(identity!.Hash.Value, posture.DescriptorHash);
+    }
+
+    [Fact]
+    public async Task Lifecycle_disable_and_remove_override_stale_catalog_tokens_and_removed_wins_an_enabled_contradiction()
+    {
+        var entry = CapabilityPostureTestData.Entry();
+        var disabledState = new CapabilityLifecycleState(entry.Descriptor, CapabilityIntegrityDigest.Compute("disabled"u8), false, false, 8, "disable", CapabilityPostureTestData.Now);
+        var removedState = new CapabilityLifecycleState(entry.Descriptor, CapabilityIntegrityDigest.Compute("removed"u8), true, true, 9, "remove", CapabilityPostureTestData.Now);
+        var catalogRemovedEntry = entry with
+        {
+            Lifecycle = entry.Lifecycle with
+            {
+                Declaration = CapabilityDeclarationState.Withdrawn,
+                Installation = CapabilityInstallationState.NotInstalled,
+                Enablement = CapabilityEnablementState.Disabled,
+                Health = CapabilityHealthState.Unavailable,
+                Retirement = CapabilityRetirementState.Removed
+            }
+        };
+        var staleEnabledState = new CapabilityLifecycleState(entry.Descriptor, CapabilityIntegrityDigest.Compute("stale-enabled"u8), true, false, 10, "stale-enable", CapabilityPostureTestData.Now);
+
+        var disabled = await ReadWithLifecycleAsync(entry, disabledState);
+        var removed = await ReadWithLifecycleAsync(entry, removedState);
+        var catalogRemoved = await ReadWithLifecycleAsync(catalogRemovedEntry, staleEnabledState);
+
+        Assert.Equal(CapabilityPostureState.Unavailable, disabled.State);
+        Assert.Equal("disabled", disabled.Enablement);
+        Assert.Equal("active", disabled.Retirement);
+        Assert.False(disabled.IsLifecycleEnabled);
+        Assert.False(disabled.IsRemoved);
+        Assert.Equal(CapabilityPostureState.Removed, removed.State);
+        Assert.Equal("disabled", removed.Enablement);
+        Assert.Equal("removed", removed.Retirement);
+        Assert.False(removed.IsLifecycleEnabled);
+        Assert.True(removed.IsRemoved);
+        Assert.Equal(CapabilityPostureState.Removed, catalogRemoved.State);
+        Assert.Equal("disabled", catalogRemoved.Enablement);
+        Assert.Equal("removed", catalogRemoved.Retirement);
+        Assert.False(catalogRemoved.IsLifecycleEnabled);
+        Assert.True(catalogRemoved.IsRemoved);
     }
 
     [Fact]
@@ -400,6 +465,17 @@ public sealed class CapabilityPostureServiceTests
         var index = new StubCapabilityDependentIndex { Snapshot = new CapabilityDependentIndexSnapshot(indexStatus, indexStatus == CapabilityDependentIndexStatus.Available ? "sha256:deps" : string.Empty, dependents, "test") };
         var result = await Service(new StubCapabilityPostureCatalogStore { Entries = [entry] }, index: index).ReadAsync(entry.Descriptor.Id);
         return Assert.IsType<CapabilityPostureProjection>(result.Posture).State;
+    }
+
+    private static async Task<CapabilityPostureProjection> ReadWithLifecycleAsync(CapabilityCatalogEntry entry, CapabilityLifecycleState state)
+    {
+        var lifecycle = new StubCapabilityLifecycleMutationStore
+        {
+            ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, state, [], [], state.Revision, "available")
+        };
+        var result = await Service(new StubCapabilityPostureCatalogStore { Entries = [entry] }, lifecycle).ReadAsync(entry.Descriptor.Id);
+        Assert.Equal(CapabilityPostureReadStatus.Available, result.Status);
+        return Assert.IsType<CapabilityPostureProjection>(result.Posture);
     }
 
     private static CapabilityCatalogReadResult ReadPage(long revision, IReadOnlyList<CapabilityCatalogEntry> entries, string? nextCursor)

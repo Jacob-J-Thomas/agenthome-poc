@@ -304,24 +304,39 @@ public sealed class CapabilityPostureService
     private CapabilityPostureProjection? Project(CapabilityCatalogEntry entry, CapabilityLifecycleReadResult lifecycle, CapabilityDependentIndexSnapshot dependents, bool catalogRecovered)
     {
         var hasLifecycleState = lifecycle?.Status is CapabilityLifecycleReadStatus.Available or CapabilityLifecycleReadStatus.RecoveredLastProved;
-        if (entry?.Descriptor is null || entry.Lifecycle is null || lifecycle is null || lifecycle.Status == CapabilityLifecycleReadStatus.Unavailable || hasLifecycleState != (lifecycle.State is not null) || !CapabilityDescriptorIdentity.TryCreate(lifecycle.State?.Descriptor ?? entry.Descriptor, out var descriptorIdentity, out _))
+        if (entry?.Descriptor is null
+            || entry.Lifecycle is null
+            || lifecycle is null
+            || lifecycle.Status == CapabilityLifecycleReadStatus.Unavailable
+            || hasLifecycleState != (lifecycle.State is not null)
+            || !CapabilityDescriptorIdentity.TryCreate(entry.Descriptor, out var catalogDescriptorIdentity, out _)
+            || !CapabilityDescriptorIdentity.TryCreate(lifecycle.State?.Descriptor ?? entry.Descriptor, out var descriptorIdentity, out _)
+            || !descriptorIdentity!.Id.Equals(entry.Descriptor.Id))
         {
             return null;
         }
 
         var descriptor = lifecycle.State?.Descriptor ?? entry.Descriptor;
+        var lifecycleRemoved = lifecycle.State?.IsRemoved ?? false;
+        var removed = lifecycleRemoved || entry.Lifecycle.Retirement == CapabilityRetirementState.Removed;
+        var effectiveLifecycle = entry.Lifecycle with
+        {
+            DescriptorIdentity = descriptorIdentity!,
+            Enablement = lifecycle.State is null
+                ? entry.Lifecycle.Enablement
+                : lifecycle.State.IsEnabled && !removed ? CapabilityEnablementState.Enabled : CapabilityEnablementState.Disabled,
+            Retirement = removed ? CapabilityRetirementState.Removed : entry.Lifecycle.Retirement
+        };
         var relevant = RelevantDependents(descriptor.Id, dependents.Dependents);
         var boundedDependents = relevant.Take(MaximumProjectedDependents).ToArray();
         var dependenciesAvailable = dependents.Status == CapabilityDependentIndexStatus.Available;
         var hostCompatible = IsHostCompatible(descriptor);
-        var lifecycleRemoved = lifecycle.State?.IsRemoved ?? false;
-        var removed = lifecycleRemoved || entry.Lifecycle.Retirement == CapabilityRetirementState.Removed;
-        var lifecycleEnabled = lifecycle.State?.IsEnabled ?? entry.Lifecycle.Enablement == CapabilityEnablementState.Enabled;
-        var lifecycleDrift = lifecycle.State is not null && !descriptorIdentity!.Equals(entry.Lifecycle.DescriptorIdentity);
+        var lifecycleEnabled = effectiveLifecycle.Enablement == CapabilityEnablementState.Enabled;
+        var lifecycleDrift = !catalogDescriptorIdentity!.Equals(entry.Lifecycle.DescriptorIdentity);
         var requiredConflict = relevant.Any(item => item.RequirementKind == CapabilityRequirementKind.Required && !ParseRange(item.CompatibleVersionRange).Contains(descriptor.Version));
         var optionalConflict = relevant.Any(item => item.RequirementKind == CapabilityRequirementKind.Optional && !ParseRange(item.CompatibleVersionRange).Contains(descriptor.Version));
         var recovered = catalogRecovered || lifecycle.Status == CapabilityLifecycleReadStatus.RecoveredLastProved;
-        var state = DetermineState(entry, lifecycleEnabled, removed, hostCompatible, dependenciesAvailable, lifecycleDrift || requiredConflict, optionalConflict || lifecycle.Degradations.Count > 0, recovered);
+        var state = DetermineState(effectiveLifecycle, lifecycleEnabled, removed, hostCompatible, dependenciesAvailable, lifecycleDrift || requiredConflict, optionalConflict || lifecycle.Degradations.Count > 0, recovered);
         return new CapabilityPostureProjection(
             descriptor.Id.Value,
             descriptor.Version.Value,
@@ -343,12 +358,12 @@ public sealed class CapabilityPostureService
             descriptor.Requirements.EgressDestinations.Order(StringComparer.Ordinal).ToArray(),
             descriptor.Requirements.Secrets.Select(item => item.Name).Order(StringComparer.Ordinal).ToArray(),
             state,
-            Token(entry.Lifecycle.Declaration),
-            Token(entry.Lifecycle.Installation),
-            Token(entry.Lifecycle.Enablement),
-            Token(entry.Lifecycle.Health),
-            Token(entry.Lifecycle.Retirement),
-            Token(entry.Lifecycle.Trust),
+            Token(effectiveLifecycle.Declaration),
+            Token(effectiveLifecycle.Installation),
+            Token(effectiveLifecycle.Enablement),
+            Token(effectiveLifecycle.Health),
+            Token(effectiveLifecycle.Retirement),
+            Token(effectiveLifecycle.Trust),
             lifecycleEnabled,
             removed,
             entry.Revision,
@@ -359,13 +374,13 @@ public sealed class CapabilityPostureService
             relevant.Count > boundedDependents.Length);
     }
 
-    private static CapabilityPostureState DetermineState(CapabilityCatalogEntry entry, bool lifecycleEnabled, bool removed, bool hostCompatible, bool dependenciesAvailable, bool requiredConflict, bool degraded, bool recovered)
+    private static CapabilityPostureState DetermineState(CapabilityLifecycleSnapshot lifecycle, bool lifecycleEnabled, bool removed, bool hostCompatible, bool dependenciesAvailable, bool requiredConflict, bool degraded, bool recovered)
     {
         if (removed)
         {
             return CapabilityPostureState.Removed;
         }
-        if (entry.Lifecycle.Declaration != CapabilityDeclarationState.Declared || entry.Lifecycle.Installation != CapabilityInstallationState.Installed || entry.Lifecycle.Enablement != CapabilityEnablementState.Enabled || entry.Lifecycle.Health is CapabilityHealthState.Unknown or CapabilityHealthState.Unavailable || entry.Lifecycle.Trust != CapabilityTrustState.Verified || !lifecycleEnabled)
+        if (lifecycle.Declaration != CapabilityDeclarationState.Declared || lifecycle.Installation != CapabilityInstallationState.Installed || lifecycle.Enablement != CapabilityEnablementState.Enabled || lifecycle.Health is CapabilityHealthState.Unknown or CapabilityHealthState.Unavailable || lifecycle.Trust != CapabilityTrustState.Verified || !lifecycleEnabled)
         {
             return CapabilityPostureState.Unavailable;
         }
@@ -377,7 +392,7 @@ public sealed class CapabilityPostureService
         {
             return CapabilityPostureState.DependencyConflict;
         }
-        if (entry.Lifecycle.Health == CapabilityHealthState.Degraded || entry.Lifecycle.Retirement == CapabilityRetirementState.Deprecated || degraded || recovered)
+        if (lifecycle.Health == CapabilityHealthState.Degraded || lifecycle.Retirement == CapabilityRetirementState.Deprecated || degraded || recovered)
         {
             return CapabilityPostureState.Degraded;
         }

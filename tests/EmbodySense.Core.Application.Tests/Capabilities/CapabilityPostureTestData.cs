@@ -43,7 +43,8 @@ internal static class CapabilityPostureTestData
 
     internal static CapabilityLifecycleReadResult Lifecycle(CapabilityCatalogEntry entry, CapabilityLifecycleReadStatus status = CapabilityLifecycleReadStatus.Available)
     {
-        var state = new CapabilityLifecycleState(entry.Descriptor, CapabilityIntegrityDigest.Compute("current"u8), true, entry.Lifecycle.Retirement == CapabilityRetirementState.Removed, 7, "test-lifecycle", Now);
+        var removed = entry.Lifecycle.Retirement == CapabilityRetirementState.Removed;
+        var state = new CapabilityLifecycleState(entry.Descriptor, CapabilityIntegrityDigest.Compute("current"u8), entry.Lifecycle.Enablement == CapabilityEnablementState.Enabled && !removed, removed, 7, "test-lifecycle", Now);
         return new CapabilityLifecycleReadResult(status, state, [], [], 7, "proved");
     }
 
