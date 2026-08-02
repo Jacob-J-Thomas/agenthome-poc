@@ -42,6 +42,9 @@ public sealed class CapabilityLifecycleTargetResolverTests
     [InlineData("capabilityVersion")]
     [InlineData("descriptorJson")]
     [InlineData("checksum")]
+    [InlineData("sourceKind")]
+    [InlineData("updatePolicy")]
+    [InlineData("platform")]
     [InlineData("trustStatus")]
     [InlineData("authenticationTag")]
     public async Task Forged_identity_content_or_trust_evidence_makes_the_complete_set_unavailable(string property)
@@ -59,6 +62,9 @@ public sealed class CapabilityLifecycleTargetResolverTests
             "capabilityVersion" => "9.9.9",
             "descriptorJson" => "{}",
             "checksum" => "sha256:" + new string('0', 64),
+            "sourceKind" => "Unknown",
+            "updatePolicy" => "Unknown",
+            "platform" => "unknown",
             "trustStatus" => "Rejected",
             _ => string.Empty
         };
@@ -69,6 +75,43 @@ public sealed class CapabilityLifecycleTargetResolverTests
         Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, result.Status);
         Assert.Null(result.Descriptor);
         Assert.Null(result.ArtifactDigest);
+    }
+
+    [Fact]
+    public async Task Missing_invalid_nested_and_overfull_staged_layouts_fail_closed()
+    {
+        var stage = CapabilityArtifactStoreTestData.Stage(_versionOne);
+
+        using var missingWorkspace = new TestWorkspace();
+        var missingPaths = new WorkspacePaths(missingWorkspace.RootPath);
+        Directory.CreateDirectory(missingPaths.CapabilityArtifactsPath);
+        Assert.Equal(CapabilityLifecycleTargetResolutionStatus.NotFound, (await Store(missingWorkspace, missingPaths).ResolveAsync(Request(stage))).Status);
+
+        using var invalidWorkspace = new TestWorkspace();
+        var invalidPaths = PrepareEmpty(invalidWorkspace);
+        Directory.CreateDirectory(Path.Combine(invalidPaths.CapabilityArtifactsPath, "staged", "not-a-canonical-digest"));
+        Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, (await Store(invalidWorkspace, invalidPaths).ResolveAsync(Request(stage))).Status);
+
+        using var nestedWorkspace = new TestWorkspace();
+        var nestedPaths = new WorkspacePaths(nestedWorkspace.RootPath);
+        var nestedStore = Store(nestedWorkspace, nestedPaths);
+        var nestedStage = stage with { Manifest = stage.Manifest with { EntryPoint = "bin/echo.exe" } };
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await nestedStore.StageAsync(nestedStage)).Status);
+        var nestedDirectory = Path.Combine(StagedRoot(nestedPaths.CapabilityArtifactsPath, nestedStage), "bin");
+        Directory.Delete(nestedDirectory, recursive: true);
+        await File.WriteAllTextAsync(nestedDirectory, "substituted-directory");
+        Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, (await nestedStore.ResolveAsync(Request(nestedStage))).Status);
+
+        using var overfullWorkspace = new TestWorkspace();
+        var overfullPaths = new WorkspacePaths(overfullWorkspace.RootPath);
+        var overfullStore = Store(overfullWorkspace, overfullPaths);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await overfullStore.StageAsync(stage)).Status);
+        var overfullRoot = StagedRoot(overfullPaths.CapabilityArtifactsPath, stage);
+        for (var index = 0; index < 63; index++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(overfullRoot, $"extra-{index:D2}.bin"), "extra");
+        }
+        Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, (await overfullStore.ResolveAsync(Request(stage))).Status);
     }
 
     [Fact]
