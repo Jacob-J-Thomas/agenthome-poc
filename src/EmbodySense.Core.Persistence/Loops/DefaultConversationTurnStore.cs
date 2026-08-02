@@ -546,7 +546,17 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
     private async Task ArchiveActiveAsync(string activePath, (DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity) proof, DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
     {
+        if (HasUnprovedHistoryStageRetirementEvidence(proof.Record.TurnId))
+        {
+            throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
+        }
+
         await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeSourceClaim, cancellationToken);
+        if (HasUnprovedHistoryStageRetirementEvidence(proof.Record.TurnId))
+        {
+            throw new FormatException($"Default-conversation turn `{proof.Record.TurnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
+        }
+
         var pendingSourcePath = GetPendingArchiveSourcePath(proof.Record.TurnId);
         var pendingHistoryPath = GetPendingArchiveHistoryPath(proof.Record.TurnId);
         var historyPath = GetHistoryPath(proof.Record.TurnId);
