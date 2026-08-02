@@ -1,5 +1,7 @@
 using EmbodySense.Web;
 using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Loops.Models;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
@@ -34,10 +36,13 @@ public sealed class LoopApiControllerTests
             var uninitializedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-before-init" });
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
             var catalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
-            var catalog = await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions);
+            var catalog = (await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions))!;
             var systemGet = await SendAsync(client, HttpMethod.Get, "/api/loops/default-conversation", token);
+            var systemJson = await systemGet.Content.ReadAsStringAsync();
+            var systemDefinition = JsonSerializer.Deserialize<SystemLoopDefinitionSnapshot>(systemJson, _jsonOptions)!;
+            var canonicalSystemDefinition = LoopDefinition.CreateDefaultConversation();
             var malformedGet = await SendAsync(client, HttpMethod.Get, "/api/loops/INVALID%20ID", token);
-            var systemUpdate = await SendAsync(client, HttpMethod.Put, "/api/loops/default-conversation", token, CreateUpdateBody(catalog!.SystemDefault, "system-update", "System loop"));
+            var systemUpdate = await SendAsync(client, HttpMethod.Put, "/api/loops/default-conversation", token, CreateUpdateBody(null, "system-update", "System loop"));
             var systemDelete = await SendAsync(client, HttpMethod.Delete, "/api/loops/default-conversation", token, new { expectedDefinitionVersion = 1, operationId = "system-delete" });
 
             Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
@@ -50,14 +55,50 @@ public sealed class LoopApiControllerTests
             Assert.Equal("default-conversation", catalog.SystemDefault.Id);
             Assert.Empty(catalog.CustomDefinitions);
             Assert.Equal(
-                [LoopToolAssignment.List, LoopToolAssignment.Read, LoopToolAssignment.Search, LoopToolAssignment.Append, LoopToolAssignment.Write, LoopToolAssignment.Delete],
-                catalog.SystemDefault.ToolAssignments);
+                [LoopCapabilityIds.ConversationTurn, LoopCapabilityIds.ConversationHistory, LoopCapabilityIds.AgentContext, LoopCapabilityIds.ProviderInference, LoopCapabilityIds.WorkspaceCommand, LoopCapabilityIds.ApprovalRequest, LoopCapabilityIds.AuditWrite],
+                catalog.SystemDefault.CapabilityIds);
             Assert.Equal([LoopToolAssignment.List, LoopToolAssignment.Read, LoopToolAssignment.Search], catalog.Tools.CustomAssignable);
             Assert.Equal(LoopCustomToolAuthorityCeiling.WorkspaceReadOnly, catalog.Tools.CustomAuthorityCeiling);
             Assert.Equal("OpenAiCodex", catalog.RuntimeModel!.Provider);
             Assert.Equal("gpt-test", catalog.RuntimeModel.Model);
             Assert.Equal(HttpStatusCode.OK, systemGet.StatusCode);
             Assert.True(systemGet.Headers.CacheControl?.NoStore == true);
+            Assert.Equal(LoopTrigger.HumanMessage, systemDefinition.Trigger);
+            Assert.Equal(LoopMemoryScope.WorkspaceStartupContext, systemDefinition.MemoryScope);
+            Assert.Equal(LoopEditMode.SystemLocked, systemDefinition.EditMode);
+            Assert.Equal(canonicalSystemDefinition.Graph.EntryNodeId, systemDefinition.Graph.EntryNodeId);
+            Assert.Equal(canonicalSystemDefinition.Graph.TerminalNodeIds, systemDefinition.Graph.TerminalNodeIds);
+            Assert.Equal(canonicalSystemDefinition.Graph.Nodes.Length, systemDefinition.Graph.Nodes.Count);
+            for (var index = 0; index < canonicalSystemDefinition.Graph.Nodes.Length; index++)
+            {
+                var expected = canonicalSystemDefinition.Graph.Nodes[index];
+                var actual = systemDefinition.Graph.Nodes[index];
+                Assert.Equal(expected.Id, actual.Id);
+                Assert.Equal(expected.DisplayName, actual.DisplayName);
+                Assert.Equal(expected.Description, actual.Description);
+                Assert.Equal(expected.Kind, actual.Kind);
+                Assert.Equal(expected.EditMode, actual.EditMode);
+                Assert.Equal(expected.CapabilityIds, actual.CapabilityIds);
+            }
+
+            Assert.Equal(canonicalSystemDefinition.Graph.Edges.Length, systemDefinition.Graph.Edges.Count);
+            for (var index = 0; index < canonicalSystemDefinition.Graph.Edges.Length; index++)
+            {
+                var expected = canonicalSystemDefinition.Graph.Edges[index];
+                var actual = systemDefinition.Graph.Edges[index];
+                Assert.Equal(expected.Id, actual.Id);
+                Assert.Equal(expected.FromNodeId, actual.FromNodeId);
+                Assert.Equal(expected.ToNodeId, actual.ToNodeId);
+                Assert.Equal(expected.Condition, actual.Condition);
+                Assert.Equal(expected.Description, actual.Description);
+            }
+            Assert.All(systemDefinition.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, node.ExecutionSemantics));
+            Assert.All(systemDefinition.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, edge.ExecutionSemantics));
+            Assert.False(systemDefinition.ExecutionContract.UsesGenericGraphDispatcher);
+            Assert.DoesNotContain("\"inferenceSteps\"", systemJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"triggerPolicy\"", systemJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"exitPolicy\"", systemJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"toolAssignments\"", systemJson, StringComparison.Ordinal);
             Assert.Equal(HttpStatusCode.BadRequest, malformedGet.StatusCode);
             Assert.Contains("invalid_loop_id", await malformedGet.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Equal(HttpStatusCode.Conflict, systemUpdate.StatusCode);
@@ -152,7 +193,7 @@ public sealed class LoopApiControllerTests
         }
     }
 
-    private static object CreateUpdateBody(LoopDefinitionSnapshot definition, string operationId, string text, object? promptSource = null, string[]? toolAssignments = null)
+    private static object CreateUpdateBody(LoopDefinitionSnapshot? definition, string operationId, string text, object? promptSource = null, string[]? toolAssignments = null)
     {
         var contextPolicy = new
         {
@@ -168,7 +209,7 @@ public sealed class LoopApiControllerTests
         };
         return new
         {
-            expectedDefinitionVersion = definition.DefinitionVersion,
+            expectedDefinitionVersion = definition?.DefinitionVersion ?? 1,
             operationId,
             definition = new
             {
@@ -179,7 +220,7 @@ public sealed class LoopApiControllerTests
                 {
                     new
                     {
-                        id = definition.InferenceSteps.Single().Id,
+                        id = definition?.InferenceSteps.Single().Id ?? "system-placeholder-step",
                         name = "Inspect",
                         instruction = text,
                         contextPolicy = new { mode = "custom", customPolicy = contextPolicy }
