@@ -1115,36 +1115,31 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
         if (OperatingSystem.IsWindows())
         {
             var nameBytes = Encoding.Unicode.GetBytes(targetName);
-            var pointerOffset = Marshal.OffsetOf<FileRenameInformationHeader>(nameof(FileRenameInformationHeader.RootDirectory)).ToInt32();
-            var lengthOffset = Marshal.OffsetOf<FileRenameInformationHeader>(nameof(FileRenameInformationHeader.FileNameLength)).ToInt32();
-            var nameOffset = Marshal.OffsetOf<FileRenameInformationHeader>(nameof(FileRenameInformationHeader.FileName)).ToInt32();
-            var bufferSize = checked(Marshal.SizeOf<FileRenameInformationHeader>() + nameBytes.Length);
-            var directoryReferenceAdded = false;
+            var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
+            var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
+            var fileNameOffset = fileNameLengthOffset + sizeof(uint);
+            var unalignedBufferSize = checked(fileNameOffset + nameBytes.Length + sizeof(char));
+            var bufferSize = checked((unalignedBufferSize + IntPtr.Size - 1) & -IntPtr.Size);
             var buffer = Marshal.AllocHGlobal(bufferSize);
             try
             {
-                directory.DangerousAddRef(ref directoryReferenceAdded);
-                for (var index = 0; index < bufferSize; index++)
+                Marshal.Copy(new byte[bufferSize], 0, buffer, bufferSize);
+                Marshal.WriteByte(buffer, overwrite ? (byte)1 : (byte)0);
+                Marshal.WriteIntPtr(buffer, rootDirectoryOffset, directory.DangerousGetHandle());
+                Marshal.WriteInt32(buffer, fileNameLengthOffset, nameBytes.Length);
+                Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, fileNameOffset), nameBytes.Length);
+                var status = NtSetInformationFile(source, out _, buffer, (uint)bufferSize, FileRenameInformation);
+                GC.KeepAlive(directory);
+                if (status < 0)
                 {
-                    Marshal.WriteByte(buffer, index, 0);
-                }
-
-                Marshal.WriteInt32(buffer, overwrite ? 1 : 0);
-                Marshal.WriteIntPtr(buffer, pointerOffset, directory.DangerousGetHandle());
-                Marshal.WriteInt32(buffer, lengthOffset, nameBytes.Length);
-                Marshal.Copy(nameBytes, 0, buffer + nameOffset, nameBytes.Length);
-                if (!SetFileInformationByHandle(source, FileRenameInfo, buffer, checked((uint)bufferSize)))
-                {
-                    throw NativeIOException("SetFileInformationByHandle rename", Marshal.GetLastPInvokeError());
+                    var unsignedStatus = unchecked((uint)status);
+                    var windowsError = unchecked((int)RtlNtStatusToDosError(status));
+                    throw new ContextualRoleNativeIOException($"NtSetInformationFile rename failed closed with NTSTATUS 0x{unsignedStatus:x8} and native error {windowsError}.", ContextualRoleNativeErrorKind.NtStatus, unsignedStatus, new Win32Exception(windowsError));
                 }
             }
             finally
             {
                 Marshal.FreeHGlobal(buffer);
-                if (directoryReferenceAdded)
-                {
-                    directory.DangerousRelease();
-                }
             }
 
             return;
@@ -1349,6 +1344,12 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     [DllImport("ntdll.dll")]
     private static extern int NtQueryDirectoryFile(SafeFileHandle file, IntPtr eventHandle, IntPtr apcRoutine, IntPtr apcContext, out IoStatusBlock ioStatusBlock, IntPtr fileInformation, uint length, int fileInformationClass, byte returnSingleEntry, IntPtr fileName, byte restartScan);
 
+    [DllImport("ntdll.dll")]
+    private static extern int NtSetInformationFile(SafeFileHandle file, out IoStatusBlock ioStatusBlock, IntPtr fileInformation, uint length, int fileInformationClass);
+
+    [DllImport("ntdll.dll")]
+    private static extern uint RtlNtStatusToDosError(int status);
+
     [DllImport("libc", EntryPoint = "open", SetLastError = true)]
     private static extern int UnixOpen(string path, int flags);
 
@@ -1462,7 +1463,7 @@ internal sealed class ContextualRoleArtifactPathGuard : IDisposable
     private const int MacDirectoryNameOffset = 21;
     private const int UnixMaximumFileNameBytes = 255;
     private const int UnixMaximumDirectoryRecordBytes = 1_280;
-    private const int FileRenameInfo = 3;
+    private const int FileRenameInformation = 10;
     private const int FileDispositionInfo = 4;
     private static int UnixSymbolicLinkLoop => OperatingSystem.IsMacOS() ? 62 : 40;
 }
