@@ -257,7 +257,9 @@ internal sealed class TriggerQueueArtifactGuard
         TriggerQueueArtifactSnapshot? publishedArtifact = null;
         try
         {
-            await using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            // The Windows path-identity proof opens a second read-only handle below. Allow only that
+            // access while continuing to deny concurrent writers and delete/rename attempts.
+            await using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
             {
                 stagedIdentity = TriggerQueueNativeFileInspector.InspectHandle(stream.SafeFileHandle, tempPath);
                 if (stagedIdentity != TriggerQueueNativeFileInspector.InspectPath(tempPath))

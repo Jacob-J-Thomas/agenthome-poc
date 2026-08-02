@@ -23,6 +23,29 @@ public sealed class TriggerQueueStoreTests
     private const string CrossProcessLoop = "EMBODYSENSE_TRIGGER_QUEUE_LOOP";
 
     [Fact]
+    public async Task Windows_staging_path_identity_check_allows_publication_and_prior_generation_cleanup()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new TriggerQueueStore(paths);
+
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope("delivery-1", "dedup-1", "loop-1")));
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope("delivery-2", "dedup-2", "loop-2")));
+
+        var snapshot = await store.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
+        Assert.Equal(2, snapshot.QueuedEntries);
+        Assert.Single(Directory.EnumerateFiles(QueueRoot(paths), "ledger-*.json"));
+        Assert.DoesNotContain(Directory.EnumerateFiles(QueueRoot(paths)), path => Path.GetFileName(path).StartsWith(".staged-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".discard-", StringComparison.Ordinal)
+            || Path.GetFileName(path).StartsWith(".cleanup-", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Admitted_entry_survives_restart_and_exact_retry_replays_without_payload_duplication()
     {
         using var workspace = new TestWorkspace();
