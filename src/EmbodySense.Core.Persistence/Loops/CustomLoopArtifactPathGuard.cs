@@ -256,6 +256,23 @@ internal sealed class CustomLoopArtifactPathGuard
         File.Delete(path);
     }
 
+    /// <summary>
+    /// Atomically moves one contained non-reparse artifact to an absent sibling path.
+    /// </summary>
+    /// <param name="root">The common artifact root.</param>
+    /// <param name="sourcePath">The existing source path.</param>
+    /// <param name="destinationPath">The absent destination path.</param>
+    public void MoveFileIfDestinationAbsent(string root, string sourcePath, string destinationPath)
+    {
+        var safeRoot = ValidateRoot(root);
+        EnsureContained(safeRoot, Path.GetFullPath(sourcePath), "Artifact source path escaped its configured root.");
+        EnsureContained(safeRoot, Path.GetFullPath(destinationPath), "Artifact destination path escaped its configured root.");
+        EnsureNoReparsePoints(sourcePath);
+        EnsureNoReparsePoints(destinationPath);
+        File.Move(sourcePath, destinationPath, overwrite: false);
+        EnsureNoReparsePoints(destinationPath);
+    }
+
     private string ValidateRoot(string root)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);

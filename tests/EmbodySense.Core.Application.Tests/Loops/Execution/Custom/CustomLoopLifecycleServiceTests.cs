@@ -999,6 +999,45 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(0, runStore.UpdateCallCount);
     }
 
+    [Fact]
+    public async Task Terminal_cleanup_replays_advance_to_one_new_stable_batch_when_admission_still_needs_capacity()
+    {
+        var run = Run("run-control-retention-next-batch", CustomLoopRunStatus.Running);
+        var runStore = new MultiRunStore([run]);
+        var operations = new InMemoryOperationStore { QuotaBeginCount = 4 };
+        var retention = new RecordingReceiptRetentionPort(CustomLoopReceiptCleanupStatus.Pruned);
+        var service = new CustomLoopLifecycleService(runStore, operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)), retention, "web");
+        const string OperationId = "pause-retention-next-batch";
+
+        var first = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web));
+        var second = await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.Failed, first.Status);
+        Assert.Equal(CustomLoopControlStatus.PauseRequested, second.Status);
+        Assert.Equal(5, operations.BeginCallCount);
+        Assert.Equal(3, retention.Requests.Count);
+        Assert.Equal(retention.Requests[0].OperationId, retention.Requests[1].OperationId);
+        Assert.NotEqual(retention.Requests[1].OperationId, retention.Requests[2].OperationId);
+        Assert.StartsWith("control-receipt-retention-", retention.Requests[2].OperationId, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Replayed_nothing_eligible_cleanup_advances_after_receipts_can_age_without_reusing_the_terminal_identity()
+    {
+        var run = Run("run-control-retention-aged-batch", CustomLoopRunStatus.Running);
+        var operations = new InMemoryOperationStore { QuotaBeginCount = 3 };
+        var retention = new RecordingReceiptRetentionPort(CustomLoopReceiptCleanupStatus.NothingEligible);
+        var service = new CustomLoopLifecycleService(new MultiRunStore([run]), operations, new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddSeconds(3)), retention, "web");
+        const string OperationId = "pause-retention-aged-batch";
+
+        await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web));
+        await service.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, OperationId, AuditSchema.Actors.Web));
+
+        Assert.Equal(3, retention.Requests.Count);
+        Assert.Equal(retention.Requests[0].OperationId, retention.Requests[1].OperationId);
+        Assert.NotEqual(retention.Requests[1].OperationId, retention.Requests[2].OperationId);
+    }
+
     [Theory]
     [InlineData(CustomLoopReceiptCleanupStatus.OperationInProgress, CustomLoopControlStatus.OperationInProgress, "bounded ownership window")]
     [InlineData(CustomLoopReceiptCleanupStatus.AuditUnavailable, CustomLoopControlStatus.Failed, "audit integrity was unavailable")]
@@ -1341,6 +1380,8 @@ public sealed class CustomLoopLifecycleServiceTests
 
     private sealed class RecordingReceiptRetentionPort(CustomLoopReceiptCleanupStatus cleanupStatus) : ICustomLoopReceiptRetentionPort
     {
+        private readonly Dictionary<string, CustomLoopReceiptCleanupJournal> _terminalJournals = new(StringComparer.Ordinal);
+
         public CustomLoopReceiptArtifactClass ArtifactClass => CustomLoopReceiptArtifactClass.LifecycleControlReceipt;
 
         public List<CustomLoopReceiptCleanupCommand> Requests { get; } = [];
@@ -1348,7 +1389,24 @@ public sealed class CustomLoopLifecycleServiceTests
         public Task<CustomLoopReceiptCleanupResult> CleanupAsync(CustomLoopReceiptCleanupCommand command, CancellationToken cancellationToken = default)
         {
             Requests.Add(command);
-            return Task.FromResult(new CustomLoopReceiptCleanupResult(cleanupStatus, null, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, cleanupStatus == CustomLoopReceiptCleanupStatus.Pruned ? 1 : 0, 1, "Recorded cleanup result."));
+            if (_terminalJournals.TryGetValue(command.OperationId, out var replayed))
+            {
+                var replayStatus = cleanupStatus == CustomLoopReceiptCleanupStatus.Pruned ? CustomLoopReceiptCleanupStatus.Replayed : cleanupStatus;
+                return Task.FromResult(new CustomLoopReceiptCleanupResult(replayStatus, replayed, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, replayed.RemovedArtifactCount, replayed.RemovedArtifactUtf8Bytes, "Recorded cleanup replay.") { IsReplay = true });
+            }
+
+            if (cleanupStatus is not (CustomLoopReceiptCleanupStatus.Pruned or CustomLoopReceiptCleanupStatus.NothingEligible or CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning))
+            {
+                return Task.FromResult(new CustomLoopReceiptCleanupResult(cleanupStatus, null, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, 0, 0, "Recorded cleanup result."));
+            }
+
+            var request = CustomLoopReceiptCleanupRequestFactory.Create(command, _now);
+            var removedCount = cleanupStatus == CustomLoopReceiptCleanupStatus.NothingEligible ? 0 : 1;
+            var stage = cleanupStatus == CustomLoopReceiptCleanupStatus.CommittedWithAuditWarning ? CustomLoopReceiptCleanupStage.CommittedWithAuditWarning : CustomLoopReceiptCleanupStage.Completed;
+            var outcome = cleanupStatus == CustomLoopReceiptCleanupStatus.NothingEligible ? CustomLoopReceiptCleanupOutcome.NothingEligible : CustomLoopReceiptCleanupOutcome.Succeeded;
+            var journal = new CustomLoopReceiptCleanupJournal(CustomLoopReceiptCleanupJournal.CurrentSchemaVersion, request, CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(request), "cleanup-owner-test", 1, _now, stage, outcome, _now, [], null, removedCount, removedCount, "Recorded cleanup result.");
+            _terminalJournals.Add(command.OperationId, journal);
+            return Task.FromResult(new CustomLoopReceiptCleanupResult(cleanupStatus, journal, CustomLoopReceiptQuotaExhaustionReason.None, CustomLoopReceiptCleanupBlockReason.None, removedCount, removedCount, journal.Detail));
         }
 
         public Task<CustomLoopReceiptClassPosture> InspectAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
