@@ -6,9 +6,10 @@ namespace EmbodySense.Core.Application.Tests.Capabilities;
 
 internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycleMutationStore
 {
+    internal CapabilityLifecycleReadResult ReadResult { get; set; } = new(CapabilityLifecycleReadStatus.NotFound, null, [], [], null, "not found");
+    internal Exception? ReadException { get; set; }
     internal CapabilityLifecyclePreview PreviewResult { get; set; } = null!;
     internal CapabilityLifecycleMutationResult MutationResult { get; set; } = null!;
-    internal CapabilityLifecycleReadResult ReadResult { get; set; } = new(CapabilityLifecycleReadStatus.NotFound, null, [], [], null, "not found");
     internal CapabilityLifecycleAuditMarkStatus AuditMarkResult { get; set; } = CapabilityLifecycleAuditMarkStatus.Applied;
     internal CapabilityLifecyclePreviewRequest? PreviewRequest { get; private set; }
     internal CapabilityLifecycleBaseline? Baseline { get; private set; }
@@ -17,8 +18,18 @@ internal sealed class StubCapabilityLifecycleMutationStore : ICapabilityLifecycl
     internal CapabilityDependentIndexSnapshot? PreviewDependents { get; private set; }
     internal CapabilityDependentIndexSnapshot? MutatedDependents { get; private set; }
     internal int AuditMarks { get; private set; }
+    internal int ReadCount { get; private set; }
 
-    public Task<CapabilityLifecycleReadResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default) => Task.FromResult(ReadResult);
+    public Task<CapabilityLifecycleReadResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ReadCount++;
+        if (ReadException is not null)
+        {
+            throw ReadException;
+        }
+        return Task.FromResult(ReadResult);
+    }
 
     public Task<CapabilityLifecyclePreview> PreviewAsync(CapabilityLifecyclePreviewRequest request, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default)
     {
