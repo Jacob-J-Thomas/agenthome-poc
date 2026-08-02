@@ -185,6 +185,91 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
+    public async Task ValidateDoesNotUsePostJoinCycleToSatisfyFirstAllPathActivation()
+    {
+        var cycleBudgets = new Dictionary<string, string> { ["max-iterations"] = "2", ["max-milliseconds"] = "5000" };
+        var left = new GovernedLoopNodeDefinition("left", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "left-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), cycleBudgets);
+        var right = new GovernedLoopNodeDefinition("right", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "right-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var join = new GovernedLoopNodeDefinition("join", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Join, "all-join", 1), [], GovernedLoopAuthorityCeiling.Create([]), cycleBudgets);
+        var candidate = Candidate(
+            nodes: [.. Nodes(), left, right, join],
+            edges:
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-success-to-left", "infer", "left", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-failure-to-right", "infer", "right", GovernedLoopControlCondition.Failure),
+                new GovernedLoopControlEdgeDefinition("left-to-join", "left", "join", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("right-to-join", "right", "join", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("join-to-left", "join", "left", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("join-to-exit", "join", "exit", GovernedLoopControlCondition.Always)
+            ]);
+        var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId is "left-transform" or "all-join" ? EnableCycle(descriptor) : descriptor).ToArray();
+
+        var result = await Service(descriptors).ValidateAsync(candidate);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, error => error.Code == "node.join.unsatisfiable" && error.Element.Id == "join");
+    }
+
+    [Fact]
+    public async Task ValidateAcceptsAllPathJoinAfterLegitimateBoundedCycle()
+    {
+        var nodes = Nodes();
+        nodes[1] = nodes[1] with { Parameters = CycleParameters("2") };
+        var left = new GovernedLoopNodeDefinition("left", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "left-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var right = new GovernedLoopNodeDefinition("right", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "right-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var join = new GovernedLoopNodeDefinition("join", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Join, "all-join", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var candidate = Candidate(
+            nodes: [.. nodes, left, right, join],
+            edges:
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-failure-to-infer", "infer", "infer", GovernedLoopControlCondition.Failure),
+                new GovernedLoopControlEdgeDefinition("infer-success-to-left", "infer", "left", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-success-to-right", "infer", "right", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("left-to-join", "left", "join", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("right-to-join", "right", "join", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("join-success-to-exit", "join", "exit", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("join-failure-to-exit", "join", "exit", GovernedLoopControlCondition.Failure)
+            ]);
+        var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId == "provider-inference" ? EnableCycle(descriptor) : descriptor).ToArray();
+
+        var result = await Service(descriptors).ValidateAsync(candidate);
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public async Task ValidateIgnoresCurrentJoinOutcomesWhenCheckingFirstActivation()
+    {
+        var cycleBudgets = new Dictionary<string, string> { ["max-iterations"] = "2", ["max-milliseconds"] = "5000" };
+        var left = new GovernedLoopNodeDefinition("left", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "left-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), cycleBudgets);
+        var right = new GovernedLoopNodeDefinition("right", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "right-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), cycleBudgets);
+        var join = new GovernedLoopNodeDefinition("join", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Join, "all-join", 1), [], GovernedLoopAuthorityCeiling.Create([]), cycleBudgets);
+        var candidate = Candidate(
+            nodes: [.. Nodes(), left, right, join],
+            edges:
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-success-to-left", "infer", "left", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("infer-success-to-right", "infer", "right", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("left-to-join", "left", "join", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("right-to-join", "right", "join", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("join-success-to-left", "join", "left", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("join-failure-to-right", "join", "right", GovernedLoopControlCondition.Failure),
+                new GovernedLoopControlEdgeDefinition("join-always-to-exit", "join", "exit", GovernedLoopControlCondition.Always)
+            ]);
+        var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId is "left-transform" or "right-transform" or "all-join" ? EnableCycle(descriptor) : descriptor).ToArray();
+
+        var result = await Service(descriptors).ValidateAsync(candidate);
+
+        Assert.Equal(
+            ["graph.resources.activation-envelope", "node.cycle.internal-fan-out-unsupported"],
+            result.Errors.Select(error => error.Code));
+        Assert.Equal("join", result.Errors.Single(error => error.Code == "node.cycle.internal-fan-out-unsupported").Element.Id);
+    }
+
+    [Fact]
     public async Task ValidateRequiresExplicitBoundedCycleBudgets()
     {
         var nodes = Nodes();

@@ -458,14 +458,14 @@ public sealed class GovernedLoopGraphValidationService
                 Add(errors, "node.join.incoming-insufficient", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}]", "The join has fewer incoming control paths than its exact descriptor requires.");
             }
 
-            if (descriptor.JoinPolicy == GovernedLoopJoinPolicy.All && !AreJoinInputsJointlySatisfiable(graph, incoming))
+            if (descriptor.JoinPolicy == GovernedLoopJoinPolicy.All && !AreJoinInputsJointlySatisfiable(graph, node.Id, incoming))
             {
                 Add(errors, "node.join.unsatisfiable", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}]", "An all-path join cannot require control paths gated by mutually exclusive outcomes.");
             }
         }
     }
 
-    private static bool AreJoinInputsJointlySatisfiable(GovernedLoopGraphDefinition graph, IReadOnlyList<GovernedLoopControlEdgeDefinition> incoming)
+    private static bool AreJoinInputsJointlySatisfiable(GovernedLoopGraphDefinition graph, string joinNodeId, IReadOnlyList<GovernedLoopControlEdgeDefinition> incoming)
     {
         if (incoming.GroupBy(edge => edge.FromNodeId, StringComparer.Ordinal).Any(group => group.Select(edge => edge.Condition).Distinct().Any(first => group.Any(second => AreMutuallyExclusive(first, second.Condition)))))
         {
@@ -478,11 +478,11 @@ public sealed class GovernedLoopGraphValidationService
             adjacency[edge.FromNodeId].Add(edge.ToNodeId);
         }
 
-        foreach (var branch in graph.ControlEdges.GroupBy(edge => edge.FromNodeId, StringComparer.Ordinal).Where(group => group.Select(edge => edge.Condition).Distinct().Count() > 1).OrderBy(group => group.Key, StringComparer.Ordinal))
+        foreach (var branch in graph.ControlEdges.GroupBy(edge => edge.FromNodeId, StringComparer.Ordinal).Where(group => !string.Equals(group.Key, joinNodeId, StringComparison.Ordinal) && group.Select(edge => edge.Condition).Distinct().Count() > 1).OrderBy(group => group.Key, StringComparer.Ordinal))
         {
             foreach (var left in incoming)
             {
-                var leftOutcomes = branch.Where(edge => CanReach(edge.ToNodeId, left.FromNodeId, adjacency)).Select(edge => edge.Condition).Distinct().ToArray();
+                var leftOutcomes = branch.Where(edge => CanReachBeforeJoin(edge.ToNodeId, left.FromNodeId, joinNodeId, adjacency)).Select(edge => edge.Condition).Distinct().ToArray();
                 if (leftOutcomes.Length == 0)
                 {
                     continue;
@@ -490,7 +490,7 @@ public sealed class GovernedLoopGraphValidationService
 
                 foreach (var right in incoming.Where(edge => string.CompareOrdinal(edge.Id, left.Id) > 0))
                 {
-                    var rightOutcomes = branch.Where(edge => CanReach(edge.ToNodeId, right.FromNodeId, adjacency)).Select(edge => edge.Condition).Distinct().ToArray();
+                    var rightOutcomes = branch.Where(edge => CanReachBeforeJoin(edge.ToNodeId, right.FromNodeId, joinNodeId, adjacency)).Select(edge => edge.Condition).Distinct().ToArray();
                     if (rightOutcomes.Length > 0 && leftOutcomes.All(leftOutcome => rightOutcomes.All(rightOutcome => AreMutuallyExclusive(leftOutcome, rightOutcome))))
                     {
                         return false;
@@ -520,7 +520,7 @@ public sealed class GovernedLoopGraphValidationService
 
     private static bool IsExclusiveWithTimeout(GovernedLoopControlCondition condition) => condition is GovernedLoopControlCondition.Success or GovernedLoopControlCondition.Failure or GovernedLoopControlCondition.True or GovernedLoopControlCondition.False or GovernedLoopControlCondition.Approved or GovernedLoopControlCondition.Rejected;
 
-    private static bool CanReach(string source, string target, IReadOnlyDictionary<string, SortedSet<string>> adjacency)
+    private static bool CanReachBeforeJoin(string source, string target, string joinNodeId, IReadOnlyDictionary<string, SortedSet<string>> adjacency)
     {
         var visited = new HashSet<string>(StringComparer.Ordinal);
         var pending = new Stack<string>();
@@ -528,7 +528,7 @@ public sealed class GovernedLoopGraphValidationService
         while (pending.Count > 0)
         {
             var current = pending.Pop();
-            if (!visited.Add(current))
+            if (string.Equals(current, joinNodeId, StringComparison.Ordinal) || !visited.Add(current))
             {
                 continue;
             }
