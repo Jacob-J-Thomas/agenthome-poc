@@ -13,9 +13,10 @@ public static class CapabilityAdmissionFactory
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
-        var catalog = new CapabilityCatalogStore(paths, trustProvider);
-        var lifecycle = new CapabilityLifecycleMutationStore(paths, trustProvider);
-        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle);
-        return new CapabilityAdmissionService(projection, CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform);
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var catalog = new CapabilityCatalogStore(paths, trustProvider, authorityTransaction: authority);
+        var lifecycle = new CapabilityLifecycleMutationStore(paths, trustProvider, authorityTransaction: authority);
+        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle, authority);
+        return new CapabilityAdmissionService(projection, CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform, authority);
     }
 }

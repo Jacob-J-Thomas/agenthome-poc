@@ -17,6 +17,47 @@ public sealed class CapabilityArtifactStoreTests
     private static readonly byte[] _versionOne = "version-one"u8.ToArray();
     private static readonly byte[] _versionTwo = "version-two"u8.ToArray();
 
+    [Theory]
+    [InlineData(CapabilityLifecycleOperationKind.Disable)]
+    [InlineData(CapabilityLifecycleOperationKind.Remove)]
+    [InlineData(CapabilityLifecycleOperationKind.Upgrade)]
+    public async Task Resolved_executable_cannot_acquire_launch_authority_after_lifecycle_transition_commits(CapabilityLifecycleOperationKind kind)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var artifactTrust = new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath);
+        var initialStore = new CapabilityArtifactStore(paths, artifactTrust, new AlwaysTrustedArtifactVerifier(), authorityTransaction: authority);
+        var first = CapabilityArtifactStoreTestData.Stage(_versionOne);
+        var second = CapabilityArtifactStoreTestData.Stage(_versionTwo, "2.0.0");
+        await initialStore.StageAsync(first);
+        await initialStore.StageAsync(second);
+        var activation = await initialStore.ActivateAsync(new CapabilityArtifactActivationRequest(first.Manifest, 0, "activate-before-launch-fence"));
+        var baselineState = new CapabilityLifecycleState(first.Manifest.Descriptor, first.Manifest.Checksum, true, false, activation.Activation!.Revision, "activate-before-launch-fence", activation.Activation.ActivatedAtUtc);
+        var baseline = new CapabilityLifecycleBaseline(baselineState, 1, activation.Activation.Revision);
+        var baselineSource = new StubCapabilityLifecycleBaselineSource { Baseline = baseline };
+        var lifecycle = new CapabilityLifecycleMutationStore(paths, new TestCapabilityLifecycleTrustProvider(), baselineSource, initialStore, authorityTransaction: authority);
+        var coordinated = new CapabilityArtifactStore(paths, artifactTrust, new AlwaysTrustedArtifactVerifier(), lifecycleStore: lifecycle, authorityTransaction: authority);
+        var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
+        var registrationRequest = new CapabilityLifecyclePreviewRequest("register-before-launch-fence", CapabilityLifecycleOperationKind.Upgrade, first.Manifest.Descriptor.Id, first.Manifest.Descriptor, first.Manifest.Checksum);
+        var registration = await lifecycle.PreviewAsync(registrationRequest, baseline, await index.CaptureAsync());
+        var registered = await lifecycle.MutateAsync(registration, baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, registered.Status);
+        var request = new CapabilityLifecyclePreviewRequest("transition-before-launch-" + kind.ToString().ToLowerInvariant(), kind, first.Manifest.Descriptor.Id, kind == CapabilityLifecycleOperationKind.Upgrade ? second.Manifest.Descriptor : null, kind == CapabilityLifecycleOperationKind.Upgrade ? second.Manifest.Checksum : null);
+        var preview = await lifecycle.PreviewAsync(request, baseline, await index.CaptureAsync());
+        var before = await lifecycle.ReadAsync(first.Manifest.Descriptor.Id);
+        var invocation = new CapabilityExecutableInvocation(first.Manifest, string.Empty, "{}", "stale-launch-" + kind.ToString().ToLowerInvariant(), before.State!.Revision);
+        var resolution = await coordinated.ResolveAsync(invocation);
+        Assert.Equal(CapabilityExecutableAvailabilityStatus.Available, resolution.Status);
+
+        var transition = await lifecycle.MutateAsync(preview, baseline, await index.CaptureAsync());
+        var launchFence = await resolution.Lease!.AcquireLaunchFenceAsync();
+
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, transition.Status);
+        Assert.Null(launchFence);
+        await resolution.Lease.DisposeAsync();
+    }
+
     [Fact]
     public async Task Activated_package_dependencies_are_discovered_from_authenticated_immutable_evidence()
     {
@@ -39,6 +80,67 @@ public sealed class CapabilityArtifactStoreTests
         Assert.True(CapabilityDependencyManifestHash.TryCompute(dependencies, out var expectedHash, out _));
         Assert.True(CapabilityDependencyManifestHash.TryCompute(discovered.Manifest, out var actualHash, out _));
         Assert.Equal(expectedHash, actualHash);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Package_discovery_and_lifecycle_upgrade_share_one_lock_order_under_opposing_lock_barriers(bool discoveryHoldsInnerLockFirst)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var artifactTrust = new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath);
+        var artifacts = new CapabilityArtifactStore(paths, artifactTrust, new AlwaysTrustedArtifactVerifier(), authorityTransaction: authority);
+        var first = WithPackageDependencies(CapabilityArtifactStoreTestData.Stage(_versionOne));
+        var second = WithPackageDependencies(CapabilityArtifactStoreTestData.Stage(_versionTwo, "2.0.0"));
+        await artifacts.StageAsync(first);
+        await artifacts.StageAsync(second);
+        var activation = await artifacts.ActivateAsync(new CapabilityArtifactActivationRequest(first.Manifest, 0, "activate-before-package-race"));
+        var baselineState = new CapabilityLifecycleState(first.Manifest.Descriptor, first.Manifest.Checksum, true, false, activation.Activation!.Revision, "activate-before-package-race", activation.Activation.ActivatedAtUtc);
+        var baseline = new CapabilityLifecycleBaseline(baselineState, 1, activation.Activation.Revision);
+        var lifecycleTrust = new TestCapabilityLifecycleTrustProvider();
+        var lifecycle = new CapabilityLifecycleMutationStore(paths, lifecycleTrust, new StubCapabilityLifecycleBaselineSource { Baseline = baseline }, artifacts, authorityTransaction: authority);
+        var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
+        var registrationRequest = new CapabilityLifecyclePreviewRequest("register-before-package-race", CapabilityLifecycleOperationKind.Upgrade, first.Manifest.Descriptor.Id, first.Manifest.Descriptor, first.Manifest.Checksum);
+        var registration = await lifecycle.PreviewAsync(registrationRequest, baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await lifecycle.MutateAsync(registration, baseline, await index.CaptureAsync())).Status);
+        var upgradeRequest = new CapabilityLifecyclePreviewRequest("upgrade-during-package-discovery", CapabilityLifecycleOperationKind.Upgrade, first.Manifest.Descriptor.Id, second.Manifest.Descriptor, second.Manifest.Checksum);
+        var upgrade = await lifecycle.PreviewAsync(upgradeRequest, baseline, await index.CaptureAsync());
+        var discoveryProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var mutationProbe = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var blockingArtifactTrust = new BlockingCapabilityArtifactStateTrustProvider(artifactTrust) { BlockNextActivationRead = discoveryHoldsInnerLockFirst };
+        var blockingLifecycleTrust = new BlockingCapabilityCatalogTrustProvider(lifecycleTrust) { BlockNextRead = !discoveryHoldsInnerLockFirst };
+        var runtimeLifecycle = new CapabilityLifecycleMutationStore(paths, blockingLifecycleTrust, new StubCapabilityLifecycleBaselineSource { Baseline = baseline }, artifacts, authorityTransaction: discoveryHoldsInnerLockFirst ? mutationProbe : authority);
+        var coordinated = new CapabilityArtifactStore(paths, blockingArtifactTrust, new AlwaysTrustedArtifactVerifier(), lifecycleStore: runtimeLifecycle, authorityTransaction: discoveryHoldsInnerLockFirst ? authority : discoveryProbe);
+        Task<IReadOnlyList<CapabilityPackageDependencyDiscovery>> discoveryTask;
+        Task<CapabilityLifecycleMutationResult> mutationTask;
+        if (discoveryHoldsInnerLockFirst)
+        {
+            discoveryTask = coordinated.DiscoverAsync();
+            await blockingArtifactTrust.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+            mutationTask = runtimeLifecycle.MutateAsync(upgrade, baseline, await index.CaptureAsync());
+            await mutationProbe.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(mutationTask.IsCompleted);
+            blockingArtifactTrust.Release();
+        }
+        else
+        {
+            mutationTask = runtimeLifecycle.MutateAsync(upgrade, baseline, await index.CaptureAsync());
+            await blockingLifecycleTrust.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+            discoveryTask = coordinated.DiscoverAsync();
+            await discoveryProbe.Attempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(discoveryTask.IsCompleted);
+            blockingLifecycleTrust.Release();
+        }
+
+        await Task.WhenAll(discoveryTask, mutationTask).WaitAsync(TimeSpan.FromSeconds(5));
+        var mutationResult = await mutationTask;
+        var discoveryResult = await discoveryTask;
+
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, mutationResult.Status);
+        var discovered = Assert.Single(discoveryResult);
+        Assert.Contains(discovered.ArtifactDigest, new[] { first.Manifest.Checksum.Value, second.Manifest.Checksum.Value });
     }
 
     [Fact]
@@ -675,6 +777,14 @@ public sealed class CapabilityArtifactStoreTests
     }
 
     private static CapabilityArtifactStore Store(TestWorkspace workspace, WorkspacePaths? paths = null, ICapabilityArtifactTrustVerifier? verifier = null) => new(paths ?? new WorkspacePaths(workspace.RootPath), new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath), verifier ?? new AlwaysTrustedArtifactVerifier());
+
+    private static CapabilityArtifactStageRequest WithPackageDependencies(CapabilityArtifactStageRequest stage)
+    {
+        Assert.True(CapabilityId.TryParse("org.example/dependency", out var dependencyId, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var range, out _));
+        var dependencies = new CapabilityDependencyManifest(1, CapabilityDependencyManifestKind.CapabilityPackage, stage.Manifest.Descriptor.Id, [new CapabilityDependency(dependencyId!, range!)], [], new CapabilityDependencyArtifactMetadata(stage.Manifest.Checksum, null));
+        return stage with { Manifest = stage.Manifest with { Dependencies = dependencies } };
+    }
 
     private static string StagedExecutablePath(WorkspacePaths paths, CapabilityArtifactManifest manifest) => Path.Combine(paths.CapabilityArtifactsPath, "staged", manifest.Checksum.Value["sha256:".Length..], manifest.EntryPoint);
 

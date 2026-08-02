@@ -101,6 +101,12 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         throw new IOException("The capability catalog lock is unavailable.");
     }
 
+    public void ReleaseLock()
+    {
+        _lock?.Dispose();
+        _lock = null;
+    }
+
     public bool DirectoryExists(string path)
     {
         return GetDirectory(RequireContained(path), create: false) is not null;

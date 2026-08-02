@@ -10,18 +10,23 @@ public sealed class CapabilityLifecycleCatalogStore : ICapabilityCatalogStore
 {
     private readonly ICapabilityCatalogStore _catalogStore;
     private readonly ICapabilityLifecycleMutationStore _lifecycleStore;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates an admission-facing projection over current proved catalog and lifecycle stores.</summary>
-    public CapabilityLifecycleCatalogStore(ICapabilityCatalogStore catalogStore, ICapabilityLifecycleMutationStore lifecycleStore)
+    public CapabilityLifecycleCatalogStore(ICapabilityCatalogStore catalogStore, ICapabilityLifecycleMutationStore lifecycleStore, ICapabilityAuthorityTransaction authorityTransaction)
     {
         ArgumentNullException.ThrowIfNull(catalogStore);
         ArgumentNullException.ThrowIfNull(lifecycleStore);
+        ArgumentNullException.ThrowIfNull(authorityTransaction);
         _catalogStore = catalogStore;
         _lifecycleStore = lifecycleStore;
+        _authorityTransaction = authorityTransaction;
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityCatalogReadResult> ReadAsync(string? startAfterId, int maximumCount, CancellationToken cancellationToken = default)
+    public Task<CapabilityCatalogReadResult> ReadAsync(string? startAfterId, int maximumCount, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ReadUnderAuthorityAsync(startAfterId, maximumCount, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityCatalogReadResult> ReadUnderAuthorityAsync(string? startAfterId, int maximumCount, CancellationToken cancellationToken)
     {
         var read = await _catalogStore.ReadAsync(startAfterId, maximumCount, cancellationToken);
         if (read.Status != CapabilityCatalogReadStatus.Available || read.Page is null)
@@ -60,5 +65,5 @@ public sealed class CapabilityLifecycleCatalogStore : ICapabilityCatalogStore
     }
 
     /// <inheritdoc />
-    public Task<CapabilityCatalogMutationResult> MutateAsync(CapabilityCatalogMutation mutation, CancellationToken cancellationToken = default) => _catalogStore.MutateAsync(mutation, cancellationToken);
+    public Task<CapabilityCatalogMutationResult> MutateAsync(CapabilityCatalogMutation mutation, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => _catalogStore.MutateAsync(mutation, transactionCancellationToken), cancellationToken);
 }

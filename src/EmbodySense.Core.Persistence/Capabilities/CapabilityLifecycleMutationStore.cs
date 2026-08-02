@@ -29,9 +29,10 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
     private readonly ICapabilityLifecycleArtifactEvidenceSource? _artifactEvidenceSource;
     private readonly CapabilityCatalogPathGuard _guard;
     private readonly TimeProvider _timeProvider;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates a read-only lifecycle store bound to one workspace and server-owned trust provider.</summary>
-    public CapabilityLifecycleMutationStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
+    public CapabilityLifecycleMutationStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
@@ -39,10 +40,11 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
         _trustProvider = trustProvider;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _guard = new CapabilityCatalogPathGuard(paths.CapabilityCatalogPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
     }
 
     /// <summary>Creates a mutable lifecycle store bound to current baseline and immutable artifact proof sources.</summary>
-    public CapabilityLifecycleMutationStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, ICapabilityLifecycleBaselineSource baselineSource, ICapabilityLifecycleArtifactEvidenceSource artifactEvidenceSource, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
+    public CapabilityLifecycleMutationStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, ICapabilityLifecycleBaselineSource baselineSource, ICapabilityLifecycleArtifactEvidenceSource artifactEvidenceSource, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
@@ -54,10 +56,13 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
         _artifactEvidenceSource = artifactEvidenceSource;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _guard = new CapabilityCatalogPathGuard(paths.CapabilityCatalogPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityLifecycleReadResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default)
+    public Task<CapabilityLifecycleReadResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ReadCoreAsync(capabilityId, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecycleReadResult> ReadCoreAsync(CapabilityId capabilityId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(capabilityId);
         try
@@ -87,7 +92,9 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityLifecyclePreview> PreviewAsync(CapabilityLifecyclePreviewRequest request, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default)
+    public Task<CapabilityLifecyclePreview> PreviewAsync(CapabilityLifecyclePreviewRequest request, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => PreviewCoreAsync(request, baseline, dependents, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecyclePreview> PreviewCoreAsync(CapabilityLifecyclePreviewRequest request, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(dependents);
@@ -184,7 +191,9 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default)
+    public Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => MutateCoreAsync(preview, baseline, dependents, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecycleMutationResult> MutateCoreAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(preview);
         ArgumentNullException.ThrowIfNull(dependents);
@@ -279,7 +288,9 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedAsync(string operationId, CancellationToken cancellationToken = default)
+    public Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedAsync(string operationId, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => MarkOutcomeAuditedCoreAsync(operationId, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecycleAuditMarkStatus> MarkOutcomeAuditedCoreAsync(string operationId, CancellationToken cancellationToken)
     {
         if (!CapabilityArtifactManifestValidator.IsOperationId(operationId))
         {

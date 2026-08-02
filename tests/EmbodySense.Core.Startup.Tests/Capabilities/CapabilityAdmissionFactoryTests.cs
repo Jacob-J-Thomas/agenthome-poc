@@ -26,7 +26,8 @@ public sealed class CapabilityAdmissionFactoryTests
         var artifacts = new CapabilityArtifactStore(paths, artifactTrust, verifier);
         Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifacts.StageAsync(stage)).Status);
         Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifacts.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "activate-runtime-lifecycle"))).Status);
-        var baseline = await new CapabilityLifecycleBaselineSource(new CapabilityCatalogStore(paths, catalogTrust), new CapabilityArtifactStore(paths, artifactTrust, verifier)).ReadAsync(stage.Manifest.Descriptor.Id);
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var baseline = await new CapabilityLifecycleBaselineSource(new CapabilityCatalogStore(paths, catalogTrust, authorityTransaction: authority), new CapabilityArtifactStore(paths, artifactTrust, verifier, authorityTransaction: authority), authority).ReadAsync(stage.Manifest.Descriptor.Id);
         Assert.NotNull(baseline);
         var lifecycle = CapabilityLifecycleFactory.Create(paths, catalogTrust, artifactTrust, verifier, new AuditLog(paths));
         var admission = CapabilityAdmissionFactory.Create(paths, catalogTrust);

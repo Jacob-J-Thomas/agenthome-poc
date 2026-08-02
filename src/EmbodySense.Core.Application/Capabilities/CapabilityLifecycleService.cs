@@ -11,20 +11,23 @@ public sealed class CapabilityLifecycleService
     private readonly ICapabilityLifecycleBaselineSource _baselineSource;
     private readonly ICapabilityLifecycleMutationStore _store;
     private readonly IAuditLog _auditLog;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates the lifecycle orchestrator over explicit dependent, baseline, artifact, persistence, and audit ports.</summary>
     /// <remarks>Artifact proof is enforced by <paramref name="store"/> inside its authenticated operation lookup so persisted previews remain recoverable after artifact loss.</remarks>
-    public CapabilityLifecycleService(ICapabilityDependentIndex dependentIndex, ICapabilityLifecycleBaselineSource baselineSource, ICapabilityLifecycleArtifactEvidenceSource artifactEvidence, ICapabilityLifecycleMutationStore store, IAuditLog auditLog)
+    public CapabilityLifecycleService(ICapabilityDependentIndex dependentIndex, ICapabilityLifecycleBaselineSource baselineSource, ICapabilityLifecycleArtifactEvidenceSource artifactEvidence, ICapabilityLifecycleMutationStore store, IAuditLog auditLog, ICapabilityAuthorityTransaction authorityTransaction)
     {
         ArgumentNullException.ThrowIfNull(dependentIndex);
         ArgumentNullException.ThrowIfNull(baselineSource);
         ArgumentNullException.ThrowIfNull(artifactEvidence);
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(auditLog);
+        ArgumentNullException.ThrowIfNull(authorityTransaction);
         _dependentIndex = dependentIndex;
         _baselineSource = baselineSource;
         _store = store;
         _auditLog = auditLog;
+        _authorityTransaction = authorityTransaction;
     }
 
     /// <summary>Captures, persists, and audits one deterministic lifecycle impact preview.</summary>
@@ -40,9 +43,13 @@ public sealed class CapabilityLifecycleService
             await AppendAsync(AuditSchema.Actions.CapabilityLifecyclePreview, auditTarget, AuditSchema.Outcomes.Failed, request.OperationId, request.Kind, rejected, rejected.Detail);
             return rejected;
         }
-        var dependents = await _dependentIndex.CaptureAsync(cancellationToken);
-        var baseline = await _baselineSource.ReadAsync(capabilityId, cancellationToken);
-        var preview = await _store.PreviewAsync(request, baseline, dependents, cancellationToken);
+        var preview = await _authorityTransaction.ExecuteAsync(async transactionCancellationToken =>
+        {
+            var dependents = await _dependentIndex.CaptureAsync(transactionCancellationToken);
+            var baseline = await _baselineSource.ReadAsync(capabilityId, transactionCancellationToken);
+            dependents = await FinalizeDependentsAsync(dependents, transactionCancellationToken);
+            return await _store.PreviewAsync(request, baseline, dependents, transactionCancellationToken);
+        }, cancellationToken);
         var outcome = preview.Status is CapabilityLifecyclePreviewStatus.Ready or CapabilityLifecyclePreviewStatus.Replayed ? AuditSchema.Outcomes.Succeeded : preview.Status == CapabilityLifecyclePreviewStatus.Conflict ? AuditSchema.Outcomes.Conflict : AuditSchema.Outcomes.Failed;
         await AppendAsync(AuditSchema.Actions.CapabilityLifecyclePreview, auditTarget, outcome, request.OperationId, request.Kind, preview, preview.Detail);
         return preview;
@@ -53,9 +60,13 @@ public sealed class CapabilityLifecycleService
     {
         ArgumentNullException.ThrowIfNull(preview);
         var auditTarget = preview.CapabilityId?.Value ?? "invalid";
-        var dependents = await _dependentIndex.CaptureAsync(cancellationToken);
-        var baseline = preview.CapabilityId is null ? null : await _baselineSource.ReadAsync(preview.CapabilityId, cancellationToken);
-        var result = await _store.MutateAsync(preview, baseline, dependents, cancellationToken);
+        var result = await _authorityTransaction.ExecuteAsync(async transactionCancellationToken =>
+        {
+            var dependents = await _dependentIndex.CaptureAsync(transactionCancellationToken);
+            var baseline = preview.CapabilityId is null ? null : await _baselineSource.ReadAsync(preview.CapabilityId, transactionCancellationToken);
+            dependents = await FinalizeDependentsAsync(dependents, transactionCancellationToken);
+            return await _store.MutateAsync(preview, baseline, dependents, transactionCancellationToken);
+        }, cancellationToken);
         var terminalStatus = result.ReplayedOutcome ?? (result.Status == CapabilityLifecycleMutationStatus.Replayed ? CapabilityLifecycleMutationStatus.Applied : result.Status);
         var action = preview.Kind == CapabilityLifecycleOperationKind.Rollback ? AuditSchema.Actions.CapabilityLifecycleRollback : terminalStatus == CapabilityLifecycleMutationStatus.Conflict ? AuditSchema.Actions.CapabilityLifecycleConflict : AuditSchema.Actions.CapabilityLifecycleMutation;
         var outcome = terminalStatus == CapabilityLifecycleMutationStatus.Applied ? AuditSchema.Outcomes.Succeeded : terminalStatus == CapabilityLifecycleMutationStatus.Conflict ? AuditSchema.Outcomes.Conflict : terminalStatus == CapabilityLifecycleMutationStatus.Blocked ? AuditSchema.Outcomes.Denied : AuditSchema.Outcomes.Failed;
@@ -70,6 +81,19 @@ public sealed class CapabilityLifecycleService
             }
         }
         return result;
+    }
+
+    private async Task<CapabilityDependentIndexSnapshot> FinalizeDependentsAsync(CapabilityDependentIndexSnapshot initial, CancellationToken cancellationToken)
+    {
+        if (initial.Status != CapabilityDependentIndexStatus.Available)
+        {
+            return initial;
+        }
+
+        var finalized = await _dependentIndex.CaptureAsync(cancellationToken);
+        return finalized.Status == CapabilityDependentIndexStatus.Available && string.Equals(initial.Hash, finalized.Hash, StringComparison.Ordinal)
+            ? finalized
+            : new CapabilityDependentIndexSnapshot(CapabilityDependentIndexStatus.Unavailable, string.Empty, [], "The registered dependent set changed or became unavailable during capability authority finalization.");
     }
 
     private Task AppendAsync(string action, string target, string outcome, string operationId, CapabilityLifecycleOperationKind kind, CapabilityLifecyclePreview? preview, string detail)

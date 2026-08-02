@@ -11,18 +11,23 @@ public sealed class CapabilityLifecycleBaselineSource : ICapabilityLifecycleBase
     private const int PageSize = CapabilityCatalogLimits.MaximumPageSize;
     private readonly ICapabilityCatalogStore _catalogStore;
     private readonly ICapabilityArtifactStore _artifactStore;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates a baseline adapter over existing proved domain stores.</summary>
-    public CapabilityLifecycleBaselineSource(ICapabilityCatalogStore catalogStore, ICapabilityArtifactStore artifactStore)
+    public CapabilityLifecycleBaselineSource(ICapabilityCatalogStore catalogStore, ICapabilityArtifactStore artifactStore, ICapabilityAuthorityTransaction authorityTransaction)
     {
         ArgumentNullException.ThrowIfNull(catalogStore);
         ArgumentNullException.ThrowIfNull(artifactStore);
+        ArgumentNullException.ThrowIfNull(authorityTransaction);
         _catalogStore = catalogStore;
         _artifactStore = artifactStore;
+        _authorityTransaction = authorityTransaction;
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityLifecycleBaseline?> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default)
+    public Task<CapabilityLifecycleBaseline?> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ReadCoreAsync(capabilityId, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecycleBaseline?> ReadCoreAsync(CapabilityId capabilityId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(capabilityId);
         string? cursor = null;

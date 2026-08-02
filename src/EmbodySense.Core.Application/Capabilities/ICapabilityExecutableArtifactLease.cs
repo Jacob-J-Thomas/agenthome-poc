@@ -21,4 +21,9 @@ public interface ICapabilityExecutableArtifactLease : IAsyncDisposable
 
     /// <summary>Gets the exact proved activation revision bound to this lease.</summary>
     long ActivationRevision { get; }
+
+    /// <summary>Revalidates current lifecycle authority and retains its transaction fence through process launch.</summary>
+    /// <param name="cancellationToken">The cancellation token used while acquiring and validating launch authority.</param>
+    /// <returns>A launch fence when the exact artifact remains enabled and current; otherwise <see langword="null"/>.</returns>
+    Task<ICapabilityExecutableLaunchFence?> AcquireLaunchFenceAsync(CancellationToken cancellationToken = default);
 }

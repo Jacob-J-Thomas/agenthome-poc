@@ -19,7 +19,7 @@ public sealed class CapabilityLifecycleCatalogStoreTests
         var replacement = manifest.Descriptor with { Version = CapabilityArtifactTestData.Version("2.0.0") };
         lifecycle.ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, new CapabilityLifecycleState(replacement, manifest.Checksum, false, true, 9, "remove-v2", DateTimeOffset.Parse("2026-08-01T13:00:00Z")), [], [], 9, "current");
 
-        var read = await new CapabilityLifecycleCatalogStore(catalog, lifecycle).ReadAsync(null, 100);
+        var read = await new CapabilityLifecycleCatalogStore(catalog, lifecycle, new StubCapabilityAuthorityTransaction()).ReadAsync(null, 100);
         var projected = Assert.Single(read.Page!.Entries);
 
         Assert.Equal(CapabilityCatalogReadStatus.Available, read.Status);
@@ -39,7 +39,7 @@ public sealed class CapabilityLifecycleCatalogStoreTests
         var entry = new CapabilityCatalogEntry(manifest.Descriptor, new CapabilityLifecycleSnapshot(1, identity!, CapabilityDeclarationState.Declared, CapabilityInstallationState.Installed, CapabilityEnablementState.Enabled, CapabilityHealthState.Healthy, CapabilityRetirementState.Active, CapabilityTrustState.Verified), 5, DateTimeOffset.Parse("2026-08-01T12:00:00Z"), "enabled");
         var catalog = new RecordingCapabilityCatalogStore { ReadResult = new CapabilityCatalogReadResult(CapabilityCatalogReadStatus.Available, new CapabilityCatalogPage(7, [entry], null), "available") };
         var lifecycle = new StubCapabilityLifecycleMutationStore { ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.RecoveredLastProved, null, [], [], 0, "recovered") };
-        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle);
+        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle, new StubCapabilityAuthorityTransaction());
 
         Assert.Equal(CapabilityCatalogReadStatus.Unavailable, (await projection.ReadAsync(null, 100)).Status);
         lifecycle.ReadResult = new CapabilityLifecycleReadResult(CapabilityLifecycleReadStatus.Available, null, [], [], 1, "incomplete");
@@ -54,12 +54,14 @@ public sealed class CapabilityLifecycleCatalogStoreTests
         var entry = new CapabilityCatalogEntry(manifest.Descriptor, new CapabilityLifecycleSnapshot(1, identity!, CapabilityDeclarationState.Declared, CapabilityInstallationState.Installed, CapabilityEnablementState.Enabled, CapabilityHealthState.Healthy, CapabilityRetirementState.Active, CapabilityTrustState.Verified), 5, DateTimeOffset.Parse("2026-08-01T12:00:00Z"), "enabled");
         var catalog = new RecordingCapabilityCatalogStore { ReadResult = new CapabilityCatalogReadResult(CapabilityCatalogReadStatus.Available, new CapabilityCatalogPage(7, [entry], null), "available") };
         var lifecycle = new StubCapabilityLifecycleMutationStore();
-        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle);
+        var authority = new StubCapabilityAuthorityTransaction();
+        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle, authority);
         var mutation = new CapabilityCatalogMutation(CapabilityCatalogMutationKind.Disable, "delegated-mutation", 7, manifest.Descriptor.Id, null);
 
         Assert.Same(entry, Assert.Single((await projection.ReadAsync(null, 100)).Page!.Entries));
         Assert.Equal(CapabilityCatalogMutationStatus.Applied, (await projection.MutateAsync(mutation)).Status);
         Assert.Same(mutation, Assert.Single(catalog.Mutations));
+        Assert.Equal(2, authority.Executions);
     }
 
     [Fact]
@@ -67,10 +69,12 @@ public sealed class CapabilityLifecycleCatalogStoreTests
     {
         var catalog = new RecordingCapabilityCatalogStore { ReadResult = new CapabilityCatalogReadResult(CapabilityCatalogReadStatus.Unavailable, null, "unavailable") };
         var lifecycle = new StubCapabilityLifecycleMutationStore();
-        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle);
+        var authority = new StubCapabilityAuthorityTransaction();
+        var projection = new CapabilityLifecycleCatalogStore(catalog, lifecycle, authority);
 
         Assert.Equal(CapabilityCatalogReadStatus.Unavailable, (await projection.ReadAsync(null, 100)).Status);
-        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleCatalogStore(null!, lifecycle));
-        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleCatalogStore(catalog, null!));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleCatalogStore(null!, lifecycle, authority));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleCatalogStore(catalog, null!, authority));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleCatalogStore(catalog, lifecycle, null!));
     }
 }

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.Models;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -8,6 +9,7 @@ using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
@@ -38,18 +40,21 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopArtifactPathGuard _pathGuard;
     private readonly SemaphoreSlim _mutationGate;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopDefinitionStore"/> type.
     /// </summary>
     /// <param name="paths">The paths.</param>
-    public CustomLoopDefinitionStore(WorkspacePaths paths)
+    /// <param name="authorityTransaction">The optional shared workspace capability-authority transaction.</param>
+    public CustomLoopDefinitionStore(WorkspacePaths paths, ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
         _paths = paths;
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
         _mutationGate = _mutationGates.GetOrAdd(Path.GetFullPath(paths.CustomLoopDefinitionsPath), _ => new SemaphoreSlim(1, 1));
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
     }
 
     /// <summary>
@@ -96,7 +101,9 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     /// A result describing creation, replay, operation/version/tombstone conflict, or workspace capacity exhaustion. A
     /// matching interrupted receipt or orphaned committed definition is recovered under the workspace mutation lock.
     /// </returns>
-    public async Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default)
+    public Task<CustomLoopDefinitionStoreResult> CreateAsync(CustomLoopDefinition definition, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => CreateCoreAsync(definition, mutation, transactionCancellationToken), cancellationToken);
+
+    private async Task<CustomLoopDefinitionStoreResult> CreateCoreAsync(CustomLoopDefinition definition, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken)
     {
         ValidateCanonicalDefinition(definition);
         if (definition.DefinitionVersion != 1)
@@ -338,7 +345,9 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     /// <param name="expectedDefinitionVersion">The currently expected durable definition version.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A result describing update, absence, version conflict, tombstone conflict, or capacity failure.</returns>
-    public async Task<CustomLoopDefinitionStoreResult> UpdateAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CancellationToken cancellationToken = default)
+    public Task<CustomLoopDefinitionStoreResult> UpdateAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => UpdateCoreAsync(definition, expectedDefinitionVersion, transactionCancellationToken), cancellationToken);
+
+    private async Task<CustomLoopDefinitionStoreResult> UpdateCoreAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CancellationToken cancellationToken)
     {
         ValidateCanonicalDefinition(definition);
         ValidateExpectedVersion(expectedDefinitionVersion);
@@ -369,7 +378,9 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     /// <param name="mutation">The canonical request binding, prior snapshot, and planned replacement used for replay recovery.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A result describing update, replay, operation/version/tombstone conflict, absence, or capacity failure.</returns>
-    public async Task<CustomLoopDefinitionStoreResult> UpdateAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default)
+    public Task<CustomLoopDefinitionStoreResult> UpdateAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => UpdateCoreAsync(definition, expectedDefinitionVersion, mutation, transactionCancellationToken), cancellationToken);
+
+    private async Task<CustomLoopDefinitionStoreResult> UpdateCoreAsync(CustomLoopDefinition definition, int expectedDefinitionVersion, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken)
     {
         ValidateCanonicalDefinition(definition);
         ValidateExpectedVersion(expectedDefinitionVersion);
@@ -427,12 +438,14 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     /// <param name="deletedAtUtc">The non-default UTC deletion timestamp.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A result describing deletion, idempotent prior deletion, absence, version conflict, or tombstone conflict.</returns>
-    public async Task<CustomLoopDefinitionStoreResult> DeleteAsync(
+    public Task<CustomLoopDefinitionStoreResult> DeleteAsync(string loopId, int expectedDefinitionVersion, string mutationOperationId, DateTimeOffset deletedAtUtc, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => DeleteCoreAsync(loopId, expectedDefinitionVersion, mutationOperationId, deletedAtUtc, transactionCancellationToken), cancellationToken);
+
+    private async Task<CustomLoopDefinitionStoreResult> DeleteCoreAsync(
         string loopId,
         int expectedDefinitionVersion,
         string mutationOperationId,
         DateTimeOffset deletedAtUtc,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken)
     {
         var safeLoopId = CustomLoopArtifactIdentifier.Require(loopId, nameof(loopId));
         ValidateExpectedVersion(expectedDefinitionVersion);
@@ -494,13 +507,15 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     /// <param name="mutation">The canonical request binding and prior snapshot used for replay recovery.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A result describing deletion, replay, operation/version/tombstone conflict, or absence.</returns>
-    public async Task<CustomLoopDefinitionStoreResult> DeleteAsync(
+    public Task<CustomLoopDefinitionStoreResult> DeleteAsync(string loopId, int expectedDefinitionVersion, string mutationOperationId, DateTimeOffset deletedAtUtc, CustomLoopDefinitionMutationRequest mutation, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => DeleteCoreAsync(loopId, expectedDefinitionVersion, mutationOperationId, deletedAtUtc, mutation, transactionCancellationToken), cancellationToken);
+
+    private async Task<CustomLoopDefinitionStoreResult> DeleteCoreAsync(
         string loopId,
         int expectedDefinitionVersion,
         string mutationOperationId,
         DateTimeOffset deletedAtUtc,
         CustomLoopDefinitionMutationRequest mutation,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken)
     {
         var safeLoopId = CustomLoopArtifactIdentifier.Require(loopId, nameof(loopId));
         ValidateExpectedVersion(expectedDefinitionVersion);

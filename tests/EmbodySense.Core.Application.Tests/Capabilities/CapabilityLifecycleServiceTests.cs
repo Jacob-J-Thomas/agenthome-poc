@@ -17,7 +17,7 @@ public sealed class CapabilityLifecycleServiceTests
         var preview = Preview(manifest, CapabilityLifecyclePreviewStatus.Ready, CapabilityLifecycleOperationKind.Upgrade);
         var store = new StubCapabilityLifecycleMutationStore { PreviewResult = preview };
         var audit = new RecordingCapabilityAuditLog();
-        var service = new CapabilityLifecycleService(index, baselineSource, new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit);
+        var service = new CapabilityLifecycleService(index, baselineSource, new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit, new StubCapabilityAuthorityTransaction());
         var request = new CapabilityLifecyclePreviewRequest(preview.OperationId, preview.Kind, manifest.Descriptor.Id, manifest.Descriptor, manifest.Checksum);
 
         var result = await service.PreviewAsync(request);
@@ -45,7 +45,7 @@ public sealed class CapabilityLifecycleServiceTests
         var baseline = new CapabilityLifecycleBaseline(state, 4, 2);
         var baselineSource = new StubCapabilityLifecycleBaselineSource { Baseline = baseline };
         var audit = new RecordingCapabilityAuditLog();
-        var service = new CapabilityLifecycleService(index, baselineSource, new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit);
+        var service = new CapabilityLifecycleService(index, baselineSource, new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit, new StubCapabilityAuthorityTransaction());
 
         var result = await service.MutateAsync(preview);
 
@@ -53,7 +53,7 @@ public sealed class CapabilityLifecycleServiceTests
         Assert.Same(preview, store.MutatedPreview);
         Assert.Same(baseline, store.MutatedBaseline);
         Assert.Equal(manifest.Descriptor.Id, baselineSource.LastCapabilityId);
-        Assert.Equal(1, index.CaptureCount);
+        Assert.Equal(2, index.CaptureCount);
         Assert.Equal([expectedAction, AuditSchema.Actions.CapabilityLifecycleFinal], audit.Events.Select(item => item.Action));
         Assert.All(audit.Events, item => Assert.Equal(expectedOutcome, item.Outcome));
         Assert.Equal(1, store.AuditMarks);
@@ -73,7 +73,7 @@ public sealed class CapabilityLifecycleServiceTests
         var index = new StubCapabilityDependentIndex { Snapshot = new CapabilityDependentIndexSnapshot(CapabilityDependentIndexStatus.Unavailable, string.Empty, [], "unavailable") };
         var store = new StubCapabilityLifecycleMutationStore { PreviewResult = recoveredPreview, MutationResult = new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Replayed, null, 4, true, "terminal replay", CapabilityLifecycleMutationStatus.Applied) };
         var audit = new RecordingCapabilityAuditLog();
-        var service = new CapabilityLifecycleService(index, new StubCapabilityLifecycleBaselineSource(), evidence, store, audit);
+        var service = new CapabilityLifecycleService(index, new StubCapabilityLifecycleBaselineSource(), evidence, store, audit, new StubCapabilityAuthorityTransaction());
 
         var recovered = await service.PreviewAsync(request);
         var result = await service.MutateAsync(recovered);
@@ -99,7 +99,7 @@ public sealed class CapabilityLifecycleServiceTests
         var store = new StubCapabilityLifecycleMutationStore { MutationResult = new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Replayed, null, 5, false, "replayed") };
         var audit = new RecordingCapabilityAuditLog();
 
-        var result = await new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit).MutateAsync(preview);
+        var result = await new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit, new StubCapabilityAuthorityTransaction()).MutateAsync(preview);
 
         Assert.Equal(CapabilityLifecycleMutationStatus.Replayed, result.Status);
         Assert.Single(audit.Events);
@@ -116,10 +116,10 @@ public sealed class CapabilityLifecycleServiceTests
         var audit = new RecordingCapabilityAuditLog();
         var request = new CapabilityLifecyclePreviewRequest("unproved-upgrade", CapabilityLifecycleOperationKind.Upgrade, manifest.Descriptor.Id, manifest.Descriptor, manifest.Checksum);
 
-        var result = await new CapabilityLifecycleService(index, new StubCapabilityLifecycleBaselineSource(), evidence, store, audit).PreviewAsync(request);
+        var result = await new CapabilityLifecycleService(index, new StubCapabilityLifecycleBaselineSource(), evidence, store, audit, new StubCapabilityAuthorityTransaction()).PreviewAsync(request);
 
         Assert.Equal(CapabilityLifecyclePreviewStatus.NotFound, result.Status);
-        Assert.Equal(1, index.CaptureCount);
+        Assert.Equal(2, index.CaptureCount);
         Assert.Same(request, store.PreviewRequest);
         Assert.Null(evidence.Descriptor);
         Assert.Equal([AuditSchema.Actions.CapabilityLifecycleIntent, AuditSchema.Actions.CapabilityLifecyclePreview], audit.Events.Select(item => item.Action));
@@ -136,7 +136,7 @@ public sealed class CapabilityLifecycleServiceTests
         var store = new StubCapabilityLifecycleMutationStore { MutationResult = new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Replayed, null, 5, true, "replayed", terminalStatus) };
         var audit = new RecordingCapabilityAuditLog();
 
-        var result = await new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit).MutateAsync(preview);
+        var result = await new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit, new StubCapabilityAuthorityTransaction()).MutateAsync(preview);
 
         Assert.Equal(CapabilityLifecycleMutationStatus.Replayed, result.Status);
         Assert.Equal(terminalStatus, result.ReplayedOutcome);
@@ -157,7 +157,7 @@ public sealed class CapabilityLifecycleServiceTests
             AuditMarkResult = CapabilityLifecycleAuditMarkStatus.Unavailable,
         };
 
-        var result = await new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, new RecordingCapabilityAuditLog()).MutateAsync(preview);
+        var result = await new CapabilityLifecycleService(new StubCapabilityDependentIndex(), new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, new RecordingCapabilityAuditLog(), new StubCapabilityAuthorityTransaction()).MutateAsync(preview);
 
         Assert.True(result.OutcomeAuditPending);
         Assert.Equal(1, store.AuditMarks);
@@ -172,7 +172,7 @@ public sealed class CapabilityLifecycleServiceTests
         var audit = new RecordingCapabilityAuditLog();
         var request = new CapabilityLifecyclePreviewRequest("invalid-capability", CapabilityLifecycleOperationKind.Disable, null!);
 
-        var result = await new CapabilityLifecycleService(index, baseline, new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit).PreviewAsync(request);
+        var result = await new CapabilityLifecycleService(index, baseline, new StubCapabilityLifecycleArtifactEvidenceSource(), store, audit, new StubCapabilityAuthorityTransaction()).PreviewAsync(request);
 
         Assert.Equal(CapabilityLifecyclePreviewStatus.Invalid, result.Status);
         Assert.Equal(0, index.CaptureCount);
@@ -190,11 +190,35 @@ public sealed class CapabilityLifecycleServiceTests
         var store = new StubCapabilityLifecycleMutationStore();
         var audit = new RecordingCapabilityAuditLog();
         var artifact = new StubCapabilityLifecycleArtifactEvidenceSource();
-        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(null!, baseline, artifact, store, audit));
-        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, null!, artifact, store, audit));
-        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, baseline, null!, store, audit));
-        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, baseline, artifact, null!, audit));
-        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, baseline, artifact, store, null!));
+        var authority = new StubCapabilityAuthorityTransaction();
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(null!, baseline, artifact, store, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, null!, artifact, store, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, baseline, null!, store, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, baseline, artifact, null!, audit, authority));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, baseline, artifact, store, null!, authority));
+        Assert.Throws<ArgumentNullException>(() => new CapabilityLifecycleService(index, baseline, artifact, store, audit, null!));
+    }
+
+    [Fact]
+    public async Task Dependent_change_during_baseline_proof_is_finalized_as_unavailable()
+    {
+        var manifest = CapabilityArtifactTestData.Manifest();
+        var initial = new CapabilityDependentIndexSnapshot(CapabilityDependentIndexStatus.Available, manifest.Checksum.Value, [], "initial");
+        var changed = initial with { Hash = CapabilityArtifactTestData.Manifest(content: "changed"u8.ToArray()).Checksum.Value, Detail = "changed" };
+        var index = new StubCapabilityDependentIndex();
+        index.Snapshots.Enqueue(initial);
+        index.Snapshots.Enqueue(changed);
+        var expected = Preview(manifest, CapabilityLifecyclePreviewStatus.Unavailable, CapabilityLifecycleOperationKind.Disable);
+        var store = new StubCapabilityLifecycleMutationStore { PreviewResult = expected };
+        var service = new CapabilityLifecycleService(index, new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource(), store, new RecordingCapabilityAuditLog(), new StubCapabilityAuthorityTransaction());
+
+        var result = await service.PreviewAsync(new CapabilityLifecyclePreviewRequest("sidecar-changed", CapabilityLifecycleOperationKind.Disable, manifest.Descriptor.Id));
+
+        Assert.Same(expected, result);
+        Assert.Equal(2, index.CaptureCount);
+        Assert.Equal(CapabilityDependentIndexStatus.Unavailable, store.PreviewDependents!.Status);
+        Assert.Empty(store.PreviewDependents.Dependents);
+        Assert.Contains("changed", store.PreviewDependents.Detail, StringComparison.Ordinal);
     }
 
     private static CapabilityLifecyclePreview Preview(CapabilityArtifactManifest manifest, CapabilityLifecyclePreviewStatus status, CapabilityLifecycleOperationKind kind) => new(status, "sha256:workspace", "lifecycle-operation", kind, manifest.Descriptor.Id, 3, 2, manifest.Checksum.Value, manifest.Checksum.Value, [], "preview", 4, 2, kind is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? manifest.Descriptor : null, kind is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? manifest.Checksum : null);

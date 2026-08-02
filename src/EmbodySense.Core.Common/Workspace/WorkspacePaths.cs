@@ -248,6 +248,9 @@ public sealed class WorkspacePaths
     /// <summary>Gets the governed capability catalog directory.</summary>
     public string CapabilityCatalogPath => Path.Combine(AgentPath, "capabilities");
 
+    /// <summary>Gets the workspace-wide capability authority transaction lock.</summary>
+    public string CapabilityAuthorityLockPath => Path.Combine(RootPath, ".embodysense-capability-authority.lock");
+
     /// <summary>Gets the canonical capability catalog artifact path.</summary>
     public string CapabilityCatalogDocumentPath => Path.Combine(CapabilityCatalogPath, "catalog.json");
 

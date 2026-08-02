@@ -26,9 +26,10 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     private readonly ICapabilityArtifactStateTrustProvider _trustProvider;
     private readonly ICapabilityArtifactTrustVerifier _artifactTrustVerifier;
     private readonly ICapabilityLifecycleMutationStore? _lifecycleStore;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates a workspace-local artifact store.</summary>
-    public CapabilityArtifactStore(WorkspacePaths paths, ICapabilityArtifactStateTrustProvider trustProvider, ICapabilityArtifactTrustVerifier artifactTrustVerifier, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityLifecycleMutationStore? lifecycleStore = null)
+    public CapabilityArtifactStore(WorkspacePaths paths, ICapabilityArtifactStateTrustProvider trustProvider, ICapabilityArtifactTrustVerifier artifactTrustVerifier, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityLifecycleMutationStore? lifecycleStore = null, ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
@@ -37,12 +38,15 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
         _trustProvider = trustProvider;
         _artifactTrustVerifier = artifactTrustVerifier;
         _lifecycleStore = lifecycleStore;
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
         _timeProvider = timeProvider ?? TimeProvider.System;
         _guard = new CapabilityCatalogPathGuard(paths.CapabilityCatalogPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityArtifactStoreResult> StageAsync(CapabilityArtifactStageRequest request, CancellationToken cancellationToken = default)
+    public Task<CapabilityArtifactStoreResult> StageAsync(CapabilityArtifactStageRequest request, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => StageCoreAsync(request, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityArtifactStoreResult> StageCoreAsync(CapabilityArtifactStageRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (!CapabilityArtifactManifestValidator.Validate(request.Manifest).IsValid)
@@ -107,7 +111,9 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityArtifactStoreResult> ActivateAsync(CapabilityArtifactActivationRequest request, CancellationToken cancellationToken = default)
+    public Task<CapabilityArtifactStoreResult> ActivateAsync(CapabilityArtifactActivationRequest request, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ActivateCoreAsync(request, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityArtifactStoreResult> ActivateCoreAsync(CapabilityArtifactActivationRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         if (!CapabilityArtifactManifestValidator.Validate(request.Manifest).IsValid || !CapabilityArtifactManifestValidator.IsOperationId(request.OperationId) || request.ExpectedRevision < 0)
@@ -182,7 +188,9 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityArtifactStoreResult> RollbackAsync(CapabilityId capabilityId, long expectedRevision, string operationId, CancellationToken cancellationToken = default)
+    public Task<CapabilityArtifactStoreResult> RollbackAsync(CapabilityId capabilityId, long expectedRevision, string operationId, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => RollbackCoreAsync(capabilityId, expectedRevision, operationId, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityArtifactStoreResult> RollbackCoreAsync(CapabilityId capabilityId, long expectedRevision, string operationId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(capabilityId);
         if (expectedRevision < 0 || !CapabilityArtifactManifestValidator.IsOperationId(operationId))
@@ -250,7 +258,9 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityArtifactStoreResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default)
+    public Task<CapabilityArtifactStoreResult> ReadAsync(CapabilityId capabilityId, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ReadCoreAsync(capabilityId, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityArtifactStoreResult> ReadCoreAsync(CapabilityId capabilityId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(capabilityId);
         if (_lifecycleStore is not null)
@@ -294,7 +304,9 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<CapabilityPackageDependencyDiscovery>> DiscoverAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<CapabilityPackageDependencyDiscovery>> DiscoverAsync(CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(DiscoverCoreAsync, cancellationToken);
+
+    private async Task<IReadOnlyList<CapabilityPackageDependencyDiscovery>> DiscoverCoreAsync(CancellationToken cancellationToken)
     {
         await using var fileSystem = await AcquireAsync(createRoot: false, cancellationToken);
         var state = await LoadProvedForMutationAsync(fileSystem, cancellationToken) ?? throw new IOException("Activated package dependencies require one proved activation state.");
@@ -340,7 +352,9 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityLifecycleArtifactEvidence> VerifyAsync(CapabilityDescriptor descriptor, CapabilityIntegrityDigest artifactDigest, CancellationToken cancellationToken = default)
+    public Task<CapabilityLifecycleArtifactEvidence> VerifyAsync(CapabilityDescriptor descriptor, CapabilityIntegrityDigest artifactDigest, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => VerifyCoreAsync(descriptor, artifactDigest, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecycleArtifactEvidence> VerifyCoreAsync(CapabilityDescriptor descriptor, CapabilityIntegrityDigest artifactDigest, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
         ArgumentNullException.ThrowIfNull(artifactDigest);
@@ -369,7 +383,9 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     /// <inheritdoc />
-    public async Task<CapabilityExecutableArtifactResolution> ResolveAsync(CapabilityExecutableInvocation invocation, CancellationToken cancellationToken = default)
+    public Task<CapabilityExecutableArtifactResolution> ResolveAsync(CapabilityExecutableInvocation invocation, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ResolveCoreAsync(invocation, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityExecutableArtifactResolution> ResolveCoreAsync(CapabilityExecutableInvocation invocation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(invocation);
         if (!CapabilityArtifactManifestValidator.Validate(invocation.Manifest).IsValid || invocation.ExpectedActivationRevision < 1)
@@ -428,7 +444,8 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
                     executable.Dispose();
                     return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Unavailable, null, "The retained executable identity does not match the proved artifact digest.");
                 }
-                var lease = new CapabilityExecutableArtifactLease(fileSystem, executable, root, executablePath, actualDigest, lifecycleState?.Revision ?? activationState!.Revision);
+                fileSystem.ReleaseLock();
+                var lease = new CapabilityExecutableArtifactLease(fileSystem, executable, root, executablePath, actualDigest, lifecycleState?.Revision ?? activationState!.Revision, _authorityTransaction, transactionCancellationToken => ValidateLaunchAsync(invocation, transactionCancellationToken));
                 fileSystem = null;
                 return new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Available, lease, "The current proved immutable artifact is retained for isolated execution.");
             }
@@ -457,6 +474,27 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
         session.PrepareDirectory(_paths.CapabilityArtifactsPath);
         session.PrepareDirectory(Path.Combine(_paths.CapabilityArtifactsPath, "staged"));
         return session;
+    }
+
+    private async Task<bool> ValidateLaunchAsync(CapabilityExecutableInvocation invocation, CancellationToken cancellationToken)
+    {
+        if (_lifecycleStore is not null)
+        {
+            var lifecycle = await _lifecycleStore.ReadAsync(invocation.Manifest.Descriptor.Id, cancellationToken);
+            if (lifecycle.Status is CapabilityLifecycleReadStatus.RecoveredLastProved or CapabilityLifecycleReadStatus.Unavailable || lifecycle.Status == CapabilityLifecycleReadStatus.Available && lifecycle.State is null)
+            {
+                return false;
+            }
+            if (lifecycle.State is { } state)
+            {
+                return state.IsEnabled && !state.IsRemoved && state.Revision == invocation.ExpectedActivationRevision && state.ArtifactDigest.FixedTimeEquals(invocation.Manifest.Checksum);
+            }
+        }
+
+        await using var fileSystem = await AcquireAsync(createRoot: false, cancellationToken);
+        var activationState = await LoadProvedForMutationAsync(fileSystem, cancellationToken);
+        var activation = activationState?.Entries.SingleOrDefault(entry => entry.CapabilityId == invocation.Manifest.Descriptor.Id.Value);
+        return activationState is not null && activation is not null && activationState.Revision == invocation.ExpectedActivationRevision && activation.ArtifactDigest == invocation.Manifest.Checksum.Value;
     }
 
     private async Task<CapabilityLifecycleReadResult?> ReadLifecycleBoundaryAsync(CapabilityId capabilityId, CancellationToken cancellationToken) => _lifecycleStore is null ? null : await _lifecycleStore.ReadAsync(capabilityId, cancellationToken);

@@ -32,15 +32,16 @@ public static class CapabilityLifecycleFactory
         ArgumentNullException.ThrowIfNull(artifactStateTrustProvider);
         ArgumentNullException.ThrowIfNull(artifactTrustVerifier);
         ArgumentNullException.ThrowIfNull(auditLog);
-        var catalog = new CapabilityCatalogStore(paths, catalogTrustProvider);
-        var baselineArtifacts = new CapabilityArtifactStore(paths, artifactStateTrustProvider, artifactTrustVerifier);
-        var baseline = new CapabilityLifecycleBaselineSource(catalog, baselineArtifacts);
-        var lifecycle = new CapabilityLifecycleMutationStore(paths, catalogTrustProvider, baseline, baselineArtifacts);
-        var artifacts = new CapabilityArtifactStore(paths, artifactStateTrustProvider, artifactTrustVerifier, lifecycleStore: lifecycle);
-        var loopSource = new LoopCapabilityDependentIndexSource(new LoopDefinitionStore(paths), new CustomLoopDefinitionStore(paths));
+        var authorityTransaction = new CapabilityAuthorityTransaction(paths);
+        var catalog = new CapabilityCatalogStore(paths, catalogTrustProvider, authorityTransaction: authorityTransaction);
+        var baselineArtifacts = new CapabilityArtifactStore(paths, artifactStateTrustProvider, artifactTrustVerifier, authorityTransaction: authorityTransaction);
+        var baseline = new CapabilityLifecycleBaselineSource(catalog, baselineArtifacts, authorityTransaction);
+        var lifecycle = new CapabilityLifecycleMutationStore(paths, catalogTrustProvider, baseline, baselineArtifacts, authorityTransaction: authorityTransaction);
+        var artifacts = new CapabilityArtifactStore(paths, artifactStateTrustProvider, artifactTrustVerifier, lifecycleStore: lifecycle, authorityTransaction: authorityTransaction);
+        var loopSource = new LoopCapabilityDependentIndexSource(new LoopDefinitionStore(paths, authorityTransaction), new CustomLoopDefinitionStore(paths, authorityTransaction));
         var skillSource = new SkillCapabilityDependentIndexSource(new LocalSkillDependencyManifestDiscovery(paths));
         var packageSource = new CapabilityPackageDependentIndexSource(artifacts);
         var index = new CapabilityDependentIndex([loopSource, skillSource, packageSource], roleSource, scheduleSource);
-        return new CapabilityLifecycleService(index, baseline, artifacts, lifecycle, auditLog);
+        return new CapabilityLifecycleService(index, baseline, artifacts, lifecycle, auditLog, authorityTransaction);
     }
 }

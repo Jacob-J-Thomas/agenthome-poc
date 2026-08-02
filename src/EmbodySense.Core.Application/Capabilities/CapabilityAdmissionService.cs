@@ -13,6 +13,7 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
     private readonly CapabilityVersion _hostContractVersion;
     private readonly CapabilityPlatform _hostPlatform;
     private readonly string _workspaceScopeId;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates a workspace-bound admission service for one exact current host contract and platform.</summary>
@@ -20,13 +21,15 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
     /// <param name="workspaceScopeId">The exact workspace scope identity.</param>
     /// <param name="hostContractVersion">The current EmbodySense capability-host contract version.</param>
     /// <param name="hostPlatform">The current exact operating-system and process-architecture tuple.</param>
+    /// <param name="authorityTransaction">The shared workspace authority fence spanning every catalog page and lifecycle overlay.</param>
     /// <param name="timeProvider">The optional trusted admission clock.</param>
-    public CapabilityAdmissionService(ICapabilityCatalogStore catalogStore, string workspaceScopeId, CapabilityVersion hostContractVersion, CapabilityPlatform hostPlatform, TimeProvider? timeProvider = null)
+    public CapabilityAdmissionService(ICapabilityCatalogStore catalogStore, string workspaceScopeId, CapabilityVersion hostContractVersion, CapabilityPlatform hostPlatform, ICapabilityAuthorityTransaction authorityTransaction, TimeProvider? timeProvider = null)
     {
         _catalogStore = catalogStore ?? throw new ArgumentNullException(nameof(catalogStore));
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceScopeId);
         ArgumentNullException.ThrowIfNull(hostContractVersion);
         ArgumentNullException.ThrowIfNull(hostPlatform);
+        ArgumentNullException.ThrowIfNull(authorityTransaction);
         if (hostPlatform.Equals(CapabilityPlatform.Any))
         {
             throw new ArgumentException("Capability admission requires one exact current host platform.", nameof(hostPlatform));
@@ -34,6 +37,7 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
         _workspaceScopeId = workspaceScopeId;
         _hostContractVersion = hostContractVersion;
         _hostPlatform = hostPlatform;
+        _authorityTransaction = authorityTransaction;
         _resolver = new CapabilityDependencyResolver(hostContractVersion, hostPlatform);
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -48,6 +52,11 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
             return Rejected("The loop capability requirement manifest is invalid.");
         }
 
+        return await _authorityTransaction.ExecuteAsync(transactionCancellationToken => AdmitUnderAuthorityAsync(requirements, requirementsHash!.Value, allowedCapabilityIds, transactionCancellationToken), cancellationToken);
+    }
+
+    private async Task<CapabilityAdmissionResult> AdmitUnderAuthorityAsync(CapabilityDependencyManifest requirements, string requirementsHash, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken)
+    {
         var catalog = await ReadCurrentCatalogAsync(cancellationToken);
         if (!catalog.IsAvailable)
         {
@@ -90,7 +99,7 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
             CapabilityAdmissionSnapshot.CurrentSchemaVersion,
             _workspaceScopeId,
             requirements,
-            requirementsHash!.Value,
+            requirementsHash,
             pins.OrderBy(item => item.DescriptorIdentity.Id.Value, StringComparer.Ordinal).ToArray(),
             evidence,
             _timeProvider.GetUtcNow().ToUniversalTime());
@@ -119,6 +128,11 @@ public sealed class CapabilityAdmissionService : ICapabilityAdmissionService
             return Invalid("Current loop or role authority is narrower than the immutable admitted capability pins.");
         }
 
+        return await _authorityTransaction.ExecuteAsync(transactionCancellationToken => RevalidateUnderAuthorityAsync(snapshot, allowedCapabilityIds, transactionCancellationToken), cancellationToken);
+    }
+
+    private async Task<CapabilityRevalidationResult> RevalidateUnderAuthorityAsync(CapabilityAdmissionSnapshot snapshot, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken)
+    {
         var catalog = await ReadCurrentCatalogAsync(cancellationToken);
         if (!catalog.IsAvailable)
         {
