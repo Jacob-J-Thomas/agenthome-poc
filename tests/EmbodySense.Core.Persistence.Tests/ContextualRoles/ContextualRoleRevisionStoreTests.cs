@@ -83,6 +83,32 @@ public sealed class ContextualRoleRevisionStoreTests
     }
 
     [Fact]
+    public async Task First_mutation_initializes_each_durable_artifact_stage()
+    {
+        using var workspace = new TestWorkspace();
+        var result = await new ContextualRoleRevisionStore(new WorkspacePaths(workspace.RootPath), "workspace-one")
+            .MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)));
+        var root = StoreRoot(workspace.RootPath);
+        var revisions = Path.Combine(root, "revisions");
+        var states = Path.Combine(root, "states");
+        var operations = Path.Combine(root, "operations");
+        var proofs = Path.Combine(root, "proofs");
+        var lockPath = Path.Combine(root, ".mutations.lock");
+        var anchor = Path.Combine(root, "workspace-anchor.json");
+        var intent = Path.Combine(operations, "create-reviewer.intent.json");
+        var revision = Path.Combine(revisions, "reviewer.1.json");
+        var state = Path.Combine(states, "reviewer.json");
+        var proof = Path.Combine(proofs, "create-reviewer.json");
+        var terminal = Path.Combine(operations, "create-reviewer.result.json");
+
+        Assert.True(
+            result.Status == ContextualRoleRevisionMutationStatus.Accepted,
+            $"status={result.Status}; root={Directory.Exists(root)}; revisions={Directory.Exists(revisions)}; states={Directory.Exists(states)}; operations={Directory.Exists(operations)}; proofs={Directory.Exists(proofs)}; lock={File.Exists(lockPath)}; anchor={File.Exists(anchor)}; intent={File.Exists(intent)}; revision={File.Exists(revision)}; state={File.Exists(state)}; proof={File.Exists(proof)}; terminal={File.Exists(terminal)}");
+        Assert.All([root, revisions, states, operations, proofs], path => Assert.True(Directory.Exists(path), path));
+        Assert.All([lockPath, anchor, intent, revision, state, proof, terminal], path => Assert.True(File.Exists(path), path));
+    }
+
+    [Fact]
     public async Task Replacement_preserves_history_and_stale_revision_conflict_as_immutable_evidence()
     {
         using var workspace = new TestWorkspace();
