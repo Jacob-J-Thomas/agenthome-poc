@@ -4,6 +4,26 @@ namespace EmbodySense.Core.Persistence.Triggers;
 /// <remarks>Implementations must not mutate queue artifacts. An exception after publication means the caller must retry the same identity to learn the durable outcome.</remarks>
 public interface ITriggerQueueDurabilityObserver
 {
+    /// <summary>Runs after exact native queue-directory authority is retained and before the lock file is opened or created.</summary>
+    /// <param name="queueRoot">The canonical queue-root path bound to retained native authority.</param>
+    void OnMutationDirectoryBound(string queueRoot);
+
+    /// <summary>Runs after the bounded directory shape is observed and before artifact content is reopened and authenticated.</summary>
+    /// <param name="queueRoot">The canonical queue-root path whose direct children were observed.</param>
+    void OnArtifactsObserved(string queueRoot);
+
+    /// <summary>Runs immediately before staging creation while exact queue-directory authority remains retained.</summary>
+    /// <param name="generation">The candidate ledger generation.</param>
+    /// <param name="precursorPath">The create-new precursor path.</param>
+    /// <param name="destinationPath">The immutable no-replace publication path.</param>
+    void OnStagingDirectoryBound(long generation, string precursorPath, string destinationPath);
+
+    /// <summary>Runs after an empty create-new precursor is opened in the retained directory and before its identity is named.</summary>
+    /// <param name="generation">The candidate ledger generation.</param>
+    /// <param name="precursorPath">The exact empty precursor path.</param>
+    /// <param name="destinationPath">The immutable no-replace publication path.</param>
+    void OnStagingPrecursorCreated(long generation, string precursorPath, string destinationPath);
+
     /// <summary>Runs after a complete temporary ledger has been flushed but before atomic publication.</summary>
     /// <param name="generation">The candidate ledger generation.</param>
     /// <param name="stagingPath">The exact create-new staging path.</param>

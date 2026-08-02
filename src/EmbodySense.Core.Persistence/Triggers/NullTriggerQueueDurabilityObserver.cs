@@ -11,6 +11,26 @@ internal sealed class NullTriggerQueueDurabilityObserver : ITriggerQueueDurabili
     }
 
     /// <inheritdoc />
+    public void OnMutationDirectoryBound(string queueRoot)
+    {
+    }
+
+    /// <inheritdoc />
+    public void OnArtifactsObserved(string queueRoot)
+    {
+    }
+
+    /// <inheritdoc />
+    public void OnStagingDirectoryBound(long generation, string precursorPath, string destinationPath)
+    {
+    }
+
+    /// <inheritdoc />
+    public void OnStagingPrecursorCreated(long generation, string precursorPath, string destinationPath)
+    {
+    }
+
+    /// <inheritdoc />
     public void OnStaged(long generation, string stagingPath, string destinationPath)
     {
     }

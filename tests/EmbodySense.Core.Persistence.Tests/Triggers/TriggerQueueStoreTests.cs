@@ -22,6 +22,7 @@ public sealed class TriggerQueueStoreTests
     private const string CrossProcessDeduplication = "EMBODYSENSE_TRIGGER_QUEUE_DEDUPLICATION";
     private const string CrossProcessLoop = "EMBODYSENSE_TRIGGER_QUEUE_LOOP";
     private const string CrossProcessCrashAfterStaged = "EMBODYSENSE_TRIGGER_QUEUE_CRASH_AFTER_STAGED";
+    private const string CrossProcessCrashAfterPrecursor = "EMBODYSENSE_TRIGGER_QUEUE_CRASH_AFTER_PRECURSOR";
 
     [Fact]
     public async Task Windows_staging_path_identity_check_allows_publication_and_prior_generation_cleanup()
@@ -44,6 +45,24 @@ public sealed class TriggerQueueStoreTests
         Assert.DoesNotContain(Directory.EnumerateFiles(QueueRoot(paths)), path => Path.GetFileName(path).StartsWith(".staged-", StringComparison.Ordinal)
             || Path.GetFileName(path).StartsWith(".discard-", StringComparison.Ordinal)
             || Path.GetFileName(path).StartsWith(".cleanup-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Queue_lock_reopens_across_store_instances_and_is_owner_only_on_unix()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+
+        var first = await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
+        var second = await new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(4));
+
+        Assert.Empty(first.Entries);
+        Assert.Empty(second.Entries);
+        if (!OperatingSystem.IsWindows())
+        {
+            var lockMode = File.GetUnixFileMode(Path.Combine(QueueRoot(paths), ".queue.lock"));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, lockMode);
+        }
     }
 
     [Fact]
@@ -402,9 +421,15 @@ public sealed class TriggerQueueStoreTests
             await Task.Delay(10);
         }
 
-        var observer = string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterStaged), "1", StringComparison.Ordinal)
-            ? new CallbackObserver(onStaged: (_, _, _) => Environment.FailFast("simulated process death after authenticated staging"))
-            : null;
+        ITriggerQueueDurabilityObserver? observer = null;
+        if (string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterStaged), "1", StringComparison.Ordinal))
+        {
+            observer = new CallbackObserver(onStaged: (_, _, _) => Environment.FailFast("simulated process death after authenticated staging"));
+        }
+        else if (string.Equals(Environment.GetEnvironmentVariable(CrossProcessCrashAfterPrecursor), "1", StringComparison.Ordinal))
+        {
+            observer = new CallbackObserver(onStagingPrecursorCreated: (_, _, _) => Environment.FailFast("simulated process death after empty staging precursor creation"));
+        }
         var store = new TriggerQueueStore(new WorkspacePaths(workspace), RaceQuota(), observer);
         var result = await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope(delivery, deduplication, loop)));
         await File.WriteAllTextAsync(output, result.Status.ToString());
@@ -757,6 +782,82 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Restart_preserves_a_bounded_empty_precursor_after_process_death_without_wedging_later_admission()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        var gate = Path.Combine(workspace.RootPath, "release-precursor-crashing-trigger-queue-host");
+        var ready = Path.Combine(workspace.RootPath, "precursor-crashing-trigger-queue-ready");
+        var output = Path.Combine(workspace.RootPath, "precursor-crashing-trigger-queue-result");
+        using var process = StartCrossProcessHost(workspace.RootPath, gate, ready, output, ("delivery-crash", "dedup-crash", "loop-crash"), crashAfterPrecursor: true);
+        await WaitForPathAsync(ready);
+        await File.WriteAllTextAsync(gate, "go");
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.NotEqual(0, process.ExitCode);
+        var precursor = Assert.Single(Directory.EnumerateFiles(root, ".ledger-*.tmp"));
+        Assert.Equal(0, new FileInfo(precursor).Length);
+
+        var restartedStore = new TriggerQueueStore(paths);
+        var restarted = await restartedStore.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
+        var admitted = await TriggerQueueTestData.Service(restartedStore).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope("delivery-after-precursor", "dedup-after-precursor", "loop-after-precursor")));
+
+        Assert.Empty(restarted.Entries);
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admitted.Status);
+        Assert.True(File.Exists(precursor));
+        Assert.Equal(0, new FileInfo(precursor).Length);
+    }
+
+    [Fact]
+    public async Task Precursor_boundary_write_failure_reclaims_only_the_exact_empty_file_and_does_not_wedge_retry()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var observer = new CallbackObserver(onStagingPrecursorCreated: (_, _, _) => throw new IOException("simulated precursor-boundary write failure"));
+
+        await Assert.ThrowsAsync<IOException>(() => TriggerQueueTestData.Service(new TriggerQueueStore(paths, observer: observer)).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope())));
+        var admitted = await TriggerQueueTestData.Service(new TriggerQueueStore(paths)).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope("delivery-retry", "dedup-retry", "loop-retry")));
+
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admitted.Status);
+        Assert.Empty(Directory.EnumerateFiles(QueueRoot(paths), ".ledger-*.tmp"));
+    }
+
+    [Fact]
+    public async Task Precursor_mutation_at_the_publication_boundary_fails_before_ledger_publication_and_preserves_the_substitute()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        Directory.CreateDirectory(root);
+        var precursor = Path.Combine(root, $".ledger-{1:D19}.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllBytesAsync(precursor, []);
+        var observer = new CallbackObserver(onPublishing: (_, _, _) => File.WriteAllText(precursor, "hostile precursor mutation"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => TriggerQueueTestData.Service(new TriggerQueueStore(paths, observer: observer)).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope())));
+
+        Assert.Equal("hostile precursor mutation", await File.ReadAllTextAsync(precursor));
+        Assert.Empty(Directory.EnumerateFiles(root, "ledger-*.json"));
+    }
+
+    [Fact]
+    public async Task Precursor_mutation_after_publication_prevents_a_success_response_and_preserves_the_substitute()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        Directory.CreateDirectory(root);
+        var precursor = Path.Combine(root, $".ledger-{1:D19}.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllBytesAsync(precursor, []);
+        var observer = new CallbackObserver(onPublished: (_, _) => File.WriteAllText(precursor, "late hostile precursor mutation"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => TriggerQueueTestData.Service(new TriggerQueueStore(paths, observer: observer)).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope())));
+
+        Assert.Equal("late hostile precursor mutation", await File.ReadAllTextAsync(precursor));
+        Assert.Single(Directory.EnumerateFiles(root, "ledger-*.json"));
+    }
+
+    [Fact]
     public async Task Authenticated_staging_name_with_a_different_identity_is_preserved_and_fails_closed()
     {
         using var workspace = new TestWorkspace();
@@ -1090,6 +1191,80 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Queue_root_replacement_at_lock_creation_boundary_cannot_mutate_the_replacement_target()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        var movedRoot = root + "-lock-authority";
+        Exception? replacementFailure = null;
+        var observer = new CallbackObserver(onMutationDirectoryBound: _ =>
+        {
+            try
+            {
+                Directory.Move(root, movedRoot);
+                Directory.CreateDirectory(root);
+                File.WriteAllText(Path.Combine(root, "replacement-sentinel"), "untouched");
+            }
+            catch (Exception exception)
+            {
+                replacementFailure = exception;
+            }
+        });
+
+        if (OperatingSystem.IsWindows())
+        {
+            var snapshot = await new TriggerQueueStore(paths, observer: observer).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3));
+            Assert.Empty(snapshot.Entries);
+            Assert.IsAssignableFrom<IOException>(replacementFailure);
+            Assert.False(Directory.Exists(movedRoot));
+            return;
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new TriggerQueueStore(paths, observer: observer).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
+        Assert.Null(replacementFailure);
+        Assert.Equal("untouched", await File.ReadAllTextAsync(Path.Combine(root, "replacement-sentinel")));
+        Assert.DoesNotContain(Directory.EnumerateFileSystemEntries(root), path => Path.GetFileName(path) == ".queue.lock");
+    }
+
+    [Fact]
+    public async Task Queue_root_replacement_at_staging_creation_boundary_cannot_redirect_the_write()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        var movedRoot = root + "-staging-authority";
+        Exception? replacementFailure = null;
+        var observer = new CallbackObserver(onStagingDirectoryBound: (_, _, _) =>
+        {
+            try
+            {
+                Directory.Move(root, movedRoot);
+                Directory.CreateDirectory(root);
+                File.WriteAllText(Path.Combine(root, "replacement-sentinel"), "untouched");
+            }
+            catch (Exception exception)
+            {
+                replacementFailure = exception;
+            }
+        });
+
+        if (OperatingSystem.IsWindows())
+        {
+            var admitted = await TriggerQueueTestData.Service(new TriggerQueueStore(paths, observer: observer)).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+            Assert.Equal(TriggerQueueAdmissionStatus.Queued, admitted.Status);
+            Assert.IsAssignableFrom<IOException>(replacementFailure);
+            Assert.False(Directory.Exists(movedRoot));
+            return;
+        }
+
+        await Assert.ThrowsAnyAsync<Exception>(() => TriggerQueueTestData.Service(new TriggerQueueStore(paths, observer: observer)).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope())));
+        Assert.Null(replacementFailure);
+        Assert.Equal("untouched", await File.ReadAllTextAsync(Path.Combine(root, "replacement-sentinel")));
+        Assert.Single(Directory.EnumerateFileSystemEntries(root));
+    }
+
+    [Fact]
     public async Task Unix_queue_root_creation_refuses_a_symlinked_missing_ancestor_without_mutating_its_target()
     {
         if (OperatingSystem.IsWindows())
@@ -1175,6 +1350,34 @@ public sealed class TriggerQueueStoreTests
         var lockPath = Path.Combine(QueueRoot(hardLinkPaths), ".queue.lock");
         Assert.Equal(0, Link(lockPath, Path.Combine(QueueRoot(hardLinkPaths), "linked-lock")));
         await Assert.ThrowsAsync<InvalidOperationException>(() => hardLinkStore.GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
+    }
+
+    [Fact]
+    public async Task Artifact_substitution_with_a_fifo_after_observation_fails_without_blocking_or_mutating_evidence()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new TriggerQueueStore(paths);
+        await TriggerQueueTestData.Service(store).AdmitAsync(TriggerQueueTestData.QueueRequest(TriggerQueueTestData.Envelope()));
+        var root = QueueRoot(paths);
+        var ledger = GenerationPath(root, 1);
+        var preserved = Path.Combine(workspace.RootPath, "preserved-ledger.json");
+        var original = await File.ReadAllBytesAsync(ledger);
+        var observer = new CallbackObserver(onArtifactsObserved: _ =>
+        {
+            File.Move(ledger, preserved);
+            Assert.Equal(0, MkFifo(ledger, Convert.ToUInt32("600", 8)));
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new TriggerQueueStore(paths, observer: observer).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3)));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(preserved));
+        Assert.True(File.Exists(ledger));
     }
 
     [Fact]
@@ -1286,7 +1489,7 @@ public sealed class TriggerQueueStoreTests
         }
     }
 
-    private static Process StartCrossProcessHost(string workspace, string gate, string ready, string output, (string Delivery, string Deduplication, string Loop) delivery, bool crashAfterStaged = false)
+    private static Process StartCrossProcessHost(string workspace, string gate, string ready, string output, (string Delivery, string Deduplication, string Loop) delivery, bool crashAfterStaged = false, bool crashAfterPrecursor = false)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -1312,6 +1515,11 @@ public sealed class TriggerQueueStoreTests
             startInfo.Environment[CrossProcessCrashAfterStaged] = "1";
         }
 
+        if (crashAfterPrecursor)
+        {
+            startInfo.Environment[CrossProcessCrashAfterPrecursor] = "1";
+        }
+
         return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process trigger queue test host did not start.");
     }
 
@@ -1321,8 +1529,27 @@ public sealed class TriggerQueueStoreTests
     [DllImport("libc", EntryPoint = "link", SetLastError = true)]
     private static extern int Link(string existingPath, string newPath);
 
-    private sealed class CallbackObserver(Action<long, string, string>? onStaged = null, Action<long, string, string>? onPublishing = null, Action<long, string, string>? onPublishingDirectoryBound = null, Action<long, string>? onPublished = null, Action<long, string, string>? onCleanupPrepared = null, Action<long, string>? onCleanupClaimed = null, Action<long, string>? onCleanupDeleting = null) : ITriggerQueueDurabilityObserver
+    private sealed class CallbackObserver(
+        Action<string>? onMutationDirectoryBound = null,
+        Action<string>? onArtifactsObserved = null,
+        Action<long, string, string>? onStagingDirectoryBound = null,
+        Action<long, string, string>? onStagingPrecursorCreated = null,
+        Action<long, string, string>? onStaged = null,
+        Action<long, string, string>? onPublishing = null,
+        Action<long, string, string>? onPublishingDirectoryBound = null,
+        Action<long, string>? onPublished = null,
+        Action<long, string, string>? onCleanupPrepared = null,
+        Action<long, string>? onCleanupClaimed = null,
+        Action<long, string>? onCleanupDeleting = null) : ITriggerQueueDurabilityObserver
     {
+        public void OnMutationDirectoryBound(string queueRoot) => onMutationDirectoryBound?.Invoke(queueRoot);
+
+        public void OnArtifactsObserved(string queueRoot) => onArtifactsObserved?.Invoke(queueRoot);
+
+        public void OnStagingDirectoryBound(long generation, string precursorPath, string destinationPath) => onStagingDirectoryBound?.Invoke(generation, precursorPath, destinationPath);
+
+        public void OnStagingPrecursorCreated(long generation, string precursorPath, string destinationPath) => onStagingPrecursorCreated?.Invoke(generation, precursorPath, destinationPath);
+
         public void OnStaged(long generation, string stagingPath, string destinationPath) => onStaged?.Invoke(generation, stagingPath, destinationPath);
 
         public void OnPublishing(long generation, string stagingPath, string destinationPath) => onPublishing?.Invoke(generation, stagingPath, destinationPath);

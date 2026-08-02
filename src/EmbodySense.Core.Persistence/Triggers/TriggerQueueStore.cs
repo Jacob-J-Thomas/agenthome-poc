@@ -46,7 +46,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            using var mutationLock = await _guard.AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false);
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
             var (ledger, identity) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
             var (swept, sweepChanged) = SweepExpired(ledger, request.RecordedAtUtc);
             var deliveryMatch = swept.Entries.SingleOrDefault(entry => entry.Envelope.DeliveryId.Equals(request.Envelope.DeliveryId));
@@ -188,7 +188,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
     {
         EnsureUtc(observedAtUtc, nameof(observedAtUtc));
         cancellationToken.ThrowIfCancellationRequested();
-        using var mutationLock = await _guard.AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false);
+        using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
         var (ledger, identity) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
         var (swept, changed) = SweepExpired(ledger, observedAtUtc);
         if (changed)
@@ -219,7 +219,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            using var mutationLock = await _guard.AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false);
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
             var (ledger, identity) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
             var (swept, sweepChanged) = SweepExpired(ledger, cancelledAtUtc);
             var existing = swept.Entries.SingleOrDefault(entry => entry.Envelope.DeliveryId.Equals(deliveryId));
@@ -260,7 +260,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         ArgumentNullException.ThrowIfNull(deduplicationId);
         try
         {
-            using var mutationLock = await _guard.AcquireMutationLockAsync(cancellationToken).ConfigureAwait(false);
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
             var (ledger, _) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
             var deliveryMatch = ledger.Entries.SingleOrDefault(entry => entry.Envelope.DeliveryId.Equals(deliveryId));
             var deduplicationMatch = ledger.Entries.SingleOrDefault(entry => entry.Envelope.DeduplicationId.Equals(deduplicationId));
@@ -309,7 +309,7 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        await _guard.WriteAsync(content, artifacts, identity.TombstoneCount, next.Generation, _observer, mutationLease).ConfigureAwait(false);
+        await _guard.WriteAsync(content, artifacts, identity.TombstoneCount, identity.Precursors, next.Generation, _observer, mutationLease).ConfigureAwait(false);
     }
 
     private async Task PersistSweepIfNeededAsync(TriggerQueueLedger ledger, TriggerQueueReadResult identity, bool changed, TriggerQueueMutationLease mutationLease, CancellationToken cancellationToken)
@@ -539,7 +539,8 @@ public sealed class TriggerQueueStore : ITriggerQueueMutationPort, ITriggerQueue
 
     private bool CanPersist(TriggerQueueReadResult identity)
     {
-        return OperatingSystem.IsWindows() || identity.TombstoneCount + Math.Max(1, identity.Artifacts.Count) <= _quota.MaxDurabilityTombstones;
+        var reservedArtifacts = identity.Precursors.Count + (OperatingSystem.IsWindows() ? 0 : identity.TombstoneCount + Math.Max(1, identity.Artifacts.Count));
+        return reservedArtifacts <= _quota.MaxDurabilityTombstones;
     }
 
     private static TriggerQueueEntry ToEntry(TriggerQueueLedgerEntry entry)
