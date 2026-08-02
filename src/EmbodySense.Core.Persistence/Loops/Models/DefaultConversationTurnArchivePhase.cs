@@ -25,5 +25,8 @@ public enum DefaultConversationTurnArchivePhase
     BeforeFinalHistoryRevalidation,
 
     /// <summary>An owned history stage contains an incomplete prefix and is about to write its remaining bytes.</summary>
-    AfterPartialHistoryStageWrite
+    AfterPartialHistoryStageWrite,
+
+    /// <summary>The incomplete history stage has been re-proved through a retained handle and is about to be claimed for retirement.</summary>
+    BeforeIncompleteHistoryStageRetirement
 }

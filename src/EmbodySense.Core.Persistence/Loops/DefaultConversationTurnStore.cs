@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -19,7 +20,8 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// workspace active-set lease serialize cooperating operations across processes. Terminal archival first claims and re-proves the
 /// exact source identity and bytes, then publishes immutable history atomically without replacement. Unsupported schemas, pathname
 /// substitutions, and altered transition history fail closed. Each terminal history artifact retains one byte-identical immutable
-/// source-proof sidecar so cleanup never unlinks an unverified pathname; terminal history therefore consumes roughly twice the record bytes.
+/// source-proof sidecar so cleanup never unlinks an unverified pathname. Incomplete stages are retired as inspectable evidence through
+/// a retained identity-proof handle; terminal history therefore consumes roughly twice the record bytes plus any failure evidence.
 /// </remarks>
 public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 {
@@ -33,6 +35,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     };
     private static readonly TimeSpan _leaseRetryDelay = TimeSpan.FromMilliseconds(25);
     private const int MaximumActiveArtifacts = 128;
+    private const int MaximumHistoryStageRetirementEvidenceEntries = MaximumActiveArtifacts * 2;
     private const int MaximumActiveDirectoryEntries = MaximumActiveArtifacts + 1;
     private const long MaximumActiveArtifactBytes = 1024 * 1024;
     private const long MaximumActiveAggregateBytes = 8 * 1024 * 1024;
@@ -531,6 +534,16 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-source-proof");
     }
 
+    private string GetHistoryStageRetirementIntentPath(string turnId, DefaultConversationTurnFileIdentity identity)
+    {
+        return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-history.{FormatFileIdentity(identity)}.retirement-intent");
+    }
+
+    private string GetRetiredHistoryStagePath(string turnId, DefaultConversationTurnFileIdentity identity)
+    {
+        return Path.Combine(_paths.DefaultConversationTurnHistoryPath, $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-history.{FormatFileIdentity(identity)}.retired");
+    }
+
     private async Task ArchiveActiveAsync(string activePath, (DefaultConversationTurnRecord Record, long ByteCount, byte[] Bytes, DefaultConversationTurnFileIdentity Identity) proof, DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken)
     {
         await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeSourceClaim, cancellationToken);
@@ -595,7 +608,10 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
         catch (Exception exception)
         {
-            if ((!historyPublished && !historyStageProved && TryRemoveOwnedIncompleteHistoryStage(pendingHistoryPath, historyStageIdentity))
+            var historyStageRetired = !historyPublished
+                && !historyStageProved
+                && await TryRetireOwnedIncompleteHistoryStageAsync(pendingHistoryPath, historyStageIdentity, operation, proof.Record.TurnId);
+            if (historyStageRetired
                 || (historyPublished && exception is FormatException))
             {
                 TryRestorePendingSource(pendingSourcePath, activePath);
@@ -625,6 +641,11 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             if (EntryExists(activePath))
             {
                 throw new FormatException($"Default-conversation turn `{turnId}` has both active and interrupted archival sources.");
+            }
+
+            if (HasUnprovedHistoryStageRetirementEvidence(turnId))
+            {
+                throw new FormatException($"Default-conversation turn `{turnId}` has interrupted history-stage retirement evidence that requires explicit recovery.");
             }
 
             var pending = await ReadRequiredAsync(pendingSourcePath, MaximumActiveArtifactBytes, cancellationToken);
@@ -795,37 +816,63 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         await stream.FlushAsync(cancellationToken);
     }
 
-    private static bool TryRemoveOwnedIncompleteHistoryStage(string path, DefaultConversationTurnFileIdentity? expectedIdentity)
+    private async Task<bool> TryRetireOwnedIncompleteHistoryStageAsync(
+        string path,
+        DefaultConversationTurnFileIdentity? expectedIdentity,
+        DefaultConversationTurnStoreOperation operation,
+        string turnId)
     {
-        if (!EntryExists(path))
+        if (expectedIdentity is null)
         {
-            return true;
+            return !EntryExists(path);
         }
 
-        if (expectedIdentity is null)
+        var retirementIntentPath = GetHistoryStageRetirementIntentPath(turnId, expectedIdentity.Value);
+        var retiredPath = GetRetiredHistoryStagePath(turnId, expectedIdentity.Value);
+        if (!TryCreateRetirementIntent(retirementIntentPath))
         {
             return false;
         }
 
         try
         {
-            using (var stream = DefaultConversationTurnNativeFileSystem.OpenRegularRead(path))
+            using var retainedProof = DefaultConversationTurnNativeFileSystem.OpenRegularReadForRetirement(path);
+            if (DefaultConversationTurnNativeFileSystem.GetIdentity(retainedProof) != expectedIdentity.Value)
             {
-                if (DefaultConversationTurnNativeFileSystem.GetIdentity(stream) != expectedIdentity.Value)
-                {
-                    return false;
-                }
+                return false;
             }
 
-            File.Delete(path);
-            return !EntryExists(path);
+            await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.BeforeIncompleteHistoryStageRetirement, CancellationToken.None);
+            File.Move(path, retiredPath, overwrite: false);
+            using var claimedProof = DefaultConversationTurnNativeFileSystem.OpenRegularReadForRetirement(retiredPath);
+            return DefaultConversationTurnNativeFileSystem.GetIdentity(retainedProof) == expectedIdentity.Value
+                && DefaultConversationTurnNativeFileSystem.GetIdentity(claimedProof) == expectedIdentity.Value;
         }
         catch (FileNotFoundException)
         {
-            return true;
+            return false;
         }
         catch (DirectoryNotFoundException)
         {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryCreateRetirementIntent(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 1, FileOptions.WriteThrough);
+            stream.WriteByte(1);
+            stream.Flush(flushToDisk: true);
             return true;
         }
         catch (IOException)
@@ -836,6 +883,148 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         {
             return false;
         }
+    }
+
+    private bool HasUnprovedHistoryStageRetirementEvidence(string turnId)
+    {
+        if (!Directory.Exists(_paths.DefaultConversationTurnHistoryPath))
+        {
+            return false;
+        }
+
+        var prefix = $".{LoopArtifactPaths.ValidateArtifactId(turnId)}.json.archive-history.";
+        var entries = Directory.EnumerateFileSystemEntries(_paths.DefaultConversationTurnHistoryPath, prefix + "*", SearchOption.TopDirectoryOnly)
+            .Take(MaximumHistoryStageRetirementEvidenceEntries + 1)
+            .ToArray();
+        if (entries.Length > MaximumHistoryStageRetirementEvidenceEntries)
+        {
+            return true;
+        }
+
+        var evidence = new Dictionary<DefaultConversationTurnFileIdentity, (string? IntentPath, string? RetiredPath)>();
+        foreach (var path in entries)
+        {
+            var fileName = Path.GetFileName(path);
+            if (string.Equals(fileName, prefix + "tmp", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!TryParseHistoryStageRetirementEvidence(fileName, prefix, out var identity, out var isIntent))
+            {
+                return true;
+            }
+
+            if (!evidence.TryAdd(identity, isIntent ? (path, null) : (null, path)))
+            {
+                var existing = evidence[identity];
+                if ((isIntent && existing.IntentPath is not null) || (!isIntent && existing.RetiredPath is not null))
+                {
+                    return true;
+                }
+
+                evidence[identity] = isIntent ? (path, existing.RetiredPath) : (existing.IntentPath, path);
+            }
+        }
+
+        return evidence.Any(entry => entry.Value.IntentPath is null
+            || entry.Value.RetiredPath is null
+            || !IsValidHistoryStageRetirementIntent(entry.Value.IntentPath!)
+            || !IsValidRetiredHistoryStage(entry.Value.RetiredPath!, entry.Key));
+    }
+
+    private static bool TryParseHistoryStageRetirementEvidence(string fileName, string prefix, out DefaultConversationTurnFileIdentity identity, out bool isIntent)
+    {
+        const string IntentSuffix = ".retirement-intent";
+        const string RetiredSuffix = ".retired";
+        identity = default;
+        isIntent = false;
+        if (!fileName.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var identityText = fileName[prefix.Length..];
+        if (identityText.EndsWith(IntentSuffix, StringComparison.Ordinal))
+        {
+            identityText = identityText[..^IntentSuffix.Length];
+            isIntent = true;
+        }
+        else if (identityText.EndsWith(RetiredSuffix, StringComparison.Ordinal))
+        {
+            identityText = identityText[..^RetiredSuffix.Length];
+        }
+        else
+        {
+            return false;
+        }
+
+        if (identityText.Length != 33 || identityText[16] != '-'
+            || !ulong.TryParse(identityText[..16], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var deviceId)
+            || !ulong.TryParse(identityText[17..], NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var fileId))
+        {
+            return false;
+        }
+
+        identity = new DefaultConversationTurnFileIdentity(deviceId, fileId);
+        return true;
+    }
+
+    private static bool IsValidHistoryStageRetirementIntent(string path)
+    {
+        try
+        {
+            using var stream = DefaultConversationTurnNativeFileSystem.OpenRegularRead(path);
+            DefaultConversationTurnNativeFileSystem.RequireSingleLinkRegularFile(stream);
+            return stream.Length == 1 && stream.ReadByte() == 1 && stream.ReadByte() == -1;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsValidRetiredHistoryStage(string path, DefaultConversationTurnFileIdentity expectedIdentity)
+    {
+        try
+        {
+            using var stream = DefaultConversationTurnNativeFileSystem.OpenRegularReadForRetirement(path);
+            DefaultConversationTurnNativeFileSystem.RequireSingleLinkRegularFile(stream);
+            return DefaultConversationTurnNativeFileSystem.GetIdentity(stream) == expectedIdentity;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static string FormatFileIdentity(DefaultConversationTurnFileIdentity identity)
+    {
+        return $"{identity.DeviceId:x16}-{identity.FileId:x16}";
     }
 
     private static void TryRestorePendingSource(string pendingSourcePath, string activePath)

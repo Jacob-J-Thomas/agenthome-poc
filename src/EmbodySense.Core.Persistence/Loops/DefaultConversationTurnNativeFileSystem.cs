@@ -12,6 +12,7 @@ internal static class DefaultConversationTurnNativeFileSystem
     private const uint FileAttributeDirectory = 0x10;
     private const uint FileAttributeReparsePoint = 0x400;
     private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const uint FileShareDelete = 0x4;
     private const uint FileShareRead = 0x1;
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
@@ -143,6 +144,22 @@ internal static class DefaultConversationTurnNativeFileSystem
         return OpenUnixRegularFile(path, readWrite: false, create: false);
     }
 
+    public static FileStream OpenRegularReadForRetirement(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var handle = OpenWindowsRegularFile(path, readWrite: false, exclusive: false, create: false, returnNullWhenContended: false, shareDelete: true);
+            return new FileStream(handle ?? throw new FileNotFoundException("The default-conversation turn artifact was not found.", path), FileAccess.Read, 4_096, isAsync: false);
+        }
+
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Default-conversation persistence retirement supports Windows, Linux, and macOS.");
+        }
+
+        return OpenUnixRegularFile(path, readWrite: false, create: false);
+    }
+
     public static DefaultConversationTurnFileIdentity GetIdentity(FileStream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
@@ -152,6 +169,18 @@ internal static class DefaultConversationTurnNativeFileSystem
         }
 
         return GetUnixIdentity(stream.SafeFileHandle);
+    }
+
+    public static void RequireSingleLinkRegularFile(FileStream stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (OperatingSystem.IsWindows())
+        {
+            RequireWindowsSingleLinkRegularFile(stream.SafeFileHandle);
+            return;
+        }
+
+        RequireUnixRegularFile(stream.SafeFileHandle, "retirement evidence", requireSingleLink: true);
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Windows; Windows is unreachable in Unix coverage runs.")]
@@ -164,6 +193,20 @@ internal static class DefaultConversationTurnNativeFileSystem
 
         var fileId = ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow;
         return new DefaultConversationTurnFileIdentity(information.VolumeSerialNumber, fileId);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Windows; Windows is unreachable in Unix coverage runs.")]
+    private static void RequireWindowsSingleLinkRegularFile(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            throw NativeIOException("Default-conversation persistence file metadata could not be read", Marshal.GetLastPInvokeError());
+        }
+
+        if ((information.FileAttributes & (FileAttributeDirectory | FileAttributeReparsePoint)) != 0 || information.NumberOfLinks != 1)
+        {
+            throw new IOException("Default-conversation retirement evidence is not a single-link regular file.");
+        }
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Unix; Unix is unreachable in Windows coverage runs.")]
@@ -199,10 +242,10 @@ internal static class DefaultConversationTurnNativeFileSystem
     }
 
     [ExcludeFromCodeCoverage(Justification = "This OS-native shim is covered through public store behavior on Windows; Windows is unreachable in Unix coverage runs.")]
-    private static SafeFileHandle? OpenWindowsRegularFile(string path, bool readWrite, bool exclusive, bool create, bool returnNullWhenContended)
+    private static SafeFileHandle? OpenWindowsRegularFile(string path, bool readWrite, bool exclusive, bool create, bool returnNullWhenContended, bool shareDelete = false)
     {
         var desiredAccess = readWrite ? GenericRead | GenericWrite : GenericRead;
-        var shareMode = exclusive ? 0U : FileShareRead;
+        var shareMode = exclusive ? 0U : FileShareRead | (shareDelete ? FileShareDelete : 0U);
         var disposition = create ? OpenAlways : OpenExisting;
         var handle = CreateFile(path, desiredAccess, shareMode, IntPtr.Zero, disposition, FileFlagOpenReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid)
@@ -320,6 +363,7 @@ internal static class DefaultConversationTurnNativeFileSystem
         SafeFileHandle handle,
         string path,
         bool requireLeasePosture = false,
+        bool requireSingleLink = false,
         bool identifyLeaseInitializationPosture = false)
     {
         ushort mode;
@@ -327,7 +371,7 @@ internal static class DefaultConversationTurnNativeFileSystem
         uint userId = 0;
         if (OperatingSystem.IsLinux())
         {
-            var mask = requireLeasePosture ? StatxMode | StatxLinkCount | StatxUserId : StatxMode;
+            var mask = requireLeasePosture ? StatxMode | StatxLinkCount | StatxUserId : requireSingleLink ? StatxMode | StatxLinkCount : StatxMode;
             if (statx(handle, string.Empty, AtEmptyPath, mask, out LinuxStatx information) != 0)
             {
                 throw NativeIOException($"Default-conversation persistence file metadata for `{path}` could not be read", Marshal.GetLastPInvokeError());
@@ -361,6 +405,11 @@ internal static class DefaultConversationTurnNativeFileSystem
         if ((mode & UnixFileTypeMask) != UnixRegularFile)
         {
             throw new IOException($"Default-conversation persistence file `{path}` is not a regular file.");
+        }
+
+        if (requireSingleLink && linkCount != 1)
+        {
+            throw new IOException($"Default-conversation retirement evidence `{path}` is not a single-link regular file.");
         }
 
         if (requireLeasePosture

@@ -8,7 +8,8 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// <remarks>
 /// Lease-acquisition observation is invoked both after a safe handle is validated but before its exclusive OS lock and after that lock
 /// but before final validation. Active-set and archival observations are invoked after the lease is acquired. Implementations must not
-/// call back into the same store instance because the process gate and active-set lease are intentionally non-reentrant.
+/// call back into the same store instance because the process gate and active-set lease are intentionally non-reentrant. Incomplete-stage
+/// retirement is failure cleanup and its observation receives a non-cancelable token after the requested operation has already failed.
 /// </remarks>
 public interface IDefaultConversationTurnStoreCoordination
 {
