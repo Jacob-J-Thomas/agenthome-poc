@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using EmbodySense.Core.Persistence.Loops;
@@ -725,6 +726,7 @@ internal sealed class TriggerQueueArtifactGuard
         EnsureNoReparsePoints(_queueRoot);
     }
 
+    [ExcludeFromCodeCoverage(Justification = "This descriptor-relative root-creation path is covered by public trigger-queue behavior on Linux/macOS and is unreachable in Windows coverage runs.")]
     private void PrepareRootUnix()
     {
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
