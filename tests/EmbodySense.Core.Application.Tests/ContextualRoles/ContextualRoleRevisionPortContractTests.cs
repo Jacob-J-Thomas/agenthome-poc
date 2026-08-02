@@ -9,13 +9,14 @@ public sealed class ContextualRoleRevisionPortContractTests
     public void Read_and_mutation_models_preserve_exact_immutable_identity_without_authority_effects()
     {
         var identity = new ContextualRoleRevisionIdentity("reviewer", 3);
+        var predecessor = new ContextualRoleRevisionIdentity("reviewer", 2);
         var read = new ContextualRoleRevisionReadRequest(identity);
-        var mutation = new ContextualRoleRevisionMutationRequest(CreateRevision(identity), identity);
+        var mutation = new ContextualRoleRevisionMutationRequest(CreateRevision(identity), predecessor);
         var readResult = new ContextualRoleRevisionReadResult(ContextualRoleRevisionReadStatus.NotFound, null, []);
         var mutationResult = new ContextualRoleRevisionMutationResult(ContextualRoleRevisionMutationStatus.Conflict, null, []);
 
         Assert.Same(identity, read.Identity);
-        Assert.Same(identity, mutation.ExpectedPreviousIdentity);
+        Assert.Same(predecessor, mutation.ExpectedPreviousIdentity);
         Assert.Same(identity, mutation.Revision.Identity);
         Assert.Equal(ContextualRoleRevisionReadStatus.NotFound, readResult.Status);
         Assert.Empty(readResult.ValidationErrors);

@@ -170,6 +170,23 @@ public sealed class ContextualRoleRevisionContractTests
         Assert.DoesNotContain(result.Errors, error => error.Code == "content_hash_mismatch");
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Public_hash_operations_reject_malformed_utf16_with_the_documented_contract(bool highSurrogate)
+    {
+        var malformedText = new string(highSurrogate ? '\ud800' : '\udc00', 1);
+        var revision = ValidRevision() with { Purpose = malformedText };
+
+        var computeFailure = Assert.Throws<ArgumentException>(() => ContextualRoleRevisionContentHash.Compute(revision));
+        var applyFailure = Assert.Throws<ArgumentException>(() => ContextualRoleRevisionContentHash.Apply(revision));
+        var matchesFailure = Assert.Throws<ArgumentException>(() => ContextualRoleRevisionContentHash.Matches(revision));
+
+        Assert.Contains("well-formed UTF-16", computeFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("well-formed UTF-16", applyFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("well-formed UTF-16", matchesFailure.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Missing_semantic_text_remains_safe_for_hash_validation()
     {

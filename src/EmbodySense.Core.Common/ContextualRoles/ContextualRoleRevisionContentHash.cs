@@ -13,6 +13,7 @@ public static class ContextualRoleRevisionContentHash
     /// <param name="revision">The revision to serialize canonically.</param>
     /// <returns>A 64-character lowercase hexadecimal SHA-256 digest.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="revision"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16.</exception>
     public static string Compute(ContextualRoleRevision revision)
     {
         ArgumentNullException.ThrowIfNull(revision);
@@ -39,6 +40,7 @@ public static class ContextualRoleRevisionContentHash
     /// <param name="revision">The revision to hash.</param>
     /// <returns>A revision whose content hash matches its semantic content.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="revision"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16.</exception>
     public static ContextualRoleRevision Apply(ContextualRoleRevision revision)
     {
         ArgumentNullException.ThrowIfNull(revision);
@@ -49,6 +51,7 @@ public static class ContextualRoleRevisionContentHash
     /// <param name="revision">The revision to verify.</param>
     /// <returns><see langword="true"/> when the exact lowercase digest matches using fixed-time comparison.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="revision"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16.</exception>
     public static bool Matches(ContextualRoleRevision revision)
     {
         ArgumentNullException.ThrowIfNull(revision);
@@ -91,5 +94,40 @@ public static class ContextualRoleRevisionContentHash
         writer.WriteEndArray();
     }
 
-    private static string? Normalize(string? value) => value?.Normalize(NormalizationForm.FormC);
+    private static string? Normalize(string? value)
+    {
+        if (!IsWellFormedUtf16(value))
+        {
+            throw new ArgumentException("Contextual-role semantic text must contain well-formed UTF-16.", nameof(value));
+        }
+
+        return value?.Normalize(NormalizationForm.FormC);
+    }
+
+    private static bool IsWellFormedUtf16(string? value)
+    {
+        if (value is null)
+        {
+            return true;
+        }
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (char.IsHighSurrogate(value[index]))
+            {
+                if (index + 1 >= value.Length || !char.IsLowSurrogate(value[index + 1]))
+                {
+                    return false;
+                }
+
+                index++;
+            }
+            else if (char.IsLowSurrogate(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 }
