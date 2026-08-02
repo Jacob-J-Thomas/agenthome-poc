@@ -48,8 +48,26 @@ public sealed class CustomLoopLifecycleServiceTests
         Assert.Equal(CustomLoopRecoveryStatus.NeedsReview, results.Single(item => item.Run.Id == "run-paused-open").Status);
         Assert.Equal(14, audit.Events.Count(item => item.Action == AuditSchema.Actions.LoopRunLifecycle));
         Assert.Equal(7, audit.Events.Count(item => item.Outcome == AuditSchema.Outcomes.Requested));
+        Assert.All(audit.Events, item => Assert.Equal(AuditSchema.Actors.Web, item.Actor));
         Assert.All(audit.Events, item => Assert.Equal(false, item.Metadata["automaticExecution"]));
         Assert.All(store.Runs.Values, item => Assert.True(CustomLoopRunValidator.Validate(item).IsValid));
+    }
+
+    [Fact]
+    public async Task Restart_recovery_attributes_each_multi_actor_run_to_its_retained_admission_actor()
+    {
+        var webRun = Run("run-web-actor", CustomLoopRunStatus.Running, admissionActor: AuditSchema.Actors.Web);
+        var cliRun = Run("run-cli-actor", CustomLoopRunStatus.Running, admissionActor: AuditSchema.Actors.Cli);
+        var audit = new RecordingAuditLog();
+        var recovery = new CustomLoopRecoveryService(new MultiRunStore([webRun, cliRun]), audit, new FixedTimeProvider(_now.AddMinutes(1)));
+
+        await recovery.RecoverAsync(AuditSchema.Actors.Llm);
+
+        Assert.All(audit.Events.Where(item => item.Target == webRun.Id), item => Assert.Equal(webRun.AdmissionActor, item.Actor));
+        Assert.All(audit.Events.Where(item => item.Target == cliRun.Id), item => Assert.Equal(cliRun.AdmissionActor, item.Actor));
+        Assert.DoesNotContain(audit.Events, item => item.Actor == AuditSchema.Actors.Llm);
+        Assert.Equal(2, audit.Events.Count(item => item.Target == webRun.Id));
+        Assert.Equal(2, audit.Events.Count(item => item.Target == cliRun.Id));
     }
 
     [Fact]
@@ -1009,7 +1027,7 @@ public sealed class CustomLoopLifecycleServiceTests
         return new CustomLoopControlOperation(CustomLoopControlOperation.CurrentSchemaVersion, operationId, CustomLoopControlRequestHash.Compute(kind, runId, expectedVersion, operationId, actor), kind, runId, expectedVersion, actor, _now, _now, CustomLoopControlOperationState.Pending, CustomLoopControlStatus.Unknown, null, null, false, "Operation pending.");
     }
 
-    private static CustomLoopRunRecord Run(string id, CustomLoopRunStatus status, bool openAttempt = false, DateTimeOffset? updatedAt = null)
+    private static CustomLoopRunRecord Run(string id, CustomLoopRunStatus status, bool openAttempt = false, DateTimeOffset? updatedAt = null, string admissionActor = AuditSchema.Actors.Web)
     {
         var updated = updatedAt ?? _now.AddSeconds(2);
         var definition = Definition();
@@ -1042,7 +1060,7 @@ public sealed class CustomLoopLifecycleServiceTests
             "web",
             new CustomLoopModelSnapshot("provider", "model"),
             $"admit-{id}",
-            AuditSchema.Actors.Web,
+            admissionActor,
             string.Empty,
             definition,
             "prompt",
