@@ -22,5 +22,8 @@ public enum DefaultConversationTurnArchivePhase
     BeforeInitialHistoryRevalidation,
 
     /// <summary>Canonical history and its source proof have been validated independently and are about to be revalidated together.</summary>
-    BeforeFinalHistoryRevalidation
+    BeforeFinalHistoryRevalidation,
+
+    /// <summary>An owned history stage contains an incomplete prefix and is about to write its remaining bytes.</summary>
+    AfterPartialHistoryStageWrite
 }

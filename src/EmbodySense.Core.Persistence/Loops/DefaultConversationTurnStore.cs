@@ -529,6 +529,8 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         var sourceProofPath = GetHistorySourceProofPath(proof.Record.TurnId);
         Directory.CreateDirectory(_paths.DefaultConversationTurnHistoryPath);
         File.Move(activePath, pendingSourcePath, overwrite: false);
+        DefaultConversationTurnFileIdentity? historyStageIdentity = null;
+        var historyStageProved = false;
         var historyPublished = false;
         try
         {
@@ -543,13 +545,20 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
                 throw new FormatException("The default-conversation turn artifact pathname was replaced during archival.");
             }
 
-            await WriteHistoryStageAsync(pendingHistoryPath, proof.Bytes, cancellationToken);
+            await WriteHistoryStageAsync(
+                pendingHistoryPath,
+                proof.Bytes,
+                operation,
+                proof.Record.TurnId,
+                identity => historyStageIdentity = identity,
+                cancellationToken);
             var stagedHistory = await ReadRequiredAsync(pendingHistoryPath, MaximumActiveArtifactBytes, cancellationToken);
-            if (!stagedHistory.Bytes.AsSpan().SequenceEqual(proof.Bytes))
+            if (historyStageIdentity is null || stagedHistory.Identity != historyStageIdentity.Value || !stagedHistory.Bytes.AsSpan().SequenceEqual(proof.Bytes))
             {
                 throw new FormatException("The default-conversation turn history staging artifact changed before publication.");
             }
 
+            historyStageProved = true;
             await ObserveArchivePhaseAsync(operation, proof.Record.TurnId, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, cancellationToken);
             File.Move(pendingHistoryPath, historyPath, overwrite: false);
             historyPublished = true;
@@ -575,7 +584,8 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         }
         catch (Exception exception)
         {
-            if (!historyPublished || exception is FormatException)
+            if ((!historyPublished && !historyStageProved && TryRemoveOwnedIncompleteHistoryStage(pendingHistoryPath, historyStageIdentity))
+                || (historyPublished && exception is FormatException))
             {
                 TryRestorePendingSource(pendingSourcePath, activePath);
                 TryRestorePendingSource(sourceProofPath, activePath);
@@ -758,11 +768,63 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return LoopArtifactPaths.ValidateArtifactId(fileName[1..^Suffix.Length]);
     }
 
-    private static async Task WriteHistoryStageAsync(string path, byte[] bytes, CancellationToken cancellationToken)
+    private async Task WriteHistoryStageAsync(
+        string path,
+        byte[] bytes,
+        DefaultConversationTurnStoreOperation operation,
+        string turnId,
+        Action<DefaultConversationTurnFileIdentity> captureIdentity,
+        CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
-        await stream.WriteAsync(bytes, cancellationToken);
+        await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough);
+        captureIdentity(DefaultConversationTurnNativeFileSystem.GetIdentity(stream));
+        await stream.WriteAsync(bytes.AsMemory(0, 1), cancellationToken);
+        await ObserveArchivePhaseAsync(operation, turnId, DefaultConversationTurnArchivePhase.AfterPartialHistoryStageWrite, cancellationToken);
+        await stream.WriteAsync(bytes.AsMemory(1), cancellationToken);
         await stream.FlushAsync(cancellationToken);
+    }
+
+    private static bool TryRemoveOwnedIncompleteHistoryStage(string path, DefaultConversationTurnFileIdentity? expectedIdentity)
+    {
+        if (!EntryExists(path))
+        {
+            return true;
+        }
+
+        if (expectedIdentity is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            using (var stream = DefaultConversationTurnNativeFileSystem.OpenRegularRead(path))
+            {
+                if (DefaultConversationTurnNativeFileSystem.GetIdentity(stream) != expectedIdentity.Value)
+                {
+                    return false;
+                }
+            }
+
+            File.Delete(path);
+            return !EntryExists(path);
+        }
+        catch (FileNotFoundException)
+        {
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private static void TryRestorePendingSource(string pendingSourcePath, string activePath)
