@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Credentials;
 using EmbodySense.Core.Application.Credentials.Models;
@@ -28,7 +29,7 @@ public sealed class CredentialLifecyclePersistenceRestartTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await SeedPreparedRegistrationAsync(Store(paths));
+        await SeedPreparedRegistrationAsync(paths);
         var deleteCount = new StrongBox<int>();
         var initialService = Service(paths, TestTrust(paths), deleteCount);
         var repairPreview = await initialService.PreviewAsync(PreviewRequest("restart-repair", CredentialLifecycleOperationKind.Repair, 2));
@@ -98,7 +99,7 @@ public sealed class CredentialLifecyclePersistenceRestartTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await SeedPreparedRegistrationAsync(Store(paths));
+        await SeedPreparedRegistrationAsync(paths);
         var deleteCount = new StrongBox<int>();
         var service = Service(paths, TestTrust(paths), deleteCount);
         var preview = await service.PreviewAsync(PreviewRequest("completed-repair", CredentialLifecycleOperationKind.Repair, 2));
@@ -120,7 +121,7 @@ public sealed class CredentialLifecyclePersistenceRestartTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await SeedPreparedRegistrationAsync(Store(paths));
+        await SeedPreparedRegistrationAsync(paths);
         var deleteCount = new StrongBox<int>();
         var failingService = Service(paths, TestTrust(paths), deleteCount, deleteSucceeds: false);
         var preview = await failingService.PreviewAsync(PreviewRequest("prepared-repair-failure", CredentialLifecycleOperationKind.Repair, 2));
@@ -264,6 +265,29 @@ public sealed class CredentialLifecyclePersistenceRestartTests
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The credential create crash process could not be started.");
     }
 
+    private static Process StartCredentialPayloadCreateCrashHost(string workspaceRoot, string trustProfile, string operationId, string consentId, string referenceJson, string bindingJson, string locatorMarker, string providerEntryMarker)
+    {
+        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+        var targetFramework = outputDirectory.Name;
+        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
+        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
+        Assert.True(File.Exists(hostAssembly), $"Cancellation host assembly was not built at `{hostAssembly}`.");
+        var startInfo = new ProcessStartInfo("dotnet") { UseShellExecute = false };
+        startInfo.ArgumentList.Add("exec");
+        startInfo.ArgumentList.Add(hostAssembly);
+        startInfo.ArgumentList.Add("credential-create-payload-crash");
+        startInfo.ArgumentList.Add(workspaceRoot);
+        startInfo.ArgumentList.Add(trustProfile);
+        startInfo.ArgumentList.Add(operationId);
+        startInfo.ArgumentList.Add(consentId);
+        startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.UTF8.GetBytes(referenceJson)));
+        startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.UTF8.GetBytes(bindingJson)));
+        startInfo.ArgumentList.Add(locatorMarker);
+        startInfo.ArgumentList.Add(providerEntryMarker);
+        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
+        return Process.Start(startInfo) ?? throw new InvalidOperationException("The credential prepared-create crash process could not be started.");
+    }
+
     private static async Task WaitForFileAsync(string path, TimeSpan timeout)
     {
         using var cancellation = new CancellationTokenSource(timeout);
@@ -284,14 +308,32 @@ public sealed class CredentialLifecyclePersistenceRestartTests
         return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
     }
 
-    private static async Task SeedPreparedRegistrationAsync(CredentialRegistryStore store)
+    private static async Task SeedPreparedRegistrationAsync(WorkspacePaths paths)
     {
-        var createOperationId = Id("restart-create");
-        var requestHash = Hash('a');
-        var intent = new CredentialRegistryMutation(CredentialRegistryMutationKind.BeginCreate, createOperationId, 0, ReferenceId(), Reference(), Binding(), Id("restart-consent"), CredentialProviderHealthStatus.NeedsRepair, null, false, (int)CredentialLifecycleOperationKind.Create, Environment.UserName, null, requestHash, CredentialLifecycleMutationPhase.Intent, createOperationId, null, "workspace-1", IntentAuditPayload());
-        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(intent)).Status);
-        var prepared = new CredentialRegistryMutation(CredentialRegistryMutationKind.Register, Id("restart-locator-prepared"), 1, ReferenceId(), Reference(), Binding(), Id("restart-consent"), CredentialProviderHealthStatus.NeedsRepair, Locator(), false, (int)CredentialLifecycleOperationKind.Create, Environment.UserName, null, requestHash, CredentialLifecycleMutationPhase.LocatorPrepared, createOperationId, null, "workspace-1");
-        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await store.MutateAsync(prepared)).Status);
+        var locatorMarker = Path.Combine(paths.WorkspacePath, "prepared-locator.marker");
+        var providerEntryMarker = Path.Combine(paths.WorkspacePath, "prepared-provider-entered.marker");
+        var reference = Reference() with { OwnerId = Environment.UserName };
+        var binding = Binding() with { Scope = Binding().Scope with { ActorId = Environment.UserName } };
+        Assert.True(CredentialContractJson.TrySerialize(reference, out var referenceJson, out _));
+        Assert.True(CredentialContractJson.TrySerialize(binding, out var bindingJson, out _));
+        using var crashHost = StartCredentialPayloadCreateCrashHost(paths.WorkspacePath, "restart", "restart-create", "restart-consent", referenceJson!, bindingJson!, locatorMarker, providerEntryMarker);
+        try
+        {
+            await WaitForFileAsync(providerEntryMarker, TimeSpan.FromSeconds(10));
+            Assert.True(File.Exists(locatorMarker));
+            var prepared = await Store(paths).ReadAsync();
+            Assert.Equal(2, prepared.RegistryRevision);
+            Assert.Equal([CredentialLifecycleMutationPhase.Intent, CredentialLifecycleMutationPhase.LocatorPrepared], prepared.Operations.Select(operation => operation.LifecyclePhase).ToArray());
+        }
+        finally
+        {
+            if (!crashHost.HasExited)
+            {
+                crashHost.Kill(entireProcessTree: true);
+            }
+            await crashHost.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        Assert.NotEqual(0, crashHost.ExitCode);
     }
 
     private static CredentialLifecyclePreviewRequest PreviewRequest(string operationId, CredentialLifecycleOperationKind kind, long revision, CredentialContractId? interruptedRepairOperationId = null) => new(Id(operationId), kind, ReferenceId(), "workspace-1", Environment.UserName, revision, interruptedRepairOperationId);

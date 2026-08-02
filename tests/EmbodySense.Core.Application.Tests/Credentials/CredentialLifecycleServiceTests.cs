@@ -328,11 +328,15 @@ public sealed class CredentialLifecycleServiceTests
         var completionResult = await completion.Service.ExecuteAsync(completion.CreateRequest("completion-failure", 4), destination => Fill(destination, 1));
         Assert.Equal(CredentialLifecycleResultStatus.NeedsRepair, completionResult.Status);
         Assert.Equal(1, completion.Provider.CreateCount);
+        var completionFallback = Assert.Single(completion.Audit.Events, auditEvent => auditEvent.Action == AuditSchema.Actions.CredentialLifecycleOutcome && Equals(auditEvent.Metadata["operationId"], "completion-failure"));
+        Assert.Equal(AuditSchema.Outcomes.Failed, completionFallback.Outcome);
 
         using var rollback = new LifecycleFixture();
         rollback.Provider.BeforeMutation = rollback.Registry.MakeUnavailable;
         var rollbackResult = await rollback.Service.ExecuteAsync(rollback.CreateRequest("rollback-failure", 4), _ => throw new InvalidOperationException("proved callback failure"));
         Assert.Equal(CredentialLifecycleResultStatus.NeedsRepair, rollbackResult.Status);
+        var rollbackFallback = Assert.Single(rollback.Audit.Events, auditEvent => auditEvent.Action == AuditSchema.Actions.CredentialLifecycleOutcome && Equals(auditEvent.Metadata["operationId"], "rollback-failure"));
+        Assert.Equal(AuditSchema.Outcomes.Failed, rollbackFallback.Outcome);
 
         using var rotateIntent = await CreatedFixtureAsync("rotate-intent-create");
         var rotatePreview = await rotateIntent.Service.PreviewAsync(rotateIntent.PreviewRequest("rotate-intent-failure", CredentialLifecycleOperationKind.Rotate, rotateIntent.Registry.Revision));
@@ -468,6 +472,49 @@ public sealed class CredentialLifecycleServiceTests
         Assert.Equal(1, fixture.Provider.HealthCount);
     }
 
+    [Theory]
+    [InlineData("corrupt", CredentialProviderHealthStatus.Corrupt, CredentialLifecycleResultStatus.Failed)]
+    [InlineData("unavailable", CredentialProviderHealthStatus.Unavailable, CredentialLifecycleResultStatus.Unavailable)]
+    [InlineData("canceled", CredentialProviderHealthStatus.Unavailable, CredentialLifecycleResultStatus.Unavailable)]
+    public async Task FailedProviderHealthCommitsTruthfulTerminalEvidenceAndReplaysWithoutRepeatingProviderIo(string scenario, CredentialProviderHealthStatus health, CredentialLifecycleResultStatus expectedStatus)
+    {
+        using var fixture = await CreatedFixtureAsync($"failed-health-{scenario}-create");
+        if (scenario == "canceled")
+        {
+            fixture.Provider.CancelNextHealth = true;
+        }
+        else
+        {
+            fixture.Provider.NextHealthFailure = health;
+        }
+        var healthCalls = fixture.Provider.HealthCount;
+        var request = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Test, Id($"failed-health-{scenario}"), fixture.Reference.Id, "workspace-1", fixture.ActorId, fixture.Registry.Revision, _timestamp);
+
+        var result = await fixture.CreateService(new FailingAuditLog()).ExecuteAsync(request);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(health, result.Health);
+        Assert.Equal(CredentialFailureCode.Unavailable, result.Failure!.Code);
+        var persisted = await fixture.Registry.ReadAsync();
+        Assert.Equal(health, Assert.Single(persisted.Entries).Health);
+        var evidence = Assert.Single(persisted.Operations, operation => operation.OperationId.Equals(request.OperationId));
+        Assert.Equal(CredentialLifecycleMutationPhase.MetadataComplete, evidence.LifecyclePhase);
+        Assert.Equal(health, evidence.ResultHealth);
+        var pending = Assert.Single(persisted.PendingAudits);
+        Assert.Equal(AuditSchema.Actions.CredentialLifecycleOutcome, pending.Action);
+        Assert.Equal(AuditSchema.Outcomes.Failed, pending.Outcome);
+
+        var recoveredAudit = new RecordingCapabilityAuditLog();
+        var replay = await fixture.CreateService(recoveredAudit).ExecuteAsync(request);
+
+        Assert.Equal(expectedStatus, replay.Status);
+        Assert.Equal(health, replay.Health);
+        Assert.Equal(CredentialFailureCode.Unavailable, replay.Failure!.Code);
+        Assert.Equal(healthCalls + 1, fixture.Provider.HealthCount);
+        Assert.Empty((await fixture.Registry.ReadAsync()).PendingAudits);
+        Assert.Equal(AuditSchema.Outcomes.Failed, Assert.Single(recoveredAudit.Events).Outcome);
+    }
+
     [Fact]
     public async Task WorkspaceMustMatchBindingForCreatePreviewAndProviderUse()
     {
@@ -511,21 +558,23 @@ public sealed class CredentialLifecycleServiceTests
     }
 
     [Fact]
-    public async Task PublicRawDerivedOperationCollisionNeverReplaysAsLifecycleSuccess()
+    public async Task PublicRawDerivedOperationCollisionIsDeniedBeforeLifecycleExecution()
     {
         using var fixture = await CreatedFixtureAsync("collision-replace-create");
         var lifecycleOperationId = Id("collision-replace");
         var derivedCompletionId = DeriveOperationId(lifecycleOperationId, "complete");
         var collision = new CredentialRegistryMutation(CredentialRegistryMutationKind.SetHealth, derivedCompletionId, fixture.Registry.Revision, fixture.Reference.Id, null, null, null, CredentialProviderHealthStatus.Available, null);
-        Assert.Equal(CredentialRegistryMutationStatus.Applied, (await fixture.Registry.MutateAsync(collision)).Status);
+        var denied = await fixture.Registry.MutateAsync(collision);
+        Assert.Equal(CredentialRegistryMutationStatus.Invalid, denied.Status);
+        Assert.Equal(CredentialFailureCode.Unauthorized, denied.Failure!.Code);
         var preview = await fixture.Service.PreviewAsync(fixture.PreviewRequest("collision-replace", CredentialLifecycleOperationKind.Replace, fixture.Registry.Revision));
         var request = fixture.DestructiveRequest("collision-replace", CredentialLifecycleOperationKind.Replace, fixture.Registry.Revision, preview, 4);
 
         var result = await fixture.Service.ExecuteAsync(request, destination => Fill(destination, 2));
         var replay = await fixture.Service.ExecuteAsync(request, destination => Fill(destination, 3));
 
-        Assert.Equal(CredentialLifecycleResultStatus.NeedsRepair, result.Status);
-        Assert.Equal(CredentialLifecycleResultStatus.NeedsRepair, replay.Status);
+        Assert.Equal(CredentialLifecycleResultStatus.Applied, result.Status);
+        Assert.Equal(CredentialLifecycleResultStatus.Replayed, replay.Status);
         Assert.Equal(1, fixture.Provider.ReplaceCount);
     }
 
@@ -619,6 +668,82 @@ public sealed class CredentialLifecycleServiceTests
         Assert.All(recoveredAudit.Events, delivered => Assert.Equal(pending[0].LifecycleIntentOperationId.Value, delivered.Metadata["operationId"]));
         Assert.Equal(pending[0].AuditOperationId.Value, recoveredAudit.Events[0].Metadata["auditOperationId"]);
         Assert.Equal(pending[1].AuditOperationId.Value, recoveredAudit.Events[1].Metadata["terminalOperationId"]);
+    }
+
+    [Theory]
+    [InlineData(CredentialLifecycleOperationKind.Bind)]
+    [InlineData(CredentialLifecycleOperationKind.Consent)]
+    [InlineData(CredentialLifecycleOperationKind.Test)]
+    [InlineData(CredentialLifecycleOperationKind.Expire)]
+    [InlineData(CredentialLifecycleOperationKind.Revoke)]
+    [InlineData(CredentialLifecycleOperationKind.Disable)]
+    public async Task MetadataTransitionAndTerminalAuditAreAtomicIdempotentAndRestartDrainable(CredentialLifecycleOperationKind kind)
+    {
+        using var fixture = await CreatedFixtureAsync($"metadata-audit-{kind.ToString().ToLowerInvariant()}-create");
+        var operation = $"metadata-audit-{kind.ToString().ToLowerInvariant()}";
+        var revision = fixture.Registry.Revision;
+        CredentialLifecycleRequest request;
+        if (kind == CredentialLifecycleOperationKind.Bind)
+        {
+            request = new CredentialLifecycleRequest(kind, Id(operation), fixture.Reference.Id, "workspace-1", fixture.ActorId, revision, _timestamp, Binding: fixture.Binding);
+        }
+        else if (kind == CredentialLifecycleOperationKind.Consent)
+        {
+            request = new CredentialLifecycleRequest(kind, Id(operation), fixture.Reference.Id, "workspace-1", fixture.ActorId, revision, _timestamp, ConsentReference: Id("metadata-audit-consent-document"));
+        }
+        else if (kind == CredentialLifecycleOperationKind.Test)
+        {
+            request = new CredentialLifecycleRequest(kind, Id(operation), fixture.Reference.Id, "workspace-1", fixture.ActorId, revision, _timestamp);
+        }
+        else
+        {
+            var preview = await fixture.Service.PreviewAsync(fixture.PreviewRequest(operation, kind, revision));
+            request = fixture.DestructiveRequest(operation, kind, revision, preview);
+        }
+        var healthCalls = fixture.Provider.HealthCount;
+
+        var result = await fixture.CreateService(new FailingAuditLog()).ExecuteAsync(request);
+
+        Assert.Equal(CredentialLifecycleResultStatus.Applied, result.Status);
+        var persisted = await fixture.Registry.ReadAsync();
+        var evidence = Assert.Single(persisted.Operations, item => item.OperationId.Equals(request.OperationId));
+        var pending = Assert.Single(persisted.PendingAudits);
+        Assert.Equal(CredentialLifecycleMutationPhase.MetadataComplete, evidence.LifecyclePhase);
+        Assert.Equal(request.OperationId, evidence.LifecycleIntentOperationId);
+        Assert.Equal(request.OperationId, pending.AuditOperationId);
+        Assert.Equal(request.OperationId, pending.LifecycleIntentOperationId);
+        Assert.Equal(AuditSchema.Actions.CredentialLifecycleOutcome, pending.Action);
+        Assert.Equal(AuditSchema.Outcomes.Succeeded, pending.Outcome);
+
+        var recoveredAudit = new RecordingCapabilityAuditLog();
+        var replay = await fixture.CreateService(recoveredAudit).ExecuteAsync(request);
+
+        Assert.Equal(CredentialLifecycleResultStatus.Replayed, replay.Status);
+        Assert.Empty((await fixture.Registry.ReadAsync()).PendingAudits);
+        var delivered = Assert.Single(recoveredAudit.Events);
+        Assert.Equal(request.OperationId.Value, delivered.Metadata["operationId"]);
+        Assert.Equal(request.OperationId.Value, delivered.Metadata["terminalOperationId"]);
+        Assert.Equal(kind == CredentialLifecycleOperationKind.Test ? healthCalls + 1 : healthCalls, fixture.Provider.HealthCount);
+    }
+
+    [Fact]
+    public async Task MetadataTransitionFailsClosedWithNoOrphanedOutcomeWhenRegistryCommitIsUnavailable()
+    {
+        using var fixture = await CreatedFixtureAsync("metadata-atomic-failure-create");
+        var revision = fixture.Registry.Revision;
+        var request = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Consent, Id("metadata-atomic-failure"), fixture.Reference.Id, "workspace-1", fixture.ActorId, revision, _timestamp, ConsentReference: Id("metadata-atomic-failure-consent"));
+        fixture.Registry.MakeUnavailable();
+
+        var result = await fixture.Service.ExecuteAsync(request);
+        var restarted = await fixture.Registry.ReadAsync();
+
+        Assert.Equal(CredentialLifecycleResultStatus.Unavailable, result.Status);
+        Assert.Equal(revision, restarted.RegistryRevision);
+        Assert.False(Assert.Single(restarted.Entries).ConsentGranted);
+        Assert.DoesNotContain(restarted.Operations, operation => operation.OperationId.Equals(request.OperationId));
+        Assert.DoesNotContain(restarted.PendingAudits, audit => audit.LifecycleIntentOperationId.Equals(request.OperationId));
+        var fallback = Assert.Single(fixture.Audit.Events, auditEvent => auditEvent.Action == AuditSchema.Actions.CredentialLifecycleOutcome && Equals(auditEvent.Metadata["operationId"], request.OperationId.Value));
+        Assert.Equal(AuditSchema.Outcomes.Failed, fallback.Outcome);
     }
 
     [Fact]

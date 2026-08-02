@@ -86,8 +86,8 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         }
     }
 
-    /// <summary>Applies one raw value-free registry mutation while rejecting repair-authority transitions and evidence.</summary>
-    /// <remarks>Lifecycle services use a private assembly boundary. Public callers cannot mint repair intents, repair outcomes, or equivalent operation and phase shapes later sufficient for privileged repair reconciliation.</remarks>
+    /// <summary>Rejects raw registry mutations because only the private lifecycle projection owns mutation authority.</summary>
+    /// <remarks>Lifecycle services use a private assembly boundary. Public callers can read value-free state and append governed use evidence, but cannot mutate registry state or mint lifecycle evidence.</remarks>
     public Task<CredentialRegistryMutationResult> MutateAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default) => MutateAsync(mutation, lifecycleAuthorized: false, cancellationToken);
 
     internal Task<CredentialRegistryMutationResult> MutateLifecycleAsync(CredentialRegistryMutation mutation, CancellationToken cancellationToken = default) => MutateAsync(mutation, lifecycleAuthorized: true, cancellationToken);
@@ -102,7 +102,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         {
             mutation = mutation with { AffectedActiveRuns = Array.AsReadOnly(mutation.AffectedActiveRuns.ToArray()) };
         }
-        if (!lifecycleAuthorized && RequiresLifecycleAuthority(mutation))
+        if (!lifecycleAuthorized)
         {
             return Mutation(CredentialRegistryMutationStatus.Invalid, mutation.OperationId, null, null, CredentialFailureCode.Unauthorized);
         }
@@ -147,7 +147,8 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
                 return Mutation(CredentialRegistryMutationStatus.Conflict, mutation.OperationId, current.Public.Revision, null, CredentialFailureCode.Conflict);
             }
 
-            if (current.Public.Operations.Count >= _quota.MaximumOperations || mutation.Kind == CredentialRegistryMutationKind.Register && current.Public.Entries.Count >= _quota.MaximumEntries || mutation.Kind == CredentialRegistryMutationKind.Tombstone && current.Public.Tombstones.Count >= _quota.MaximumTombstones)
+            var newRegistrationExceedsEntryQuota = current.Public.Entries.Count >= _quota.MaximumEntries && (mutation.Kind == CredentialRegistryMutationKind.Register || mutation.Kind == CredentialRegistryMutationKind.BeginCreate && current.Public.Entries.All(item => !Matches(item, mutation.ReferenceId)));
+            if (current.Public.Operations.Count >= _quota.MaximumOperations || newRegistrationExceedsEntryQuota || mutation.Kind == CredentialRegistryMutationKind.Tombstone && current.Public.Tombstones.Count >= _quota.MaximumTombstones)
             {
                 return Mutation(CredentialRegistryMutationStatus.Unavailable, mutation.OperationId, current.Public.Revision, null, CredentialFailureCode.LimitExceeded);
             }
@@ -171,8 +172,10 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         }
     }
 
-    /// <inheritdoc />
-    public async Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default)
+    /// <summary>Rejects raw audit acknowledgement because only the lifecycle audit drain owns delivery authority.</summary>
+    public Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+
+    internal async Task<bool> AcknowledgeLifecycleAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(auditOperationId);
         try
@@ -635,27 +638,15 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             return false;
         }
 
-        var restrictive = mutation.Kind == CredentialRegistryMutationKind.UpdatePosture && mutation.LifecyclePhase is null && (mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Expire || mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Revoke || mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Disable);
+        var restrictive = mutation.Kind == CredentialRegistryMutationKind.UpdatePosture && (mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Expire || mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Revoke || mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Disable);
         var audited = mutation.LifecyclePhase == CredentialLifecycleMutationPhase.Intent || IsTerminalPhase(mutation.LifecyclePhase);
-        if (restrictive != (mutation.AffectedActiveRuns is not null) || audited != (mutation.LifecycleAudit is not null) || mutation.LifecycleAudit is not null && (!string.Equals(mutation.LifecycleAudit.Action, ExpectedAuditAction(mutation.LifecyclePhase), StringComparison.Ordinal) || !string.Equals(mutation.LifecycleAudit.Outcome, ExpectedAuditOutcome(mutation.LifecyclePhase), StringComparison.Ordinal) || !IsSafe(mutation.LifecycleAudit.Detail, 512)) || !ValidateLifecyclePhaseShape(mutation))
+        if (restrictive != (mutation.AffectedActiveRuns is not null) || audited != (mutation.LifecycleAudit is not null) || mutation.LifecycleAudit is not null && (!string.Equals(mutation.LifecycleAudit.Action, ExpectedAuditAction(mutation.LifecyclePhase), StringComparison.Ordinal) || !string.Equals(mutation.LifecycleAudit.Outcome, ExpectedAuditOutcome(mutation.LifecyclePhase, mutation.LifecycleOperation, mutation.Health), StringComparison.Ordinal) || !IsSafe(mutation.LifecycleAudit.Detail, 512)) || !ValidateLifecyclePhaseShape(mutation))
         {
             return false;
         }
 
         requestHash = Hash(JsonSerializer.Serialize(mutation, _canonicalJson));
         return true;
-    }
-
-    private static bool RequiresLifecycleAuthority(CredentialRegistryMutation mutation)
-    {
-        return !IsPublicRawMutationKind(mutation.Kind)
-            || mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Repair or (int)CredentialLifecycleOperationKind.ReconcileRepair
-            || mutation.LifecyclePhase is CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.RepairUncertain or CredentialLifecycleMutationPhase.RepairReconciledUncertain;
-    }
-
-    private static bool IsPublicRawMutationKind(CredentialRegistryMutationKind kind)
-    {
-        return kind is CredentialRegistryMutationKind.Register or CredentialRegistryMutationKind.SetHealth or CredentialRegistryMutationKind.Tombstone or CredentialRegistryMutationKind.Bind or CredentialRegistryMutationKind.Consent or CredentialRegistryMutationKind.UpdatePosture or CredentialRegistryMutationKind.BeginCreate or CredentialRegistryMutationKind.RecordLocatorUncertain;
     }
 
     private static bool ValidateActiveRuns(IReadOnlyList<string>? runs)
@@ -685,6 +676,7 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             CredentialLifecycleMutationPhase.Uncertain => mutation.Kind == CredentialRegistryMutationKind.SetHealth && mutation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && mutation.Health == CredentialProviderHealthStatus.NeedsRepair,
             CredentialLifecycleMutationPhase.RepairUncertain => mutation.Kind is CredentialRegistryMutationKind.RecordRepairUncertain or CredentialRegistryMutationKind.Tombstone && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair,
             CredentialLifecycleMutationPhase.RepairReconciledUncertain => mutation.Kind == CredentialRegistryMutationKind.ReconcileRepair && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.ReconcileRepair && mutation.PreviewHash is not null,
+            CredentialLifecycleMutationPhase.MetadataComplete => mutation.OperationId.Equals(mutation.LifecycleIntentOperationId) && (mutation.Kind == CredentialRegistryMutationKind.Bind && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Bind || mutation.Kind == CredentialRegistryMutationKind.Consent && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Consent || mutation.Kind == CredentialRegistryMutationKind.SetHealth && mutation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Test || mutation.Kind == CredentialRegistryMutationKind.UpdatePosture && HasExactMetadataPosture(mutation)),
             _ => false
         };
     }
@@ -694,6 +686,10 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         if (mutation.LifecyclePhase is null or CredentialLifecycleMutationPhase.Intent)
         {
             return true;
+        }
+        if (mutation.LifecyclePhase == CredentialLifecycleMutationPhase.MetadataComplete)
+        {
+            return mutation.OperationId.Equals(mutation.LifecycleIntentOperationId);
         }
         var intentOperationId = mutation.LifecycleIntentOperationId;
         if (intentOperationId is null)
@@ -733,6 +729,17 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         };
     }
 
+    private static bool HasExactMetadataPosture(CredentialRegistryMutation mutation)
+    {
+        return mutation.LifecycleOperation switch
+        {
+            (int)CredentialLifecycleOperationKind.Expire => mutation.Reference?.Status == CredentialLifecycleStatus.Expired && mutation.Health == CredentialProviderHealthStatus.Expired,
+            (int)CredentialLifecycleOperationKind.Revoke => mutation.Reference?.Status == CredentialLifecycleStatus.Revoked && mutation.Health == CredentialProviderHealthStatus.Revoked,
+            (int)CredentialLifecycleOperationKind.Disable => mutation.Reference?.Status == CredentialLifecycleStatus.Disabled && mutation.Health == CredentialProviderHealthStatus.Disabled,
+            _ => false
+        };
+    }
+
     private static bool IsPreparedCreateState(CredentialRegistryDocument document, CredentialRegistryEntryDocument? entry, IReadOnlyList<CredentialRegistryLocatorDocument> locators, CredentialReferenceId referenceId)
     {
         if (entry is null || (CredentialProviderHealthStatus)entry.Health != CredentialProviderHealthStatus.NeedsRepair || !locators.Any(locator => string.Equals(locator.ReferenceId, referenceId.Value, StringComparison.Ordinal) && !locator.RepairRequired))
@@ -762,11 +769,11 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         return item.NeedsRepair && item.RepairBindingJson is not null && item.RepairProviderId is not null && CredentialContractJson.TryDeserializeBinding(item.RepairBindingJson, out var binding, out _) && binding!.ReferenceId.Equals(referenceId) && CredentialProviderId.TryParse(item.RepairProviderId, out var providerId, out _) && string.Equals(providerId!.Value, binding.Implementation.ProviderId.Value, StringComparison.Ordinal);
     }
 
-    private static bool IsTerminalPhase(CredentialLifecycleMutationPhase? phase) => phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.Rollback or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain or CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.Uncertain or CredentialLifecycleMutationPhase.RepairUncertain or CredentialLifecycleMutationPhase.LocatorUncertain or CredentialLifecycleMutationPhase.RepairReconciledUncertain;
+    private static bool IsTerminalPhase(CredentialLifecycleMutationPhase? phase) => phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.Rollback or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain or CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.Uncertain or CredentialLifecycleMutationPhase.RepairUncertain or CredentialLifecycleMutationPhase.LocatorUncertain or CredentialLifecycleMutationPhase.RepairReconciledUncertain or CredentialLifecycleMutationPhase.MetadataComplete;
 
     private static string? ExpectedAuditAction(CredentialLifecycleMutationPhase? phase) => phase == CredentialLifecycleMutationPhase.Intent ? AuditSchema.Actions.CredentialLifecycleIntent : IsTerminalPhase(phase) ? AuditSchema.Actions.CredentialLifecycleOutcome : null;
 
-    private static string? ExpectedAuditOutcome(CredentialLifecycleMutationPhase? phase) => phase == CredentialLifecycleMutationPhase.Intent ? AuditSchema.Outcomes.Started : phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.RepairComplete ? AuditSchema.Outcomes.Succeeded : IsTerminalPhase(phase) ? AuditSchema.Outcomes.Failed : null;
+    private static string? ExpectedAuditOutcome(CredentialLifecycleMutationPhase? phase, int? lifecycleOperation, CredentialProviderHealthStatus? health) => phase == CredentialLifecycleMutationPhase.Intent ? AuditSchema.Outcomes.Started : phase == CredentialLifecycleMutationPhase.MetadataComplete && lifecycleOperation == (int)CredentialLifecycleOperationKind.Test && health is CredentialProviderHealthStatus.Unavailable or CredentialProviderHealthStatus.Corrupt ? AuditSchema.Outcomes.Failed : phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.MetadataComplete ? AuditSchema.Outcomes.Succeeded : IsTerminalPhase(phase) ? AuditSchema.Outcomes.Failed : null;
 
     private static bool IsSafe(string? value, int maximum) => value is not null && value.Length is > 0 && value.Length <= maximum && value.All(character => character >= (char)0x20 && character != (char)0x7f);
 
@@ -863,7 +870,8 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
         {
             return false;
         }
-        return operation.AuditOutbox is null || operation.AuditOutbox.OccurredAtUtc.Offset == TimeSpan.Zero && operation.AuditOutbox.RegistryRevision == operation.Revision && string.Equals(operation.AuditOutbox.Action, ExpectedAuditAction(phase), StringComparison.Ordinal) && string.Equals(operation.AuditOutbox.Outcome, ExpectedAuditOutcome(phase), StringComparison.Ordinal) && IsSafe(operation.AuditOutbox.Detail, 512);
+        var health = operation.ResultEntry is null ? null : (CredentialProviderHealthStatus?)operation.ResultEntry.Health;
+        return operation.AuditOutbox is null || operation.AuditOutbox.OccurredAtUtc.Offset == TimeSpan.Zero && operation.AuditOutbox.RegistryRevision == operation.Revision && string.Equals(operation.AuditOutbox.Action, ExpectedAuditAction(phase), StringComparison.Ordinal) && string.Equals(operation.AuditOutbox.Outcome, ExpectedAuditOutcome(phase, operation.LifecycleOperation, health), StringComparison.Ordinal) && IsSafe(operation.AuditOutbox.Detail, 512);
     }
 
     private static bool ValidatePersistedLifecyclePhases(IReadOnlyList<CredentialRegistryOperationDocument> operations)
@@ -878,6 +886,16 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             }
             if (operation.LifecyclePhase is not null and not (int)CredentialLifecycleMutationPhase.Intent)
             {
+                if (operation.LifecyclePhase == (int)CredentialLifecycleMutationPhase.MetadataComplete)
+                {
+                    if (!string.Equals(operation.OperationId, operation.LifecycleIntentOperationId, StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+                    priorById.Add(operation.OperationId, operation);
+                    latestByReference[operation.ReferenceId] = operation;
+                    continue;
+                }
                 if (!priorById.TryGetValue(operation.LifecycleIntentOperationId!, out var intent) || !latestByReference.TryGetValue(operation.ReferenceId, out var latestPrior))
                 {
                     return false;
@@ -942,6 +960,22 @@ public sealed class CredentialRegistryStore : ICredentialRegistryStore
             CredentialLifecycleMutationPhase.Uncertain => operation.Kind == (int)CredentialRegistryMutationKind.SetHealth && operation.LifecycleOperation is (int)CredentialLifecycleOperationKind.Create or (int)CredentialLifecycleOperationKind.Import or (int)CredentialLifecycleOperationKind.Rotate or (int)CredentialLifecycleOperationKind.Replace && operation.ResultEntry?.Health == (int)CredentialProviderHealthStatus.NeedsRepair,
             CredentialLifecycleMutationPhase.RepairUncertain => operation.Kind is (int)CredentialRegistryMutationKind.RecordRepairUncertain or (int)CredentialRegistryMutationKind.Tombstone && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Repair && operation.ResultEntry is null,
             CredentialLifecycleMutationPhase.RepairReconciledUncertain => operation.Kind == (int)CredentialRegistryMutationKind.ReconcileRepair && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.ReconcileRepair && operation.PreviewHash is not null && operation.ResultEntry is null,
+            CredentialLifecycleMutationPhase.MetadataComplete => string.Equals(operation.OperationId, operation.LifecycleIntentOperationId, StringComparison.Ordinal) && (operation.Kind == (int)CredentialRegistryMutationKind.Bind && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Bind || operation.Kind == (int)CredentialRegistryMutationKind.Consent && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Consent || operation.Kind == (int)CredentialRegistryMutationKind.SetHealth && operation.LifecycleOperation == (int)CredentialLifecycleOperationKind.Test || operation.Kind == (int)CredentialRegistryMutationKind.UpdatePosture && HasExactPersistedMetadataPosture(operation)) && operation.ResultEntry is not null,
+            _ => false
+        };
+    }
+
+    private static bool HasExactPersistedMetadataPosture(CredentialRegistryOperationDocument operation)
+    {
+        if (operation.ResultEntry is null || !TryMapEntry(operation.ResultEntry, out var entry))
+        {
+            return false;
+        }
+        return operation.LifecycleOperation switch
+        {
+            (int)CredentialLifecycleOperationKind.Expire => entry!.Reference.Status == CredentialLifecycleStatus.Expired && entry.Health == CredentialProviderHealthStatus.Expired,
+            (int)CredentialLifecycleOperationKind.Revoke => entry!.Reference.Status == CredentialLifecycleStatus.Revoked && entry.Health == CredentialProviderHealthStatus.Revoked,
+            (int)CredentialLifecycleOperationKind.Disable => entry!.Reference.Status == CredentialLifecycleStatus.Disabled && entry.Health == CredentialProviderHealthStatus.Disabled,
             _ => false
         };
     }

@@ -38,7 +38,7 @@ internal sealed class CredentialLifecycleRegistryStore(CredentialRegistryStore r
         return await registry.MutateLifecycleAsync(mutation, cancellationToken);
     }
 
-    public Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default) => registry.AcknowledgeAuditAsync(auditOperationId, cancellationToken);
+    public Task<bool> AcknowledgeAuditAsync(CredentialContractId auditOperationId, CancellationToken cancellationToken = default) => registry.AcknowledgeLifecycleAuditAsync(auditOperationId, cancellationToken);
 
     public ValueTask<CredentialEvidenceWriteResult> AppendAsync(CredentialUseEvidence evidence, CancellationToken cancellationToken) => registry.AppendAsync(evidence, cancellationToken);
 }

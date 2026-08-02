@@ -20,6 +20,8 @@ internal sealed class SecureFakeProvider : ICredentialValueProvider
     internal bool CancelAfterNextCreateEffect { get; set; }
     internal bool CancelAfterNextReplaceEffect { get; set; }
     internal bool CancelAfterNextDeleteEffect { get; set; }
+    internal bool CancelNextHealth { get; set; }
+    internal CredentialProviderHealthStatus? NextHealthFailure { get; set; }
     internal bool ReturnNullHealth { get; set; }
     internal Action? BeforeMutation { get; set; }
 
@@ -119,6 +121,16 @@ internal sealed class SecureFakeProvider : ICredentialValueProvider
     public ValueTask<CredentialProviderHealthResult> GetHealthAsync(CredentialProviderUseRequest request, CancellationToken cancellationToken)
     {
         HealthCount++;
+        if (CancelNextHealth)
+        {
+            CancelNextHealth = false;
+            return ValueTask.FromResult(CredentialProviderHealthResult.Failed(CredentialProviderHealthStatus.Unavailable, CredentialFailure.FromCode(CredentialFailureCode.Unavailable)));
+        }
+        if (NextHealthFailure is { } failedHealth)
+        {
+            NextHealthFailure = null;
+            return ValueTask.FromResult(CredentialProviderHealthResult.Failed(failedHealth, CredentialFailure.FromCode(CredentialFailureCode.Unavailable)));
+        }
         if (ReturnNullHealth)
         {
             return ValueTask.FromResult<CredentialProviderHealthResult>(null!);

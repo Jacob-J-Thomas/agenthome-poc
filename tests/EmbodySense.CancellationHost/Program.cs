@@ -13,6 +13,7 @@ using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Credentials;
 using EmbodySense.Core.Persistence.Loops;
+using System.Text;
 using System.Text.Json;
 
 if (args is ["capability", var behavior])
@@ -33,6 +34,11 @@ if (args is ["credential-repair-crash", var credentialWorkspaceRoot, var crashWi
 if (args is ["credential-create-crash", var createWorkspaceRoot, var locatorMarker, var providerEntryMarker])
 {
     return await CrashCredentialCreateAsync(createWorkspaceRoot, locatorMarker, providerEntryMarker);
+}
+
+if (args is ["credential-create-payload-crash", var payloadWorkspaceRoot, var trustProfile, var payloadOperationId, var consentId, var referencePayload, var bindingPayload, var payloadLocatorMarker, var payloadProviderEntryMarker])
+{
+    return await CrashCredentialPayloadCreateAsync(payloadWorkspaceRoot, trustProfile, payloadOperationId, consentId, referencePayload, bindingPayload, payloadLocatorMarker, payloadProviderEntryMarker);
 }
 
 if (args is [var cancellationWorkspaceRoot, var cancellationRunId])
@@ -75,6 +81,51 @@ static async Task<int> CrashCredentialCreateAsync(string workspaceRoot, string l
     var dependentIndex = new CapabilityDependentIndex([adapter]);
     var service = CredentialLifecyclePersistenceFactory.Create(paths, trustProvider, adapter, new CredentialCreateCrashValueProvider(providerEntryMarker), adapter, dependentIndex, adapter, new AuditLog(paths));
     _ = await service.ExecuteAsync(CreateRequest("restart-create"), destination =>
+    {
+        destination.Fill(1);
+        return destination.Length;
+    });
+    return 4;
+}
+
+static async Task<int> CrashCredentialPayloadCreateAsync(string workspaceRoot, string trustProfile, string operationId, string consentId, string referencePayload, string bindingPayload, string locatorMarker, string providerEntryMarker)
+{
+    var trustDirectoryName = trustProfile switch
+    {
+        "registry" => "credential-registry-trust",
+        "restart" => "credential-lifecycle-restart-trust",
+        _ => null
+    };
+    if (trustDirectoryName is null)
+    {
+        return 2;
+    }
+
+    string referenceJson;
+    string bindingJson;
+    try
+    {
+        referenceJson = Encoding.UTF8.GetString(Convert.FromBase64String(referencePayload));
+        bindingJson = Encoding.UTF8.GetString(Convert.FromBase64String(bindingPayload));
+    }
+    catch (FormatException)
+    {
+        return 2;
+    }
+    if (!CredentialContractJson.TryDeserializeReference(referenceJson, out var reference, out _) || !CredentialContractJson.TryDeserializeBinding(bindingJson, out var binding, out _) || !reference!.Id.Equals(binding!.ReferenceId))
+    {
+        return 2;
+    }
+
+    var paths = new WorkspacePaths(workspaceRoot);
+    var workspaceDirectory = new DirectoryInfo(paths.WorkspacePath);
+    var temporaryRoot = workspaceDirectory.Parent?.Parent ?? throw new InvalidOperationException("The test workspace root is invalid.");
+    var trustProvider = new FileCapabilityCatalogTrustProvider(Path.Combine(temporaryRoot.FullName, "embodysense-test-server-state", workspaceDirectory.Name, trustDirectoryName));
+    var adapter = new CredentialCreateCrashTestAdapter(locatorMarker);
+    var dependentIndex = new CapabilityDependentIndex([adapter]);
+    var service = CredentialLifecyclePersistenceFactory.Create(paths, trustProvider, adapter, new CredentialCreateCrashValueProvider(providerEntryMarker), adapter, dependentIndex, adapter, new AuditLog(paths));
+    var request = new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Create, ParseId(operationId), reference.Id, binding.Scope.WorkspaceId!, Environment.UserName, 0, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), 4, reference, binding, ParseId(consentId));
+    _ = await service.ExecuteAsync(request, destination =>
     {
         destination.Fill(1);
         return destination.Length;

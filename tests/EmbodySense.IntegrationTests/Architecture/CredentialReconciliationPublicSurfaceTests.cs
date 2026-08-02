@@ -27,7 +27,8 @@ public sealed class CredentialReconciliationPublicSurfaceTests
         var serviceSurface = typeof(CredentialLifecycleService).GetMembers().Select(member => member.ToString() ?? member.Name).ToArray();
         var startupFactoryMembers = typeof(CredentialLifecycleFactory).GetMembers().Where(member => string.Equals(member.Name, nameof(CredentialLifecycleFactory.Create), StringComparison.Ordinal)).ToArray();
         var persistenceFactoryMembers = typeof(CredentialLifecyclePersistenceFactory).GetMembers().Where(member => string.Equals(member.Name, nameof(CredentialLifecyclePersistenceFactory.Create), StringComparison.Ordinal)).ToArray();
-        var factorySurface = startupFactoryMembers.Concat(persistenceFactoryMembers).Select(member => member.ToString() ?? member.Name).ToArray();
+        var persistenceFactorySurface = typeof(CredentialLifecyclePersistenceFactory).GetMembers().Where(member => member.Name.StartsWith("Create", StringComparison.Ordinal)).ToArray();
+        var factorySurface = startupFactoryMembers.Concat(persistenceFactorySurface).Select(member => member.ToString() ?? member.Name).ToArray();
         Func<WorkspacePaths, FileCapabilityCatalogTrustProvider, ICredentialProviderLocatorVerifier, ICredentialValueProvider, ICredentialProviderLocatorSource, ICapabilityDependentIndex, ICredentialActiveRunIndex, IAuditLog, TimeProvider?, CredentialLifecycleService> startupFactory = CredentialLifecycleFactory.Create;
         Func<WorkspacePaths, FileCapabilityCatalogTrustProvider, ICredentialProviderLocatorVerifier, ICredentialValueProvider, ICredentialProviderLocatorSource, ICapabilityDependentIndex, ICredentialActiveRunIndex, IAuditLog, TimeProvider?, CredentialLifecycleService> persistenceFactory = CredentialLifecyclePersistenceFactory.Create;
 
@@ -44,6 +45,7 @@ public sealed class CredentialReconciliationPublicSurfaceTests
         Assert.NotNull(persistenceFactory);
         Assert.DoesNotContain(registrySurface, signature => signature.Contains("MutateLifecycle", StringComparison.Ordinal));
         Assert.DoesNotContain(factorySurface, signature => signature.Contains("Authenticate", StringComparison.Ordinal));
+        Assert.DoesNotContain(factorySurface, signature => signature.Contains(nameof(ICapabilityCatalogTrustProvider), StringComparison.Ordinal));
         Assert.DoesNotContain(mutationSurface, signature => signature.Contains("ReconciliationProof", StringComparison.Ordinal));
     }
 

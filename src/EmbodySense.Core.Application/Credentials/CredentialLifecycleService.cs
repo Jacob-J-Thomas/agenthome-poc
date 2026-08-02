@@ -135,9 +135,8 @@ public sealed class CredentialLifecycleService
         if (request.OperationId is not null && request.ReferenceId is not null && IsSafe(request.ActorId, 128))
         {
             var read = await _registry.ReadAsync(CancellationToken.None);
-            var hasDurableOutcome = read.Succeeded && read.Operations.Any(operation => (operation.LifecycleIntentOperationId?.Equals(request.OperationId) == true || operation.OperationId.Equals(request.OperationId)) && IsTerminalPhase(operation.LifecyclePhase));
-            var hasDurableProviderIntent = read.Succeeded && HasProviderMutation(request.Kind) && read.Operations.Any(operation => operation.OperationId.Equals(request.OperationId) && operation.LifecyclePhase == CredentialLifecycleMutationPhase.Intent);
-            if (hasDurableOutcome || hasDurableProviderIntent)
+            var hasDurableOutcome = read.Succeeded && read.Operations.Any(operation => (operation.LifecycleIntentOperationId?.Equals(request.OperationId) == true || operation.OperationId.Equals(request.OperationId)) && IsTerminalPhase(operation.LifecyclePhase) && MatchesLifecycleEvidence(operation, request));
+            if (hasDurableOutcome)
             {
                 _ = await DrainAuditAsync(CancellationToken.None);
             }
@@ -194,6 +193,11 @@ public sealed class CredentialLifecycleService
             {
                 return ReplayProviderOperation(request, read, entry);
             }
+            if (request.Kind == CredentialLifecycleOperationKind.Test && existingOperation.LifecyclePhase == CredentialLifecycleMutationPhase.MetadataComplete && existingOperation.ResultHealth is CredentialProviderHealthStatus.Unavailable or CredentialProviderHealthStatus.Corrupt)
+            {
+                var status = existingOperation.ResultHealth == CredentialProviderHealthStatus.Corrupt ? CredentialLifecycleResultStatus.Failed : CredentialLifecycleResultStatus.Unavailable;
+                return Result(request, status, read.RegistryRevision, existingOperation.ResultHealth.Value, [], CredentialFailureCode.Unavailable, "The exact failed provider health result was replayed from durable terminal evidence without repeating provider I/O.");
+            }
             return Result(request, CredentialLifecycleResultStatus.Replayed, read.RegistryRevision, entry?.Health ?? CredentialProviderHealthStatus.Missing, existingOperation.AffectedActiveRuns, null, "The exact value-free lifecycle operation was already committed.");
         }
         if (HasUnresolvedRepairIntent(read, request.ReferenceId) && !(request.Kind == CredentialLifecycleOperationKind.ReconcileRepair && interruptedRepair is not null))
@@ -230,11 +234,6 @@ public sealed class CredentialLifecycleService
             var health = entry?.Health ?? (tombstone?.NeedsRepair == true ? CredentialProviderHealthStatus.NeedsRepair : CredentialProviderHealthStatus.Missing);
             return Result(request, CredentialLifecycleResultStatus.Conflict, read.RegistryRevision, health, [], CredentialFailureCode.Conflict, "The confirmed impact preview is stale, incomplete, or belongs to another actor, workspace, or request.");
         }
-        if (!HasProviderMutation(request.Kind) && request.Kind != CredentialLifecycleOperationKind.ReconcileRepair)
-        {
-            await TryAppendAuditAsync(AuditSchema.Actions.CredentialLifecycleIntent, request, AuditSchema.Outcomes.Started, read.RegistryRevision, request.Preview?.PreviewRevision, "Credential lifecycle intent was recorded before any provider mutation.");
-        }
-
         CredentialLifecycleResult outcome;
         if (request.Kind is CredentialLifecycleOperationKind.Create or CredentialLifecycleOperationKind.Import)
         {
@@ -477,10 +476,12 @@ public sealed class CredentialLifecycleService
         {
             return Result(request, CredentialLifecycleResultStatus.Unavailable, request.ExpectedRegistryRevision, CredentialProviderHealthStatus.Unavailable, [], CredentialFailureCode.Unavailable, "The provider returned no safe health outcome.");
         }
-        var mutation = Mutation(request, CredentialRegistryMutationKind.SetHealth, request.ExpectedRegistryRevision, null, null, null, health.Status, null, null);
-        var committed = await _registry.MutateAsync(mutation, cancellationToken);
+        var status = health.Failure is null ? CredentialLifecycleResultStatus.Applied : health.Status == CredentialProviderHealthStatus.Corrupt ? CredentialLifecycleResultStatus.Failed : CredentialLifecycleResultStatus.Unavailable;
+        var detail = health.Failure is null ? "Safe provider health was tested without invoking a credential-bearing external effect." : health.Status == CredentialProviderHealthStatus.Corrupt ? "Provider health testing proved corrupt credential material without exposing it." : "Provider health testing could not establish a trustworthy provider posture.";
+        var mutation = Mutation(request, CredentialRegistryMutationKind.SetHealth, request.ExpectedRegistryRevision, null, null, null, health.Status, null, null, phase: CredentialLifecycleMutationPhase.MetadataComplete, terminalStatus: status, terminalDetail: detail);
+        var committed = await _registry.MutateAsync(mutation, CancellationToken.None);
         return committed.Status is CredentialRegistryMutationStatus.Applied or CredentialRegistryMutationStatus.Replayed
-            ? Result(request, committed.Status == CredentialRegistryMutationStatus.Replayed ? CredentialLifecycleResultStatus.Replayed : CredentialLifecycleResultStatus.Applied, committed.RegistryRevision, health.Status, [], health.Failure?.Code, "Safe provider health was tested without invoking a credential-bearing external effect.")
+            ? Result(request, committed.Status == CredentialRegistryMutationStatus.Replayed && health.Failure is null ? CredentialLifecycleResultStatus.Replayed : status, committed.RegistryRevision, health.Status, [], health.Failure?.Code, detail)
             : FromRegistry(request, committed, entry.Health, "Safe provider health could not be committed.");
     }
 
@@ -497,14 +498,15 @@ public sealed class CredentialLifecycleService
             activeRuns = activeRunCapture.Runs;
         }
 
+        const string Detail = "The value-free lifecycle metadata transition is committed and grants no authority.";
         CredentialRegistryMutation mutation;
         if (request.Kind == CredentialLifecycleOperationKind.Bind)
         {
-            mutation = Mutation(request, CredentialRegistryMutationKind.Bind, request.ExpectedRegistryRevision, null, request.Binding, null, null, null, null);
+            mutation = Mutation(request, CredentialRegistryMutationKind.Bind, request.ExpectedRegistryRevision, null, request.Binding, null, null, null, null, phase: CredentialLifecycleMutationPhase.MetadataComplete, terminalStatus: CredentialLifecycleResultStatus.Applied, terminalDetail: Detail);
         }
         else if (request.Kind == CredentialLifecycleOperationKind.Consent)
         {
-            mutation = Mutation(request, CredentialRegistryMutationKind.Consent, request.ExpectedRegistryRevision, null, null, request.ConsentReference, null, null, true);
+            mutation = Mutation(request, CredentialRegistryMutationKind.Consent, request.ExpectedRegistryRevision, null, null, request.ConsentReference, null, null, true, phase: CredentialLifecycleMutationPhase.MetadataComplete, terminalStatus: CredentialLifecycleResultStatus.Applied, terminalDetail: Detail);
         }
         else
         {
@@ -521,7 +523,7 @@ public sealed class CredentialLifecycleService
                 _ => CredentialProviderHealthStatus.Disabled
             };
             var reference = entry.Reference with { Status = status, UpdatedAtUtc = request.RequestedAtUtc };
-            mutation = Mutation(request, CredentialRegistryMutationKind.UpdatePosture, request.ExpectedRegistryRevision, reference, null, null, health, null, null, activeRuns: activeRuns);
+            mutation = Mutation(request, CredentialRegistryMutationKind.UpdatePosture, request.ExpectedRegistryRevision, reference, null, null, health, null, null, phase: CredentialLifecycleMutationPhase.MetadataComplete, activeRuns: activeRuns, terminalStatus: CredentialLifecycleResultStatus.Applied, terminalDetail: Detail);
         }
 
         var committed = await _registry.MutateAsync(mutation, cancellationToken);
@@ -530,7 +532,7 @@ public sealed class CredentialLifecycleService
             return FromRegistry(request, committed, entry.Health, "The metadata-only lifecycle transition could not be committed.");
         }
 
-        return Result(request, committed.Status == CredentialRegistryMutationStatus.Replayed ? CredentialLifecycleResultStatus.Replayed : CredentialLifecycleResultStatus.Applied, committed.RegistryRevision, committed.Entry?.Health ?? entry.Health, activeRuns, null, "The value-free lifecycle metadata transition is committed and grants no authority.");
+        return Result(request, committed.Status == CredentialRegistryMutationStatus.Replayed ? CredentialLifecycleResultStatus.Replayed : CredentialLifecycleResultStatus.Applied, committed.RegistryRevision, committed.Entry?.Health ?? entry.Health, activeRuns, null, Detail);
     }
 
     private async Task<CredentialLifecycleResult> ResolveProviderFailureAsync(CredentialLifecycleRequest request, CredentialRegistryEntry preparedEntry, CredentialFailure failure, CredentialProviderHealthStatus rollbackHealth, long revision, CancellationToken cancellationToken)
@@ -826,7 +828,7 @@ public sealed class CredentialLifecycleService
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
     }
 
-    private static bool IsTerminalPhase(CredentialLifecycleMutationPhase? phase) => phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.Rollback or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain or CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.Uncertain or CredentialLifecycleMutationPhase.RepairUncertain or CredentialLifecycleMutationPhase.LocatorUncertain or CredentialLifecycleMutationPhase.RepairReconciledUncertain;
+    private static bool IsTerminalPhase(CredentialLifecycleMutationPhase? phase) => phase is CredentialLifecycleMutationPhase.Complete or CredentialLifecycleMutationPhase.Rollback or CredentialLifecycleMutationPhase.TombstoneComplete or CredentialLifecycleMutationPhase.TombstoneUncertain or CredentialLifecycleMutationPhase.RepairComplete or CredentialLifecycleMutationPhase.Uncertain or CredentialLifecycleMutationPhase.RepairUncertain or CredentialLifecycleMutationPhase.LocatorUncertain or CredentialLifecycleMutationPhase.RepairReconciledUncertain or CredentialLifecycleMutationPhase.MetadataComplete;
 
     private static CredentialLifecycleResult FromRegistry(CredentialLifecycleRequest request, CredentialRegistryMutationResult result, CredentialProviderHealthStatus health, string detail)
     {

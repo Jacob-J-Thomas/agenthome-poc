@@ -24,5 +24,7 @@ public enum CredentialLifecycleMutationPhase
     /// <summary>The durable outcome-uncertain evidence recorded after ambiguous provider-locator creation.</summary>
     LocatorUncertain = 10,
     /// <summary>The closed durable reconciliation that terminalizes an exact interrupted repair intent without claiming provider success.</summary>
-    RepairReconciledUncertain = 11
+    RepairReconciledUncertain = 11,
+    /// <summary>The atomic registry transition and terminal audit outcome for one value-free lifecycle operation.</summary>
+    MetadataComplete = 12
 }
