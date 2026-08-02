@@ -68,6 +68,11 @@ public sealed class TriggerDeliveryAdmissionService : ITriggerDeliveryAdmissionP
             return Result(TriggerAdmissionStatus.Conflicting, TriggerAdmissionReason.IdentityConflict, envelopeHash);
         }
 
+        if (request.Envelope.Redelivery.Attempt != 1 || request.Envelope.Redelivery.Count != 1)
+        {
+            return Result(TriggerAdmissionStatus.Invalid, TriggerAdmissionReason.InvalidEnvelope, envelopeHash);
+        }
+
         return ValidateCurrentEvidence(request, envelopeHash!) ?? Result(TriggerAdmissionStatus.Admitted, TriggerAdmissionReason.EvidenceAccepted, envelopeHash);
     }
 

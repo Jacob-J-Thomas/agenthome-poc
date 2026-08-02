@@ -123,6 +123,22 @@ public sealed class TriggerDeliveryAdmissionServiceTests
     }
 
     [Fact]
+    public async Task History_free_admission_rejects_unproved_redelivery_lineage()
+    {
+        var redelivery = TriggerAdmissionTestData.Envelope(
+            deliveryId: "delivery-9",
+            deduplicationId: "dedup-9",
+            redeliveryAttempt: 7,
+            redeliveryCount: 9,
+            originalDeliveryId: "arbitrary-origin");
+
+        var result = await _port.AdmitAsync(TriggerAdmissionTestData.Request(envelope: redelivery));
+
+        AssertOutcome(result, TriggerAdmissionStatus.Invalid, TriggerAdmissionReason.InvalidEnvelope);
+        AssertOutcome(await _port.AdmitAsync(TriggerAdmissionTestData.Request()), TriggerAdmissionStatus.Admitted, TriggerAdmissionReason.EvidenceAccepted, admitted: true);
+    }
+
+    [Fact]
     public async Task Divergent_delivery_and_deduplication_history_matches_conflict()
     {
         var deliveryMatch = TriggerAdmissionTestData.Envelope();
