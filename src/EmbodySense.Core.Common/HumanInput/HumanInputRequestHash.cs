@@ -235,9 +235,13 @@ public static class HumanInputRequestHash
 
         WriteChoices(writer, "choices", schema.Choices);
         writer.WritePropertyName("structuredFields");
-        writer.WriteStartArray();
-        if (schema.StructuredFields is not null)
+        if (schema.StructuredFields is null)
         {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartArray();
             foreach (var field in schema.StructuredFields)
             {
                 if (field is null)
@@ -262,9 +266,10 @@ public static class HumanInputRequestHash
                 WriteChoices(writer, "choices", field.Choices);
                 writer.WriteEndObject();
             }
+
+            writer.WriteEndArray();
         }
 
-        writer.WriteEndArray();
         writer.WritePropertyName("referencePolicy");
         if (schema.ReferencePolicy is null)
         {
@@ -284,22 +289,25 @@ public static class HumanInputRequestHash
     private static void WriteChoices(Utf8JsonWriter writer, string propertyName, HumanInputChoice[]? choices)
     {
         writer.WritePropertyName(propertyName);
-        writer.WriteStartArray();
-        if (choices is not null)
+        if (choices is null)
         {
-            foreach (var choice in choices)
-            {
-                if (choice is null)
-                {
-                    writer.WriteNullValue();
-                    continue;
-                }
+            writer.WriteNullValue();
+            return;
+        }
 
-                writer.WriteStartObject();
-                WriteString(writer, "choiceId", choice.ChoiceId);
-                WriteString(writer, "displayText", choice.DisplayText);
-                writer.WriteEndObject();
+        writer.WriteStartArray();
+        foreach (var choice in choices)
+        {
+            if (choice is null)
+            {
+                writer.WriteNullValue();
+                continue;
             }
+
+            writer.WriteStartObject();
+            WriteString(writer, "choiceId", choice.ChoiceId);
+            WriteString(writer, "displayText", choice.DisplayText);
+            writer.WriteEndObject();
         }
 
         writer.WriteEndArray();

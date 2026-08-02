@@ -157,14 +157,16 @@ public static class HumanInputValidator
                 continue;
             }
 
+            var respondentIdIsValid = HumanInputIdentifier.IsValid(respondent.RespondentId);
+            var routeIsValid = HumanInputText.IsValid(respondent.RoutingReference, HumanInputLimits.MaxRoutingReferenceCharacters, true);
             ValidateId(respondent.RespondentId, $"{field}.respondentId", errors);
             ValidateText(respondent.RoutingReference, $"{field}.routingReference", HumanInputLimits.MaxRoutingReferenceCharacters, true, errors);
-            if (!respondentIds.Add(respondent.RespondentId ?? string.Empty))
+            if (respondentIdIsValid && !respondentIds.Add(respondent.RespondentId))
             {
                 Add(errors, "duplicate_respondent", $"{field}.respondentId", "Eligible respondent IDs must be unique.");
             }
 
-            if (!routes.Add(respondent.RoutingReference ?? string.Empty))
+            if (routeIsValid && !routes.Add(respondent.RoutingReference))
             {
                 Add(errors, "ambiguous_recipient_route", $"{field}.routingReference", "Each eligible respondent requires one unique routing reference.");
             }
