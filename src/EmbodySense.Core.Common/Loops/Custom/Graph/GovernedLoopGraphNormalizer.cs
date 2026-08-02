@@ -29,7 +29,7 @@ public static class GovernedLoopGraphNormalizer
         ValidateSchemas(schemas, errors);
         ValidateNodes(nodes, schemas, candidate.AuthorityCeiling, errors);
         ValidateEdges(edges, nodes, errors);
-        ValidateBindings(bindings, nodes, edges, errors);
+        ValidateBindings(bindings, nodes, edges, candidate.EntryNodeId, errors);
         ValidateTerminalsAndTopology(candidate.EntryNodeId, terminals, nodes, edges, errors);
         ValidateOutput(candidate.OutputContract, nodes, schemas, terminals, errors);
         ValidateDisplay(candidate.DisplayMetadata, nodes, errors);
@@ -260,7 +260,7 @@ public static class GovernedLoopGraphNormalizer
         }
     }
 
-    private static void ValidateBindings(IReadOnlyList<GovernedLoopBindingDefinition?> bindings, IReadOnlyList<GovernedLoopNodeDefinition?> nodes, IReadOnlyList<GovernedLoopControlEdgeDefinition?> edges, GovernedLoopGraphErrorCollector errors)
+    private static void ValidateBindings(IReadOnlyList<GovernedLoopBindingDefinition?> bindings, IReadOnlyList<GovernedLoopNodeDefinition?> nodes, IReadOnlyList<GovernedLoopControlEdgeDefinition?> edges, string? entryNodeId, GovernedLoopGraphErrorCollector errors)
     {
         ValidateIdentities(bindings, value => value?.Id, "bindings", GovernedLoopGraphElementKind.Binding, errors);
         var nodeById = ValidNodesById(nodes);
@@ -313,6 +313,10 @@ public static class GovernedLoopGraphNormalizer
             else if (nodeById.ContainsKey(binding.FromNodeId) && nodeById.ContainsKey(binding.ToNodeId) && !CanReach(binding.FromNodeId, binding.ToNodeId, adjacency))
             {
                 errors.Add("binding.source.not-control-predecessor", GovernedLoopGraphElementKind.Binding, binding.Id, path, "A bound producer must be able to precede its consumer through control flow; values are never ambient.");
+            }
+            else if (hasTarget && target!.Required && entryNodeId is not null && adjacency.ContainsKey(entryNodeId) && !Dominates(entryNodeId, binding.FromNodeId, binding.ToNodeId, adjacency))
+            {
+                errors.Add("binding.source.not-control-dominator", GovernedLoopGraphElementKind.Binding, binding.Id, path, "A required input producer must execute on every control path from the graph entry to its consumer.");
             }
         }
 
@@ -460,7 +464,7 @@ public static class GovernedLoopGraphNormalizer
                     errors.Add("output.source-port.incompatible", GovernedLoopGraphElementKind.Output, item.Id, $"{path}.sourcePortId", "The output source port is missing or incompatible.");
                 }
 
-                if (!terminalIds.Contains(item.SourceNodeId) || node.Descriptor.Kind != GovernedLoopNodeKind.Exit)
+                if (!terminalIds.Contains(item.SourceNodeId) || node.Descriptor?.Kind != GovernedLoopNodeKind.Exit)
                 {
                     errors.Add("output.source-node.not-success-terminal", GovernedLoopGraphElementKind.Output, item.Id, $"{path}.sourceNodeId", "A successful graph output must be sourced from a declared exit terminal.");
                 }
@@ -661,6 +665,38 @@ public static class GovernedLoopGraphNormalizer
     private static bool CanReach(string source, string target, IReadOnlyDictionary<string, SortedSet<string>> adjacency)
     {
         return !string.Equals(source, target, StringComparison.Ordinal) && Traverse(source, adjacency).Contains(target);
+    }
+
+    private static bool Dominates(string entry, string producer, string consumer, IReadOnlyDictionary<string, SortedSet<string>> adjacency)
+    {
+        if (string.Equals(entry, producer, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Stack<string>();
+        pending.Push(entry);
+        while (pending.Count > 0)
+        {
+            var current = pending.Pop();
+            if (string.Equals(current, producer, StringComparison.Ordinal) || !visited.Add(current))
+            {
+                continue;
+            }
+
+            if (string.Equals(current, consumer, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            foreach (var target in adjacency[current].Reverse())
+            {
+                pending.Push(target);
+            }
+        }
+
+        return true;
     }
 
     private static void ValidateIdentities<T>(IReadOnlyList<T?> values, Func<T, string?> getId, string collectionPath, GovernedLoopGraphElementKind kind, GovernedLoopGraphErrorCollector errors, string? ownerId = null)

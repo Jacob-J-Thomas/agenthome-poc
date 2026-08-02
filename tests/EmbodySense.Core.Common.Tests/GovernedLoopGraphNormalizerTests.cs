@@ -77,6 +77,70 @@ public sealed class GovernedLoopGraphNormalizerTests
     }
 
     [Fact]
+    public void NormalizeRejectsRequiredBindingWhenAControlPathBypassesItsProducer()
+    {
+        var edges = GovernedLoopGraphTestFixture.Edges().Append(new GovernedLoopControlEdgeDefinition("trigger-to-exit", "trigger", "exit", GovernedLoopControlCondition.Failure)).ToArray();
+
+        var result = GovernedLoopGraphNormalizer.Normalize(Candidate(edges: edges));
+
+        Assert.Contains(result.Errors, error => error.Code == "binding.source.not-control-dominator" && error.Element.Id == "result-binding");
+    }
+
+    [Fact]
+    public void NormalizeRejectsRequiredBindingWhenDiamondBranchBypassesItsProducer()
+    {
+        var bypass = new GovernedLoopNodeDefinition("bypass", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "bypass-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var edges = new[]
+        {
+            new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Success),
+            new GovernedLoopControlEdgeDefinition("trigger-to-bypass", "trigger", "bypass", GovernedLoopControlCondition.Failure),
+            new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            new GovernedLoopControlEdgeDefinition("bypass-to-exit", "bypass", "exit", GovernedLoopControlCondition.Success)
+        };
+
+        var result = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: [.. GovernedLoopGraphTestFixture.Nodes(), bypass], edges: edges));
+
+        Assert.Contains(result.Errors, error => error.Code == "binding.source.not-control-dominator" && error.Element.Id == "result-binding");
+    }
+
+    [Fact]
+    public void NormalizeAcceptsRequiredBindingWhenProducerDominatesConsumerAcrossCycle()
+    {
+        var cycle = new GovernedLoopNodeDefinition("cycle", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "cycle-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var edges = new[]
+        {
+            new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+            new GovernedLoopControlEdgeDefinition("infer-to-cycle", "infer", "cycle", GovernedLoopControlCondition.Failure),
+            new GovernedLoopControlEdgeDefinition("cycle-to-infer", "cycle", "infer", GovernedLoopControlCondition.Always),
+            new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success)
+        };
+
+        var result = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: [.. GovernedLoopGraphTestFixture.Nodes(), cycle], edges: edges));
+
+        Assert.True(result.IsValid);
+        Assert.DoesNotContain(result.Errors, error => error.Code == "binding.source.not-control-dominator");
+    }
+
+    [Fact]
+    public void NormalizeRejectsRequiredBindingWhenCycleCanEnterConsumerBeforeProducer()
+    {
+        var nodes = GovernedLoopGraphTestFixture.Nodes();
+        var producer = new GovernedLoopNodeDefinition("producer", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "producer-transform", 1), [GovernedLoopGraphTestFixture.OutputPort("request", GovernedLoopBindingKind.Data)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var bindings = GovernedLoopGraphTestFixture.Bindings().Select(binding => binding.Id == "request-binding" ? binding with { FromNodeId = "producer", FromPortId = "request" } : binding).ToArray();
+        var edges = new[]
+        {
+            new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+            new GovernedLoopControlEdgeDefinition("infer-to-producer", "infer", "producer", GovernedLoopControlCondition.Failure),
+            new GovernedLoopControlEdgeDefinition("producer-to-infer", "producer", "infer", GovernedLoopControlCondition.Always),
+            new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success)
+        };
+
+        var result = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: [.. nodes, producer], edges: edges, bindings: bindings));
+
+        Assert.Contains(result.Errors, error => error.Code == "binding.source.not-control-dominator" && error.Element.Id == "request-binding");
+    }
+
+    [Fact]
     public void NormalizeRejectsRequiredInputConflictAndCompatibilityMismatch()
     {
         var bindings = GovernedLoopGraphTestFixture.Bindings();
@@ -130,13 +194,13 @@ public sealed class GovernedLoopGraphNormalizerTests
             var id = $"branch-{index:D2}";
             validNodes.Add(new GovernedLoopNodeDefinition(id, new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "branch-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>()));
             validEdges.Add(new GovernedLoopControlEdgeDefinition($"trigger-to-{id}", "trigger", id, GovernedLoopControlCondition.Always));
-            validEdges.Add(new GovernedLoopControlEdgeDefinition($"{id}-to-exit", id, "exit", GovernedLoopControlCondition.Success));
+            validEdges.Add(new GovernedLoopControlEdgeDefinition($"{id}-to-infer", id, "infer", GovernedLoopControlCondition.Success));
         }
 
         validEdges.Add(new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success));
         var atLimit = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: validNodes, edges: validEdges));
         var extraNode = new GovernedLoopNodeDefinition("branch-extra", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "branch-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
-        var overLimit = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: validNodes.Append(extraNode).ToArray(), edges: validEdges.Append(new GovernedLoopControlEdgeDefinition("trigger-to-branch-extra", "trigger", "branch-extra", GovernedLoopControlCondition.Always)).Append(new GovernedLoopControlEdgeDefinition("branch-extra-to-exit", "branch-extra", "exit", GovernedLoopControlCondition.Success)).ToArray()));
+        var overLimit = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: validNodes.Append(extraNode).ToArray(), edges: validEdges.Append(new GovernedLoopControlEdgeDefinition("trigger-to-branch-extra", "trigger", "branch-extra", GovernedLoopControlCondition.Always)).Append(new GovernedLoopControlEdgeDefinition("branch-extra-to-infer", "branch-extra", "infer", GovernedLoopControlCondition.Success)).ToArray()));
 
         Assert.DoesNotContain(atLimit.Errors, error => error.Code == "graph.node.fan-out");
         Assert.Contains(overLimit.Errors, error => error.Code == "graph.node.fan-out");
@@ -387,6 +451,19 @@ public sealed class GovernedLoopGraphNormalizerTests
     }
 
     [Fact]
+    public void NormalizeReturnsStructuralErrorsWhenOutputSourceDescriptorIsNull()
+    {
+        var nodes = GovernedLoopGraphTestFixture.Nodes();
+        nodes[2] = nodes[2] with { Descriptor = null! };
+
+        var result = GovernedLoopGraphNormalizer.Normalize(Candidate(nodes: nodes));
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, error => error.Code == "node.descriptor.required" && error.Element.Id == "exit");
+        Assert.Contains(result.Errors, error => error.Code == "output.source-node.not-success-terminal" && error.Element.Id == "result");
+    }
+
+    [Fact]
     public void NormalizeEnforcesCondensedDepthAtLimitAndLimitPlusOne()
     {
         var atLimit = GovernedLoopGraphNormalizer.Normalize(DepthCandidate(CustomLoopLimits.MaxGraphControlDepth));
@@ -419,8 +496,8 @@ public sealed class GovernedLoopGraphNormalizerTests
         var nodes = GovernedLoopGraphTestFixture.Nodes().ToList();
         var edges = GovernedLoopGraphTestFixture.Edges().ToList();
         var parents = new Queue<string>();
-        var availableChildren = new Dictionary<string, int>(StringComparer.Ordinal) { ["trigger"] = CustomLoopLimits.MaxGraphControlFanOut - 1 };
-        parents.Enqueue("trigger");
+        var availableChildren = new Dictionary<string, int>(StringComparer.Ordinal) { ["infer"] = CustomLoopLimits.MaxGraphControlFanOut - 1 };
+        parents.Enqueue("infer");
         for (var index = 0; index < count - GovernedLoopGraphTestFixture.Nodes().Length; index++)
         {
             while (availableChildren[parents.Peek()] == 0)

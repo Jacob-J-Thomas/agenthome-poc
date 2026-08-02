@@ -85,7 +85,7 @@ public sealed class GovernedLoopGraphValidationService
         var evidence = GovernedLoopGraphValidationEvidenceHash.Compute(catalog, authority);
         var errors = new List<GovernedLoopGraphValidationError>();
         ValidateAuthority(normalized.Graph!, authority, errors);
-        var catalogByKey = catalog.Descriptors.ToDictionary(DescriptorKey);
+        var catalogByKey = catalog.Descriptors.Take(CustomLoopLimits.MaxGraphNodes).ToDictionary(DescriptorKey);
         ValidateDescriptors(normalized.Graph!, catalogByKey, authority, errors);
         return errors.Count == 0
             ? new GovernedLoopGraphValidationResult(normalized.Graph, evidence, Array.Empty<GovernedLoopGraphValidationError>())
@@ -101,7 +101,7 @@ public sealed class GovernedLoopGraphValidationService
         }
 
         var keys = new HashSet<(GovernedLoopNodeKind Kind, string TypeId, int Version)>();
-        foreach (var descriptor in snapshot.Descriptors.OrderBy(item => item?.Descriptor?.TypeId, StringComparer.Ordinal))
+        foreach (var descriptor in snapshot.Descriptors.Take(CustomLoopLimits.MaxGraphNodes).OrderBy(item => item?.Descriptor?.TypeId, StringComparer.Ordinal))
         {
             if (descriptor is null || descriptor.Descriptor is null || !Enum.IsDefined(descriptor.Descriptor.Kind) || descriptor.Descriptor.Kind == GovernedLoopNodeKind.Unknown || !CustomLoopArtifactIdentifier.IsValid(descriptor.Descriptor.TypeId) || descriptor.Descriptor.Version < 1 || descriptor.Ports is null || descriptor.Parameters is null || descriptor.RequiredCapabilityIds is null || descriptor.AllowedControlOutcomes is null || descriptor.RequiredControlOutcomes is null || descriptor.ResourceBudget is null)
             {
@@ -132,10 +132,19 @@ public sealed class GovernedLoopGraphValidationService
             Add(errors, "catalog.join-contract.invalid", GovernedLoopGraphElementKind.Catalog, id, path, "Join arrival requirements do not match the declared join policy.");
         }
 
-        var allowed = descriptor.AllowedControlOutcomes.ToHashSet();
-        if (descriptor.AllowedControlOutcomes.Any(value => !Enum.IsDefined(value) || value == GovernedLoopControlCondition.Unknown) || allowed.Count != descriptor.AllowedControlOutcomes.Count || descriptor.RequiredControlOutcomes.Any(value => !allowed.Contains(value)) || descriptor.RequiredControlOutcomes.Distinct().Count() != descriptor.RequiredControlOutcomes.Count)
+        var maximumOutcomes = Enum.GetValues<GovernedLoopControlCondition>().Count(value => value != GovernedLoopControlCondition.Unknown);
+        if (descriptor.AllowedControlOutcomes.Count > maximumOutcomes || descriptor.RequiredControlOutcomes.Count > maximumOutcomes)
         {
-            Add(errors, "catalog.control-outcomes.invalid", GovernedLoopGraphElementKind.Catalog, id, path, "Allowed and required control outcomes must be defined, unique, and internally consistent.");
+            Add(errors, "catalog.control-outcomes.count", GovernedLoopGraphElementKind.Catalog, id, path, "Allowed and required control outcomes must fit the defined schema-1 outcome set.");
+        }
+        else
+        {
+            var allowed = descriptor.AllowedControlOutcomes.Take(maximumOutcomes).ToHashSet();
+            var required = descriptor.RequiredControlOutcomes.Take(maximumOutcomes).ToArray();
+            if (allowed.Any(value => !Enum.IsDefined(value) || value == GovernedLoopControlCondition.Unknown) || allowed.Count != descriptor.AllowedControlOutcomes.Count || required.Any(value => !allowed.Contains(value)) || required.Distinct().Count() != descriptor.RequiredControlOutcomes.Count)
+            {
+                Add(errors, "catalog.control-outcomes.invalid", GovernedLoopGraphElementKind.Catalog, id, path, "Allowed and required control outcomes must be defined, unique, and internally consistent.");
+            }
         }
 
         if (descriptor.AllowsCycle)
@@ -150,18 +159,29 @@ public sealed class GovernedLoopGraphValidationService
             Add(errors, "catalog.cycle-budget-contract.invalid", GovernedLoopGraphElementKind.Catalog, id, path, "A non-cyclic descriptor cannot declare cycle budget parameters.");
         }
 
-        var portIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var port in descriptor.Ports)
+        if (descriptor.Ports.Count > CustomLoopLimits.MaxGraphPortsPerNode)
         {
-            if (port is null || !CustomLoopArtifactIdentifier.IsValid(port.Id) || !portIds.Add(port.Id) || !Enum.IsDefined(port.Direction) || port.Direction == GovernedLoopPortDirection.Unknown || !Enum.IsDefined(port.BindingKind) || port.BindingKind == GovernedLoopBindingKind.Unknown || !Enum.IsDefined(port.ValueKind) || port.ValueKind == GovernedLoopValueKind.Unknown)
+            Add(errors, "catalog.port-contract.count", GovernedLoopGraphElementKind.Catalog, id, $"{path}.ports", $"A descriptor may declare at most {CustomLoopLimits.MaxGraphPortsPerNode} port contracts.");
+        }
+        else
+        {
+            var portIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var port in descriptor.Ports.Take(CustomLoopLimits.MaxGraphPortsPerNode))
             {
-                Add(errors, "catalog.port-contract.invalid", GovernedLoopGraphElementKind.Catalog, id, $"{path}.ports", "Catalog port contracts must be canonical, unique, and fully defined.");
+                if (port is null || !CustomLoopArtifactIdentifier.IsValid(port.Id) || !portIds.Add(port.Id) || !Enum.IsDefined(port.Direction) || port.Direction == GovernedLoopPortDirection.Unknown || !Enum.IsDefined(port.BindingKind) || port.BindingKind == GovernedLoopBindingKind.Unknown || !Enum.IsDefined(port.ValueKind) || port.ValueKind == GovernedLoopValueKind.Unknown)
+                {
+                    Add(errors, "catalog.port-contract.invalid", GovernedLoopGraphElementKind.Catalog, id, $"{path}.ports", "Catalog port contracts must be canonical, unique, and fully defined.");
+                }
             }
         }
 
         ValidateParameterContracts(descriptor, path, errors);
 
-        if (descriptor.RequiredCapabilityIds.Any(capability => !CustomLoopArtifactIdentifier.IsValid(capability)) || descriptor.RequiredCapabilityIds.Distinct(StringComparer.Ordinal).Count() != descriptor.RequiredCapabilityIds.Count)
+        if (descriptor.RequiredCapabilityIds.Count > CustomLoopLimits.MaxGraphAuthorityCapabilities)
+        {
+            Add(errors, "catalog.capabilities.count", GovernedLoopGraphElementKind.Catalog, id, $"{path}.requiredCapabilityIds", $"A descriptor may require at most {CustomLoopLimits.MaxGraphAuthorityCapabilities} capabilities.");
+        }
+        else if (descriptor.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Any(capability => !CustomLoopArtifactIdentifier.IsValid(capability)) || descriptor.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Distinct(StringComparer.Ordinal).Count() != descriptor.RequiredCapabilityIds.Count)
         {
             Add(errors, "catalog.capabilities.invalid", GovernedLoopGraphElementKind.Catalog, id, $"{path}.requiredCapabilityIds", "Catalog capabilities must be canonical and unique.");
         }
@@ -174,10 +194,11 @@ public sealed class GovernedLoopGraphValidationService
         if (descriptor.Parameters.Count > CustomLoopLimits.MaxGraphDescriptorParameters)
         {
             Add(errors, "catalog.parameter-contract.count", GovernedLoopGraphElementKind.Catalog, descriptor.Descriptor.TypeId, $"{descriptorPath}.parameters", $"A descriptor may declare at most {CustomLoopLimits.MaxGraphDescriptorParameters} parameter contracts.");
+            return;
         }
 
         var ids = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var parameter in descriptor.Parameters.OrderBy(parameter => parameter?.Id, StringComparer.Ordinal).Take(CustomLoopLimits.MaxGraphDescriptorParameters))
+        foreach (var parameter in descriptor.Parameters.Take(CustomLoopLimits.MaxGraphDescriptorParameters).OrderBy(parameter => parameter?.Id, StringComparer.Ordinal))
         {
             if (parameter is null || !CustomLoopArtifactIdentifier.IsValid(parameter.Id) || !ids.Add(parameter.Id) || !Enum.IsDefined(parameter.ValueKind) || parameter.ValueKind == GovernedLoopParameterValueKind.Unknown || parameter.MinimumCharacters < 0 || parameter.MinimumCharacters > parameter.MaximumCharacters || parameter.MaximumCharacters > CustomLoopLimits.MaxGraphParameterValueCharacters || parameter.AllowedValues is null)
             {
@@ -186,7 +207,7 @@ public sealed class GovernedLoopGraphValidationService
             }
 
             var hasIntegerRange = parameter.MinimumInteger.HasValue && parameter.MaximumInteger.HasValue && parameter.MinimumInteger <= parameter.MaximumInteger;
-            var allowedValuesValid = parameter.AllowedValues.Count > 0 && parameter.AllowedValues.Count <= CustomLoopLimits.MaxGraphDescriptorParameters && parameter.AllowedValues.All(value => IsCanonicalParameterText(value, parameter.MinimumCharacters, parameter.MaximumCharacters)) && parameter.AllowedValues.Distinct(StringComparer.Ordinal).Count() == parameter.AllowedValues.Count;
+            var allowedValuesValid = parameter.AllowedValues.Count > 0 && parameter.AllowedValues.Count <= CustomLoopLimits.MaxGraphDescriptorParameters && parameter.AllowedValues.Take(CustomLoopLimits.MaxGraphDescriptorParameters).All(value => IsCanonicalParameterText(value, parameter.MinimumCharacters, parameter.MaximumCharacters)) && parameter.AllowedValues.Take(CustomLoopLimits.MaxGraphDescriptorParameters).Distinct(StringComparer.Ordinal).Count() == parameter.AllowedValues.Count;
             if (parameter.ValueKind == GovernedLoopParameterValueKind.Integer != hasIntegerRange || parameter.ValueKind == GovernedLoopParameterValueKind.Enumeration != allowedValuesValid || parameter.ValueKind != GovernedLoopParameterValueKind.Integer && (parameter.MinimumInteger.HasValue || parameter.MaximumInteger.HasValue) || parameter.ValueKind != GovernedLoopParameterValueKind.Enumeration && parameter.AllowedValues.Count > 0)
             {
                 Add(errors, "catalog.parameter-contract.semantics", GovernedLoopGraphElementKind.Catalog, descriptor.Descriptor.TypeId, $"{descriptorPath}.parameters[{parameter.Id}]", "Integer ranges and enumeration values must be present only for their matching canonical value semantics.");
@@ -202,7 +223,7 @@ public sealed class GovernedLoopGraphValidationService
 
     private static void ValidateCycleBudgetContract(GovernedLoopNodeCatalogDescriptor descriptor, string parameterId, long maximum, string descriptorPath, List<GovernedLoopGraphValidationError> errors)
     {
-        var parameter = descriptor.Parameters.FirstOrDefault(value => value is not null && string.Equals(value.Id, parameterId, StringComparison.Ordinal));
+        var parameter = descriptor.Parameters.Take(CustomLoopLimits.MaxGraphDescriptorParameters).FirstOrDefault(value => value is not null && string.Equals(value.Id, parameterId, StringComparison.Ordinal));
         if (parameter is null || parameter.ValueKind != GovernedLoopParameterValueKind.Integer || !parameter.Required || parameter.MinimumInteger is null or < 1 || parameter.MaximumInteger is null || parameter.MaximumInteger > maximum)
         {
             Add(errors, "catalog.cycle-budget-parameter.invalid", GovernedLoopGraphElementKind.Catalog, descriptor.Descriptor.TypeId, $"{descriptorPath}.parameters[{parameterId}]", "Cycle budget parameters must be required positive bounded integer contracts.");
@@ -211,7 +232,15 @@ public sealed class GovernedLoopGraphValidationService
 
     private static void ValidateAuthoritySnapshot(GovernedLoopAuthoritySnapshot snapshot, List<GovernedLoopGraphValidationError> errors)
     {
-        if (!CustomLoopArtifactIdentifier.IsValid(snapshot.SourceEvidenceId) || !CustomLoopArtifactIdentifier.IsValid(snapshot.RoleId) || snapshot.CapabilityIds is null || snapshot.CapabilityIds.Any(capability => !CustomLoopArtifactIdentifier.IsValid(capability)) || snapshot.CapabilityIds.Distinct(StringComparer.Ordinal).Count() != snapshot.CapabilityIds.Count)
+        if (!CustomLoopArtifactIdentifier.IsValid(snapshot.SourceEvidenceId) || !CustomLoopArtifactIdentifier.IsValid(snapshot.RoleId) || snapshot.CapabilityIds is null)
+        {
+            Add(errors, "authority.snapshot.invalid", GovernedLoopGraphElementKind.Authority, snapshot.RoleId, "authority", "The authority snapshot identity, role, or capabilities are invalid.");
+        }
+        else if (snapshot.CapabilityIds.Count > CustomLoopLimits.MaxGraphAuthorityCapabilities)
+        {
+            Add(errors, "authority.capabilities.count", GovernedLoopGraphElementKind.Authority, snapshot.RoleId, "authority.capabilityIds", $"Current role authority may contain at most {CustomLoopLimits.MaxGraphAuthorityCapabilities} capabilities.");
+        }
+        else if (snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Any(capability => !CustomLoopArtifactIdentifier.IsValid(capability)) || snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Distinct(StringComparer.Ordinal).Count() != snapshot.CapabilityIds.Count)
         {
             Add(errors, "authority.snapshot.invalid", GovernedLoopGraphElementKind.Authority, snapshot.RoleId, "authority", "The authority snapshot identity, role, or capabilities are invalid.");
         }
@@ -226,7 +255,7 @@ public sealed class GovernedLoopGraphValidationService
             Add(errors, "authority.role.mismatch", GovernedLoopGraphElementKind.Authority, authority.RoleId, "authority.roleId", "Authority evidence must belong to the graph's owning role.");
         }
 
-        var current = authority.CapabilityIds.ToHashSet(StringComparer.Ordinal);
+        var current = authority.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).ToHashSet(StringComparer.Ordinal);
         foreach (var capability in graph.AuthorityCeiling.CapabilityIds.Where(capability => !current.Contains(capability)).Order(StringComparer.Ordinal))
         {
             Add(errors, "authority.loop.widens-current-role", GovernedLoopGraphElementKind.Authority, capability, "graph.authorityCeiling", "The loop ceiling cannot widen current role authority.");
@@ -281,7 +310,7 @@ public sealed class GovernedLoopGraphValidationService
     {
         var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
         var actual = node.Ports.ToDictionary(port => port.Id, StringComparer.Ordinal);
-        var expected = descriptor.Ports.ToDictionary(port => port.Id, StringComparer.Ordinal);
+        var expected = descriptor.Ports.Take(CustomLoopLimits.MaxGraphPortsPerNode).ToDictionary(port => port.Id, StringComparer.Ordinal);
         foreach (var portId in actual.Keys.Union(expected.Keys, StringComparer.Ordinal).Order(StringComparer.Ordinal))
         {
             var path = $"graph.nodes[{node.Id}].ports[{portId}]";
@@ -301,7 +330,7 @@ public sealed class GovernedLoopGraphValidationService
     private static void ValidateNodeAuthority(GovernedLoopNodeDefinition node, GovernedLoopNodeCatalogDescriptor descriptor, List<GovernedLoopGraphValidationError> errors)
     {
         var ceiling = node.AuthorityCeiling.CapabilityIds.ToHashSet(StringComparer.Ordinal);
-        foreach (var capability in descriptor.RequiredCapabilityIds.Where(capability => !ceiling.Contains(capability)).Order(StringComparer.Ordinal))
+        foreach (var capability in descriptor.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Where(capability => !ceiling.Contains(capability)).Order(StringComparer.Ordinal))
         {
             Add(errors, "node.authority.missing-capability", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}].authorityCeiling", "The node ceiling does not contain a capability required by its exact descriptor.");
         }
@@ -309,7 +338,7 @@ public sealed class GovernedLoopGraphValidationService
 
     private static void ValidateNodeParameters(GovernedLoopNodeDefinition node, GovernedLoopNodeCatalogDescriptor descriptor, List<GovernedLoopGraphValidationError> errors)
     {
-        var contracts = descriptor.Parameters.ToDictionary(parameter => parameter.Id, StringComparer.Ordinal);
+        var contracts = descriptor.Parameters.Take(CustomLoopLimits.MaxGraphDescriptorParameters).ToDictionary(parameter => parameter.Id, StringComparer.Ordinal);
         foreach (var parameter in node.Parameters.OrderBy(parameter => parameter.Key, StringComparer.Ordinal))
         {
             var path = $"graph.nodes[{node.Id}].parameters[{parameter.Key}]";
@@ -323,7 +352,7 @@ public sealed class GovernedLoopGraphValidationService
             }
         }
 
-        foreach (var contract in descriptor.Parameters.Where(contract => contract.Required && !node.Parameters.ContainsKey(contract.Id)).OrderBy(contract => contract.Id, StringComparer.Ordinal))
+        foreach (var contract in descriptor.Parameters.Take(CustomLoopLimits.MaxGraphDescriptorParameters).Where(contract => contract.Required && !node.Parameters.ContainsKey(contract.Id)).OrderBy(contract => contract.Id, StringComparer.Ordinal))
         {
             Add(errors, "node.parameter.required", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}].parameters[{contract.Id}]", "A required executable parameter is missing.");
         }
@@ -400,14 +429,14 @@ public sealed class GovernedLoopGraphValidationService
             }
 
             var outgoing = graph.ControlEdges.Where(edge => string.Equals(edge.FromNodeId, node.Id, StringComparison.Ordinal)).OrderBy(edge => edge.Id, StringComparer.Ordinal).ToArray();
-            var allowed = descriptor.AllowedControlOutcomes.ToHashSet();
+            var allowed = descriptor.AllowedControlOutcomes.Take(Enum.GetValues<GovernedLoopControlCondition>().Length - 1).ToHashSet();
             foreach (var edge in outgoing.Where(edge => !allowed.Contains(edge.Condition)))
             {
                 Add(errors, "edge.outcome.not-allowed", GovernedLoopGraphElementKind.ControlEdge, edge.Id, $"graph.controlEdges[{edge.Id}].condition", "The edge outcome is not emitted by the exact source descriptor.");
             }
 
             var actual = outgoing.Select(edge => edge.Condition).ToHashSet();
-            foreach (var required in descriptor.RequiredControlOutcomes.Where(required => !actual.Contains(required)).OrderBy(value => value))
+            foreach (var required in descriptor.RequiredControlOutcomes.Take(Enum.GetValues<GovernedLoopControlCondition>().Length - 1).Where(required => !actual.Contains(required)).OrderBy(value => value))
             {
                 Add(errors, "node.branch-outcome.missing", GovernedLoopGraphElementKind.Node, node.Id, $"graph.nodes[{node.Id}]", $"Required branch outcome `{required}` has no outgoing control edge.");
             }
@@ -475,14 +504,21 @@ public sealed class GovernedLoopGraphValidationService
 
     private static bool AreMutuallyExclusive(GovernedLoopControlCondition left, GovernedLoopControlCondition right)
     {
-        return left != right && (left, right) is
+        return left != right && (IsTimeoutPair(left, right) || (left, right) is
             (GovernedLoopControlCondition.Success, GovernedLoopControlCondition.Failure) or
             (GovernedLoopControlCondition.Failure, GovernedLoopControlCondition.Success) or
             (GovernedLoopControlCondition.True, GovernedLoopControlCondition.False) or
             (GovernedLoopControlCondition.False, GovernedLoopControlCondition.True) or
             (GovernedLoopControlCondition.Approved, GovernedLoopControlCondition.Rejected) or
-            (GovernedLoopControlCondition.Rejected, GovernedLoopControlCondition.Approved);
+            (GovernedLoopControlCondition.Rejected, GovernedLoopControlCondition.Approved));
     }
+
+    private static bool IsTimeoutPair(GovernedLoopControlCondition left, GovernedLoopControlCondition right)
+    {
+        return left == GovernedLoopControlCondition.Timeout && IsExclusiveWithTimeout(right) || right == GovernedLoopControlCondition.Timeout && IsExclusiveWithTimeout(left);
+    }
+
+    private static bool IsExclusiveWithTimeout(GovernedLoopControlCondition condition) => condition is GovernedLoopControlCondition.Success or GovernedLoopControlCondition.Failure or GovernedLoopControlCondition.True or GovernedLoopControlCondition.False or GovernedLoopControlCondition.Approved or GovernedLoopControlCondition.Rejected;
 
     private static bool CanReach(string source, string target, IReadOnlyDictionary<string, SortedSet<string>> adjacency)
     {
@@ -789,11 +825,6 @@ public sealed class GovernedLoopGraphValidationService
 
     private static void Add(List<GovernedLoopGraphValidationError> errors, string code, GovernedLoopGraphElementKind kind, string? id, string path, string message)
     {
-        if (errors.Count >= CustomLoopLimits.MaxGraphValidationErrors)
-        {
-            return;
-        }
-
         errors.Add(new GovernedLoopGraphValidationError(code.Length <= CustomLoopLimits.MaxGraphValidationErrorCodeCharacters ? code : code[..CustomLoopLimits.MaxGraphValidationErrorCodeCharacters], new GovernedLoopGraphElementReference(kind, id is null || id.Length <= CustomLoopLimits.MaxArtifactIdCharacters ? id : id[..CustomLoopLimits.MaxArtifactIdCharacters], path.Length <= CustomLoopLimits.MaxGraphValidationErrorPathCharacters ? path : path[..CustomLoopLimits.MaxGraphValidationErrorPathCharacters]), message.Length <= CustomLoopLimits.MaxGraphValidationErrorMessageCharacters ? message : message[..CustomLoopLimits.MaxGraphValidationErrorMessageCharacters]));
     }
 

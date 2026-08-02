@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using EmbodySense.Core.Application.Loops.GraphValidation.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Application.Loops.GraphValidation;
@@ -37,7 +38,7 @@ internal static class GovernedLoopGraphValidationEvidenceHash
         writer.WriteString("sourceEvidenceId", snapshot.SourceEvidenceId);
         writer.WritePropertyName("descriptors");
         writer.WriteStartArray();
-        foreach (var item in snapshot.Descriptors.OrderBy(DescriptorKey, StringComparer.Ordinal))
+        foreach (var item in snapshot.Descriptors.Take(CustomLoopLimits.MaxGraphNodes).OrderBy(DescriptorKey, StringComparer.Ordinal))
         {
             writer.WriteStartObject();
             writer.WriteString("descriptor", DescriptorKey(item));
@@ -54,7 +55,7 @@ internal static class GovernedLoopGraphValidationEvidenceHash
             writer.WriteString("cycleMilliseconds", item.CycleTimeBudgetMillisecondsParameterId);
             writer.WritePropertyName("ports");
             writer.WriteStartArray();
-            foreach (var port in item.Ports.OrderBy(port => port.Id, StringComparer.Ordinal))
+            foreach (var port in item.Ports.Take(CustomLoopLimits.MaxGraphPortsPerNode).OrderBy(port => port.Id, StringComparer.Ordinal))
             {
                 writer.WriteStartObject();
                 writer.WriteString("id", port.Id);
@@ -68,7 +69,7 @@ internal static class GovernedLoopGraphValidationEvidenceHash
             writer.WriteEndArray();
             writer.WritePropertyName("parameters");
             writer.WriteStartArray();
-            foreach (var parameter in item.Parameters.OrderBy(parameter => parameter.Id, StringComparer.Ordinal))
+            foreach (var parameter in item.Parameters.Take(CustomLoopLimits.MaxGraphDescriptorParameters).OrderBy(parameter => parameter.Id, StringComparer.Ordinal))
             {
                 writer.WriteStartObject();
                 writer.WriteString("id", parameter.Id);
@@ -96,7 +97,7 @@ internal static class GovernedLoopGraphValidationEvidenceHash
 
                 writer.WritePropertyName("allowedValues");
                 writer.WriteStartArray();
-                foreach (var value in parameter.AllowedValues.Order(StringComparer.Ordinal))
+                foreach (var value in parameter.AllowedValues.Take(CustomLoopLimits.MaxGraphDescriptorParameters).Order(StringComparer.Ordinal))
                 {
                     writer.WriteStringValue(value);
                 }
@@ -108,7 +109,7 @@ internal static class GovernedLoopGraphValidationEvidenceHash
             writer.WriteEndArray();
             writer.WritePropertyName("capabilities");
             writer.WriteStartArray();
-            foreach (var capability in item.RequiredCapabilityIds.Order(StringComparer.Ordinal))
+            foreach (var capability in item.RequiredCapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Order(StringComparer.Ordinal))
             {
                 writer.WriteStringValue(capability);
             }
@@ -134,7 +135,7 @@ internal static class GovernedLoopGraphValidationEvidenceHash
         writer.WriteString("roleId", snapshot.RoleId);
         writer.WritePropertyName("capabilities");
         writer.WriteStartArray();
-        foreach (var capability in snapshot.CapabilityIds.Order(StringComparer.Ordinal))
+        foreach (var capability in snapshot.CapabilityIds.Take(CustomLoopLimits.MaxGraphAuthorityCapabilities).Order(StringComparer.Ordinal))
         {
             writer.WriteStringValue(capability);
         }
@@ -151,7 +152,7 @@ internal static class GovernedLoopGraphValidationEvidenceHash
     {
         writer.WritePropertyName(name);
         writer.WriteStartArray();
-        foreach (var value in values.OrderBy(value => Convert.ToInt32(value)))
+        foreach (var value in values.Take(Enum.GetValues<TEnum>().Length).OrderBy(value => Convert.ToInt32(value)))
         {
             writer.WriteStringValue(value.ToString());
         }

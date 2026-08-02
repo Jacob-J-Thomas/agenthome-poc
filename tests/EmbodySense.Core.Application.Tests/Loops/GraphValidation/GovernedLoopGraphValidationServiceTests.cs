@@ -136,6 +136,31 @@ public sealed class GovernedLoopGraphValidationServiceTests
         Assert.Contains(result.Errors, error => error.Code == "node.join.unsatisfiable" && error.Element.Id == "join");
     }
 
+    [Theory]
+    [InlineData(GovernedLoopControlCondition.Success)]
+    [InlineData(GovernedLoopControlCondition.Failure)]
+    [InlineData(GovernedLoopControlCondition.True)]
+    [InlineData(GovernedLoopControlCondition.False)]
+    [InlineData(GovernedLoopControlCondition.Approved)]
+    [InlineData(GovernedLoopControlCondition.Rejected)]
+    public async Task ValidateRejectsAllPathJoinOfTimeoutAndAnotherTerminalOutcome(GovernedLoopControlCondition otherOutcome)
+    {
+        var join = new GovernedLoopNodeDefinition("join", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Join, "all-join", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        var candidate = Candidate(
+            nodes: [.. Nodes(), join],
+            edges:
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("infer-other-to-join", "infer", "join", otherOutcome),
+                new GovernedLoopControlEdgeDefinition("infer-timeout-to-join", "infer", "join", GovernedLoopControlCondition.Timeout),
+                new GovernedLoopControlEdgeDefinition("join-to-exit", "join", "exit", GovernedLoopControlCondition.Always)
+            ]);
+
+        var result = await Service(Descriptors(candidate)).ValidateAsync(candidate);
+
+        Assert.Contains(result.Errors, error => error.Code == "node.join.unsatisfiable" && error.Element.Id == "join");
+    }
+
     [Fact]
     public async Task ValidateFindsUnsatisfiableJoinAcrossIntermediateBranchNodes()
     {
@@ -458,9 +483,11 @@ public sealed class GovernedLoopGraphValidationServiceTests
     [Fact]
     public async Task ValidatePricesAcyclicReconvergencePerIncomingActivation()
     {
+        var nodes = Nodes();
+        nodes[2] = nodes[2] with { Ports = nodes[2].Ports.Select(port => port.Id == "result" ? port with { Required = false } : port).ToArray() };
         var extra = new GovernedLoopNodeDefinition("extra", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "extra-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
         var candidate = Candidate(
-            nodes: [.. Nodes(), extra],
+            nodes: [.. nodes, extra],
             edges:
             [
                 new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
@@ -482,6 +509,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
     {
         var nodes = Nodes();
         nodes[1] = nodes[1] with { Parameters = CycleParameters("2") };
+        nodes[2] = nodes[2] with { Ports = nodes[2].Ports.Select(port => port.Id == "result" ? port with { Required = false } : port).ToArray() };
         var second = new GovernedLoopNodeDefinition("second", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "second-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), CycleParameters("2"));
         var candidate = Candidate(
             nodes: [.. nodes, second],
@@ -553,6 +581,71 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     [Fact]
+    public async Task ValidateCapsCatalogErrorsAfterCanonicalSortingAcrossProviderPermutations()
+    {
+        var candidate = Candidate();
+        var template = Descriptors(candidate)[1];
+        var malformed = Enumerable.Range(0, CustomLoopLimits.MaxGraphNodes).Select(index => template with
+        {
+            Descriptor = new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, $"malformed-{index:D3}", 1),
+            JoinPolicy = GovernedLoopJoinPolicy.None,
+            MinimumIncomingControlEdges = 2,
+            AllowedControlOutcomes = [GovernedLoopControlCondition.Unknown],
+            RequiredControlOutcomes = [GovernedLoopControlCondition.Failure],
+            CycleIterationBudgetParameterId = "iterations",
+            Ports = [new GovernedLoopCatalogPortContract("INVALID", GovernedLoopPortDirection.Unknown, GovernedLoopBindingKind.Unknown, GovernedLoopValueKind.Unknown, true)],
+            RequiredCapabilityIds = ["INVALID"],
+            ResourceBudget = new GovernedLoopNodeResourceBudget(-1, -1, -1, -1)
+        }).ToArray();
+
+        var forward = await Service(malformed).ValidateAsync(candidate);
+        var reverse = await Service(malformed.Reverse().ToArray()).ValidateAsync(candidate);
+
+        Assert.Equal(CustomLoopLimits.MaxGraphValidationErrors, forward.Errors.Count);
+        Assert.Equal(forward.Errors, reverse.Errors);
+        Assert.Equal(forward.Errors.OrderBy(error => error.Element.Path, StringComparer.Ordinal).ThenBy(error => error.Code, StringComparer.Ordinal).ThenBy(error => error.Element.Id, StringComparer.Ordinal), forward.Errors);
+    }
+
+    [Fact]
+    public async Task ValidateRejectsOversizedCatalogPortsWithoutEnumeratingOrHashingThem()
+    {
+        var candidate = Candidate();
+        var descriptors = Descriptors(candidate);
+        descriptors[1] = descriptors[1] with { Ports = new ThrowingEnumerationReadOnlyList<GovernedLoopCatalogPortContract>(CustomLoopLimits.MaxGraphPortsPerNode + 1) };
+
+        var result = await Service(descriptors).ValidateAsync(candidate);
+
+        Assert.Null(result.Evidence);
+        Assert.Contains(result.Errors, error => error.Code == "catalog.port-contract.count" && error.Element.Id == "provider-inference");
+    }
+
+    [Fact]
+    public async Task ValidateRejectsOversizedSiblingProviderCollectionsWithoutEnumeratingThem()
+    {
+        var candidate = Candidate();
+        var descriptors = Descriptors(candidate);
+        var outcomeMaximum = Enum.GetValues<GovernedLoopControlCondition>().Count(value => value != GovernedLoopControlCondition.Unknown);
+        var outcomes = descriptors.ToArray();
+        outcomes[1] = outcomes[1] with { AllowedControlOutcomes = new ThrowingEnumerationReadOnlyList<GovernedLoopControlCondition>(outcomeMaximum + 1) };
+        var parameters = descriptors.ToArray();
+        parameters[1] = parameters[1] with { Parameters = new ThrowingEnumerationReadOnlyList<GovernedLoopCatalogParameterContract>(CustomLoopLimits.MaxGraphDescriptorParameters + 1) };
+        var capabilities = descriptors.ToArray();
+        capabilities[1] = capabilities[1] with { RequiredCapabilityIds = new ThrowingEnumerationReadOnlyList<string>(CustomLoopLimits.MaxGraphAuthorityCapabilities + 1) };
+        var authority = Authority() with { CapabilityIds = new ThrowingEnumerationReadOnlyList<string>(CustomLoopLimits.MaxGraphAuthorityCapabilities + 1) };
+
+        var outcomeResult = await Service(outcomes).ValidateAsync(candidate);
+        var parameterResult = await Service(parameters).ValidateAsync(candidate);
+        var capabilityResult = await Service(capabilities).ValidateAsync(candidate);
+        var authorityResult = await Service(descriptors, authority).ValidateAsync(candidate);
+
+        Assert.Contains(outcomeResult.Errors, error => error.Code == "catalog.control-outcomes.count");
+        Assert.Contains(parameterResult.Errors, error => error.Code == "catalog.parameter-contract.count");
+        Assert.Contains(capabilityResult.Errors, error => error.Code == "catalog.capabilities.count");
+        Assert.Contains(authorityResult.Errors, error => error.Code == "authority.capabilities.count");
+        Assert.All(new[] { outcomeResult, parameterResult, capabilityResult, authorityResult }, result => Assert.Null(result.Evidence));
+    }
+
+    [Fact]
     public async Task ValidateRejectsDescriptorAuthorityEntryTerminalAndOutcomeConflicts()
     {
         var extra = new GovernedLoopNodeDefinition("extra", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Transform, "extra-transform", 1), [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
@@ -563,7 +656,7 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer", GovernedLoopControlCondition.Always),
                 new GovernedLoopControlEdgeDefinition("trigger-to-extra", "trigger", "extra", GovernedLoopControlCondition.Always),
                 new GovernedLoopControlEdgeDefinition("infer-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
-                new GovernedLoopControlEdgeDefinition("extra-to-exit", "extra", "exit", GovernedLoopControlCondition.Success)
+                new GovernedLoopControlEdgeDefinition("extra-to-infer", "extra", "infer", GovernedLoopControlCondition.Success)
             ]);
         var descriptors = Descriptors(candidate).Select(descriptor => descriptor.Descriptor.TypeId switch
         {
