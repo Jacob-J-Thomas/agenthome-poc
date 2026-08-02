@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using System.Text.Json.Serialization;
+using EmbodySense.Core.Common.Capabilities.Models;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
@@ -59,6 +60,9 @@ public sealed record CustomLoopRunRecord(
     /// Schema version required by the current custom-loop run contract.
     /// </summary>
     public const int CurrentSchemaVersion = 1;
+
+    /// <summary>Gets the immutable exact capability resolution admitted for this run.</summary>
+    public CapabilityAdmissionSnapshot CapabilityAdmission { get; init; } = null!;
 
     /// <summary>
     /// Gets a value indicating whether the lifecycle has reached a terminal status.

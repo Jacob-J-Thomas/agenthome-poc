@@ -15,6 +15,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
@@ -414,7 +415,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
                 CorrelationId: "provider-reused-attempt-correlation"), cancellationToken);
             return Response();
         }, evidenceSink: evidenceSink);
-        var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, new PublishedConversation(), new AuditLog(paths), new TestAuthorityProvider());
+        var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, new PublishedConversation(), new AuditLog(paths), new TestAuthorityProvider(), capabilityAdmissionService: new TestCapabilityAdmissionService());
 
         var execution = await runner.RunAsync(new CustomLoopOrderedRunRequest(admitted.Id, "web"));
 
@@ -465,7 +466,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             return Response();
         }, evidenceSink: evidenceSink);
         var executor = new RunLimitAttemptExecutor(inner);
-        var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, new PublishedConversation(), new AuditLog(paths), new TestAuthorityProvider());
+        var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, new PublishedConversation(), new AuditLog(paths), new TestAuthorityProvider(), capabilityAdmissionService: new TestCapabilityAdmissionService());
 
         var execution = await runner.RunAsync(new CustomLoopOrderedRunRequest(admitted.Id, "web"));
 
@@ -726,6 +727,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             (IToolApprovalPrompt)effectivePrompt,
             authorityProvider ?? new TestAuthorityProvider(),
             evidenceSink ?? new NullEvidenceSink(),
+            new TestCapabilityAdmissionService(),
             (options, broker) => factory?.Invoke(options, broker, behavior) ?? new AsyncFakeInferenceClient(broker, behavior));
     }
 
@@ -734,7 +736,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         RecordingApprovalPrompt approvalPrompt,
         CustomLoopInferenceClientFactory clientFactory)
     {
-        return new CustomLoopInferenceAttemptExecutor(options, (IToolApprovalPrompt)approvalPrompt, new TestAuthorityProvider(), new NullEvidenceSink(), clientFactory);
+        return new CustomLoopInferenceAttemptExecutor(options, (IToolApprovalPrompt)approvalPrompt, new TestAuthorityProvider(), new NullEvidenceSink(), new TestCapabilityAdmissionService(), clientFactory);
     }
 
     private static LlmInferenceClientOptions CreateOptions(TestWorkspace workspace)
@@ -767,7 +769,10 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             new CustomLoopModelSnapshot("openai", "pinned-model"),
             assignments ?? [],
             ToolRequestsUsedInRun: 0,
-            LlmInferenceRequest.FromUserText("prompt"));
+            LlmInferenceRequest.FromUserText("prompt"))
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(LoopCapabilityRequirements.CreateCustomLoopManifest("loop-1", assignments ?? []))
+        };
     }
 
     private static async Task<CustomLoopRunRecord> CreateAdmittedRunAsync(CustomLoopRunStore store)
@@ -777,7 +782,11 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         {
             ToolAssignments = [CustomLoopToolAssignment.Read]
         };
-        definition = CustomLoopDefinitionContentHash.Apply(definition with { ContentHash = string.Empty });
+        definition = CustomLoopDefinitionContentHash.Apply(definition with
+        {
+            ContentHash = string.Empty,
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments)
+        });
         var authority = (await new TestAuthorityProvider().ResolveAsync(definition.RoleId, definition.ToolAssignments)) with { EvaluatedAtUtc = now };
         var admittedEvent = new CustomLoopRunEvent(1, "event-admitted", now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, "openai", "pinned-model", null, null, authority);
         var run = new CustomLoopRunRecord(
@@ -803,7 +812,10 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             [admittedEvent],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, now)
+        };
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(run)).Status);
         var auditMarker = new CustomLoopRunEvent(2, "event-admission-audit", now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);

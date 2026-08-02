@@ -171,14 +171,15 @@ public sealed class LoopRunStore : ILoopRunStore
 
             case LoopRunStatus.Failed:
             case LoopRunStatus.Cancelled:
+            case LoopRunStatus.NeedsReview:
                 if (run.CompletedAtUtc is null)
                 {
-                    throw new FormatException("Failed and cancelled loop runs must include a terminal timestamp.");
+                    throw new FormatException("Failed, cancelled, and needs-review loop runs must include a terminal timestamp.");
                 }
 
                 if (string.IsNullOrWhiteSpace(run.FailureDetail))
                 {
-                    throw new FormatException("Failed and cancelled loop runs must include a failure detail.");
+                    throw new FormatException("Failed, cancelled, and needs-review loop runs must include a failure detail.");
                 }
 
                 break;

@@ -6,6 +6,8 @@ using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using static EmbodySense.Core.Common.Loops.Custom.Execution.CustomLoopRunValidationRules;
+using EmbodySense.Core.Common.Capabilities;
+using System.Text.Json;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
@@ -270,6 +272,16 @@ public static class CustomLoopRunValidator
 
     private static void ValidateAdmission(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
+        var capabilityError = CapabilityAdmissionSnapshotValidator.Validate(run.CapabilityAdmission);
+        if (capabilityError is not null)
+        {
+            Add(errors, "invalid_capability_admission", "capabilityAdmission", capabilityError);
+        }
+        else if (run.AdmittedDefinition is not null && !string.Equals(run.CapabilityAdmission.RequirementsHash, GetRequirementsHash(run.AdmittedDefinition), StringComparison.Ordinal))
+        {
+            Add(errors, "capability_admission_definition_mismatch", "capabilityAdmission.requirementsHash", "Admitted capability evidence must bind the admitted definition's exact requirements.");
+        }
+
         if (run.ModelSnapshot is null)
         {
             Add(errors, "model_snapshot_required", "modelSnapshot", "A pinned provider/model snapshot is required.");
@@ -1210,6 +1222,16 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "admitted_context_changed", "contextSnapshot", "The admitted conversation binding and context snapshot are immutable.");
         }
+
+        if (!string.Equals(JsonSerializer.Serialize(current.CapabilityAdmission), JsonSerializer.Serialize(candidate.CapabilityAdmission), StringComparison.Ordinal))
+        {
+            Add(errors, "capability_admission_changed", "capabilityAdmission", "Historical capability pins and resolution evidence are immutable.");
+        }
+    }
+
+    private static string GetRequirementsHash(CustomLoopDefinition definition)
+    {
+        return CapabilityDependencyManifestHash.TryCompute(definition.CapabilityRequirements, out var hash, out _) ? hash!.Value : string.Empty;
     }
 
     private static void ValidateLifecycleTransition(CustomLoopRunRecord current, CustomLoopRunRecord candidate, List<CustomLoopValidationError> errors)

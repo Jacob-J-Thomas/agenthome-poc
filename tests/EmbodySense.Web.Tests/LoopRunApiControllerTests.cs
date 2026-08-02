@@ -388,7 +388,7 @@ public sealed class LoopRunApiControllerTests
     public async Task Pause_and_cancel_routes_surface_unsupported_discovery_index_cleanup()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
         var interrupted = await CreateInterruptedRunAsync(store);
@@ -438,11 +438,11 @@ public sealed class LoopRunApiControllerTests
     public async Task Run_evidence_api_recovers_interrupted_runs_before_exposing_lifecycle_state()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         const string TranscriptEvidence = """
-            {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","role":"user","content":"recovered user prompt"}
-            {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-07-20T11:59:00+00:00","role":"assistant","content":"recovered assistant response"}
+            {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"recovered user prompt"}
+            {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-07-20T11:59:00+00:00","messageId":"message-2","publicationId":"publication-2","role":"assistant","content":"recovered assistant response"}
             """;
         await File.WriteAllTextAsync(paths.CurrentConversationPath, TranscriptEvidence);
         var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;
@@ -506,7 +506,7 @@ public sealed class LoopRunApiControllerTests
         var definition = CustomLoopDefinition.CreateSeed("loop-web-recovery", "default-role", "step-1", "create-web-recovery", _timestamp);
         var admittedEvent = RunEvent(1, "web-recovery-admitted", CustomLoopRunEventKind.Admitted);
         var conversation = invokingConversationIdentity is null ? null : new CustomLoopConversationReference(invokingConversationIdentity, new string('c', CustomLoopLimits.Sha256HexCharacters), _timestamp);
-        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null);
+        var admitted = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-web-recovery", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-web-recovery", "web", string.Empty, definition, "Initial prompt", conversation, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null) { CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp) };
         admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
         Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);

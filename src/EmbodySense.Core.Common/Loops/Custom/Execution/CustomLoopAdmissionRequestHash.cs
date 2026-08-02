@@ -38,6 +38,8 @@ public static class CustomLoopAdmissionRequestHash
             WriteConversation(writer, run.InvokingConversation);
             writer.WritePropertyName("contextSnapshot");
             WriteContextSnapshot(writer, run.ContextSnapshot);
+            writer.WritePropertyName("capabilityAdmission");
+            JsonSerializer.Serialize(writer, run.CapabilityAdmission);
             writer.WriteEndObject();
         }
 

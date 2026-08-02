@@ -162,6 +162,12 @@ public sealed class WorkspacePaths
     public string LoopRunsPath => Path.Combine(LoopsPath, "runs");
 
     /// <summary>
+    /// Gets the durable default-conversation turn protocol path.
+    /// </summary>
+    /// <value>The default-conversation turn protocol path.</value>
+    public string DefaultConversationTurnsPath => Path.Combine(LoopRunsPath, "default-conversation-turns");
+
+    /// <summary>
     /// Gets the custom loop runs path.
     /// </summary>
     /// <value>The custom loop runs path.</value>
@@ -238,6 +244,42 @@ public sealed class WorkspacePaths
     /// </summary>
     /// <value>The recipes path.</value>
     public string RecipesPath => Path.Combine(AgentPath, "recipes");
+
+    /// <summary>Gets the governed capability catalog directory.</summary>
+    public string CapabilityCatalogPath => Path.Combine(AgentPath, "capabilities");
+
+    /// <summary>Gets the workspace-wide capability authority transaction lock.</summary>
+    public string CapabilityAuthorityLockPath => Path.Combine(RootPath, ".embodysense-capability-authority.lock");
+
+    /// <summary>Gets the canonical capability catalog artifact path.</summary>
+    public string CapabilityCatalogDocumentPath => Path.Combine(CapabilityCatalogPath, "catalog.json");
+
+    /// <summary>Gets the last independently proved capability catalog artifact path.</summary>
+    public string CapabilityCatalogProofPath => Path.Combine(CapabilityCatalogPath, "catalog.proved.json");
+
+    /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
+    public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
+
+    /// <summary>Gets the authenticated capability lifecycle aggregate path.</summary>
+    public string CapabilityLifecycleDocumentPath => Path.Combine(CapabilityCatalogPath, "lifecycle.json");
+
+    /// <summary>Gets the last-proved capability lifecycle aggregate path.</summary>
+    public string CapabilityLifecycleProofPath => Path.Combine(CapabilityCatalogPath, "lifecycle.proved.json");
+
+    /// <summary>Gets the single capability lifecycle mutation lock path.</summary>
+    public string CapabilityLifecycleLockPath => Path.Combine(CapabilityCatalogPath, ".lifecycle.lock");
+
+    /// <summary>Gets the immutable capability artifact storage root.</summary>
+    public string CapabilityArtifactsPath => Path.Combine(CapabilityCatalogPath, "artifacts");
+
+    /// <summary>Gets the durable capability artifact activation document.</summary>
+    public string CapabilityArtifactActivationPath => Path.Combine(CapabilityArtifactsPath, "activation.json");
+
+    /// <summary>Gets the last completely written capability artifact activation proof.</summary>
+    public string CapabilityArtifactActivationProofPath => Path.Combine(CapabilityArtifactsPath, "activation.proved.json");
+
+    /// <summary>Gets the cross-process capability artifact mutation lock.</summary>
+    public string CapabilityArtifactLockPath => Path.Combine(CapabilityArtifactsPath, ".artifacts.lock");
 
     /// <summary>
     /// Gets the permissions path.

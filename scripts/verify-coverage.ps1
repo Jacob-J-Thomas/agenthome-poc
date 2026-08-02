@@ -99,7 +99,7 @@ foreach ($coverageFile in $coverageFiles) {
         }
 
         foreach ($class in $package.classes.class) {
-            foreach ($line in $class.lines.line) {
+            foreach ($line in $class.SelectNodes("lines/line")) {
                 $lineKey = Get-CoverageLineKey -PackageName $packageName -FileName $class.filename -LineNumber $line.number
                 $hits = [int]$line.hits
 

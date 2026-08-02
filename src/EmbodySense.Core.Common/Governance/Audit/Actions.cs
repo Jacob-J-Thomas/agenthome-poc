@@ -114,5 +114,39 @@ public static partial class AuditSchema
         /// Identifies the tool execute audit action.
         /// </summary>
         public const string ToolExecute = "tool.execute";
+
+        /// <summary>
+        /// Identifies a capability artifact intake outcome.
+        /// </summary>
+        public const string CapabilityArtifactIntake = "capability.artifact.intake";
+
+        /// <summary>Identifies a capability artifact verification outcome.</summary>
+        public const string CapabilityArtifactVerification = "capability.artifact.verification";
+
+        /// <summary>Identifies a capability artifact activation or rollback outcome.</summary>
+        public const string CapabilityArtifactActivation = "capability.artifact.activation";
+
+        /// <summary>Identifies capability lifecycle mutation intent.</summary>
+        public const string CapabilityLifecycleIntent = "capability.lifecycle.intent";
+
+        /// <summary>Identifies deterministic capability lifecycle impact preview evidence.</summary>
+        public const string CapabilityLifecyclePreview = "capability.lifecycle.preview";
+
+        /// <summary>Identifies a capability lifecycle conflict.</summary>
+        public const string CapabilityLifecycleConflict = "capability.lifecycle.conflict";
+
+        /// <summary>Identifies an atomic capability lifecycle mutation.</summary>
+        public const string CapabilityLifecycleMutation = "capability.lifecycle.mutation";
+
+        /// <summary>Identifies an atomic capability rollback.</summary>
+        public const string CapabilityLifecycleRollback = "capability.lifecycle.rollback";
+
+        /// <summary>Identifies the final durable lifecycle outcome.</summary>
+        public const string CapabilityLifecycleFinal = "capability.lifecycle.final";
+
+        /// <summary>
+        /// Identifies a capability executable invocation intent or outcome.
+        /// </summary>
+        public const string CapabilityExecutableInvocation = "capability.executable.invocation";
     }
 }

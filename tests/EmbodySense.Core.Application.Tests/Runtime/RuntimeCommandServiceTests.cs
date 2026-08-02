@@ -245,6 +245,11 @@ public sealed class RuntimeCommandServiceTests
             return Task.FromResult(false);
         }
 
+        public Task<ConversationPublicationAppendResult> TryPublishMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, ConversationMessagePublication publication, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ConversationPublicationAppendResult(ConversationPublicationAppendStatus.Conflict, new ConversationMemorySnapshot("current", "runtime-command-version", [])));
+        }
+
         public Task<IReadOnlyList<ConversationMemorySearchResult>> SearchCurrentConversationAsync(string query, int limit = 20, CancellationToken cancellationToken = default)
         {
             return Task.FromResult<IReadOnlyList<ConversationMemorySearchResult>>([]);

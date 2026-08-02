@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
@@ -230,7 +231,7 @@ public sealed class CustomLoopContextResolverTests
                 Assert.Equal(0, block.CharacterCount);
                 Assert.False(block.Truncated);
             });
-        Assert.Contains(assembly.Request.Messages, message => message.Content.EndsWith("Tools: none", StringComparison.Ordinal));
+        Assert.Contains(assembly.Request.Messages, message => message.Content.Contains($"Tools: none{Environment.NewLine}", StringComparison.Ordinal));
     }
 
     [Theory]
@@ -326,7 +327,7 @@ public sealed class CustomLoopContextResolverTests
         var newline = Environment.NewLine;
         var metadata = Assert.Single(assembly.Request.Messages, message => message.Content.Contains("Node: exit", StringComparison.Ordinal));
         var instruction = Assert.Single(assembly.Request.InstructionContext!.TrustedInstructions, message => message.Content.Contains("Return exactly one ASCII token", StringComparison.Ordinal));
-        Assert.EndsWith("Tools: none (Exit is tool-less)", metadata.Content, StringComparison.Ordinal);
+        Assert.Contains($"Tools: none (Exit is tool-less){newline}", metadata.Content, StringComparison.Ordinal);
         Assert.DoesNotContain("Tools: list", metadata.Content, StringComparison.Ordinal);
         Assert.DoesNotContain("Tools: read", metadata.Content, StringComparison.Ordinal);
         Assert.Equal($"  Decide whether another iteration is useful.  {newline}{newline}Return exactly one ASCII token: Complete or Repeat. Do not add punctuation, JSON, Markdown, or explanation.", instruction.Content);
@@ -484,7 +485,10 @@ public sealed class CustomLoopContextResolverTests
             events ?? [],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _now)
+        };
     }
 
     private static CustomLoopConversationReference Conversation()

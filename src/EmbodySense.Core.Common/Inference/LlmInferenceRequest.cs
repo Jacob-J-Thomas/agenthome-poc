@@ -12,10 +12,12 @@ public sealed record LlmInferenceRequest
     /// <param name="messages">The messages.</param>
     /// <param name="options">The options.</param>
     /// <param name="instructionContext">The instruction context.</param>
+    /// <param name="correlation">The stable provider and governed-tool correlation chain.</param>
     public LlmInferenceRequest(
         IReadOnlyList<LlmMessage> messages,
         LlmInferenceOptions? options = null,
-        LlmInferenceInstructionContext? instructionContext = null)
+        LlmInferenceInstructionContext? instructionContext = null,
+        LlmInferenceCorrelation? correlation = null)
     {
         ArgumentNullException.ThrowIfNull(messages);
 
@@ -26,9 +28,16 @@ public sealed record LlmInferenceRequest
                 nameof(messages));
         }
 
+        if (correlation is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(correlation.ProviderAttemptId);
+            ArgumentException.ThrowIfNullOrWhiteSpace(correlation.ProviderCorrelationId);
+        }
+
         Messages = messages.ToArray();
         Options = options ?? LlmInferenceOptions.Default;
         InstructionContext = instructionContext;
+        Correlation = correlation;
     }
 
     /// <summary>
@@ -48,6 +57,11 @@ public sealed record LlmInferenceRequest
     /// </summary>
     /// <value>The LLM inference instruction context.</value>
     public LlmInferenceInstructionContext? InstructionContext { get; }
+
+    /// <summary>
+    /// Gets the stable provider and governed-tool correlation chain.
+    /// </summary>
+    public LlmInferenceCorrelation? Correlation { get; }
 
     /// <summary>
     /// Creates an LLM inference request from user text.
