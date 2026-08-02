@@ -179,6 +179,11 @@ public sealed class CapabilityPostureService
             {
                 return new CapabilityPosturePreviewResult(CapabilityPostureReadStatus.Invalid, null, _invalidError);
             }
+            var currentlyEnabled = lifecycle.State?.IsEnabled ?? catalog.Entry.Lifecycle.Enablement == CapabilityEnablementState.Enabled;
+            if (query.Operation == CapabilityLifecycleOperationKind.Enable && currentlyEnabled)
+            {
+                return new CapabilityPosturePreviewResult(CapabilityPostureReadStatus.Invalid, null, _invalidError);
+            }
 
             var targetVersion = ResolveTargetVersion(query, lifecycle, current.Version);
             if (query.Operation is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback && targetVersion is null)
