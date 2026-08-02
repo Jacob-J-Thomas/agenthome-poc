@@ -20,15 +20,26 @@ internal static class CapabilityCatalogNativeFileSystem
     private const uint GenericRead = 0x80000000;
     private const uint GenericWrite = 0x40000000;
     private const uint DeleteAccess = 0x00010000;
-    private const uint CreateNew = 1;
+    private const uint SynchronizeAccess = 0x00100000;
+    private const uint FileListDirectory = 0x00000001;
+    private const uint FileTraverse = 0x00000020;
+    private const uint FileReadAttributes = 0x00000080;
+    private const uint ObjectCaseInsensitive = 0x00000040;
+    private const uint NtFileOpen = 1;
+    private const uint NtFileCreate = 2;
+    private const uint NtFileOpenIf = 3;
+    private const uint NtFileDirectory = 0x00000001;
+    private const uint NtFileWriteThrough = 0x00000002;
+    private const uint NtFileSynchronousIoNonAlert = 0x00000020;
+    private const uint NtFileNonDirectory = 0x00000040;
+    private const uint NtFileOpenReparsePoint = 0x00200000;
+    private const uint FileAttributeNormal = 0x00000080;
     private const uint OpenExisting = 3;
-    private const uint OpenAlways = 4;
-    private const uint MoveFileReplaceExisting = 0x1;
-    private const uint MoveFileWriteThrough = 0x8;
     private const int ErrorFileNotFound = 2;
     private const int ErrorPathNotFound = 3;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
+    private const int ErrorNoMoreFiles = 18;
     private const int AtEmptyPath = 0x1000;
     private const int LockExclusive = 2;
     private const int LockNonBlocking = 4;
@@ -36,23 +47,24 @@ internal static class CapabilityCatalogNativeFileSystem
     private const ushort UnixFileTypeMask = 0xF000;
     private const ushort UnixRegularFile = 0x8000;
     private const uint StatxMode = 0x2;
+    private const uint StatxLinkCount = 0x4;
     private const uint StatxInode = 0x100;
 
     public static SafeFileHandle? OpenDirectory(string fullPath, SafeFileHandle? parent, string? name, bool create, ICapabilityCatalogDurabilityBarrier durabilityBarrier, out bool created)
     {
-        return OperatingSystem.IsWindows() ? OpenWindowsDirectory(fullPath, create, durabilityBarrier, out created) : OpenUnixDirectory(parent, name, create, out created);
+        return OperatingSystem.IsWindows() ? OpenWindowsDirectory(fullPath, parent, name, create, durabilityBarrier, out created) : OpenUnixDirectory(parent, name, create, out created);
     }
 
     public static SafeFileHandle? OpenRegularFile(string fullPath, SafeFileHandle parent, string name, FileMode mode, FileAccess access, FileShare share, bool writeThrough)
     {
-        return OperatingSystem.IsWindows() ? OpenWindowsFile(fullPath, mode, access, share, writeThrough) : OpenUnixFile(parent, name, mode, access);
+        return OperatingSystem.IsWindows() ? OpenWindowsFile(parent, name, mode, access, share, writeThrough) : OpenUnixFile(parent, name, mode, access);
     }
 
     public static FileStream? TryAcquireExclusiveLock(string fullPath, SafeFileHandle parent, string name)
     {
         if (OperatingSystem.IsWindows())
         {
-            var handle = OpenWindowsHandle(fullPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, writeThrough: true, allowDirectory: false, returnNullWhenMissing: false, returnNullWhenContended: true);
+            var handle = OpenWindowsHandle(parent, name, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, writeThrough: true, allowDirectory: false, returnNullWhenMissing: false, returnNullWhenContended: true);
             return handle is null ? null : new FileStream(handle, FileAccess.ReadWrite, 1, isAsync: false);
         }
 
@@ -72,14 +84,51 @@ internal static class CapabilityCatalogNativeFileSystem
         throw NativeIOException("The capability catalog lock could not be acquired", error);
     }
 
+    public static void RequireSingleLink(SafeFileHandle handle, string name)
+    {
+        uint linkCount;
+        if (OperatingSystem.IsWindows())
+        {
+            if (!GetFileInformationByHandle(handle, out var information))
+            {
+                throw NativeIOException($"Capability catalog file link metadata for `{name}` could not be read", Marshal.GetLastPInvokeError());
+            }
+            linkCount = information.NumberOfLinks;
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            if (statx(handle, string.Empty, AtEmptyPath, StatxLinkCount, out var information) != 0 || (information.Mask & StatxLinkCount) == 0)
+            {
+                throw NativeIOException($"Capability catalog file link metadata for `{name}` could not be read", Marshal.GetLastPInvokeError());
+            }
+            linkCount = information.LinkCount;
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            if (fstat(handle, out CapabilityCatalogMacStat information) != 0)
+            {
+                throw NativeIOException($"Capability catalog file link metadata for `{name}` could not be read", Marshal.GetLastPInvokeError());
+            }
+            linkCount = information.LinkCount;
+        }
+        else
+        {
+            throw new PlatformNotSupportedException("Capability catalog hard-link validation supports Windows, Linux, and macOS.");
+        }
+
+        if (linkCount != 1)
+        {
+            throw new IOException($"Capability catalog file `{name}` is hard-linked and cannot be trusted as immutable evidence.");
+        }
+    }
+
     public static void MoveFile(string sourceFullPath, string destinationFullPath, SafeFileHandle parent, string sourceName, string destinationName)
     {
         if (OperatingSystem.IsWindows())
         {
-            if (!MoveFileEx(sourceFullPath, destinationFullPath, MoveFileReplaceExisting | MoveFileWriteThrough))
-            {
-                throw NativeIOException("The capability catalog artifact could not be moved atomically and durably", Marshal.GetLastPInvokeError());
-            }
+            using var source = OpenWindowsRelative(parent, sourceName, DeleteAccess | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new FileNotFoundException("The capability catalog staging artifact disappeared before its retained-handle move.", sourceFullPath);
+            ValidateWindowsHandle(source, sourceName, requireDirectory: false);
+            RenameWindowsByHandle(source, parent, destinationName, replaceExisting: true, destinationFullPath);
             return;
         }
 
@@ -93,7 +142,15 @@ internal static class CapabilityCatalogNativeFileSystem
     {
         if (OperatingSystem.IsWindows())
         {
-            File.Delete(fullPath);
+            using var file = OpenWindowsRelative(parent, name, DeleteAccess | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileNonDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint, returnNullWhenMissing: true, returnNullWhenContended: false);
+            if (file is not null)
+            {
+                ValidateWindowsHandle(file, name, requireDirectory: false);
+                if (!SetFileInformationByHandle(file, FileInfoByHandleClass.FileDispositionInfo, [1], 1))
+                {
+                    throw NativeIOException($"Capability catalog temporary artifact `{fullPath}` could not be removed by retained handle", Marshal.GetLastPInvokeError());
+                }
+            }
             return;
         }
 
@@ -123,7 +180,7 @@ internal static class CapabilityCatalogNativeFileSystem
     {
         if (OperatingSystem.IsWindows())
         {
-            using var destination = OpenWindowsHandle(destinationFullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, writeThrough: true, allowDirectory: false, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new IOException("The renamed capability catalog artifact is unavailable for its durability barrier.");
+            using var destination = OpenWindowsHandle(parent, Path.GetFileName(destinationFullPath), FileMode.Open, FileAccess.ReadWrite, FileShare.Read, writeThrough: true, allowDirectory: false, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new IOException("The renamed capability catalog artifact is unavailable for its durability barrier.");
             if (!FlushFileBuffers(destination))
             {
                 throw NativeIOException("The renamed capability catalog artifact could not be flushed durably", Marshal.GetLastPInvokeError());
@@ -212,6 +269,61 @@ internal static class CapabilityCatalogNativeFileSystem
         return Directory.Exists(devicePath) ? devicePath : throw new IOException("No handle-relative directory enumeration surface is available on this platform.");
     }
 
+    public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateWindowsDirectory(SafeFileHandle directory)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Windows directory enumeration is available only on Windows.");
+        }
+
+        const int FileNameLengthOffset = 60;
+        const int FileAttributesOffset = 56;
+        const int FileNameOffset = 104;
+        var entries = new List<CapabilityCatalogDirectoryEntry>();
+        var buffer = new byte[64 * 1_024];
+        var informationClass = FileInfoByHandleClass.FileIdBothDirectoryRestartInfo;
+        while (true)
+        {
+            if (!GetFileInformationByHandleEx(directory, informationClass, buffer, (uint)buffer.Length))
+            {
+                var error = Marshal.GetLastPInvokeError();
+                return error == ErrorNoMoreFiles ? entries : throw NativeIOException("The capability catalog directory handle could not be enumerated", error);
+            }
+            informationClass = FileInfoByHandleClass.FileIdBothDirectoryInfo;
+
+            var offset = 0;
+            while (true)
+            {
+                if (offset < 0 || offset > buffer.Length - FileNameOffset)
+                {
+                    throw new IOException("Windows returned malformed capability catalog directory enumeration data.");
+                }
+                var nextOffset = BitConverter.ToUInt32(buffer, offset);
+                var attributes = BitConverter.ToUInt32(buffer, offset + FileAttributesOffset);
+                var fileNameLength = BitConverter.ToUInt32(buffer, offset + FileNameLengthOffset);
+                if (fileNameLength == 0 || (fileNameLength & 1) != 0 || fileNameLength > buffer.Length - offset - FileNameOffset)
+                {
+                    throw new IOException("Windows returned a malformed capability catalog directory entry.");
+                }
+                var name = Encoding.Unicode.GetString(buffer, offset + FileNameOffset, checked((int)fileNameLength));
+                if (name is not "." and not "..")
+                {
+                    var kind = (attributes & FileAttributeReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (attributes & FileAttributeDirectory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile;
+                    entries.Add(new CapabilityCatalogDirectoryEntry(name, kind));
+                }
+                if (nextOffset == 0)
+                {
+                    break;
+                }
+                if (nextOffset < FileNameOffset || nextOffset > buffer.Length - offset)
+                {
+                    throw new IOException("Windows returned an invalid capability catalog directory continuation offset.");
+                }
+                offset = checked(offset + (int)nextOffset);
+            }
+        }
+    }
+
     public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateMacDirectory(SafeFileHandle directory)
     {
         if (!OperatingSystem.IsMacOS())
@@ -261,92 +373,69 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    private static SafeFileHandle? OpenWindowsDirectory(string fullPath, bool create, ICapabilityCatalogDurabilityBarrier durabilityBarrier, out bool created)
+    private static SafeFileHandle? OpenWindowsDirectory(string fullPath, SafeFileHandle? parent, string? name, bool create, ICapabilityCatalogDurabilityBarrier durabilityBarrier, out bool created)
     {
         created = false;
-        var handle = CreateFile(fullPath, 0, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
-        if (handle.IsInvalid)
+        if (parent is null)
         {
-            var error = Marshal.GetLastPInvokeError();
-            handle.Dispose();
-            if (!create && (error == ErrorFileNotFound || error == ErrorPathNotFound))
+            var root = CreateFile(fullPath, FileListDirectory | FileTraverse | FileReadAttributes, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
+            if (root.IsInvalid)
+            {
+                var error = Marshal.GetLastPInvokeError();
+                root.Dispose();
+                return !create && error is ErrorFileNotFound or ErrorPathNotFound ? null : throw NativeIOException($"Capability catalog filesystem root `{fullPath}` could not be opened safely", error);
+            }
+            ValidateWindowsHandle(root, fullPath, requireDirectory: true);
+            return root;
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        var handle = OpenWindowsRelative(parent, name, FileListDirectory | FileTraverse | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint, returnNullWhenMissing: true, returnNullWhenContended: false);
+        if (handle is null)
+        {
+            if (!create)
             {
                 return null;
             }
-            if (create && (error == ErrorFileNotFound || error == ErrorPathNotFound))
-            {
-                handle = CreateWindowsDirectoryDurably(fullPath, durabilityBarrier);
-                created = true;
-            }
-            else
-            {
-                throw NativeIOException($"Capability catalog directory `{fullPath}` could not be opened safely", error);
-            }
+            handle = CreateWindowsDirectoryDurably(fullPath, parent, name, durabilityBarrier);
+            created = true;
         }
-
-        ValidateWindowsHandle(handle, fullPath, requireDirectory: true);
+        ValidateWindowsHandle(handle, name, requireDirectory: true);
         return handle;
     }
 
-    private static SafeFileHandle CreateWindowsDirectoryDurably(string fullPath, ICapabilityCatalogDurabilityBarrier durabilityBarrier)
+    private static SafeFileHandle CreateWindowsDirectoryDurably(string fullPath, SafeFileHandle parent, string name, ICapabilityCatalogDurabilityBarrier durabilityBarrier)
     {
-        var parentPath = Path.GetDirectoryName(fullPath) ?? throw new IOException("Capability catalog directory has no parent.");
-        var temporaryPath = Path.Combine(parentPath, $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.mkdir");
-        if (!CreateDirectory(temporaryPath, IntPtr.Zero))
-        {
-            throw NativeIOException($"Capability catalog staging directory `{temporaryPath}` could not be created", Marshal.GetLastPInvokeError());
-        }
-
+        var temporaryName = $".{name}.{Guid.NewGuid():N}.mkdir";
+        var temporaryPath = Path.Combine(Path.GetDirectoryName(fullPath)!, temporaryName);
         SafeFileHandle? staging = null;
         SafeFileHandle? movedIdentity = null;
         var renamed = false;
         try
         {
-            staging = CreateFile(temporaryPath, GenericRead | GenericWrite | DeleteAccess, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint | FileFlagWriteThrough, IntPtr.Zero);
-            if (staging.IsInvalid)
-            {
-                var error = Marshal.GetLastPInvokeError();
-                staging.Dispose();
-                staging = null;
-                throw NativeIOException($"Capability catalog staging directory `{temporaryPath}` could not be retained safely", error);
-            }
-
-            ValidateWindowsHandle(staging, temporaryPath, requireDirectory: true);
+            staging = OpenWindowsRelative(parent, temporaryName, GenericRead | GenericWrite | DeleteAccess | SynchronizeAccess, FileShareRead | FileShareWrite, NtFileCreate, NtFileDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | NtFileWriteThrough, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new IOException("The capability catalog staging directory could not be created relative to retained authority.");
+            ValidateWindowsHandle(staging, temporaryName, requireDirectory: true);
             var expectedIdentity = GetWindowsFileIdentity(staging, temporaryPath);
             durabilityBarrier.BeforeDirectoryMove(temporaryPath, fullPath);
-            RenameWindowsDirectoryByHandle(staging, fullPath);
+            RenameWindowsByHandle(staging, parent, name, replaceExisting: false, fullPath);
             renamed = true;
             if (!FlushFileBuffers(staging))
             {
                 throw NativeIOException($"Capability catalog directory `{fullPath}` could not be flushed after its handle-based move", Marshal.GetLastPInvokeError());
             }
 
-            movedIdentity = CreateFile(fullPath, 0, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
-            if (movedIdentity.IsInvalid)
-            {
-                var error = Marshal.GetLastPInvokeError();
-                movedIdentity.Dispose();
-                movedIdentity = null;
-                throw NativeIOException($"New capability catalog directory `{fullPath}` could not be identity-checked safely", error);
-            }
-            ValidateWindowsHandle(movedIdentity, fullPath, requireDirectory: true);
+            movedIdentity = OpenWindowsRelative(parent, name, FileListDirectory | FileTraverse | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new IOException("The new capability catalog directory could not be identity-checked relative to retained authority.");
+            ValidateWindowsHandle(movedIdentity, name, requireDirectory: true);
             RequireSameWindowsFileIdentity(expectedIdentity, GetWindowsFileIdentity(movedIdentity, fullPath), fullPath);
 
             staging.Dispose();
             staging = null;
             durabilityBarrier.AfterDirectoryMove(temporaryPath, fullPath);
 
-            var retained = CreateFile(fullPath, 0, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
-            if (retained.IsInvalid)
-            {
-                var error = Marshal.GetLastPInvokeError();
-                retained.Dispose();
-                throw NativeIOException($"New capability catalog directory `{fullPath}` could not be retained without delete sharing", error);
-            }
-
+            var retained = OpenWindowsRelative(parent, name, FileListDirectory | FileTraverse | FileReadAttributes | SynchronizeAccess, FileShareRead | FileShareWrite | FileShareDelete, NtFileOpen, NtFileDirectory | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint, returnNullWhenMissing: false, returnNullWhenContended: false) ?? throw new IOException("The new capability catalog directory could not be retained relative to parent authority.");
             try
             {
-                ValidateWindowsHandle(retained, fullPath, requireDirectory: true);
+                ValidateWindowsHandle(retained, name, requireDirectory: true);
                 RequireSameWindowsFileIdentity(expectedIdentity, GetWindowsFileIdentity(retained, fullPath), fullPath);
                 return retained;
             }
@@ -367,19 +456,29 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    private static void RenameWindowsDirectoryByHandle(SafeFileHandle directory, string destinationPath)
+    private static void RenameWindowsByHandle(SafeFileHandle source, SafeFileHandle parent, string destinationName, bool replaceExisting, string destinationPath)
     {
-        var fileName = System.Text.Encoding.Unicode.GetBytes(destinationPath);
+        var fileName = Encoding.Unicode.GetBytes(destinationName);
         var rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
         var fileNameLengthOffset = rootDirectoryOffset + IntPtr.Size;
         var fileNameOffset = fileNameLengthOffset + sizeof(uint);
         var information = new byte[fileNameOffset + fileName.Length];
+        information[0] = replaceExisting ? (byte)1 : (byte)0;
+        if (IntPtr.Size == 8)
+        {
+            BitConverter.GetBytes(parent.DangerousGetHandle().ToInt64()).CopyTo(information, rootDirectoryOffset);
+        }
+        else
+        {
+            BitConverter.GetBytes(parent.DangerousGetHandle().ToInt32()).CopyTo(information, rootDirectoryOffset);
+        }
         BitConverter.GetBytes(fileName.Length).CopyTo(information, fileNameLengthOffset);
         fileName.CopyTo(information, fileNameOffset);
-        if (!SetFileInformationByHandle(directory, FileInfoByHandleClass.FileRenameInfo, information, (uint)information.Length))
+        if (!SetFileInformationByHandle(source, FileInfoByHandleClass.FileRenameInfo, information, (uint)information.Length))
         {
-            throw NativeIOException($"Capability catalog staging directory could not be moved by retained handle to `{destinationPath}`", Marshal.GetLastPInvokeError());
+            throw NativeIOException($"Capability catalog entry could not be moved by retained handle to `{destinationPath}`", Marshal.GetLastPInvokeError());
         }
+        GC.KeepAlive(parent);
     }
 
     private static void MarkWindowsDirectoryForDeletion(SafeFileHandle directory)
@@ -407,12 +506,12 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    private static SafeFileHandle? OpenWindowsFile(string fullPath, FileMode mode, FileAccess access, FileShare share, bool writeThrough)
+    private static SafeFileHandle? OpenWindowsFile(SafeFileHandle parent, string name, FileMode mode, FileAccess access, FileShare share, bool writeThrough)
     {
-        return OpenWindowsHandle(fullPath, mode, access, share, writeThrough, allowDirectory: false, returnNullWhenMissing: mode == FileMode.Open, returnNullWhenContended: false);
+        return OpenWindowsHandle(parent, name, mode, access, share, writeThrough, allowDirectory: false, returnNullWhenMissing: mode == FileMode.Open, returnNullWhenContended: false);
     }
 
-    private static SafeFileHandle? OpenWindowsHandle(string fullPath, FileMode mode, FileAccess access, FileShare share, bool writeThrough, bool allowDirectory, bool returnNullWhenMissing, bool returnNullWhenContended)
+    private static SafeFileHandle? OpenWindowsHandle(SafeFileHandle parent, string name, FileMode mode, FileAccess access, FileShare share, bool writeThrough, bool allowDirectory, bool returnNullWhenMissing, bool returnNullWhenContended)
     {
         var desiredAccess = access switch
         {
@@ -437,27 +536,64 @@ internal static class CapabilityCatalogNativeFileSystem
 
         var disposition = mode switch
         {
-            FileMode.CreateNew => CreateNew,
-            FileMode.Open => OpenExisting,
-            FileMode.OpenOrCreate => OpenAlways,
+            FileMode.CreateNew => NtFileCreate,
+            FileMode.Open => NtFileOpen,
+            FileMode.OpenOrCreate => NtFileOpenIf,
             _ => throw new ArgumentOutOfRangeException(nameof(mode), "Capability catalog native opens support only create-new, open, and open-or-create modes.")
         };
-        var flags = FileFlagOpenReparsePoint | (writeThrough ? FileFlagWriteThrough : 0);
-        var handle = CreateFile(fullPath, desiredAccess, shareMode, IntPtr.Zero, disposition, flags, IntPtr.Zero);
-        if (handle.IsInvalid)
+        var options = (allowDirectory ? NtFileDirectory : NtFileNonDirectory) | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | (writeThrough ? NtFileWriteThrough : 0);
+        var handle = OpenWindowsRelative(parent, name, desiredAccess | SynchronizeAccess, shareMode, disposition, options, returnNullWhenMissing, returnNullWhenContended);
+        if (handle is null)
         {
-            var error = Marshal.GetLastPInvokeError();
-            handle.Dispose();
+            return null;
+        }
+        ValidateWindowsHandle(handle, name, requireDirectory: allowDirectory);
+        return handle;
+    }
+
+    private static SafeFileHandle? OpenWindowsRelative(SafeFileHandle parent, string name, uint desiredAccess, uint shareMode, uint disposition, uint options, bool returnNullWhenMissing, bool returnNullWhenContended)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (name is "." or ".." || name.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0)
+        {
+            throw new IOException("Capability catalog relative opens accept exactly one canonical child name.");
+        }
+
+        var nameBytes = checked(name.Length * sizeof(char));
+        if (nameBytes > ushort.MaxValue)
+        {
+            throw new PathTooLongException("Capability catalog relative child name exceeds the native bound.");
+        }
+        var nameBuffer = Marshal.StringToHGlobalUni(name);
+        var unicodeBuffer = IntPtr.Zero;
+        try
+        {
+            var unicode = new CapabilityCatalogWindowsUnicodeString { Length = (ushort)nameBytes, MaximumLength = (ushort)(nameBytes + sizeof(char)), Buffer = nameBuffer };
+            unicodeBuffer = Marshal.AllocHGlobal(Marshal.SizeOf<CapabilityCatalogWindowsUnicodeString>());
+            Marshal.StructureToPtr(unicode, unicodeBuffer, fDeleteOld: false);
+            var attributes = new CapabilityCatalogWindowsObjectAttributes { Length = Marshal.SizeOf<CapabilityCatalogWindowsObjectAttributes>(), RootDirectory = parent.DangerousGetHandle(), ObjectName = unicodeBuffer, Attributes = ObjectCaseInsensitive };
+            var status = NtCreateFile(out var rawHandle, desiredAccess, ref attributes, out _, IntPtr.Zero, FileAttributeNormal, shareMode, disposition, options, IntPtr.Zero, 0);
+            GC.KeepAlive(parent);
+            if (status >= 0)
+            {
+                return new SafeFileHandle(rawHandle, ownsHandle: true);
+            }
+
+            var error = unchecked((int)RtlNtStatusToDosError(status));
             if ((returnNullWhenMissing && error is ErrorFileNotFound or ErrorPathNotFound) || (returnNullWhenContended && error is ErrorSharingViolation or ErrorLockViolation))
             {
                 return null;
             }
-
-            throw NativeIOException($"Capability catalog file `{fullPath}` could not be opened safely", error);
+            throw NativeIOException($"Capability catalog child `{name}` could not be opened relative to retained directory authority", error);
         }
-
-        ValidateWindowsHandle(handle, fullPath, requireDirectory: allowDirectory);
-        return handle;
+        finally
+        {
+            if (unicodeBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(unicodeBuffer);
+            }
+            Marshal.FreeHGlobal(nameBuffer);
+        }
     }
 
     private static SafeFileHandle? OpenUnixDirectory(SafeFileHandle? parent, string? name, bool create, out bool created)
@@ -616,19 +752,13 @@ internal static class CapabilityCatalogNativeFileSystem
         FileRenameInfo = 3,
         FileDispositionInfo = 4,
         FileAttributeTagInfo = 9,
+        FileIdBothDirectoryInfo = 10,
+        FileIdBothDirectoryRestartInfo = 11,
         FileIdInfo = 18
     }
 
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern SafeFileHandle CreateFile(string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
-
-    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", SetLastError = true, CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool MoveFileEx(string existingFileName, string newFileName, uint flags);
-
-    [DllImport("kernel32.dll", EntryPoint = "CreateDirectoryW", SetLastError = true, CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CreateDirectory(string pathName, IntPtr securityAttributes);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -645,6 +775,20 @@ internal static class CapabilityCatalogNativeFileSystem
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, FileInfoByHandleClass fileInformationClass, out CapabilityCatalogFileIdInfo fileInformation, uint bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle file, FileInfoByHandleClass fileInformationClass, [Out] byte[] fileInformation, uint bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle file, out CapabilityCatalogWindowsFileInformation fileInformation);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtCreateFile(out IntPtr fileHandle, uint desiredAccess, ref CapabilityCatalogWindowsObjectAttributes objectAttributes, out CapabilityCatalogWindowsIoStatusBlock ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+
+    [DllImport("ntdll.dll")]
+    private static extern uint RtlNtStatusToDosError(int status);
 
     [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
     private static extern int open(string path, int flags, int mode);

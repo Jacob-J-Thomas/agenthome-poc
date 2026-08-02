@@ -31,6 +31,7 @@ public sealed class CapabilityLifecycleServiceTests
     }
 
     [Theory]
+    [InlineData(CapabilityLifecycleOperationKind.Enable, CapabilityLifecycleMutationStatus.Applied, "capability.lifecycle.mutation", "succeeded")]
     [InlineData(CapabilityLifecycleOperationKind.Upgrade, CapabilityLifecycleMutationStatus.Applied, "capability.lifecycle.mutation", "succeeded")]
     [InlineData(CapabilityLifecycleOperationKind.Rollback, CapabilityLifecycleMutationStatus.Applied, "capability.lifecycle.rollback", "succeeded")]
     [InlineData(CapabilityLifecycleOperationKind.Disable, CapabilityLifecycleMutationStatus.Conflict, "capability.lifecycle.conflict", "conflict")]
@@ -61,6 +62,7 @@ public sealed class CapabilityLifecycleServiceTests
     }
 
     [Theory]
+    [InlineData(CapabilityLifecycleOperationKind.Enable)]
     [InlineData(CapabilityLifecycleOperationKind.Upgrade)]
     [InlineData(CapabilityLifecycleOperationKind.Rollback)]
     public async Task Exact_terminal_artifact_preview_can_be_recovered_after_evidence_loss_and_repairs_pending_audit(CapabilityLifecycleOperationKind kind)
@@ -68,7 +70,7 @@ public sealed class CapabilityLifecycleServiceTests
         var manifest = CapabilityArtifactTestData.Manifest();
         var originalPreview = Preview(manifest, CapabilityLifecyclePreviewStatus.Ready, kind);
         var recoveredPreview = originalPreview with { Status = CapabilityLifecyclePreviewStatus.Replayed };
-        var request = new CapabilityLifecyclePreviewRequest(originalPreview.OperationId, kind, manifest.Descriptor.Id, kind == CapabilityLifecycleOperationKind.Upgrade ? manifest.Descriptor : null, kind == CapabilityLifecycleOperationKind.Upgrade ? manifest.Checksum : null);
+        var request = new CapabilityLifecyclePreviewRequest(originalPreview.OperationId, kind, manifest.Descriptor.Id, kind is CapabilityLifecycleOperationKind.Enable or CapabilityLifecycleOperationKind.Upgrade ? manifest.Descriptor : null, kind is CapabilityLifecycleOperationKind.Enable or CapabilityLifecycleOperationKind.Upgrade ? manifest.Checksum : null);
         var evidence = new StubCapabilityLifecycleArtifactEvidenceSource { Evidence = new CapabilityLifecycleArtifactEvidence(CapabilityLifecycleArtifactEvidenceStatus.NotFound, "deleted") };
         var index = new StubCapabilityDependentIndex { Snapshot = new CapabilityDependentIndexSnapshot(CapabilityDependentIndexStatus.Unavailable, string.Empty, [], "unavailable") };
         var store = new StubCapabilityLifecycleMutationStore { PreviewResult = recoveredPreview, MutationResult = new CapabilityLifecycleMutationResult(CapabilityLifecycleMutationStatus.Replayed, null, 4, true, "terminal replay", CapabilityLifecycleMutationStatus.Applied) };
@@ -221,5 +223,5 @@ public sealed class CapabilityLifecycleServiceTests
         Assert.Contains("changed", store.PreviewDependents.Detail, StringComparison.Ordinal);
     }
 
-    private static CapabilityLifecyclePreview Preview(CapabilityArtifactManifest manifest, CapabilityLifecyclePreviewStatus status, CapabilityLifecycleOperationKind kind) => new(status, "sha256:workspace", "lifecycle-operation", kind, manifest.Descriptor.Id, 3, 2, manifest.Checksum.Value, manifest.Checksum.Value, [], "preview", 4, 2, kind is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? manifest.Descriptor : null, kind is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? manifest.Checksum : null);
+    private static CapabilityLifecyclePreview Preview(CapabilityArtifactManifest manifest, CapabilityLifecyclePreviewStatus status, CapabilityLifecycleOperationKind kind) => new(status, "sha256:workspace", "lifecycle-operation", kind, manifest.Descriptor.Id, 3, 2, manifest.Checksum.Value, manifest.Checksum.Value, [], "preview", 4, 2, kind is CapabilityLifecycleOperationKind.Enable or CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? manifest.Descriptor : null, kind is CapabilityLifecycleOperationKind.Enable or CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? manifest.Checksum : null);
 }

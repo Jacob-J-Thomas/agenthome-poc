@@ -11,6 +11,9 @@ public interface ICapabilityLifecycleMutationStore
     /// <summary>Persists and returns a deterministic preview over one exact dependent snapshot.</summary>
     Task<CapabilityLifecyclePreview> PreviewAsync(CapabilityLifecyclePreviewRequest request, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default);
 
+    /// <summary>Returns a persisted preview only when the exact server-validated selection identity was already admitted.</summary>
+    Task<CapabilityLifecyclePreview> TryReplaySelectionAsync(CapabilityLifecycleSelectionRequest request, CancellationToken cancellationToken = default);
+
     /// <summary>Applies or rejects the exact preview after fresh baseline and dependent recapture.</summary>
     Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CapabilityLifecycleBaseline? baseline, CapabilityDependentIndexSnapshot dependents, CancellationToken cancellationToken = default);
 

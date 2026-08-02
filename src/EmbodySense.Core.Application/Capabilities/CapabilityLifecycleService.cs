@@ -55,6 +55,24 @@ public sealed class CapabilityLifecycleService
         return preview;
     }
 
+    /// <summary>Returns an exact persisted selection preview without consulting current staged artifact evidence.</summary>
+    /// <remarks>A missing operation is returned as <see cref="CapabilityLifecyclePreviewStatus.NotFound"/> so the caller can resolve and validate a new operation.</remarks>
+    public async Task<CapabilityLifecyclePreview> TryReplaySelectionAsync(CapabilityLifecycleSelectionRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var preview = await _authorityTransaction.ExecuteAsync(transactionCancellationToken => _store.TryReplaySelectionAsync(request, transactionCancellationToken), cancellationToken);
+        if (preview.Status == CapabilityLifecyclePreviewStatus.NotFound)
+        {
+            return preview;
+        }
+
+        var auditTarget = request.CapabilityId?.Value ?? "invalid";
+        await AppendAsync(AuditSchema.Actions.CapabilityLifecycleIntent, auditTarget, AuditSchema.Outcomes.Started, request.OperationId, request.Kind, null, "A persisted lifecycle selection replay was requested.");
+        var outcome = preview.Status == CapabilityLifecyclePreviewStatus.Replayed ? AuditSchema.Outcomes.Succeeded : preview.Status == CapabilityLifecyclePreviewStatus.Conflict ? AuditSchema.Outcomes.Conflict : AuditSchema.Outcomes.Failed;
+        await AppendAsync(AuditSchema.Actions.CapabilityLifecyclePreview, auditTarget, outcome, request.OperationId, request.Kind, preview, preview.Detail);
+        return preview;
+    }
+
     /// <summary>Recaptures every dependent and atomically applies or rejects the exact audited preview.</summary>
     public async Task<CapabilityLifecycleMutationResult> MutateAsync(CapabilityLifecyclePreview preview, CancellationToken cancellationToken = default)
     {

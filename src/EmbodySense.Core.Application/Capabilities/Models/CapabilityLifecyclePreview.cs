@@ -17,8 +17,8 @@ namespace EmbodySense.Core.Application.Capabilities.Models;
 /// <param name="Detail">A bounded operator-facing explanation.</param>
 /// <param name="BaselineCatalogRevision">The exact current catalog revision bound to the preview.</param>
 /// <param name="BaselineActivationRevision">The exact current legacy activation revision bound to the preview.</param>
-/// <param name="TargetDescriptor">The exact immutable upgrade or rollback target.</param>
-/// <param name="TargetArtifactDigest">The exact immutable upgrade or rollback artifact.</param>
+/// <param name="TargetDescriptor">The exact immutable enable, upgrade, or rollback target.</param>
+/// <param name="TargetArtifactDigest">The exact immutable enable, upgrade, or rollback artifact.</param>
 public sealed record CapabilityLifecyclePreview(CapabilityLifecyclePreviewStatus Status, string WorkspaceIdentity, string OperationId, CapabilityLifecycleOperationKind Kind, CapabilityId CapabilityId, long LifecycleRevision, long DependentSetRevision, string DependentSetHash, string PreviewHash, IReadOnlyList<CapabilityLifecycleImpact> Impacts, string Detail, long BaselineCatalogRevision = 0, long BaselineActivationRevision = 0, CapabilityDescriptor? TargetDescriptor = null, CapabilityIntegrityDigest? TargetArtifactDigest = null)
 {
     /// <summary>Gets a defensive read-only impact snapshot.</summary>

@@ -13,9 +13,13 @@ namespace EmbodySense.Core.Persistence.Capabilities;
 
 /// <summary>Persists immutable capability payloads and a schema-1 atomic activation index.</summary>
 /// <remarks>Activation state is deliberately separate from declaration, installation, enablement, health, and trust lifecycle axes in the catalog.</remarks>
-public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabilityPackageDependencyManifestDiscovery, ICapabilityLifecycleArtifactEvidenceSource
+public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabilityPackageDependencyManifestDiscovery, ICapabilityLifecycleArtifactEvidenceSource, ICapabilityLifecycleTargetResolver
 {
     private const int MaximumActivationBytes = 1_048_576;
+    private const int MaximumStagedArtifacts = 256;
+    private const int MaximumStagedArtifactEntries = 64;
+    private const int MaximumAggregateEvidenceBytes = 4 * 1_048_576;
+    private const int MaximumAggregateContentBytes = 128 * 1_048_576;
     private const int MaximumOperations = 256;
     private const int MaximumEntries = 256;
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
@@ -29,7 +33,15 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates a workspace-local artifact store.</summary>
-    public CapabilityArtifactStore(WorkspacePaths paths, ICapabilityArtifactStateTrustProvider trustProvider, ICapabilityArtifactTrustVerifier artifactTrustVerifier, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityLifecycleMutationStore? lifecycleStore = null, ICapabilityAuthorityTransaction? authorityTransaction = null)
+    /// <param name="paths">The exact initialized workspace paths.</param>
+    /// <param name="trustProvider">The server-owned artifact-state trust provider.</param>
+    /// <param name="artifactTrustVerifier">The server-owned artifact policy verifier.</param>
+    /// <param name="timeProvider">The optional clock used for persisted evidence timestamps.</param>
+    /// <param name="durabilityBarrier">The optional platform durability barrier.</param>
+    /// <param name="lifecycleStore">The optional lifecycle state source used to restrict executable resolution.</param>
+    /// <param name="authorityTransaction">The optional shared workspace authority transaction.</param>
+    /// <param name="pathObserver">The optional server-owned bounded child-open observer.</param>
+    public CapabilityArtifactStore(WorkspacePaths paths, ICapabilityArtifactStateTrustProvider trustProvider, ICapabilityArtifactTrustVerifier artifactTrustVerifier, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityLifecycleMutationStore? lifecycleStore = null, ICapabilityAuthorityTransaction? authorityTransaction = null, ICapabilityCatalogPathObserver? pathObserver = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
@@ -40,7 +52,7 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
         _lifecycleStore = lifecycleStore;
         _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _guard = new CapabilityCatalogPathGuard(paths.CapabilityCatalogPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
+        _guard = new CapabilityCatalogPathGuard(paths.CapabilityCatalogPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance, pathObserver);
     }
 
     /// <inheritdoc />
@@ -383,6 +395,139 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     /// <inheritdoc />
+    public Task<CapabilityLifecycleTargetResolution> ResolveAsync(CapabilityLifecycleTargetResolutionRequest request, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ResolveTargetCoreAsync(request, transactionCancellationToken), cancellationToken);
+
+    private async Task<CapabilityLifecycleTargetResolution> ResolveTargetCoreAsync(CapabilityLifecycleTargetResolutionRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.CapabilityId is null || request.Kind is not CapabilityLifecycleOperationKind.Enable and not CapabilityLifecycleOperationKind.Upgrade)
+        {
+            return TargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "Only enable and upgrade may resolve staged lifecycle targets.");
+        }
+
+        try
+        {
+            await using var fileSystem = await AcquireAsync(createRoot: false, cancellationToken);
+            var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(fileSystem.PhysicalIdentityMaterial);
+            var stagedRoot = Path.Combine(_paths.CapabilityArtifactsPath, "staged");
+            if (!fileSystem.TryEnumerateStrictDirectories(stagedRoot, MaximumStagedArtifacts, out var digestNames))
+            {
+                return TargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The bounded staged artifact directory quota was exceeded.");
+            }
+
+            var matches = new List<(CapabilityDescriptor Descriptor, CapabilityIntegrityDigest Digest)>();
+            var aggregateEvidenceBytes = 0;
+            long aggregateContentBytes = 0;
+            foreach (var digestName in digestNames)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (digestName.Length != 64 || digestName.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')) || !CapabilityIntegrityDigest.TryParse("sha256:" + digestName, out var digest, out _))
+                {
+                    throw new FormatException("A staged artifact directory does not use one canonical digest identity.");
+                }
+                var candidate = await ReadStagedCandidateAsync(fileSystem, workspaceIdentity, digest!, aggregateEvidenceBytes, aggregateContentBytes, cancellationToken);
+                aggregateEvidenceBytes = checked(aggregateEvidenceBytes + candidate.EvidenceBytes);
+                aggregateContentBytes = checked(aggregateContentBytes + candidate.ContentBytes);
+                if (aggregateEvidenceBytes > MaximumAggregateEvidenceBytes)
+                {
+                    return TargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The bounded aggregate staged evidence quota was exceeded.");
+                }
+                if (aggregateContentBytes > MaximumAggregateContentBytes)
+                {
+                    return TargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The bounded aggregate staged content quota was exceeded.");
+                }
+                if (candidate.Descriptor.Id.Equals(request.CapabilityId) && (request.TargetVersion is null || candidate.Descriptor.Version.Equals(request.TargetVersion)))
+                {
+                    matches.Add((candidate.Descriptor, digest!));
+                }
+            }
+
+            return matches.Count switch
+            {
+                0 => TargetResolution(CapabilityLifecycleTargetResolutionStatus.NotFound, null, null, "A complete proved staged-artifact scan found no matching lifecycle target."),
+                1 => TargetResolution(CapabilityLifecycleTargetResolutionStatus.Available, matches[0].Descriptor, matches[0].Digest, "Exactly one server-owned staged lifecycle target is available."),
+                _ => TargetResolution(CapabilityLifecycleTargetResolutionStatus.Ambiguous, null, null, "Multiple distinct proved staged lifecycle targets matched; no lexical target was selected.")
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException or JsonException or InvalidOperationException or KeyNotFoundException or OverflowException)
+        {
+            return TargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The complete staged lifecycle target set could not be proved safely.");
+        }
+    }
+
+    private async Task<(CapabilityDescriptor Descriptor, int EvidenceBytes, int ContentBytes)> ReadStagedCandidateAsync(CapabilityCatalogPathSession fileSystem, string workspaceIdentity, CapabilityIntegrityDigest digest, int aggregateEvidenceBytes, long aggregateContentBytes, CancellationToken cancellationToken)
+    {
+        var root = Path.Combine(_paths.CapabilityArtifactsPath, "staged", digest.Value["sha256:".Length..]);
+        var evidencePath = Path.Combine(root, "artifact.evidence.json");
+        var remainingEvidenceBytes = MaximumAggregateEvidenceBytes - aggregateEvidenceBytes;
+        if (remainingEvidenceBytes <= 0)
+        {
+            throw new IOException("The bounded aggregate staged evidence quota is exhausted.");
+        }
+        var remainingContentBytes = MaximumAggregateContentBytes - aggregateContentBytes;
+        if (remainingContentBytes <= 0)
+        {
+            throw new IOException("The bounded aggregate staged content quota is exhausted.");
+        }
+        var evidenceBytes = await fileSystem.TryReadAllBytesBoundAsync(evidencePath, Math.Min(MaximumActivationBytes, remainingEvidenceBytes), cancellationToken) ?? throw new FormatException("A staged artifact is missing its canonical evidence document.");
+        var evidence = DeserializeStrict<CapabilityArtifactEvidenceDocument>(evidenceBytes) ?? throw new FormatException("A staged artifact evidence document is malformed.");
+        if (!CapabilityDescriptorJson.TryDeserialize(evidence.DescriptorJson, out var descriptor, out _) || descriptor is null || !CapabilityDescriptorJson.TrySerialize(descriptor, out var canonicalDescriptor, out _) || canonicalDescriptor != evidence.DescriptorJson)
+        {
+            throw new FormatException("A staged artifact descriptor is malformed or noncanonical.");
+        }
+        if (!Enum.TryParse<CapabilityArtifactSourceKind>(evidence.SourceKind, ignoreCase: false, out var sourceKind) || !Enum.IsDefined(sourceKind) || !Enum.TryParse<CapabilityArtifactUpdatePolicy>(evidence.UpdatePolicy, ignoreCase: false, out var updatePolicy) || !Enum.IsDefined(updatePolicy) || !CapabilityPlatform.TryParse(evidence.Platform, out var platform, out _) || !CapabilityIntegrityDigest.TryParse(evidence.Checksum, out var checksum, out _))
+        {
+            throw new FormatException("A staged artifact manifest contains malformed typed evidence.");
+        }
+        var source = new CapabilityArtifactSourceReference(sourceKind, evidence.SourceUri, evidence.SourceRevision, updatePolicy);
+        var manifest = new CapabilityArtifactManifest(evidence.SchemaVersion, descriptor, source, checksum!, evidence.Signature, platform!, evidence.EntryPoint, evidence.Arguments, evidence.Dependencies);
+        if (evidence.SchemaVersion != 1 || !CapabilityArtifactManifestValidator.Validate(manifest).IsValid || evidence.Checksum != digest.Value || evidence.CapabilityId != descriptor.Id.Value || evidence.CapabilityVersion != descriptor.Version.Value || evidence.ProviderId != descriptor.Implementation.ProviderId.Value || evidence.ImplementationId != descriptor.Implementation.ImplementationId || descriptor.Provenance.Integrity is { } integrity && !integrity.FixedTimeEquals(digest) || evidence.TrustStatus != CapabilityArtifactTrustStatus.Verified.ToString() || string.IsNullOrWhiteSpace(evidence.Verifier) || evidence.ManifestPolicyPin != CapabilityArtifactManifestCanonicalizer.ComputePolicyPin(manifest).Value || evidence.ContentDigest != ComputeEvidenceDigest(evidence) || string.IsNullOrWhiteSpace(evidence.AuthenticationTag) || !await _trustProvider.VerifyStagedEvidenceAsync(workspaceIdentity, digest.Value, evidence.ContentDigest, evidence.AuthenticationTag, cancellationToken))
+        {
+            throw new FormatException("A staged artifact failed canonical identity, content, or server trust proof.");
+        }
+
+        ValidateStagedArtifactShape(fileSystem, root, evidence.EntryPoint);
+        var contentPath = Path.Combine(root, evidence.EntryPoint.Replace('/', Path.DirectorySeparatorChar));
+        var content = await fileSystem.TryReadAllBytesBoundAsync(contentPath, (int)Math.Min(CapabilityArtifactManifestValidator.MaximumArtifactBytes, remainingContentBytes), cancellationToken) ?? throw new FormatException("A staged artifact is missing its immutable content.");
+        if (!digest.FixedTimeEquals(CapabilityIntegrityDigest.Compute(content)))
+        {
+            throw new FormatException("Staged artifact content does not match its canonical digest identity.");
+        }
+        return (descriptor, evidenceBytes.Length, content.Length);
+    }
+
+    private static void ValidateStagedArtifactShape(CapabilityCatalogPathSession fileSystem, string root, string entryPoint)
+    {
+        var segments = entryPoint.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0 || segments.Length + 1 > MaximumStagedArtifactEntries)
+        {
+            throw new FormatException("The staged artifact entry-point shape exceeds its bound.");
+        }
+
+        var current = root;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            var entries = fileSystem.EnumerateBoundEntries(current, MaximumStagedArtifactEntries);
+            var expectedNames = index == 0 ? new[] { "artifact.evidence.json", segments[index] } : new[] { segments[index] };
+            if (!entries.Select(entry => entry.Name).OrderBy(name => name, StringComparer.Ordinal).SequenceEqual(expectedNames.OrderBy(name => name, StringComparer.Ordinal), StringComparer.Ordinal))
+            {
+                throw new FormatException("A staged artifact contains unexpected or missing filesystem evidence.");
+            }
+            var target = entries.Single(entry => entry.Name == segments[index]);
+            var expectedKind = index == segments.Length - 1 ? CapabilityCatalogDirectoryEntryKind.RegularFile : CapabilityCatalogDirectoryEntryKind.Directory;
+            if (target.Kind != expectedKind)
+            {
+                throw new FormatException("A staged artifact entry point has an unexpected filesystem shape.");
+            }
+            current = Path.Combine(current, segments[index]);
+        }
+    }
+
+    /// <inheritdoc />
     public Task<CapabilityExecutableArtifactResolution> ResolveAsync(CapabilityExecutableInvocation invocation, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => ResolveCoreAsync(invocation, transactionCancellationToken), cancellationToken);
 
     private async Task<CapabilityExecutableArtifactResolution> ResolveCoreAsync(CapabilityExecutableInvocation invocation, CancellationToken cancellationToken)
@@ -671,6 +816,8 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
     }
 
     private static CapabilityArtifactStoreResult Result(CapabilityArtifactStoreStatus status, CapabilityArtifactActivation? activation, string detail) => new(status, activation, detail);
+
+    private static CapabilityLifecycleTargetResolution TargetResolution(CapabilityLifecycleTargetResolutionStatus status, CapabilityDescriptor? descriptor, CapabilityIntegrityDigest? digest, string detail) => new(status, descriptor, digest, detail);
 
     private static T? DeserializeStrict<T>(byte[] bytes)
     {
