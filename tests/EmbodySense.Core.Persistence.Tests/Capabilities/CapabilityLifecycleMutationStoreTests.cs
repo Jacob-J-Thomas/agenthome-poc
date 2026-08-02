@@ -627,21 +627,34 @@ public sealed class CapabilityLifecycleMutationStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = Prepare(workspace);
-        var store = Store(paths);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var store = new CapabilityLifecycleMutationStore(paths, trust, new StubCapabilityLifecycleBaselineSource(), new StubCapabilityLifecycleArtifactEvidenceSource());
         var index = new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]);
         var snapshot = await index.CaptureAsync();
         var request = new CapabilityLifecyclePreviewRequest("cancel-lifecycle-io", CapabilityLifecycleOperationKind.Disable, CapabilityLifecycleTestData.Descriptor().Id);
         var preview = await store.PreviewAsync(request, CapabilityLifecycleTestData.Baseline(), snapshot);
         var terminal = await store.MutateAsync(preview, CapabilityLifecycleTestData.Baseline(), snapshot);
         Assert.Equal(CapabilityLifecycleMutationStatus.Applied, terminal.Status);
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
 
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.ReadAsync(request.CapabilityId, cancellation.Token));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.PreviewAsync(new CapabilityLifecyclePreviewRequest("cancel-preview-io", CapabilityLifecycleOperationKind.Disable, request.CapabilityId), null, snapshot, cancellation.Token));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.TryReplaySelectionAsync(new CapabilityLifecycleSelectionRequest(request.OperationId, request.Kind, request.CapabilityId), cancellation.Token));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.MutateAsync(preview, CapabilityLifecycleTestData.Baseline(), snapshot, cancellation.Token));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => store.MarkOutcomeAuditedAsync(request.OperationId, cancellation.Token));
+        await AssertCanceledAsync(async token => _ = await store.ReadAsync(request.CapabilityId, token));
+        await AssertCanceledAsync(async token => _ = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest("cancel-preview-io", CapabilityLifecycleOperationKind.Disable, request.CapabilityId), null, snapshot, token));
+        await AssertCanceledAsync(async token => _ = await store.TryReplaySelectionAsync(new CapabilityLifecycleSelectionRequest(request.OperationId, request.Kind, request.CapabilityId), token));
+        await AssertCanceledAsync(async token => _ = await store.MutateAsync(preview, CapabilityLifecycleTestData.Baseline(), snapshot, token));
+        await AssertCanceledAsync(async token => _ = await store.MarkOutcomeAuditedAsync(request.OperationId, token));
+
+        async Task AssertCanceledAsync(Func<CancellationToken, Task> operation)
+        {
+            using var cancellation = new CancellationTokenSource();
+            trust.BeforeRead = _ => cancellation.Cancel();
+            try
+            {
+                await Assert.ThrowsAsync<OperationCanceledException>(() => operation(cancellation.Token));
+            }
+            finally
+            {
+                trust.BeforeRead = null;
+            }
+        }
     }
 
     [Fact]

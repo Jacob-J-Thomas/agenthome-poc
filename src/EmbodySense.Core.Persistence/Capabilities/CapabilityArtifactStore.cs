@@ -428,14 +428,6 @@ public sealed class CapabilityArtifactStore : ICapabilityArtifactStore, ICapabil
                 var candidate = await ReadStagedCandidateAsync(fileSystem, workspaceIdentity, digest!, aggregateEvidenceBytes, aggregateContentBytes, cancellationToken);
                 aggregateEvidenceBytes = checked(aggregateEvidenceBytes + candidate.EvidenceBytes);
                 aggregateContentBytes = checked(aggregateContentBytes + candidate.ContentBytes);
-                if (aggregateEvidenceBytes > MaximumAggregateEvidenceBytes)
-                {
-                    return TargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The bounded aggregate staged evidence quota was exceeded.");
-                }
-                if (aggregateContentBytes > MaximumAggregateContentBytes)
-                {
-                    return TargetResolution(CapabilityLifecycleTargetResolutionStatus.Unavailable, null, null, "The bounded aggregate staged content quota was exceeded.");
-                }
                 if (candidate.Descriptor.Id.Equals(request.CapabilityId) && (request.TargetVersion is null || candidate.Descriptor.Version.Equals(request.TargetVersion)))
                 {
                     matches.Add((candidate.Descriptor, digest!));

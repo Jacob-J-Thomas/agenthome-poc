@@ -112,6 +112,41 @@ public sealed class CapabilityLifecycleTargetResolverTests
             await File.WriteAllTextAsync(Path.Combine(overfullRoot, $"extra-{index:D2}.bin"), "extra");
         }
         Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, (await overfullStore.ResolveAsync(Request(stage))).Status);
+
+        using var deepWorkspace = new TestWorkspace();
+        var deepPaths = new WorkspacePaths(deepWorkspace.RootPath);
+        var deepStore = Store(deepWorkspace, deepPaths);
+        var deepStage = stage with { Manifest = stage.Manifest with { EntryPoint = string.Join('/', Enumerable.Repeat("d", 64)) } };
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await deepStore.StageAsync(deepStage)).Status);
+        Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, (await deepStore.ResolveAsync(Request(deepStage))).Status);
+    }
+
+    [Fact]
+    public async Task Aggregate_evidence_quota_and_mid_scan_cancellation_fail_closed()
+    {
+        using var quotaWorkspace = new TestWorkspace();
+        var quotaPaths = new WorkspacePaths(quotaWorkspace.RootPath);
+        var quotaStore = Store(quotaWorkspace, quotaPaths);
+        CapabilityArtifactStageRequest? first = null;
+        for (var index = 0; index < 5; index++)
+        {
+            var stage = CapabilityArtifactStoreTestData.Stage(BitConverter.GetBytes(index), $"1.0.{index}");
+            first ??= stage;
+            Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await quotaStore.StageAsync(stage)).Status);
+            var evidencePath = EvidencePath(quotaPaths, stage);
+            var evidenceLength = new FileInfo(evidencePath).Length;
+            Assert.InRange(evidenceLength, 1, 1_048_575);
+            await File.AppendAllTextAsync(evidencePath, new string(' ', checked(1_048_576 - (int)evidenceLength)));
+        }
+        Assert.Equal(CapabilityLifecycleTargetResolutionStatus.Unavailable, (await quotaStore.ResolveAsync(Request(first!))).Status);
+
+        using var canceledWorkspace = new TestWorkspace();
+        var canceledPaths = new WorkspacePaths(canceledWorkspace.RootPath);
+        var canceledStage = CapabilityArtifactStoreTestData.Stage(_versionOne);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await Store(canceledWorkspace, canceledPaths).StageAsync(canceledStage)).Status);
+        using var cancellation = new CancellationTokenSource();
+        var canceledResolver = Store(canceledWorkspace, canceledPaths, new CancelingCapabilityCatalogPathObserver(cancellation));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => canceledResolver.ResolveAsync(Request(canceledStage), cancellation.Token));
     }
 
     [Fact]
@@ -286,4 +321,31 @@ public sealed class CapabilityLifecycleTargetResolverTests
 
     [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
     private static extern int CreateFifoUnix(string path, int mode);
+
+    private sealed class CancelingCapabilityCatalogPathObserver(CancellationTokenSource cancellation) : ICapabilityCatalogPathObserver
+    {
+        private int _canceled;
+
+        public void BeforeDirectoryChildOpen(string parentPath, string childName)
+        {
+            _ = parentPath;
+            _ = childName;
+            if (Interlocked.Exchange(ref _canceled, 1) == 0)
+            {
+                cancellation.Cancel();
+            }
+        }
+
+        public void BeforeFileChildOpen(string parentPath, string childName)
+        {
+            _ = parentPath;
+            _ = childName;
+        }
+
+        public void AfterFileChildOpen(string parentPath, string childName)
+        {
+            _ = parentPath;
+            _ = childName;
+        }
+    }
 }
