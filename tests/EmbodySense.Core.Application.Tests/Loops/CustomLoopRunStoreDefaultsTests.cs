@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops;
 
@@ -40,7 +41,10 @@ public sealed class CustomLoopRunStoreDefaultsTests
     {
         var definition = CustomLoopDefinition.CreateSeed("loop-default", "default-role", "step-1", "create-default", _timestamp);
         var admitted = new CustomLoopRunEvent(1, "event-1", _timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-default", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-default", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-default", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-default", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp)
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

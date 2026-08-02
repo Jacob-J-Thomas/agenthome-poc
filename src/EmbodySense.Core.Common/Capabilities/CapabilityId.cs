@@ -1,9 +1,12 @@
+using System.Text.Json.Serialization;
+
 namespace EmbodySense.Core.Common.Capabilities;
 
 /// <summary>
 /// Identifies a capability with a stable provider namespace and provider-owned path.
 /// </summary>
 /// <remarks>The canonical schema-1 form is <c>lowercase.provider/path</c>; no normalization is performed.</remarks>
+[JsonConverter(typeof(CapabilityScalarJsonConverterFactory))]
 public sealed class CapabilityId : IEquatable<CapabilityId>, IComparable<CapabilityId>
 {
     private CapabilityId(string value)

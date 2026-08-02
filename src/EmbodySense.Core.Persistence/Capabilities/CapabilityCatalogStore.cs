@@ -28,12 +28,14 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
     private readonly CapabilityCatalogPathGuard _pathGuard;
     private readonly ICapabilityCatalogTrustProvider _trustProvider;
     private readonly TimeProvider _timeProvider;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>Creates a catalog store rooted in one workspace.</summary>
     /// <param name="paths">The canonical workspace paths.</param>
     /// <param name="timeProvider">The optional trusted store clock.</param>
     /// <param name="durabilityBarrier">The optional trusted post-rename durability adapter.</param>
-    public CapabilityCatalogStore(WorkspacePaths paths, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null) : this(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), timeProvider, durabilityBarrier)
+    /// <param name="authorityTransaction">The optional shared workspace capability-authority transaction.</param>
+    public CapabilityCatalogStore(WorkspacePaths paths, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityAuthorityTransaction? authorityTransaction = null) : this(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), timeProvider, durabilityBarrier, authorityTransaction)
     {
     }
 
@@ -42,7 +44,8 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
     /// <param name="trustProvider">The server-owned trust provider outside mutable workspace storage.</param>
     /// <param name="timeProvider">The optional trusted store clock.</param>
     /// <param name="durabilityBarrier">The optional trusted post-rename durability adapter.</param>
-    public CapabilityCatalogStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null)
+    /// <param name="authorityTransaction">The optional shared workspace capability-authority transaction.</param>
+    public CapabilityCatalogStore(WorkspacePaths paths, ICapabilityCatalogTrustProvider trustProvider, TimeProvider? timeProvider = null, ICapabilityCatalogDurabilityBarrier? durabilityBarrier = null, ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
@@ -55,10 +58,27 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
         _pathGuard = new CapabilityCatalogPathGuard(paths.RootPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
         _trustProvider = trustProvider;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
     }
 
     /// <inheritdoc />
     public async Task<CapabilityCatalogReadResult> ReadAsync(string? startAfterId, int maximumCount, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(transactionCancellationToken => ReadCoreAsync(startAfterId, maximumCount, transactionCancellationToken), cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception))
+        {
+            return new CapabilityCatalogReadResult(CapabilityCatalogReadStatus.Unavailable, null, "The capability authority boundary could not be acquired safely.");
+        }
+    }
+
+    private async Task<CapabilityCatalogReadResult> ReadCoreAsync(string? startAfterId, int maximumCount, CancellationToken cancellationToken)
     {
         if (maximumCount is < 1 or > CapabilityCatalogLimits.MaximumPageSize || startAfterId is not null && !CapabilityId.TryParse(startAfterId, out _, out _))
         {
@@ -98,8 +118,91 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
         }
     }
 
+    /// <summary>Reads every bounded integrity-proved operation receipt retained for one exact capability.</summary>
+    /// <param name="id">The canonical capability identity.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The current or recovered receipt snapshots without mutation authority.</returns>
+    public async Task<CapabilityCatalogOperationReceiptReadResult> ReadOperationReceiptsAsync(CapabilityId id, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(transactionCancellationToken => ReadOperationReceiptsCoreAsync(id, transactionCancellationToken), cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception))
+        {
+            return new CapabilityCatalogOperationReceiptReadResult(CapabilityCatalogReadStatus.Unavailable, null, [], "The capability authority boundary could not be acquired safely.");
+        }
+    }
+
+    private async Task<CapabilityCatalogOperationReceiptReadResult> ReadOperationReceiptsCoreAsync(CapabilityId id, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(id);
+        try
+        {
+            await using var ownership = await AcquireLockAsync(cancellationToken);
+            var workspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(ownership.PhysicalIdentityMaterial);
+            var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken);
+            var loaded = await LoadAsync(ownership, workspaceIdentity, trust, cancellationToken);
+            if (loaded.Document is null)
+            {
+                return new CapabilityCatalogOperationReceiptReadResult(CapabilityCatalogReadStatus.Unavailable, null, [], "No trustworthy capability catalog operation receipts are available.");
+            }
+
+            var receipts = loaded.Document.Operations
+                .Where(operation => string.Equals(operation.CapabilityId, id.Value, StringComparison.Ordinal))
+                .OrderBy(operation => operation.OperationId, StringComparer.Ordinal)
+                .Select(operation => new CapabilityCatalogOperationReceipt(operation.OperationId, operation.Outcome, operation.CatalogRevision, MapReceipt(loaded.Document, operation)))
+                .ToArray();
+            var status = loaded.Recovered ? CapabilityCatalogReadStatus.RecoveredLastProved : CapabilityCatalogReadStatus.Available;
+            var detail = loaded.Recovered ? "The primary catalog was unsafe; last-proved operation receipts are available read-only." : "The current integrity-proved operation receipts are available.";
+            return new CapabilityCatalogOperationReceiptReadResult(status, loaded.Document.Generation, receipts, detail);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception))
+        {
+            return new CapabilityCatalogOperationReceiptReadResult(CapabilityCatalogReadStatus.Unavailable, null, [], "The capability catalog operation receipts could not be read safely.");
+        }
+    }
+
     /// <inheritdoc />
-    public async Task<CapabilityCatalogMutationResult> MutateAsync(CapabilityCatalogMutation mutation, CancellationToken cancellationToken = default)
+    public Task<CapabilityCatalogMutationResult> MutateAsync(CapabilityCatalogMutation mutation, CancellationToken cancellationToken = default) => MutateUnderAuthorityAsync(mutation, null, cancellationToken);
+
+    /// <summary>Applies one mutation only when the authenticated catalog remains at the caller-proved generation.</summary>
+    /// <param name="mutation">The mutation.</param>
+    /// <param name="expectedCatalogGeneration">The exact authenticated document generation proved by the caller.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The durable structured outcome.</returns>
+    public Task<CapabilityCatalogMutationResult> MutateAtGenerationAsync(CapabilityCatalogMutation mutation, long expectedCatalogGeneration, CancellationToken cancellationToken = default)
+    {
+        return expectedCatalogGeneration < 0
+            ? Task.FromResult(Result(CapabilityCatalogMutationStatus.Invalid, mutation?.OperationId ?? string.Empty, null, null, "The expected catalog generation is invalid."))
+            : MutateUnderAuthorityAsync(mutation, expectedCatalogGeneration, cancellationToken);
+    }
+
+    private async Task<CapabilityCatalogMutationResult> MutateUnderAuthorityAsync(CapabilityCatalogMutation mutation, long? expectedCatalogGeneration, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(transactionCancellationToken => MutateCoreAsync(mutation, expectedCatalogGeneration, transactionCancellationToken), cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception))
+        {
+            return Result(CapabilityCatalogMutationStatus.Unavailable, mutation?.OperationId ?? string.Empty, null, null, "The capability authority boundary could not be acquired safely.");
+        }
+    }
+
+    private async Task<CapabilityCatalogMutationResult> MutateCoreAsync(CapabilityCatalogMutation mutation, long? expectedCatalogGeneration, CancellationToken cancellationToken)
     {
         var validation = ValidateMutation(mutation);
         if (validation is not null)
@@ -120,6 +223,11 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
             }
 
             var current = loaded.Document;
+            if (expectedCatalogGeneration is not null && expectedCatalogGeneration.Value != current.Generation)
+            {
+                return Result(CapabilityCatalogMutationStatus.Conflict, operationId, current.CatalogRevision, FindEntry(current, mutation.CapabilityId!.Value), "The authenticated catalog generation changed after the caller's proof.");
+            }
+
             var requestHash = ComputeRequestHash(mutation);
             var existingReceipt = current.Operations.SingleOrDefault(item => string.Equals(item.OperationId, operationId, StringComparison.Ordinal));
             if (existingReceipt is not null)

@@ -99,6 +99,31 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Generation_bound_mutation_conflicts_after_a_no_change_receipt_without_touching_the_entry()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        var service = new CapabilityCatalogService(store);
+        var descriptor = CapabilityCatalogTestData.Descriptor();
+        var declared = await service.DeclareAsync(descriptor, 0, "declare-before-generation-proof");
+        var proof = await store.ReadOperationReceiptsAsync(descriptor.Id);
+        Assert.Equal(CapabilityCatalogReadStatus.Available, proof.Status);
+        var provedGeneration = Assert.IsType<long>(proof.CatalogGeneration);
+
+        var operatorTouch = await service.DisableAsync(descriptor.Id, declared.CatalogRevision!.Value, "operator-no-change-after-proof");
+        var attempted = await store.MutateAtGenerationAsync(new CapabilityCatalogMutation(CapabilityCatalogMutationKind.Install, "install-against-stale-generation", declared.CatalogRevision.Value, descriptor.Id, null), provedGeneration);
+        var invalid = await store.MutateAtGenerationAsync(new CapabilityCatalogMutation(CapabilityCatalogMutationKind.Install, "install-against-invalid-generation", declared.CatalogRevision.Value, descriptor.Id, null), -1);
+
+        Assert.Equal(CapabilityCatalogMutationStatus.NoChange, operatorTouch.Status);
+        Assert.Equal(CapabilityCatalogMutationStatus.Conflict, attempted.Status);
+        Assert.Equal(CapabilityCatalogMutationStatus.Invalid, invalid.Status);
+        var entry = Assert.Single((await store.ReadAsync(null, 10)).Page!.Entries);
+        Assert.Equal(CapabilityInstallationState.NotInstalled, entry.Lifecycle.Installation);
+        Assert.Equal("declare-before-generation-proof", entry.LastOperationId);
+    }
+
+    [Fact]
     public async Task Concurrent_stores_serialize_the_same_expected_revision()
     {
         using var workspace = new TestWorkspace();

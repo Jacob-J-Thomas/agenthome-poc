@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Capabilities.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 
@@ -41,4 +42,8 @@ public sealed record CustomLoopInferenceAttemptRequest(
     IReadOnlyList<CustomLoopToolAssignment> AdmittedToolAssignments,
     int ToolRequestsUsedInRun,
     LlmInferenceRequest InferenceRequest,
-    CustomLoopToolAuthoritySnapshot? AuthoritySnapshot = null);
+    CustomLoopToolAuthoritySnapshot? AuthoritySnapshot = null)
+{
+    /// <summary>Gets the immutable capability pins and resolution evidence admitted for the owning run.</summary>
+    public CapabilityAdmissionSnapshot CapabilityAdmission { get; init; } = null!;
+}

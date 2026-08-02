@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Inference;
 
 namespace EmbodySense.Core.Application.Loops.Models;
@@ -35,4 +36,7 @@ public sealed record DefaultConversationTurnRecord(
 {
     /// <summary>The only supported persisted protocol schema.</summary>
     public const int CurrentSchemaVersion = 1;
+
+    /// <summary>Gets the immutable exact capability resolution admitted before any turn effect.</summary>
+    public CapabilityAdmissionSnapshot CapabilityAdmission { get; init; } = null!;
 }

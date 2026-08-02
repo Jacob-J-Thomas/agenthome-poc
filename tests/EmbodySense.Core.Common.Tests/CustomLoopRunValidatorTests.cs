@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Common.Tests;
 
@@ -575,7 +576,10 @@ public sealed class CustomLoopRunValidatorTests
             [admitted],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp)
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

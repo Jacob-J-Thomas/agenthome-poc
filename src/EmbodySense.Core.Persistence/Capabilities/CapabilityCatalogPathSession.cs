@@ -1,4 +1,5 @@
 using System.Text;
+using EmbodySense.Core.Persistence.Capabilities.Models;
 using Microsoft.Win32.SafeHandles;
 
 namespace EmbodySense.Core.Persistence.Capabilities;
@@ -100,6 +101,12 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         throw new IOException("The capability catalog lock is unavailable.");
     }
 
+    public void ReleaseLock()
+    {
+        _lock?.Dispose();
+        _lock = null;
+    }
+
     public bool DirectoryExists(string path)
     {
         return GetDirectory(RequireContained(path), create: false) is not null;
@@ -118,6 +125,54 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         return handle is not null;
     }
 
+    public bool TryEnumerateDirectories(string path, int maximumEntries, out IReadOnlyList<string> names)
+    {
+        if (maximumEntries < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumEntries));
+        }
+
+        var safePath = RequireContained(path);
+        var directory = GetDirectory(safePath, create: false);
+        if (directory is null)
+        {
+            names = [];
+            return true;
+        }
+
+        var directories = new List<string>();
+        var entryCount = 0;
+        var entries = OperatingSystem.IsMacOS() ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory) : Directory.EnumerateFileSystemEntries(OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory), "*", SearchOption.TopDirectoryOnly).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+        foreach (var entry in entries)
+        {
+            if (entryCount >= maximumEntries)
+            {
+                names = [];
+                return false;
+            }
+            entryCount++;
+
+            if (entry.Kind is CapabilityCatalogDirectoryEntryKind.Unsafe or CapabilityCatalogDirectoryEntryKind.Unknown)
+            {
+                throw new IOException("Capability catalog directory enumeration refuses reparse points.");
+            }
+            if (entry.Kind != CapabilityCatalogDirectoryEntryKind.Directory)
+            {
+                continue;
+            }
+            var name = entry.Name;
+            if (string.IsNullOrEmpty(name) || GetDirectory(Path.Combine(safePath, name), create: false) is null)
+            {
+                throw new IOException("A capability catalog directory entry disappeared during bound enumeration.");
+            }
+
+            directories.Add(name);
+        }
+
+        names = directories.OrderBy(name => name, StringComparer.Ordinal).ToArray();
+        return true;
+    }
+
     public void PrepareDirectory(string path)
     {
         _ = GetDirectory(RequireContained(path), create: true) ?? throw new IOException("Capability catalog directory could not be prepared safely.");
@@ -125,17 +180,103 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
 
     public async Task<byte[]> ReadAllBytesAsync(string path, int maximumBytes, CancellationToken cancellationToken)
     {
+        return (await ReadAllBytesAsync(path, maximumBytes, allowEmpty: false, missingIsNull: false, cancellationToken))!;
+    }
+
+    public async Task<byte[]> ReadAllBytesAllowEmptyAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+    {
+        return (await ReadAllBytesAsync(path, maximumBytes, allowEmpty: true, missingIsNull: false, cancellationToken))!;
+    }
+
+    public Task<byte[]?> TryReadAllBytesAllowEmptyAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+    {
+        return ReadAllBytesAsync(path, maximumBytes, allowEmpty: true, missingIsNull: true, cancellationToken);
+    }
+
+    public Task<byte[]?> TryReadAllBytesAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+    {
+        return ReadAllBytesAsync(path, maximumBytes, allowEmpty: false, missingIsNull: true, cancellationToken);
+    }
+
+    public Task<byte[]?> TryReadAllBytesBoundAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+    {
+        return ReadAllBytesAsync(path, maximumBytes, allowEmpty: false, missingIsNull: true, cancellationToken, requireStableBinding: true);
+    }
+
+    public Task<byte[]?> TryReadAllBytesAllowEmptyBoundAsync(string path, int maximumBytes, CancellationToken cancellationToken)
+    {
+        return ReadAllBytesAsync(path, maximumBytes, allowEmpty: true, missingIsNull: true, cancellationToken, requireStableBinding: true);
+    }
+
+    public FileStream OpenBoundReadLease(string path, int maximumBytes)
+    {
         var safePath = RequireContained(path);
-        var parent = GetDirectory(Path.GetDirectoryName(safePath)!, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        var parentPath = Path.GetDirectoryName(safePath)!;
+        var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        EnsurePhysicalDirectoryBinding(parentPath);
         var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new FileNotFoundException("Capability catalog artifact is missing.", safePath);
+        FileStream? stream = null;
+        try
+        {
+            stream = new FileStream(handle, FileAccess.Read, 4096, isAsync: false);
+            if (stream.Length <= 0 || stream.Length > maximumBytes)
+            {
+                throw new FormatException("The capability catalog artifact is empty or exceeds its bounded size.");
+            }
+            var physicalIdentity = CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(stream.SafeFileHandle);
+            EnsurePhysicalDirectoryBinding(parentPath);
+            using var revalidated = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("Capability catalog artifact disappeared while opening an execution lease.");
+            if (!string.Equals(physicalIdentity, CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(revalidated), StringComparison.Ordinal))
+            {
+                throw new IOException("Capability catalog artifact was substituted while opening an execution lease.");
+            }
+            var result = stream;
+            stream = null;
+            return result;
+        }
+        finally
+        {
+            stream?.Dispose();
+        }
+    }
+
+    private async Task<byte[]?> ReadAllBytesAsync(string path, int maximumBytes, bool allowEmpty, bool missingIsNull, CancellationToken cancellationToken, bool requireStableBinding = false)
+    {
+        var safePath = RequireContained(path);
+        var parentPath = Path.GetDirectoryName(safePath)!;
+        var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        if (requireStableBinding)
+        {
+            EnsurePhysicalDirectoryBinding(parentPath);
+        }
+        var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false);
+        if (handle is null)
+        {
+            if (missingIsNull)
+            {
+                return null;
+            }
+
+            throw new FileNotFoundException("Capability catalog artifact is missing.", safePath);
+        }
         await using var stream = new FileStream(handle, FileAccess.Read, 4096, isAsync: false);
-        if (stream.Length is <= 0 or > int.MaxValue || stream.Length > maximumBytes)
+        var physicalIdentity = requireStableBinding ? CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(stream.SafeFileHandle) : null;
+        if (stream.Length > int.MaxValue || stream.Length > maximumBytes || !allowEmpty && stream.Length <= 0)
         {
             throw new FormatException("The capability catalog artifact is empty or exceeds its bounded size.");
         }
 
         var bytes = new byte[checked((int)stream.Length)];
         await stream.ReadExactlyAsync(bytes, cancellationToken);
+        if (requireStableBinding)
+        {
+            EnsurePhysicalDirectoryBinding(parentPath);
+            using var revalidated = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("Capability catalog artifact disappeared during bound read.");
+            if (!string.Equals(physicalIdentity, CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(revalidated), StringComparison.Ordinal))
+            {
+                throw new IOException("Capability catalog artifact was substituted during bound read.");
+            }
+        }
         return bytes;
     }
 
@@ -194,17 +335,21 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             return [];
         }
 
-        var enumerationPath = OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory);
         var entries = new List<(string Name, long Length)>();
         var totalBytes = 0L;
-        foreach (var entry in Directory.EnumerateFileSystemEntries(enumerationPath))
+        var directoryEntries = OperatingSystem.IsMacOS() ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory) : Directory.EnumerateFileSystemEntries(OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory)).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+        foreach (var entry in directoryEntries)
         {
             if (entries.Count >= maximumEntries)
             {
                 throw new IOException("The bounded capability catalog trust-root entry quota is exhausted.");
             }
 
-            var name = Path.GetFileName(entry);
+            if (entry.Kind != CapabilityCatalogDirectoryEntryKind.RegularFile)
+            {
+                throw new IOException("The capability catalog trust root contains a non-regular entry.");
+            }
+            var name = entry.Name;
             var fullPath = Path.Combine(safePath, name);
             var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(fullPath, directory, name, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, writeThrough: false) ?? throw new IOException("A capability catalog trust-root entry disappeared during bounded enumeration.");
             using var stream = new FileStream(handle, FileAccess.Read, 1, isAsync: false);
@@ -273,6 +418,17 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         }
 
         return parent;
+    }
+
+    private void EnsurePhysicalDirectoryBinding(string path)
+    {
+        var safePath = RequireContained(path);
+        var expected = GetDirectory(safePath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog directory is unavailable for physical binding validation.");
+        using var current = Open(safePath, _comparison, createRoot: false) ?? throw new IOException("Capability catalog directory disappeared during physical binding validation.");
+        if (!string.Equals(CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(expected), current.PhysicalIdentityMaterial, StringComparison.Ordinal))
+        {
+            throw new IOException("Capability catalog directory was substituted during bound read.");
+        }
     }
 
     private string RequireContained(string path)

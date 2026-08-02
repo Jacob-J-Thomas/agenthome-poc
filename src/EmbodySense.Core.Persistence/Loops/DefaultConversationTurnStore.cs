@@ -241,7 +241,8 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
             && string.Equals(left.ProviderAttemptId, right.ProviderAttemptId, StringComparison.Ordinal)
             && string.Equals(left.ProviderCorrelationId, right.ProviderCorrelationId, StringComparison.Ordinal)
             && string.Equals(left.UserPublicationId, right.UserPublicationId, StringComparison.Ordinal)
-            && string.Equals(left.AssistantPublicationId, right.AssistantPublicationId, StringComparison.Ordinal);
+            && string.Equals(left.AssistantPublicationId, right.AssistantPublicationId, StringComparison.Ordinal)
+            && string.Equals(JsonSerializer.Serialize(left.CapabilityAdmission, _jsonOptions), JsonSerializer.Serialize(right.CapabilityAdmission, _jsonOptions), StringComparison.Ordinal);
     }
 
     private static bool EvidenceAdvances(DefaultConversationTurnRecord existing, DefaultConversationTurnRecord candidate)

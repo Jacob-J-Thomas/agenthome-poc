@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.LocalWorkspace;
@@ -14,6 +15,7 @@ using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.ToolResults;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Tests.Support;
@@ -69,7 +71,7 @@ public sealed class ToolBrokerTests
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         using var cancellation = new CancellationTokenSource();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var executor = new CancellingWorkspaceToolExecutor(new LocalWorkspaceClient(paths), cancellation);
+        var executor = new CancellingWorkspaceToolExecutor(CreateWorkspaceClient(paths), cancellation);
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), workspaceToolExecutor: executor);
 
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Append, "shared/note.txt", " second"), cancellation.Token);
@@ -402,8 +404,8 @@ public sealed class ToolBrokerTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
 
-        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), new LocalWorkspaceClient(paths), new AuditLog(paths), null!, new ToolResultRetentionStore(paths)));
-        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), new LocalWorkspaceClient(paths), new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), null!));
+        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), CreateWorkspaceClient(paths), new AuditLog(paths), null!, new ToolResultRetentionStore(paths)));
+        Assert.Throws<ArgumentNullException>(() => new ToolBroker(paths, new ToolPermissionService(paths, policy), new ThrowingApprovalPrompt(), CreateWorkspaceClient(paths), new AuditLog(paths), LoopDefinition.CreateDefaultConversation(), null!));
     }
 
     private static ToolBroker CreateBroker(
@@ -417,7 +419,13 @@ public sealed class ToolBrokerTests
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? new LocalWorkspaceClient(paths), auditLog ?? new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths), postActuationIntegrityTimeout: postActuationIntegrityTimeout);
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceToolExecutor ?? CreateWorkspaceClient(paths), auditLog ?? new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), retentionStore ?? new ToolResultRetentionStore(paths), postActuationIntegrityTimeout: postActuationIntegrityTimeout);
+    }
+
+    private static LocalWorkspaceClient CreateWorkspaceClient(WorkspacePaths paths)
+    {
+        ICapabilityAuthorityTransaction authority = new CapabilityAuthorityTransaction(paths);
+        return new LocalWorkspaceClient(paths, new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, authority));
     }
 
     private sealed class CancellingWorkspaceToolExecutor(IWorkspaceToolExecutor inner, CancellationTokenSource cancellation) : IWorkspaceToolExecutor

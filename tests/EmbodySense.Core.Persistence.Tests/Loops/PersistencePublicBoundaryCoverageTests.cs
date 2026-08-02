@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Permissions.Models;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
@@ -547,14 +548,15 @@ public sealed class PersistencePublicBoundaryCoverageTests
         var definition = CustomLoopDefinition.CreateSeed("loop-boundary", "default-role", "step-1", "create-loop", _timestamp);
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var admitted = new CustomLoopRunEvent(1, "event-1", _timestamp, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-boundary", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-boundary", "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-boundary", definition.Id, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-boundary", "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null) { CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp) };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
     private static CustomLoopRunRecord CreateToolRun(bool includeIntegrity = false, string targetPath = ".")
     {
         var seed = CustomLoopDefinition.CreateSeed("loop-tool-boundary", "default-role", "step-1", "create-tool-loop", _timestamp);
-        var definition = CustomLoopDefinitionContentHash.Apply(seed with { ToolAssignments = [CustomLoopToolAssignment.Search], ContentHash = string.Empty });
+        var definition = seed with { ToolAssignments = [CustomLoopToolAssignment.Search], ContentHash = string.Empty };
+        definition = CustomLoopDefinitionContentHash.Apply(definition with { CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments) });
         var authority = ToolAuthority();
         var governance = new ToolGovernanceEvidence(
             ToolAuthorityDecision.Allowed,
@@ -588,7 +590,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
         }
 
         var checkpoint = CustomLoopRunCheckpoint.Start() with { ToolRequestsUsed = 1 };
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-tool-boundary", definition.Id, events.Count, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-tool-boundary", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), checkpoint, events.ToArray(), null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, "run-tool-boundary", definition.Id, events.Count, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), "invoke-tool-boundary", "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(_timestamp), CustomLoopExecutionClock.NotStarted(), checkpoint, events.ToArray(), null, null, null) { CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp) };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

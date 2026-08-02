@@ -7,6 +7,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Runtime;
+using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution;
 
@@ -185,7 +186,8 @@ public sealed class DefaultConversationTurnProtocolValidatorTests
     {
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, _startedAtUtc);
         var conversation = new ConversationMemorySnapshot("current", new string('0', 64), [LlmMessage.System("system context")]);
-        return DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), _startedAtUtc.AddSeconds(1), RequestId);
+        var admittedAtUtc = _startedAtUtc.AddSeconds(1);
+        return DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), admittedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, admittedAtUtc));
     }
 
     private static DefaultConversationTurnRecord AdvanceTo(DefaultConversationTurnCheckpoint target)

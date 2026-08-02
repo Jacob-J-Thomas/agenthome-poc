@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Common.Capabilities;
 
 namespace EmbodySense.Core.Common.Loops.Custom;
 
@@ -72,10 +73,17 @@ public static class CustomLoopDefinitionContentHash
         WriteContextDefaults(writer, definition.ContextDefaults);
         WriteInferenceSteps(writer, definition.InferenceSteps);
         WriteToolAssignments(writer, definition.ToolAssignments);
+        WriteCapabilityRequirements(writer, definition.CapabilityRequirements);
         WriteExitPolicy(writer, definition.ExitPolicy);
         WriteString(writer, "lastMutationOperationId", definition.LastMutationOperationId);
         writer.WriteEndObject();
         writer.Flush();
+    }
+
+    private static void WriteCapabilityRequirements(Utf8JsonWriter writer, Capabilities.Models.CapabilityDependencyManifest? requirements)
+    {
+        writer.WritePropertyName("capabilityRequirementsHash");
+        writer.WriteStringValue(CapabilityDependencyManifestHash.TryCompute(requirements, out var hash, out _) ? hash!.Value : "invalid");
     }
 
     private static void WriteTrigger(Utf8JsonWriter writer, CustomLoopTriggerPolicy? trigger)
