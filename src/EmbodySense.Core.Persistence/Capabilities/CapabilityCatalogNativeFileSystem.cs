@@ -578,7 +578,10 @@ internal static class CapabilityCatalogNativeFileSystem
             _ => throw new ArgumentOutOfRangeException(nameof(mode), "Capability catalog native opens support only create-new, open, and open-or-create modes.")
         };
         var options = (allowDirectory ? NtFileDirectory : NtFileNonDirectory) | NtFileSynchronousIoNonAlert | NtFileOpenReparsePoint | (writeThrough ? NtFileWriteThrough : 0);
-        var handle = OpenWindowsRelative(parent, name, desiredAccess | SynchronizeAccess, shareMode, disposition, options, returnNullWhenMissing, returnNullWhenContended);
+        // Metadata validation below requires FILE_READ_ATTRIBUTES even when the
+        // caller is opening a write-only stream. GENERIC_WRITE does not grant
+        // that right on Windows.
+        var handle = OpenWindowsRelative(parent, name, desiredAccess | FileReadAttributes | SynchronizeAccess, shareMode, disposition, options, returnNullWhenMissing, returnNullWhenContended);
         if (handle is null)
         {
             return null;
