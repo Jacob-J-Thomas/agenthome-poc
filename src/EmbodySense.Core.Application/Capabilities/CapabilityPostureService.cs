@@ -192,7 +192,7 @@ public sealed class CapabilityPostureService
                 return new CapabilityPosturePreviewResult(CapabilityPostureReadStatus.Unavailable, null, _dependencyUnavailableError);
             }
 
-            var impacts = ProjectImpacts(query, targetVersion, dependents.Dependents);
+            var impacts = ProjectImpacts(query, targetVersion, IsTargetAdmitted(query, lifecycle), dependents.Dependents);
             var bounded = impacts.Take(MaximumProjectedDependents).ToArray();
             var preview = new CapabilityPosturePreviewProjection(
                 query.CapabilityId.Value,
@@ -420,12 +420,12 @@ public sealed class CapabilityPostureService
         return projections.OrderBy(item => item.Kind).ThenBy(item => item.Identity, StringComparer.Ordinal).ThenBy(item => item.RequirementKind).ToArray();
     }
 
-    private static IReadOnlyList<CapabilityPosturePreviewImpact> ProjectImpacts(CapabilityPosturePreviewQuery query, CapabilityVersion? targetVersion, IEnumerable<CapabilityDependent> dependents)
+    private static IReadOnlyList<CapabilityPosturePreviewImpact> ProjectImpacts(CapabilityPosturePreviewQuery query, CapabilityVersion? targetVersion, bool targetIsAdmitted, IEnumerable<CapabilityDependent> dependents)
     {
         var impacts = new List<CapabilityPosturePreviewImpact>();
         foreach (var dependent in RelevantDependents(query.CapabilityId, dependents))
         {
-            var compatible = query.Operation is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback && targetVersion is not null && ParseRange(dependent.CompatibleVersionRange).Contains(targetVersion);
+            var compatible = targetIsAdmitted && targetVersion is not null && ParseRange(dependent.CompatibleVersionRange).Contains(targetVersion);
             var outcome = compatible ? CapabilityLifecycleImpactOutcome.Preserved : dependent.RequirementKind == CapabilityRequirementKind.Required ? CapabilityLifecycleImpactOutcome.Blocked : CapabilityLifecycleImpactOutcome.Degraded;
             impacts.Add(new CapabilityPosturePreviewImpact(dependent, compatible, outcome));
         }
@@ -439,6 +439,16 @@ public sealed class CapabilityPostureService
             CapabilityLifecycleOperationKind.Upgrade => query.TargetVersion,
             CapabilityLifecycleOperationKind.Rollback => lifecycle.History.LastOrDefault()?.Descriptor.Version,
             _ => null
+        };
+    }
+
+    private static bool IsTargetAdmitted(CapabilityPosturePreviewQuery query, CapabilityLifecycleReadResult lifecycle)
+    {
+        return query.Operation switch
+        {
+            CapabilityLifecycleOperationKind.Upgrade => true,
+            CapabilityLifecycleOperationKind.Rollback => lifecycle.History.LastOrDefault() is { WasEnabled: true, WasRemoved: false },
+            _ => false
         };
     }
 

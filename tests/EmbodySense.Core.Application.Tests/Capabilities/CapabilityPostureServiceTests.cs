@@ -238,6 +238,36 @@ public sealed class CapabilityPostureServiceTests
         Assert.True(rollback.Preview?.IsBlocked);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Rollback_preview_blocks_required_dependents_when_the_immediately_prior_state_was_not_admitted(bool wasRemoved)
+    {
+        var entry = CapabilityPostureTestData.Entry();
+        var prior = entry.Descriptor with { Version = CapabilityPostureTestData.Version("0.9.0") };
+        var lifecycle = new StubCapabilityLifecycleMutationStore
+        {
+            ReadResult = new CapabilityLifecycleReadResult(
+                CapabilityLifecycleReadStatus.Available,
+                CapabilityPostureTestData.Lifecycle(entry).State,
+                [new CapabilityLifecycleHistoryEntry(prior, CapabilityIntegrityDigest.Compute("prior-not-admitted"u8), false, wasRemoved, 6, "prior-not-admitted", CapabilityPostureTestData.Now)],
+                [],
+                7,
+                "available")
+        };
+        var required = CapabilityPostureTestData.Dependent(entry.Descriptor.Id, CapabilityRequirementKind.Required, "[0.9.0]");
+        var index = new StubCapabilityDependentIndex { Snapshot = new CapabilityDependentIndexSnapshot(CapabilityDependentIndexStatus.Available, "sha256:deps", [required], "available") };
+
+        var result = await Service(new StubCapabilityPostureCatalogStore { Entries = [entry] }, lifecycle, index).PreviewAsync(new CapabilityPosturePreviewQuery(entry.Descriptor.Id, CapabilityLifecycleOperationKind.Rollback));
+
+        Assert.Equal(CapabilityPostureReadStatus.Available, result.Status);
+        Assert.Equal("0.9.0", result.Preview?.TargetVersion);
+        Assert.True(result.Preview?.IsBlocked);
+        var impact = Assert.Single(result.Preview!.Impacts);
+        Assert.False(impact.IsCompatible);
+        Assert.Equal(CapabilityLifecycleImpactOutcome.Blocked, impact.Outcome);
+    }
+
     [Fact]
     public async Task Model_context_contains_only_exact_assigned_and_currently_authorized_admitted_pins()
     {

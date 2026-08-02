@@ -231,6 +231,38 @@ public sealed class CapabilityLifecycleMutationStoreTests
         Assert.True(restored.State.IsEnabled);
     }
 
+    [Theory]
+    [InlineData(CapabilityLifecycleOperationKind.Disable)]
+    [InlineData(CapabilityLifecycleOperationKind.Remove)]
+    public async Task Repeated_rollback_blocks_required_dependents_when_it_would_restore_a_disabled_or_removed_state(CapabilityLifecycleOperationKind priorOperation)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var source = new StubCapabilityDependentIndexSource();
+        var index = new CapabilityDependentIndex([source]);
+        var store = Store(paths);
+        var id = CapabilityLifecycleTestData.Descriptor().Id;
+        var baseline = CapabilityLifecycleTestData.Baseline();
+        var prior = new CapabilityLifecyclePreviewRequest($"{priorOperation.ToString().ToLowerInvariant()}-for-rollback", priorOperation, id);
+
+        var initial = await store.PreviewAsync(prior, baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await store.MutateAsync(initial, baseline, await index.CaptureAsync())).Status);
+        source.Dependents = [CapabilityLifecycleTestData.Dependent("required-loop", CapabilityRequirementKind.Required, "[1.0.0]")];
+
+        var restore = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest($"restore-{priorOperation.ToString().ToLowerInvariant()}", CapabilityLifecycleOperationKind.Rollback, id), baseline, await index.CaptureAsync());
+        Assert.Equal(CapabilityLifecycleImpactOutcome.Preserved, Assert.Single(restore.Impacts).Outcome);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await store.MutateAsync(restore, baseline, await index.CaptureAsync())).Status);
+
+        var rollback = await store.PreviewAsync(new CapabilityLifecyclePreviewRequest($"rollback-{priorOperation.ToString().ToLowerInvariant()}", CapabilityLifecycleOperationKind.Rollback, id), baseline, await index.CaptureAsync());
+        var blocked = await store.MutateAsync(rollback, baseline, await index.CaptureAsync());
+        var state = await store.ReadAsync(id);
+
+        Assert.Equal(CapabilityLifecycleImpactOutcome.Blocked, Assert.Single(rollback.Impacts).Outcome);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Blocked, blocked.Status);
+        Assert.True(state.State!.IsEnabled);
+        Assert.False(state.State.IsRemoved);
+    }
+
     [Fact]
     public async Task Preview_is_bound_to_physical_workspace_and_operation_identity()
     {
