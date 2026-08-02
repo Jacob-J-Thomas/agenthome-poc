@@ -713,7 +713,7 @@ public sealed class CustomLoopLifecycleService
             throw new ArgumentOutOfRangeException(nameof(expectedLifecycleVersion), "Expected lifecycle version must be at least one.");
         }
 
-        if (string.IsNullOrWhiteSpace(actor) || actor.Length > CustomLoopLimits.MaxTraceReferenceCharacters || !actor.IsNormalized(NormalizationForm.FormC) || actor.Any(character => char.IsControl(character) || char.IsSurrogate(character)))
+        if (string.IsNullOrWhiteSpace(actor) || actor.Length > CustomLoopLimits.MaxTraceReferenceCharacters || actor.Any(character => char.IsControl(character) || char.IsSurrogate(character)) || !actor.IsNormalized(NormalizationForm.FormC))
         {
             throw new ArgumentException("Actor must be bounded normalized text without control or invalid surrogate characters.", nameof(actor));
         }
