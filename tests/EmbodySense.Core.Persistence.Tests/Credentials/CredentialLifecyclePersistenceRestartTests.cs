@@ -1,5 +1,5 @@
-using System.Runtime.CompilerServices;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Credentials;
 using EmbodySense.Core.Application.Credentials.Models;
@@ -34,9 +34,27 @@ public sealed class CredentialLifecyclePersistenceRestartTests
         var repairPreview = await initialService.PreviewAsync(PreviewRequest("restart-repair", CredentialLifecycleOperationKind.Repair, 2));
         Assert.Equal(CredentialLifecyclePreviewStatus.Ready, repairPreview.Status);
         var repair = Request("restart-repair", CredentialLifecycleOperationKind.Repair, 2, repairPreview);
+        var providerEntryMarker = Path.Combine(workspace.RootPath, "provider-entered.marker");
         var providerSuccessMarker = Path.Combine(workspace.RootPath, "provider-success.marker");
-        using var crashHost = StartCredentialRepairCrashHost(workspace.RootPath, crashWindow, providerSuccessMarker);
-        await crashHost.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        using var crashHost = StartCredentialRepairCrashHost(workspace.RootPath, crashWindow, providerEntryMarker, providerSuccessMarker);
+        try
+        {
+            var expectedMarker = crashWindow == CredentialRepairCrashWindow.AfterProviderSuccess ? providerSuccessMarker : providerEntryMarker;
+            await WaitForFileAsync(expectedMarker, TimeSpan.FromSeconds(10));
+            Assert.True(File.Exists(providerEntryMarker));
+            Assert.Equal(crashWindow == CredentialRepairCrashWindow.AfterProviderSuccess, File.Exists(providerSuccessMarker));
+            var durableIntent = await Store(paths).ReadAsync();
+            Assert.Equal(3, durableIntent.RegistryRevision);
+            Assert.Equal(CredentialLifecycleMutationPhase.Intent, Assert.Single(durableIntent.Operations, operation => operation.OperationId.Equals(repair.OperationId)).LifecyclePhase);
+        }
+        finally
+        {
+            if (!crashHost.HasExited)
+            {
+                crashHost.Kill(entireProcessTree: true);
+            }
+            await crashHost.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
         Assert.NotEqual(0, crashHost.ExitCode);
         Assert.Equal(crashWindow == CredentialRepairCrashWindow.AfterProviderSuccess, File.Exists(providerSuccessMarker));
 
@@ -209,19 +227,20 @@ public sealed class CredentialLifecyclePersistenceRestartTests
         return CredentialLifecyclePersistenceFactory.Create(paths, TestTrust(paths), adapter, provider, adapter, dependentIndex, adapter, new AuditLog(paths));
     }
 
-    private static Process StartCredentialRepairCrashHost(string workspaceRoot, CredentialRepairCrashWindow crashWindow, string providerSuccessMarker)
+    private static Process StartCredentialRepairCrashHost(string workspaceRoot, CredentialRepairCrashWindow crashWindow, string providerEntryMarker, string providerSuccessMarker)
     {
         var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
         var targetFramework = outputDirectory.Name;
         var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
         var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
         Assert.True(File.Exists(hostAssembly), $"Cancellation host assembly was not built at `{hostAssembly}`.");
-        var startInfo = new ProcessStartInfo("dotnet") { RedirectStandardError = true, UseShellExecute = false };
+        var startInfo = new ProcessStartInfo("dotnet") { UseShellExecute = false };
         startInfo.ArgumentList.Add("exec");
         startInfo.ArgumentList.Add(hostAssembly);
         startInfo.ArgumentList.Add("credential-repair-crash");
         startInfo.ArgumentList.Add(workspaceRoot);
         startInfo.ArgumentList.Add(crashWindow.ToString());
+        startInfo.ArgumentList.Add(providerEntryMarker);
         startInfo.ArgumentList.Add(providerSuccessMarker);
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The credential repair crash process could not be started.");
@@ -234,7 +253,7 @@ public sealed class CredentialLifecyclePersistenceRestartTests
         var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
         var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
         Assert.True(File.Exists(hostAssembly), $"Cancellation host assembly was not built at `{hostAssembly}`.");
-        var startInfo = new ProcessStartInfo("dotnet") { RedirectStandardError = true, UseShellExecute = false };
+        var startInfo = new ProcessStartInfo("dotnet") { UseShellExecute = false };
         startInfo.ArgumentList.Add("exec");
         startInfo.ArgumentList.Add(hostAssembly);
         startInfo.ArgumentList.Add("credential-create-crash");

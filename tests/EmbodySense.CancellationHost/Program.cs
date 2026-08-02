@@ -25,9 +25,9 @@ if (args is ["hold-control", var workspaceRoot, var kindText, var runId, var ver
     return await HoldControlOperationAsync(workspaceRoot, kindText, runId, versionText, operationId);
 }
 
-if (args is ["credential-repair-crash", var credentialWorkspaceRoot, var crashWindow, var providerSuccessMarker])
+if (args is ["credential-repair-crash", var credentialWorkspaceRoot, var crashWindow, var repairProviderEntryMarker, var providerSuccessMarker])
 {
-    return await CrashCredentialRepairAsync(credentialWorkspaceRoot, crashWindow, providerSuccessMarker);
+    return await CrashCredentialRepairAsync(credentialWorkspaceRoot, crashWindow, repairProviderEntryMarker, providerSuccessMarker);
 }
 
 if (args is ["credential-create-crash", var createWorkspaceRoot, var locatorMarker, var providerEntryMarker])
@@ -42,7 +42,7 @@ if (args is [var cancellationWorkspaceRoot, var cancellationRunId])
 
 return 2;
 
-static async Task<int> CrashCredentialRepairAsync(string workspaceRoot, string crashWindow, string providerSuccessMarker)
+static async Task<int> CrashCredentialRepairAsync(string workspaceRoot, string crashWindow, string providerEntryMarker, string providerSuccessMarker)
 {
     var paths = new WorkspacePaths(workspaceRoot);
     var workspaceDirectory = new DirectoryInfo(paths.WorkspacePath);
@@ -51,7 +51,7 @@ static async Task<int> CrashCredentialRepairAsync(string workspaceRoot, string c
     var adapter = CredentialRepairCrashTestAdapter.Instance;
     var dependentIndex = new CapabilityDependentIndex([adapter]);
     var markProviderSuccess = string.Equals(crashWindow, "AfterProviderSuccess", StringComparison.Ordinal);
-    var service = CredentialLifecyclePersistenceFactory.Create(paths, trustProvider, adapter, new CredentialRepairCrashValueProvider(markProviderSuccess, providerSuccessMarker), adapter, dependentIndex, adapter, new AuditLog(paths));
+    var service = CredentialLifecyclePersistenceFactory.Create(paths, trustProvider, adapter, new CredentialRepairCrashValueProvider(markProviderSuccess, providerEntryMarker, providerSuccessMarker), adapter, dependentIndex, adapter, new AuditLog(paths));
     var operationId = ParseId("restart-repair");
     var referenceId = ParseReferenceId("credential-restart");
     var preview = await service.PreviewAsync(new CredentialLifecyclePreviewRequest(operationId, CredentialLifecycleOperationKind.Repair, referenceId, "workspace-1", Environment.UserName, 2));
