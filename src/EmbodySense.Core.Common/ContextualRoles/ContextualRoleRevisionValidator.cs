@@ -202,8 +202,12 @@ public static class ContextualRoleRevisionValidator
         return IsWellFormedUtf16(revision.Identity?.RoleId)
             && IsWellFormedUtf16(revision.Purpose)
             && IsWellFormedUtf16(revision.InstructionSource?.ReferenceId)
-            && (revision.WorkspaceApplicability?.WorkspaceIds ?? []).All(IsWellFormedUtf16)
-            && (revision.PolicyMaxima?.CapabilityIds ?? []).All(IsWellFormedUtf16);
+            && (revision.WorkspaceApplicability is null
+                || !revision.WorkspaceApplicability.WorkspaceIds.IsDefault
+                && revision.WorkspaceApplicability.WorkspaceIds.All(IsWellFormedUtf16))
+            && (revision.PolicyMaxima is null
+                || !revision.PolicyMaxima.CapabilityIds.IsDefault
+                && revision.PolicyMaxima.CapabilityIds.All(IsWellFormedUtf16));
     }
 
     private static bool IsUtcTimestamp(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;

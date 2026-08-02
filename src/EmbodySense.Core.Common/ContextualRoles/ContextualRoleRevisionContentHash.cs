@@ -13,7 +13,7 @@ public static class ContextualRoleRevisionContentHash
     /// <param name="revision">The revision to serialize canonically.</param>
     /// <returns>A 64-character lowercase hexadecimal SHA-256 digest.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="revision"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16.</exception>
+    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16 or a semantic identifier collection is uninitialized.</exception>
     public static string Compute(ContextualRoleRevision revision)
     {
         ArgumentNullException.ThrowIfNull(revision);
@@ -40,7 +40,7 @@ public static class ContextualRoleRevisionContentHash
     /// <param name="revision">The revision to hash.</param>
     /// <returns>A revision whose content hash matches its semantic content.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="revision"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16.</exception>
+    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16 or a semantic identifier collection is uninitialized.</exception>
     public static ContextualRoleRevision Apply(ContextualRoleRevision revision)
     {
         ArgumentNullException.ThrowIfNull(revision);
@@ -51,7 +51,7 @@ public static class ContextualRoleRevisionContentHash
     /// <param name="revision">The revision to verify.</param>
     /// <returns><see langword="true"/> when the exact lowercase digest matches using fixed-time comparison.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="revision"/> is <see langword="null"/>.</exception>
-    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16.</exception>
+    /// <exception cref="ArgumentException">Thrown when semantic text contains malformed UTF-16 or a semantic identifier collection is uninitialized.</exception>
     public static bool Matches(ContextualRoleRevision revision)
     {
         ArgumentNullException.ThrowIfNull(revision);
@@ -62,9 +62,11 @@ public static class ContextualRoleRevisionContentHash
 
     private static void WriteWorkspaceApplicability(Utf8JsonWriter writer, ContextualRoleWorkspaceApplicability? applicability)
     {
+        var workspaceIds = applicability?.WorkspaceIds ?? [];
+        RequireInitialized(workspaceIds, "workspaceApplicability");
         writer.WritePropertyName("workspaceIds");
         writer.WriteStartArray();
-        foreach (var workspaceId in (applicability?.WorkspaceIds ?? []).Order(StringComparer.Ordinal))
+        foreach (var workspaceId in workspaceIds.Order(StringComparer.Ordinal))
         {
             writer.WriteStringValue(Normalize(workspaceId));
         }
@@ -84,14 +86,24 @@ public static class ContextualRoleRevisionContentHash
 
     private static void WritePolicyMaxima(Utf8JsonWriter writer, ContextualRolePolicyMaxima? maxima)
     {
+        var capabilityIds = maxima?.CapabilityIds ?? [];
+        RequireInitialized(capabilityIds, "policyMaxima");
         writer.WritePropertyName("capabilityMaximumIds");
         writer.WriteStartArray();
-        foreach (var capabilityId in (maxima?.CapabilityIds ?? []).Order(StringComparer.Ordinal))
+        foreach (var capabilityId in capabilityIds.Order(StringComparer.Ordinal))
         {
             writer.WriteStringValue(Normalize(capabilityId));
         }
 
         writer.WriteEndArray();
+    }
+
+    private static void RequireInitialized<T>(System.Collections.Immutable.ImmutableArray<T> values, string parameterName)
+    {
+        if (values.IsDefault)
+        {
+            throw new ArgumentException("Contextual-role semantic identifier collections must be initialized.", parameterName);
+        }
     }
 
     private static string? Normalize(string? value)

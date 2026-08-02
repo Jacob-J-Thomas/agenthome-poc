@@ -187,6 +187,27 @@ public sealed class ContextualRoleRevisionContractTests
         Assert.Contains("well-formed UTF-16", matchesFailure.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Default_semantic_identifier_arrays_return_structured_validation_errors_and_documented_hash_failures(bool workspaceIds)
+    {
+        var revision = workspaceIds
+            ? ValidRevision() with { WorkspaceApplicability = new ContextualRoleWorkspaceApplicability(default) }
+            : ValidRevision() with { PolicyMaxima = new ContextualRolePolicyMaxima(default) };
+
+        var result = ContextualRoleRevisionValidator.Validate(revision);
+
+        Assert.Contains(result.Errors, error => error.Code == (workspaceIds ? "workspace_applicability_required" : "policy_maxima_required"));
+        Assert.DoesNotContain(result.Errors, error => error.Code == "content_hash_mismatch");
+        var computeFailure = Assert.Throws<ArgumentException>(() => ContextualRoleRevisionContentHash.Compute(revision));
+        var applyFailure = Assert.Throws<ArgumentException>(() => ContextualRoleRevisionContentHash.Apply(revision));
+        var matchesFailure = Assert.Throws<ArgumentException>(() => ContextualRoleRevisionContentHash.Matches(revision));
+        Assert.Contains("must be initialized", computeFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("must be initialized", applyFailure.Message, StringComparison.Ordinal);
+        Assert.Contains("must be initialized", matchesFailure.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Missing_semantic_text_remains_safe_for_hash_validation()
     {
