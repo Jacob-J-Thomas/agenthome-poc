@@ -11,6 +11,9 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime.Models;
+using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Persistence.Triggers;
+using EmbodySense.Core.Startup.Triggers;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
@@ -150,6 +153,23 @@ public sealed class AgentRuntime : IAsyncDisposable
     public Task<LoopRunInvocationResponse> InvokeCustomLoopAsync(LoopRunInvocationInput input, CancellationToken cancellationToken = default)
     {
         return _customLoops.InvokeAsync(input, cancellationToken);
+    }
+
+    /// <summary>Creates an explicit one-shot trigger worker bound to this runtime's governed custom-loop execution gate.</summary>
+    /// <remarks>
+    /// The supplied authorizer is retained as a composition-owned trusted current-state source; it is not accepted per dispatch.
+    /// Creating this facade does not start background work or automatically continue interrupted dispatches.
+    /// </remarks>
+    /// <param name="authorizer">The trusted current loop, assignment, capability, authority, actor, workspace, and temporal evidence source.</param>
+    /// <param name="timeProvider">An optional composition-owned UTC clock.</param>
+    /// <returns>A facade for queue posture and explicit one-shot dispatch.</returns>
+    public TriggerWorkerRuntimeFacade CreateTriggerWorkerRuntime(ITriggerWorkerCurrentEvidenceAuthorizer authorizer, TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(authorizer);
+        var clock = timeProvider ?? TimeProvider.System;
+        var store = new TriggerQueueStore(Paths, timeProvider: clock);
+        var service = new TriggerWorkerService(store, new TriggerWorkerCurrentEvidenceAuthorizerAdapter(authorizer), new TriggerCustomLoopDispatcher(_customLoops), clock);
+        return new TriggerWorkerRuntimeFacade(store, service);
     }
 
     /// <summary>

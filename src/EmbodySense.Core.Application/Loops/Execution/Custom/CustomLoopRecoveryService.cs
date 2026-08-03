@@ -42,7 +42,7 @@ public sealed class CustomLoopRecoveryService
     /// <summary>
     /// Reconciles every nonterminal run after restart.
     /// </summary>
-    /// <param name="actor">The actor.</param>
+    /// <param name="actor">The authenticated actor requesting recovery. Each lifecycle transition remains attributed to the recovered run's retained admission actor.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>One unchanged, recovered, needs-review, or failed result per discovered run.</returns>
     public async Task<IReadOnlyList<CustomLoopRecoveryResult>> RecoverAsync(string actor, CancellationToken cancellationToken = default)
@@ -53,7 +53,7 @@ public sealed class CustomLoopRecoveryService
         foreach (var run in runs)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            results.Add(await RecoverOneAsync(run, actor, cancellationToken));
+            results.Add(await RecoverOneAsync(run, run.AdmissionActor, cancellationToken));
         }
 
         return results;
