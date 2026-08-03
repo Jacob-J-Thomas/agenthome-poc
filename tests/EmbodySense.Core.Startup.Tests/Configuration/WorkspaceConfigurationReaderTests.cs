@@ -9,6 +9,8 @@ using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text;
+using System.Text.Json;
 
 namespace EmbodySense.Core.Startup.Tests.Configuration;
 
@@ -115,6 +117,75 @@ public sealed class WorkspaceConfigurationReaderTests
         Assert.Equal(205, current.MessageCount);
         Assert.Equal(200, current.Messages.Count);
         Assert.Contains(snapshot.ConversationHistory.ReadProblems, problem => problem.Contains("omits 5 later messages", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ReadAsync_reads_audit_while_an_append_compatible_writer_handle_is_open()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new AuditLog(paths).AppendAsync(AuditEvent.Create("test.actor", "test.concurrent-read", "target", "ok", "detail"));
+        await using var writer = new FileStream(paths.EventsLogPath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, FileOptions.Asynchronous);
+
+        var snapshot = await new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime()).WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Contains(snapshot.Audit.Events, auditEvent => auditEvent.Action == "test.concurrent-read");
+        Assert.Empty(snapshot.Audit.ReadProblems);
+    }
+
+    [Fact]
+    public async Task ReadAsync_returns_a_bounded_snapshot_while_an_audit_writer_continues_appending()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new AuditLog(paths).AppendAsync(AuditEvent.Create("test.actor", "test.snapshot", "target", "ok", "detail"));
+        using var writerCancellation = new CancellationTokenSource();
+        var writerStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(AuditEvent.Create("test.actor", "test.concurrent-append", "target", "ok", new string('a', 4_096))) + Environment.NewLine);
+        var writerTask = Task.Run(async () =>
+        {
+            try
+            {
+                await using var writer = new FileStream(paths.EventsLogPath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, FileOptions.Asynchronous);
+                while (!writerCancellation.Token.IsCancellationRequested)
+                {
+                    await writer.WriteAsync(line, writerCancellation.Token);
+                    await writer.FlushAsync(writerCancellation.Token);
+                    writerStarted.TrySetResult(true);
+                    await Task.Yield();
+                }
+            }
+            catch (OperationCanceledException) when (writerCancellation.IsCancellationRequested)
+            {
+            }
+        });
+
+        try
+        {
+            await writerStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var snapshot = await new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime()).WaitAsync(TimeSpan.FromSeconds(3));
+
+            Assert.Contains(snapshot.Audit.Events, auditEvent => auditEvent.Action == "test.concurrent-append");
+            Assert.False(writerTask.IsCompleted);
+        }
+        finally
+        {
+            await writerCancellation.CancelAsync();
+            await writerTask.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+    }
+
+    [Fact]
+    public async Task ReadAsync_still_surfaces_a_persistent_exclusive_audit_lock()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var exclusive = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None, bufferSize: 1, FileOptions.Asynchronous);
+
+        await Assert.ThrowsAsync<IOException>(() => new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime()));
     }
 
     [Fact]
