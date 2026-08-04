@@ -1124,7 +1124,7 @@ public sealed class CustomLoopInvocationOperationStore : ICustomLoopInvocationOp
     {
         return !string.IsNullOrWhiteSpace(value)
             && value.Length <= maximumLength
-            && value.IsNormalized(NormalizationForm.FormC)
-            && !value.Any(character => char.IsControl(character) || char.IsSurrogate(character));
+            && !value.Any(character => char.IsControl(character) || char.IsSurrogate(character))
+            && value.IsNormalized(NormalizationForm.FormC);
     }
 }

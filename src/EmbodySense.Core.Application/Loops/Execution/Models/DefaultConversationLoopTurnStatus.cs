@@ -20,5 +20,9 @@ public enum DefaultConversationLoopTurnStatus
     /// <summary>
     /// Identifies the cancelled default conversation loop turn status.
     /// </summary>
-    Cancelled
+    Cancelled,
+    /// <summary>
+    /// Identifies a terminal turn whose ambiguous provider outcome or transcript conflict requires explicit review.
+    /// </summary>
+    NeedsReview
 }

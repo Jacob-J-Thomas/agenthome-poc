@@ -544,7 +544,9 @@ public sealed class CustomLoopRuntimeTests
         var defaultTurn = runtime.RunTurnAsync("delayed default turn");
         await WaitForAttemptStartAsync(workspace);
         await conversationMemory.StartFreshConversationAsync();
-        Assert.Equal("MessageCompleted", (await defaultTurn).Status.ToString());
+        var divergentDefaultTurn = await defaultTurn;
+        Assert.Equal("MessageNeedsReview", divergentDefaultTurn.Status.ToString());
+        Assert.Contains("Existing user-owned content was preserved", divergentDefaultTurn.FailureDetail, StringComparison.Ordinal);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-divergent-context", "custom task")));
         var followingTurn = await runtime.RunTurnAsync("following default turn");
