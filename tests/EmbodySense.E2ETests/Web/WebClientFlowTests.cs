@@ -75,13 +75,13 @@ public sealed class WebClientFlowTests
             await WriteCurrentTranscriptAsync(workspace, "e2e restored prompt", "e2e restored answer");
             await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).StartFreshConversationAsync();
 
-            var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history");
+            var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history", null);
             var historyEvent = Assert.Single(GetStreamEvents(historyMessages));
             Assert.Equal("assistant_final", historyEvent.GetProperty("type").GetString());
             Assert.Contains("Stored conversations:", historyEvent.GetProperty("text").GetString());
             Assert.Contains("Send conversation number to load", historyEvent.GetProperty("text").GetString());
 
-            var loadMessages = await signalr.InvokeAndCollectAsync("SendMessage", "1");
+            var loadMessages = await signalr.InvokeAndCollectAsync("SendMessage", "1", null);
             var streamEvents = GetStreamEvents(loadMessages).ToArray();
             var loadedEvent = Assert.Single(streamEvents, streamEvent => streamEvent.GetProperty("type").GetString() == "history_loaded");
             var confirmationEvent = Assert.Single(streamEvents, streamEvent => streamEvent.GetProperty("type").GetString() == "assistant_final");
@@ -285,8 +285,8 @@ public sealed class WebClientFlowTests
     {
         var path = workspace.File(".agent", "memory", "conversations", "current.ndjson");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "user", prompt);
-        var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "assistant", answer);
+        var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "e2e-message-user", "e2e-publication-user", "user", prompt);
+        var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "e2e-message-assistant", "e2e-publication-assistant", "assistant", answer);
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, _jsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, _jsonOptions) + Environment.NewLine);
     }
 
@@ -310,7 +310,7 @@ public sealed class WebClientFlowTests
         return JsonSerializer.Deserialize<T>(element.GetRawText(), _jsonOptions) ?? throw new InvalidOperationException($"Could not deserialize {typeof(T).Name}.");
     }
 
-    private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
+    private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string MessageId, string PublicationId, string Role, string Content);
 
     private sealed class WebProcess : IDisposable
     {

@@ -42,6 +42,25 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task Routine_workspace_reads_reject_uppercase_json_definition_artifacts_before_they_escape_inventory_validation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-uppercase-extension");
+        await CreateCommittedAsync(store, definition);
+        var canonicalPath = Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json");
+        var temporaryPath = canonicalPath + ".rename";
+        var uppercasePath = Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".JSON");
+        File.Move(canonicalPath, temporaryPath);
+        File.Move(temporaryPath, uppercasePath);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(definition.Id));
+
+        Assert.Contains("unrecognized artifact", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task UpdateAsync_persists_the_canonical_next_version()
     {
         using var workspace = new TestWorkspace();

@@ -17,7 +17,7 @@ namespace EmbodySense.Core.Clients.CodexAppServer;
 /// and accepts only bounded newline-delimited JSON messages. Callers must serialize generation, reset, and disposal; the
 /// mutable protocol correlation and thread state are not designed for concurrent use.
 /// </remarks>
-public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
+public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IQuarantinableInferenceClient, IAsyncDisposable
 {
     private const string ClientName = "embodysense";
     private const string ClientTitle = "EmbodySense";
@@ -26,14 +26,16 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private static readonly TimeSpan _protocolReadTimeout = TimeSpan.FromMinutes(2);
     private readonly LlmInferenceClientOptions _options;
     private ICodexAppServerTransport? _transport;
-    private readonly ICodexAppServerToolBridge? _toolBridge;
+    private readonly CodexAppServerToolBridge? _toolBridge;
     private readonly ICodexAppServerContextBuilder _contextBuilder;
-    private readonly ICodexAppServerRequestHandler _requestHandler;
+    private readonly CodexAppServerRequestHandler _requestHandler;
     private readonly Action? _providerRequestStarted;
     private readonly string _runtimeDirectory;
+    private readonly bool _transportWasInjected;
     private int _nextRequestId;
     private bool _initialized;
     private string? _threadId;
+    private bool _injectedTransportQuarantined;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CodexAppServerInferenceClient"/> type.
@@ -54,6 +56,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         _options = options;
         _transport = transport;
+        _transportWasInjected = transport is not null;
         _toolBridge = toolBroker is null ? null : new CodexAppServerToolBridge(toolBroker);
         _contextBuilder = new CodexAppServerContextBuilder(toolBroker?.AvailableCommands);
         _runtimeDirectory = CreateRuntimeDirectory();
@@ -68,22 +71,42 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     /// <param name="responseChunkHandler">An optional ordered handler for each correlated agent-message delta.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The completed response, preferring terminal message text over the accumulated delta stream.</returns>
-    public async Task<LlmInferenceResponse> GenerateAsync(
+    public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
+        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting: null);
+    }
+
+    /// <inheritdoc />
+    public async Task<LlmInferenceResponse> GenerateAsync(
+        LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? providerRequestStarting)
+    {
         ArgumentNullException.ThrowIfNull(request);
 
-        await EnsureThreadAsync(request, cancellationToken);
-
-        var requestId = NextRequestId();
-        var userText = _contextBuilder.CreateTurnInput(request);
-        _providerRequestStarted?.Invoke();
-        await SendRequestAsync("turn/start", requestId, new JsonObject
+        _toolBridge?.SetInferenceCorrelation(request.Correlation);
+        _requestHandler.SetInferenceCorrelation(request.Correlation);
+        try
         {
-            ["threadId"] = _threadId,
-            ["input"] = new JsonArray
+
+            await EnsureThreadAsync(request, cancellationToken);
+
+            var requestId = NextRequestId();
+            var userText = _contextBuilder.CreateTurnInput(request);
+            if (providerRequestStarting is not null)
+            {
+                await providerRequestStarting(cancellationToken);
+            }
+
+            _providerRequestStarted?.Invoke();
+            await SendRequestAsync("turn/start", requestId, new JsonObject
+            {
+                ["threadId"] = _threadId,
+                ["input"] = new JsonArray
             {
                 new JsonObject
                 {
@@ -91,73 +114,79 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                     ["text"] = userText
                 }
             }
-        }, cancellationToken);
+            }, cancellationToken);
 
-        var streamedText = new StringBuilder();
-        string? turnId = null;
-        string? completedText = null;
-        var turnStartResponseReceived = false;
-        var turnCompleted = false;
+            var streamedText = new StringBuilder();
+            string? turnId = null;
+            string? completedText = null;
+            var turnStartResponseReceived = false;
+            var turnCompleted = false;
 
-        while (!turnStartResponseReceived || !turnCompleted)
-        {
-            using var messageDocument = await ReadMessageAsync(cancellationToken);
-            var message = messageDocument.RootElement;
-
-            // App-server requests may interleave with the turn/start response and notifications.
-            // Answer them immediately so the protocol cannot deadlock while this turn awaits completion.
-            if (IsServerRequest(message))
+            while (!turnStartResponseReceived || !turnCompleted)
             {
-                await HandleServerRequestAsync(message, cancellationToken);
-                continue;
-            }
+                using var messageDocument = await ReadMessageAsync(cancellationToken);
+                var message = messageDocument.RootElement;
 
-            if (IsResponse(message, requestId))
-            {
-                ThrowIfError(message);
-                turnStartResponseReceived = true;
-                turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
-                continue;
-            }
+                // App-server requests may interleave with the turn/start response and notifications.
+                // Answer them immediately so the protocol cannot deadlock while this turn awaits completion.
+                if (IsServerRequest(message))
+                {
+                    await HandleServerRequestAsync(message, cancellationToken);
+                    continue;
+                }
 
-            if (!IsNotification(message, out var method))
-            {
-                continue;
-            }
+                if (IsResponse(message, requestId))
+                {
+                    ThrowIfError(message);
+                    turnStartResponseReceived = true;
+                    turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
+                    continue;
+                }
 
-            switch (method)
-            {
-                case "item/agentMessage/delta":
-                    if (IsCurrentTurnNotification(message, turnId))
-                    {
-                        var delta = message.GetProperty("params").GetProperty("delta").GetString() ?? "";
-                        streamedText.Append(delta);
-                        if (responseChunkHandler is not null)
+                if (!IsNotification(message, out var method))
+                {
+                    continue;
+                }
+
+                switch (method)
+                {
+                    case "item/agentMessage/delta":
+                        if (IsCurrentTurnNotification(message, turnId))
                         {
-                            await responseChunkHandler(delta, cancellationToken);
+                            var delta = message.GetProperty("params").GetProperty("delta").GetString() ?? "";
+                            streamedText.Append(delta);
+                            if (responseChunkHandler is not null)
+                            {
+                                await responseChunkHandler(delta, cancellationToken);
+                            }
                         }
-                    }
 
-                    break;
+                        break;
 
-                case "turn/completed":
-                    if (IsCurrentTurnNotification(message, turnId))
-                    {
-                        turnCompleted = true;
-                        turnId = TryGetNestedString(message, "params", "turn", "id") ?? turnId;
-                        completedText = TryExtractCompletedAgentMessage(message);
-                        ThrowIfTurnFailed(message);
-                    }
+                    case "turn/completed":
+                        if (IsCurrentTurnNotification(message, turnId))
+                        {
+                            turnCompleted = true;
+                            turnId = TryGetNestedString(message, "params", "turn", "id") ?? turnId;
+                            completedText = TryExtractCompletedAgentMessage(message);
+                            ThrowIfTurnFailed(message, turnId);
+                        }
 
-                    break;
+                        break;
+                }
             }
-        }
 
-        return new LlmInferenceResponse(
-            completedText ?? streamedText.ToString(),
-            LlmInferenceSurface.OpenAiCodex,
-            _options.Model,
-            turnId);
+            return new LlmInferenceResponse(
+                completedText ?? streamedText.ToString(),
+                LlmInferenceSurface.OpenAiCodex,
+                _options.Model,
+                turnId);
+        }
+        finally
+        {
+            _requestHandler.SetInferenceCorrelation(null);
+            _toolBridge?.SetInferenceCorrelation(null);
+        }
     }
 
     /// <summary>
@@ -192,6 +221,27 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     public void ResetConversation()
     {
         _threadId = null;
+    }
+
+    /// <summary>
+    /// Disposes the live app-server transport and clears all protocol correlation after an ambiguous attempt.
+    /// </summary>
+    public async Task QuarantineAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var transport = _transport;
+        _transport = null;
+        _threadId = null;
+        _initialized = false;
+        _nextRequestId = 0;
+        _requestHandler.SetInferenceCorrelation(null);
+        _toolBridge?.SetInferenceCorrelation(null);
+        if (transport is not null)
+        {
+            await transport.DisposeAsync();
+        }
+
+        _injectedTransportQuarantined = _transportWasInjected;
     }
 
     private async Task EnsureThreadAsync(LlmInferenceRequest request, CancellationToken cancellationToken)
@@ -423,6 +473,11 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
     private ICodexAppServerTransport GetTransport()
     {
+        if (_injectedTransportQuarantined)
+        {
+            throw new InvalidOperationException("The injected Codex app-server transport was quarantined and cannot be reused.");
+        }
+
         return _transport ??= new CodexAppServerProcessTransport(_options, _runtimeDirectory);
     }
 
@@ -489,7 +544,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         throw new InvalidOperationException($"Codex app-server request failed: {errorMessage}");
     }
 
-    private static void ThrowIfTurnFailed(JsonElement message)
+    private static void ThrowIfTurnFailed(JsonElement message, string? providerResponseId)
     {
         var status = TryGetNestedString(message, "params", "turn", "status");
 
@@ -499,7 +554,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }
 
         var errorMessage = TryGetNestedString(message, "params", "turn", "error", "message") ?? "turn failed";
-        throw new InvalidOperationException($"Codex app-server turn failed: {errorMessage}");
+        throw new LlmInferenceTerminalFailureException($"Codex app-server turn failed: {errorMessage}", providerResponseId);
     }
 
     private static string? TryExtractCompletedAgentMessage(JsonElement message)
