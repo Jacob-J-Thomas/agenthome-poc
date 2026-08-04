@@ -38,6 +38,10 @@ public enum RuntimeCommandId
     /// </summary>
     ConversationHistory,
     /// <summary>
+    /// Identifies default-conversation review inspection and resolution.
+    /// </summary>
+    DefaultConversationReview,
+    /// <summary>
     /// Identifies the cancel pending input runtime command ID.
     /// </summary>
     CancelPendingInput

@@ -108,6 +108,7 @@ internal static class CustomLoopRunArtifactCodec
             && string.Equals(kind.GetString(), ArtifactKind, StringComparison.Ordinal);
     }
 
+    // TODO(#230): Bound maximum-artifact decode/reprojection allocation without weakening duplicate-property, depth, hash, semantic, or exact canonical-byte checks.
     private static ParsedEnvelope Parse(byte[] utf8Json, bool requireCanonical, bool validateDepth = true, string? path = null)
     {
         if (validateDepth)

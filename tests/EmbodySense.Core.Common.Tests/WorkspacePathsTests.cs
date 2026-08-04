@@ -23,6 +23,7 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "definition-mutation-receipt"), paths.CustomLoopDefinitionMutationReceiptCleanupHistoryPath);
         Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "definition-tombstone"), paths.CustomLoopDefinitionTombstoneCleanupHistoryPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs"), paths.LoopRunsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "default-conversation-turns"), paths.DefaultConversationTurnsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom"), paths.CustomLoopRunsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom-trace-deletion-operations"), paths.CustomLoopTraceDeletionOperationsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "default-conversation.json"), paths.DefaultConversationLoopDefinitionPath);
