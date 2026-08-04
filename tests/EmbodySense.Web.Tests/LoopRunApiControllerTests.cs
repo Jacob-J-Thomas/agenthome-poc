@@ -317,6 +317,10 @@ public sealed class LoopRunApiControllerTests
             Assert.True(detailResponse.Headers.CacheControl?.NoStore == true);
             Assert.Equal(invocation.Run.Id, detail!.Id);
             Assert.Equal(invocation.Run.Context.ManifestHash, detail.Context.ManifestHash);
+            var publicationDisposition = Assert.Single(detail.ConversationPublicationDispositions);
+            Assert.Equal("Published", publicationDisposition.Disposition);
+            Assert.True(publicationDisposition.IsDefinite);
+            Assert.False(publicationDisposition.HasIntegrityWarning);
             Assert.Equal(HttpStatusCode.OK, quotaResponse.StatusCode);
             Assert.Equal(1, quota!.LiveTraceCount);
             Assert.Equal(1, quota.ActiveReservationCount);
@@ -441,8 +445,8 @@ public sealed class LoopRunApiControllerTests
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         const string TranscriptEvidence = """
-            {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","role":"user","content":"recovered user prompt"}
-            {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-07-20T11:59:00+00:00","role":"assistant","content":"recovered assistant response"}
+            {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"recovered user prompt"}
+            {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-07-20T11:59:00+00:00","messageId":"message-2","publicationId":"publication-2","role":"assistant","content":"recovered assistant response"}
             """;
         await File.WriteAllTextAsync(paths.CurrentConversationPath, TranscriptEvidence);
         var conversationIdentity = (await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync()).Version;

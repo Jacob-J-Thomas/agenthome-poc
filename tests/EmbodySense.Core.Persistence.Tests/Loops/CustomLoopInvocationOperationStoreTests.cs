@@ -550,6 +550,41 @@ public sealed class CustomLoopInvocationOperationStoreTests
         await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(rejected with { ValidationErrors = [new CustomLoopValidationError("code", "field", "unsafe\nmessage")] }));
     }
 
+    [Theory]
+    [InlineData("code", "code", "D800")]
+    [InlineData("code", "code", "DC00")]
+    [InlineData("field", "field", "D800")]
+    [InlineData("field", "field", "DC00")]
+    [InlineData("message", "message", "D800")]
+    [InlineData("message", "message", "DC00")]
+    public async Task Persisted_validation_error_with_malformed_utf16_fails_through_canonical_format_validation(string propertyName, string value, string codeUnit)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-malformed-validation-error-" + propertyName + codeUnit.ToLowerInvariant(), "prompt");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        pending = await BindContextAsync(store, pending);
+        var rejected = pending with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = "Invalid",
+            ValidationErrors = [new CustomLoopValidationError("code", "field", "message")],
+            Detail = "The invocation was rejected."
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(rejected)).Status);
+
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var persisted = await File.ReadAllTextAsync(path);
+        var malformed = persisted.Replace("\"" + propertyName + "\": \"" + value + "\"", "\"" + propertyName + "\": \"\\u" + codeUnit + "\"", StringComparison.Ordinal);
+        Assert.NotEqual(persisted, malformed);
+        await File.WriteAllTextAsync(path, malformed);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
+    }
+
     private static async Task<CustomLoopInvocationOperation> BindConversationAsync(CustomLoopInvocationOperationStore store, CustomLoopInvocationOperation pending, CustomLoopInvocationBindingState bindingState)
     {
         var result = await store.BindAsync(ConversationBound(pending, bindingState));

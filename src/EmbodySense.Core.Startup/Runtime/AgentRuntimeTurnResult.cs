@@ -52,6 +52,11 @@ public sealed record AgentRuntimeTurnResult
     public bool IsFailure => Status == AgentRuntimeTurnStatus.MessageFailed;
 
     /// <summary>
+    /// Gets a value indicating whether a provider outcome requires explicit human review.
+    /// </summary>
+    public bool NeedsReview => Status == AgentRuntimeTurnStatus.MessageNeedsReview;
+
+    /// <summary>
     /// Gets a value indicating whether a model turn was cancelled.
     /// </summary>
     public bool IsCancelled => Status == AgentRuntimeTurnStatus.MessageCancelled;
@@ -158,6 +163,26 @@ public sealed record AgentRuntimeTurnResult
             Output = failureDetail,
             RunIdentity = runIdentity,
             FailureDetail = failureDetail,
+            Events = events
+        };
+    }
+
+    /// <summary>
+    /// Creates a review-required model-turn result while preserving accepted assistant events.
+    /// </summary>
+    public static AgentRuntimeTurnResult MessageNeedsReview(
+        string detail,
+        AgentRuntimeRunIdentity? runIdentity = null,
+        IReadOnlyList<AgentRuntimeTurnEvent>? priorEvents = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(detail);
+        var events = new List<AgentRuntimeTurnEvent>(priorEvents ?? []);
+        events.Add(AgentRuntimeTurnEvent.NeedsReview(detail, runIdentity));
+        return new AgentRuntimeTurnResult(AgentRuntimeTurnStatus.MessageNeedsReview)
+        {
+            Output = detail,
+            RunIdentity = runIdentity,
+            FailureDetail = detail,
             Events = events
         };
     }
