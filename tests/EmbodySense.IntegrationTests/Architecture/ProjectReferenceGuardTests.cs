@@ -48,6 +48,19 @@ public sealed class ProjectReferenceGuardTests
     }
 
     [Fact]
+    public void Common_graph_contract_remains_dependency_free_and_has_no_overlapping_general_graph_type()
+    {
+        var root = FindRepositoryRoot();
+        var projectPath = Path.Combine(root, "src", "EmbodySense.Core.Common", "EmbodySense.Core.Common.csproj");
+        var document = XDocument.Load(projectPath);
+
+        Assert.Empty(document.Descendants("PackageReference"));
+        Assert.Empty(document.Descendants("ProjectReference"));
+        Assert.Null(typeof(EmbodySense.Core.Common.Loops.Custom.Graph.GovernedLoopGraphDefinition).Assembly.GetType("EmbodySense.Core.Common.Loops.LoopGraphDefinition"));
+        Assert.NotNull(typeof(EmbodySense.Core.Common.Loops.BuiltInLoopGraphDefinition));
+    }
+
+    [Fact]
     public void Web_project_uses_startup_as_its_only_core_api()
     {
         var root = FindRepositoryRoot();
