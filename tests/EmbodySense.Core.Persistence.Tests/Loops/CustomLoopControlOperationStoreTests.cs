@@ -184,6 +184,26 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.DoesNotContain("nesting depth", malformed.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("D800")]
+    [InlineData("DC00")]
+    public async Task Persisted_control_operation_with_malformed_actor_fails_through_canonical_format_validation(string codeUnit)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("malformed-control-actor", AuditSchema.Actors.Web);
+        var store = new CustomLoopControlOperationStore(paths);
+
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var path = Path.Combine(paths.CustomLoopControlOperationsPath, pending.OperationId + ".json");
+        var persisted = await File.ReadAllTextAsync(path);
+        var malformed = persisted.Replace(AuditSchema.Actors.Web, "\\u" + codeUnit, StringComparison.Ordinal);
+        Assert.NotEqual(persisted, malformed);
+        await File.WriteAllTextAsync(path, malformed);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
+    }
+
     private static CustomLoopControlOperation Pending(string operationId, string actor)
     {
         var kind = CustomLoopControlKind.Pause;

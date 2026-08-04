@@ -9,6 +9,46 @@ namespace EmbodySense.Core.Common.Loops.Custom;
 public static class CustomLoopLimits
 {
     /// <summary>
+    /// Maximum nodes in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphNodes = 128;
+    /// <summary>
+    /// Maximum control-flow edges in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphControlEdges = 512;
+    /// <summary>
+    /// Maximum typed bindings in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphBindings = 1_024;
+    /// <summary>
+    /// Maximum ports declared by one node.
+    /// </summary>
+    public const int MaxGraphPortsPerNode = 64;
+    /// <summary>
+    /// Maximum value schemas in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphValueSchemas = 128;
+    /// <summary>
+    /// Maximum declared loop outputs.
+    /// </summary>
+    public const int MaxGraphOutputs = 64;
+    /// <summary>
+    /// Maximum executable descriptor parameters on one node.
+    /// </summary>
+    public const int MaxGraphDescriptorParameters = 64;
+    /// <summary>
+    /// Maximum authority capabilities in one ceiling.
+    /// </summary>
+    public const int MaxGraphAuthorityCapabilities = 128;
+    /// <summary>
+    /// Maximum characters in a descriptor parameter value.
+    /// </summary>
+    public const int MaxGraphParameterValueCharacters = 8_192;
+    /// <summary>
+    /// Maximum absolute canvas coordinate accepted as display-only metadata.
+    /// </summary>
+    public const int MaxGraphCanvasCoordinate = 1_000_000;
+    /// <summary>
     /// Maximum definitions per workspace.
     /// </summary>
     public const int MaxDefinitionsPerWorkspace = 50;

@@ -7,6 +7,8 @@ namespace EmbodySense.Core.Common.Memory.Models;
 /// <param name="ConversationId">The conversation ID.</param>
 /// <param name="Sequence">The sequence.</param>
 /// <param name="TimestampUtc">The UTC event time.</param>
+/// <param name="MessageId">The stable message identity.</param>
+/// <param name="PublicationId">The stable publication identity.</param>
 /// <param name="Role">The model message role assigned to the content.</param>
 /// <param name="Content">The exact content.</param>
 public sealed record ConversationMemoryEntry(
@@ -14,5 +16,7 @@ public sealed record ConversationMemoryEntry(
     string ConversationId,
     int Sequence,
     DateTimeOffset TimestampUtc,
+    string MessageId,
+    string PublicationId,
     string Role,
     string Content);

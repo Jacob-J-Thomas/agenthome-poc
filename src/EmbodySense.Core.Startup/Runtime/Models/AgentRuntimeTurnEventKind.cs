@@ -30,6 +30,10 @@ public enum AgentRuntimeTurnEventKind
     /// </summary>
     Failure,
     /// <summary>
+    /// Terminal provider ambiguity that requires explicit human review.
+    /// </summary>
+    NeedsReview,
+    /// <summary>
     /// Terminal model-turn cancellation detail.
     /// </summary>
     Cancellation,
