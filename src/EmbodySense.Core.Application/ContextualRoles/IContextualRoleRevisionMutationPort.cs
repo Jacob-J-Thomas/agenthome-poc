@@ -2,12 +2,13 @@ using EmbodySense.Core.Application.ContextualRoles.Models;
 
 namespace EmbodySense.Core.Application.ContextualRoles;
 
-/// <summary>Defines the persistence-agnostic boundary for submitting a validated immutable contextual-role revision mutation.</summary>
+/// <summary>Defines the persistence-agnostic boundary for idempotent immutable contextual-role revision and lifecycle mutations.</summary>
 public interface IContextualRoleRevisionMutationPort
 {
     /// <summary>Submits a mutation request without granting authority, interpreting source content, or binding loops.</summary>
+    /// <remarks>Exact operation replay returns its stored terminal outcome. Changed intent under one operation id conflicts. Cancellation after durable intent publication returns an explicit ambiguous outcome for later exact recovery.</remarks>
     /// <param name="request">The requested immutable revision mutation.</param>
     /// <param name="cancellationToken">A token that cancels the mutation before it completes.</param>
-    /// <returns>A structured mutation result for a later persistence implementation to produce.</returns>
+    /// <returns>A structured accepted, conflict, unavailable, recovered, ambiguous, or validation outcome.</returns>
     Task<ContextualRoleRevisionMutationResult> MutateAsync(ContextualRoleRevisionMutationRequest request, CancellationToken cancellationToken = default);
 }

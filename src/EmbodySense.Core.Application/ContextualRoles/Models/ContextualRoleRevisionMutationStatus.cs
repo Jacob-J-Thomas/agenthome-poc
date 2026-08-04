@@ -10,5 +10,11 @@ public enum ContextualRoleRevisionMutationStatus
     /// <summary>The request failed structured contract validation.</summary>
     Invalid = 2,
     /// <summary>The expected predecessor did not match current durable state.</summary>
-    Conflict = 3
+    Conflict = 3,
+    /// <summary>No mutation was attempted because exclusive or trusted persistence was unavailable.</summary>
+    Unavailable = 4,
+    /// <summary>A matching pending intent was reconciled to one proved terminal mutation outcome.</summary>
+    Recovered = 5,
+    /// <summary>Durable evidence was incomplete or inconsistent, so no new mutation was accepted.</summary>
+    Ambiguous = 6
 }
