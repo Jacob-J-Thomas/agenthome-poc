@@ -21,7 +21,7 @@ namespace EmbodySense.Core.Startup.Inference;
 /// text are not written to those audit events. Provider, callback, and audit failures propagate.
 /// Dispose this instance to dispose the selected provider client.
 /// </remarks>
-public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IAsyncDisposable
+public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferenceClient, IQuarantinableInferenceClient, IAsyncDisposable
 {
     private readonly LlmInferenceClientOptions _options;
     private readonly ILlmInferenceClient _innerClient;
@@ -52,26 +52,66 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
     /// <returns>A task whose result is the provider response.</returns>
     /// <remarks>
     /// Cancellation propagates and is not recorded as a failed inference. Other provider failures
-    /// are audited before being rethrown; an audit-write failure can therefore become the observed failure.
+    /// are audited before being rethrown. Once a terminal provider outcome is observed, a completion-audit
+    /// failure is attached to that conclusive outcome rather than replacing it with outcome-unknown evidence.
     /// </remarks>
-    public async Task<LlmInferenceResponse> GenerateAsync(
+    public Task<LlmInferenceResponse> GenerateAsync(
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default)
     {
+        return GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting: null);
+    }
+
+    /// <inheritdoc />
+    public async Task<LlmInferenceResponse> GenerateAsync(
+        LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? providerRequestStarting)
+    {
         ArgumentNullException.ThrowIfNull(request);
 
-        var requestId = Guid.NewGuid().ToString("N");
+        var requestId = request.Correlation?.ProviderAttemptId ?? Guid.NewGuid().ToString("N");
         var stopwatch = Stopwatch.StartNew();
 
         await RecordInferenceStartedAsync(requestId, request, cancellationToken);
 
         try
         {
-            var response = await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken);
+            var response = providerRequestStarting is null
+                ? await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken)
+                : await _innerClient.GenerateAsync(request, responseChunkHandler, cancellationToken, providerRequestStarting);
             stopwatch.Stop();
-            await RecordInferenceSucceededAsync(requestId, request, response, stopwatch.Elapsed, cancellationToken);
+            try
+            {
+                await RecordInferenceSucceededAsync(requestId, request, response, stopwatch.Elapsed, CancellationToken.None);
+            }
+            catch (Exception auditException)
+            {
+                throw new LlmInferenceObservedResponseException("The terminal provider response was observed, but its completion audit could not be persisted. The response must be retained for review and the provider attempt must not be redispatched.", response, auditException);
+            }
+
             return response;
+        }
+        catch (LlmInferenceObservedResponseException)
+        {
+            throw;
+        }
+        catch (LlmInferenceTerminalFailureException exception)
+        {
+            stopwatch.Stop();
+            try
+            {
+                await RecordInferenceFailedAsync(requestId, request, exception, stopwatch.Elapsed, CancellationToken.None);
+            }
+            catch (Exception auditException)
+            {
+                var detail = $"{exception.Message} The conclusive provider failure was observed, but its completion audit could not be persisted; the provider attempt must not be redispatched.";
+                throw new LlmInferenceTerminalFailureException(detail, exception.ProviderResponseId, new AggregateException(exception, auditException));
+            }
+
+            throw;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -186,7 +226,7 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
             ? 0
             : EmbodySenseDeveloperInstructions.Compose(request.InstructionContext.Governance, request.InstructionContext.TrustedInstructions).Length;
 
-        return new Dictionary<string, object?>
+        var metadata = new Dictionary<string, object?>
         {
             ["request_id"] = requestId,
             ["surface"] = _options.Surface.ToString(),
@@ -199,5 +239,31 @@ public sealed class LlmInferenceClient : ILlmInferenceClient, IResettableInferen
             ["instruction_character_count"] = instructionCharacterCount,
             ["input_character_count"] = messageCharacterCount + instructionCharacterCount
         };
+
+        if (request.Correlation is { } correlation)
+        {
+            metadata["provider_attempt_id"] = correlation.ProviderAttemptId;
+            metadata["provider_correlation_id"] = correlation.ProviderCorrelationId;
+            metadata["run_id"] = correlation.ToolAuditCorrelation?.RunId;
+            metadata["loop_id"] = correlation.ToolAuditCorrelation?.LoopId;
+            metadata["role_id"] = correlation.ToolAuditCorrelation?.RoleId;
+            metadata["attempt_correlation_id"] = correlation.ToolAuditCorrelation?.AttemptCorrelationId;
+        }
+
+        return metadata.Where(item => item.Value is not null).ToDictionary(item => item.Key, item => item.Value);
+    }
+
+    /// <summary>
+    /// Abandons provider transport state after an outcome-unknown attempt.
+    /// </summary>
+    public async Task QuarantineAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_innerClient is not IQuarantinableInferenceClient quarantinableClient)
+        {
+            throw new NotSupportedException("The selected inference provider cannot quarantine ambiguous transport state.");
+        }
+
+        await quarantinableClient.QuarantineAsync(cancellationToken);
     }
 }

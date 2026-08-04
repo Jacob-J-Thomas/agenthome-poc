@@ -70,6 +70,16 @@ public interface IConversationMemoryStore
     Task<bool> TryAppendMessageAsync(string expectedConversationId, string expectedConversationVersion, IReadOnlyList<LlmMessage> expectedPrefix, LlmMessage message, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Atomically appends or recognizes one identity-bearing publication after an exact expected prefix.
+    /// </summary>
+    Task<ConversationPublicationAppendResult> TryPublishMessageAsync(
+        string expectedConversationId,
+        string expectedConversationVersion,
+        IReadOnlyList<LlmMessage> expectedPrefix,
+        ConversationMessagePublication publication,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Searches the current transcript and returns at most the requested number of matches.
     /// </summary>
     /// <param name="query">The query.</param>

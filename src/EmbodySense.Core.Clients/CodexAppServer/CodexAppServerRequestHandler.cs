@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using EmbodySense.Core.Clients.CodexAppServer.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
@@ -17,6 +18,7 @@ internal sealed class CodexAppServerRequestHandler : ICodexAppServerRequestHandl
 {
     private readonly ICodexAppServerToolBridge? _toolBridge;
     private readonly IAuditLog? _auditLog;
+    private LlmInferenceCorrelation? _inferenceCorrelation;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CodexAppServerRequestHandler"/> type.
@@ -27,6 +29,15 @@ internal sealed class CodexAppServerRequestHandler : ICodexAppServerRequestHandl
     {
         _toolBridge = toolBridge;
         _auditLog = auditLog;
+    }
+
+    /// <summary>
+    /// Sets the serialized inference attempt whose app-server requests are currently being handled.
+    /// </summary>
+    /// <param name="correlation">The current attempt correlation, or null outside generation.</param>
+    public void SetInferenceCorrelation(LlmInferenceCorrelation? correlation)
+    {
+        _inferenceCorrelation = correlation;
     }
 
     /// <summary>
@@ -101,7 +112,7 @@ internal sealed class CodexAppServerRequestHandler : ICodexAppServerRequestHandl
             metadata: CreateAppServerRequestMetadata(method, parameters)), cancellationToken);
     }
 
-    private static Dictionary<string, object?> CreateAppServerRequestMetadata(string method, JsonElement parameters)
+    private Dictionary<string, object?> CreateAppServerRequestMetadata(string method, JsonElement parameters)
     {
         var metadata = new Dictionary<string, object?>
         {
@@ -113,6 +124,16 @@ internal sealed class CodexAppServerRequestHandler : ICodexAppServerRequestHandl
             ["namespace"] = TryGetString(parameters, "namespace"),
             ["tool"] = TryGetString(parameters, "tool")
         };
+
+        if (_inferenceCorrelation is { } correlation)
+        {
+            metadata["provider_attempt_id"] = correlation.ProviderAttemptId;
+            metadata["provider_correlation_id"] = correlation.ProviderCorrelationId;
+            metadata["run_id"] = correlation.ToolAuditCorrelation?.RunId;
+            metadata["loop_id"] = correlation.ToolAuditCorrelation?.LoopId;
+            metadata["role_id"] = correlation.ToolAuditCorrelation?.RoleId;
+            metadata["attempt_correlation_id"] = correlation.ToolAuditCorrelation?.AttemptCorrelationId;
+        }
 
         if (string.Equals(method, "item/tool/call", StringComparison.Ordinal) && parameters.TryGetProperty("arguments", out var arguments) && arguments.ValueKind == JsonValueKind.Object)
         {
