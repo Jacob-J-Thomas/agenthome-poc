@@ -1,14 +1,16 @@
+using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models;
 namespace EmbodySense.Core.Common.Loops;
 
 /// <summary>
-/// Defines the immutable nodes, edges, entry point, and terminal set of a governed loop graph.
+/// Defines the immutable structural graph used only by built-in system loops.
 /// </summary>
+/// <remarks>This narrowly named contract preserves the read-only default conversation graph; <see cref="GovernedLoopGraphDefinition"/> is the sole general custom-loop graph contract.</remarks>
 /// <param name="EntryNodeId">The entry node ID.</param>
 /// <param name="TerminalNodeIds">The terminal node IDs.</param>
 /// <param name="Nodes">The nodes.</param>
 /// <param name="Edges">The edges.</param>
-public sealed record LoopGraphDefinition(
+public sealed record BuiltInLoopGraphDefinition(
     string EntryNodeId,
     string[] TerminalNodeIds,
     LoopGraphNodeDefinition[] Nodes,
@@ -18,9 +20,9 @@ public sealed record LoopGraphDefinition(
     /// Creates the system-locked graph for the built-in conversation loop.
     /// </summary>
     /// <returns>A linear trigger-to-context-to-inference-to-transcript-to-finalization graph with canonical node and capability identities.</returns>
-    public static LoopGraphDefinition CreateDefaultConversation()
+    public static BuiltInLoopGraphDefinition CreateDefaultConversation()
     {
-        return new LoopGraphDefinition(
+        return new BuiltInLoopGraphDefinition(
             DefaultConversationLoopGraphIds.AcceptUserMessage,
             [DefaultConversationLoopGraphIds.CompleteRun],
             [

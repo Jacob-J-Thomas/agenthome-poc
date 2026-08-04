@@ -30,6 +30,37 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.deleteButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "System managed");
+  assert.equal(findByClass(app.elements.loopCanvas, "node-card").length, 5);
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /Accept user message.*Assemble runtime context.*Dispatch provider inference.*Persist transcript.*Complete loop run/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /accept-message-to-context.*context-to-inference.*inference-to-transcript.*transcript-to-complete-run/,
+  );
+  assert.doesNotMatch(
+    app.elements.loopCanvas.textContent,
+    /Manual trigger|Respond in role|Deterministic complete/,
+  );
+  assert.equal(
+    app.elements.loopHeaderMeta.textContent,
+    "default · Schema v1 · 5 nodes · 4 edges",
+  );
+  assert.equal(
+    app.elements.canvasStepCount.textContent,
+    "5 system nodes · 4 edges",
+  );
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /DefaultConversationLoopRunner.*not dispatched by the custom-loop or a generic graph executor/,
+  );
+
+  await app.elements.loopSettingsButton.click();
+  assert.match(
+    app.elements.inspectorContent.textContent,
+    /Human message.*Workspace startup context.*conversation\.turn.*workspace\.command.*Generic graph dispatch: Not implemented/,
+  );
 
   await selectCustomLoop(app);
 
@@ -37,6 +68,57 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("a rejected system runner contract is shown as invalid throughout the graph", async () => {
+  const catalog = createCatalog();
+  catalog.systemDefault.executionContract.graphSemantics = "unknown";
+  catalog.systemDefault.executionContract.detail =
+    "The default conversation graph does not match the dedicated runner contract.";
+  catalog.systemDefault.graph.edges.push(
+    createSystemEdge(
+      "rejected-branch",
+      "accept-user-message",
+      "dispatch-provider-inference",
+      "success",
+      "A noncanonical branch that the dedicated runner rejects.",
+    ),
+  );
+  for (const graphNode of catalog.systemDefault.graph.nodes)
+    graphNode.executionSemantics = "unknown";
+  for (const edge of catalog.systemDefault.graph.edges)
+    edge.executionSemantics = "unknown";
+
+  const app = await loadLoopBuilder({ catalog });
+
+  assert.equal(
+    app.elements.validationBanner.className,
+    "validation-banner visible error",
+  );
+  assert.equal(
+    app.elements.validationBanner.textContent,
+    "The default conversation graph does not match the dedicated runner contract.",
+  );
+  assert.match(
+    app.elements.validationBanner.attributes.get("aria-label"),
+    /Definition needs attention/,
+  );
+  assert.doesNotMatch(
+    app.elements.loopCanvas.textContent,
+    /Validated runner contract/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /Runner contract not validated/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /rejected-branch.*accept-user-message → dispatch-provider-inference/,
+  );
+  assert.equal(
+    findByClass(app.elements.loopCanvas, "system-connector").length,
+    5,
+  );
 });
 
 test("initialization refresh hydrates a loop builder that booted disabled", async () => {
@@ -7158,13 +7240,6 @@ function findAll(root, predicate) {
 }
 
 function createCatalog() {
-  const defaults = {
-    inference: createContextPolicy({ publishToInvokingConversation: false }),
-    exit: createContextPolicy({
-      includePreviousIterationResult: true,
-      retainForLoopReasoning: false,
-    }),
-  };
   return {
     roleId: "default",
     runtimeModel: { provider: "OpenAiCodex", model: "gpt-5-test" },
@@ -7173,26 +7248,104 @@ function createCatalog() {
       customAuthorityCeiling: "workspaceReadOnly",
     },
     systemDefault: {
-      ...createCustomDefinition({
-        id: "default-conversation",
-        displayName: "Default conversation",
-        definitionVersion: 1,
-      }),
+      schemaVersion: 1,
+      id: "default-conversation",
+      displayName: "Default conversation",
       description: "System-managed conversation loop.",
-      contextDefaults: clone(defaults),
-      inferenceSteps: [
-        {
-          id: "dispatch-inference",
-          name: "Respond in role",
-          instruction: "System-managed default conversation behavior.",
-          contextPolicy: {
-            mode: "custom",
-            customPolicy: createContextPolicy({
-              publishToInvokingConversation: true,
-            }),
-          },
-        },
+      roleId: "default",
+      trigger: "human-message",
+      memoryScope: "workspace-startup-context",
+      capabilityIds: [
+        "conversation.turn",
+        "conversation.history",
+        "agent.context",
+        "provider.inference",
+        "workspace.command",
+        "approval.request",
+        "audit.write",
       ],
+      reviewPolicy: "review-at-authority-boundaries",
+      failurePolicy: "record-failure-and-surface-to-user",
+      state: "enabled",
+      editMode: "system-locked",
+      graph: {
+        entryNodeId: "accept-user-message",
+        terminalNodeIds: ["complete-run"],
+        nodes: [
+          createSystemNode(
+            "accept-user-message",
+            "Accept user message",
+            "trigger",
+            ["conversation.turn"],
+            "Receives the current human message as the trigger for the governed default conversation turn.",
+          ),
+          createSystemNode(
+            "assemble-runtime-context",
+            "Assemble runtime context",
+            "context-assembly",
+            ["agent.context", "conversation.history"],
+            "Combines startup context, restored/session transcript context, and current turn input before provider dispatch.",
+          ),
+          createSystemNode(
+            "dispatch-provider-inference",
+            "Dispatch provider inference",
+            "model-inference",
+            ["provider.inference"],
+            "Sends the assembled turn request to the configured inference adapter.",
+          ),
+          createSystemNode(
+            "persist-transcript",
+            "Persist transcript",
+            "transcript-persistence",
+            ["conversation.turn", "conversation.history"],
+            "Persists accepted user and assistant messages into runtime state and conversation memory.",
+          ),
+          createSystemNode(
+            "complete-run",
+            "Complete loop run",
+            "run-finalization",
+            ["audit.write"],
+            "Records the terminal loop run status and returns the typed runtime turn result to the active surface.",
+          ),
+        ],
+        edges: [
+          createSystemEdge(
+            "accept-message-to-context",
+            "accept-user-message",
+            "assemble-runtime-context",
+            "always",
+            "Accepted user input flows into context assembly.",
+          ),
+          createSystemEdge(
+            "context-to-inference",
+            "assemble-runtime-context",
+            "dispatch-provider-inference",
+            "success",
+            "Context assembly must succeed before provider inference.",
+          ),
+          createSystemEdge(
+            "inference-to-transcript",
+            "dispatch-provider-inference",
+            "persist-transcript",
+            "success",
+            "A completed inference response is persisted into the transcript.",
+          ),
+          createSystemEdge(
+            "transcript-to-complete-run",
+            "persist-transcript",
+            "complete-run",
+            "success",
+            "Persisted transcript state completes the run.",
+          ),
+        ],
+      },
+      executionContract: {
+        runner: "DefaultConversationLoopRunner",
+        graphSemantics: "validated-runner-contract",
+        usesGenericGraphDispatcher: false,
+        detail:
+          "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor.",
+      },
     },
     customDefinitions: [createCustomDefinition()],
     limits: {
@@ -7220,6 +7373,29 @@ function createCatalog() {
       maxRunTraceUtf8Bytes: 16777216,
       maxRunExecutionMilliseconds: 1800000,
     },
+  };
+}
+
+function createSystemNode(id, displayName, kind, capabilityIds, description) {
+  return {
+    id,
+    displayName,
+    description,
+    kind,
+    editMode: "system-locked",
+    capabilityIds,
+    executionSemantics: "validated-runner-contract",
+  };
+}
+
+function createSystemEdge(id, fromNodeId, toNodeId, condition, description) {
+  return {
+    id,
+    fromNodeId,
+    toNodeId,
+    condition,
+    description,
+    executionSemantics: "validated-runner-contract",
   };
 }
 
