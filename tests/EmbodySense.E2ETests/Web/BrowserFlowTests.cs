@@ -88,7 +88,7 @@ public sealed class BrowserFlowTests
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var currentTranscriptPath = workspace.File(".agent", "memory", "conversations", "current.ndjson");
-        await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
+        await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
         await using var externalLease = new FileStream(currentTranscriptPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
@@ -140,6 +140,26 @@ public sealed class BrowserFlowTests
             Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('invokeButton').disabled && document.getElementById('saveButton').disabled && document.getElementById('deleteButton').disabled"));
             Assert.Contains("System definition is valid and read-only", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
             Assert.Contains("default-assistant", await browser.EvaluateStringAsync("document.getElementById('canvasAuthority').textContent"), StringComparison.Ordinal);
+            Assert.Equal(5, await browser.EvaluateInt32Async("document.querySelectorAll('#loopCanvas .node-card').length"));
+            Assert.Equal(4, await browser.EvaluateInt32Async("document.querySelectorAll('#loopCanvas .system-connector-label').length"));
+            var systemCanvas = await browser.EvaluateStringAsync("document.getElementById('loopCanvas').textContent");
+            Assert.Contains("Accept user message", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Assemble runtime context", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Dispatch provider inference", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Persist transcript", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Complete loop run", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("accept-message-to-context", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("transcript-to-complete-run", systemCanvas, StringComparison.Ordinal);
+            Assert.DoesNotContain("Manual trigger", systemCanvas, StringComparison.Ordinal);
+            Assert.DoesNotContain("Respond in role", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("5 nodes · 4 edges", await browser.EvaluateStringAsync("document.getElementById('loopHeaderMeta').textContent"), StringComparison.Ordinal);
+            Assert.Contains("not dispatched by the custom-loop or a generic graph executor", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
+            await ClickAsync(browser, "#loopSettingsButton");
+            var systemPolicy = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
+            Assert.Contains("Human message", systemPolicy, StringComparison.Ordinal);
+            Assert.Contains("Workspace startup context", systemPolicy, StringComparison.Ordinal);
+            Assert.Contains("workspace.command", systemPolicy, StringComparison.Ordinal);
+            Assert.Contains("Generic graph dispatch: Not implemented", systemPolicy, StringComparison.Ordinal);
 
             await ClickAsync(browser, "#createLoopButton");
             await browser.WaitForExpressionAsync("!document.getElementById('loopName').disabled && document.querySelector('#loopCanvas .node-card.inference')");

@@ -121,4 +121,25 @@ public sealed record DefaultConversationLoopTurnResult
             FailureDetail = detail
         };
     }
+
+    /// <summary>
+    /// Creates a terminal turn result that forbids automatic redispatch and requires explicit reconciliation.
+    /// </summary>
+    /// <param name="detail">The actionable ambiguity or conflict evidence.</param>
+    /// <param name="transcriptMessages">Messages whose durable publication was proved.</param>
+    /// <param name="runIdentity">The stable loop-run identity.</param>
+    /// <param name="userMessageAccepted">Whether the exact user message was durably accepted.</param>
+    /// <returns>A needs-review result.</returns>
+    public static DefaultConversationLoopTurnResult NeedsReview(
+        string detail,
+        IReadOnlyList<RuntimeTranscriptMessage>? transcriptMessages = null,
+        LoopRunIdentity? runIdentity = null,
+        bool userMessageAccepted = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(detail);
+        return new DefaultConversationLoopTurnResult(DefaultConversationLoopTurnStatus.NeedsReview, transcriptMessages, runIdentity, userMessageAccepted)
+        {
+            FailureDetail = detail
+        };
+    }
 }

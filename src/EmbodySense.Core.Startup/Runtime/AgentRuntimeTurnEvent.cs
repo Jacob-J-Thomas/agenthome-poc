@@ -97,6 +97,14 @@ public sealed record AgentRuntimeTurnEvent
     }
 
     /// <summary>
+    /// Creates a terminal review-required event.
+    /// </summary>
+    public static AgentRuntimeTurnEvent NeedsReview(string text, AgentRuntimeRunIdentity? runIdentity = null)
+    {
+        return new AgentRuntimeTurnEvent(AgentRuntimeTurnEventKind.NeedsReview, text, runIdentity: runIdentity);
+    }
+
+    /// <summary>
     /// Creates a terminal cancellation event.
     /// </summary>
     /// <param name="text">The cancellation detail safe to project to the interface.</param>
