@@ -317,6 +317,10 @@ public sealed class LoopRunApiControllerTests
             Assert.True(detailResponse.Headers.CacheControl?.NoStore == true);
             Assert.Equal(invocation.Run.Id, detail!.Id);
             Assert.Equal(invocation.Run.Context.ManifestHash, detail.Context.ManifestHash);
+            var publicationDisposition = Assert.Single(detail.ConversationPublicationDispositions);
+            Assert.Equal("Published", publicationDisposition.Disposition);
+            Assert.True(publicationDisposition.IsDefinite);
+            Assert.False(publicationDisposition.HasIntegrityWarning);
             Assert.Equal(HttpStatusCode.OK, quotaResponse.StatusCode);
             Assert.Equal(1, quota!.LiveTraceCount);
             Assert.Equal(1, quota.ActiveReservationCount);

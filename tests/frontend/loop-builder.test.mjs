@@ -1454,6 +1454,188 @@ test("Runs projects durable timeline and context evidence from the authenticated
   );
 });
 
+test("conversation publication disposition is table-driven, definite, and phase-aware", async (t) => {
+  const publicationId = "publication-operation";
+  const event = (sequence, kind, publishedToInvokingConversation = null) => ({
+    sequence,
+    eventId: `publication-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: 1,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: publicationId,
+  });
+  const cases = [
+    {
+      name: "no publication requested",
+      dispositions: [],
+      events: [],
+      expected: "No conversation publication requested",
+    },
+    {
+      name: "omitted without a bound conversation",
+      dispositions: [
+        publicationDisposition("OmittedNoInvokingConversation", true),
+      ],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Omitted No Invoking Conversation",
+    },
+    {
+      name: "intent is pending",
+      dispositions: [publicationDisposition("Pending", false)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+      ],
+      expected: "Pending",
+      phase: "intent committed",
+    },
+    {
+      name: "publication succeeds once",
+      dispositions: [publicationDisposition("Published", true)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+        event(5, "ConversationPublished", true),
+      ],
+      expected: "Published",
+      phase: "terminal outcome recorded",
+    },
+    {
+      name: "a prior commit is reconciled",
+      dispositions: [publicationDisposition("AlreadyPublished", true)],
+      events: [event(5, "ConversationPublished", true)],
+      expected: "Already Published",
+    },
+    {
+      name: "a definite failure remains distinct",
+      dispositions: [publicationDisposition("DefinitelyFailed", true)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Definitely Failed",
+    },
+    {
+      name: "an uncertain outcome requires review",
+      dispositions: [publicationDisposition("Uncertain", false)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Uncertain",
+    },
+    {
+      name: "duplicate terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("DuplicateTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", true),
+      ],
+      expected: "Integrity warning: Duplicate Terminal Outcomes",
+    },
+    {
+      name: "conflicting terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("ConflictingTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", false),
+      ],
+      expected: "Integrity warning: Conflicting Terminal Outcomes",
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const server = new FakeFetchServer(createCatalog());
+      const run = createRunSnapshot();
+      run.events = scenario.events;
+      run.conversationPublicationDispositions = scenario.dispositions;
+      server.runs = [runSummary(run)];
+      server.runDetails.set(run.id, run);
+      const app = await loadLoopBuilder({ server });
+      await selectCustomLoop(app);
+
+      await app.elements.runsTab.click();
+      await flushAsyncWork();
+
+      assert.match(
+        app.elements.inspectorContent.textContent,
+        new RegExp(scenario.expected),
+      );
+      assert.doesNotMatch(
+        app.elements.inspectorContent.textContent,
+        /not published/i,
+      );
+      if (scenario.phase)
+        assert.match(
+          app.elements.runTimeline.textContent,
+          new RegExp(scenario.phase),
+        );
+    });
+  }
+});
+
+test("multiple conversation publication operations keep canonical grouping and durable order", async () => {
+  const event = (
+    sequence,
+    operationId,
+    kind,
+    publishedToInvokingConversation = null,
+  ) => ({
+    sequence,
+    eventId: `${operationId}-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: operationId === "publication-first" ? 1 : 2,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: operationId,
+  });
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.events = [
+    event(2, "publication-first", "ExitDecisionCompleted", true),
+    event(3, "publication-first", "ConversationPublicationStarted"),
+    event(4, "publication-first", "ConversationPublished", true),
+    event(5, "publication-second", "ExitDecisionCompleted", true),
+    event(6, "publication-second", "ConversationPublicationStarted"),
+    event(7, "publication-second", "ConversationPublished", true),
+  ];
+  run.conversationPublicationDispositions = [
+    publicationDisposition("Published", true, false, "publication-first"),
+    publicationDisposition("Published", true, false, "publication-second"),
+  ];
+  server.runs = [runSummary(run)];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  const inspector = app.elements.inspectorContent.textContent;
+  assert.ok(
+    inspector.indexOf("publication-first") <
+      inspector.indexOf("publication-second"),
+  );
+  assert.equal(inspector.match(/publication-first/g)?.length, 1);
+  assert.equal(inspector.match(/publication-second/g)?.length, 1);
+  assert.equal(inspector.match(/Published · definite/g)?.length, 2);
+  assert.equal(
+    app.elements.runTimeline.textContent.match(/terminal outcome recorded/g)
+      ?.length,
+    2,
+  );
+});
+
 test("standalone integrity evidence reports governance as intentionally not evaluated", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();
@@ -7456,6 +7638,39 @@ function createContextPolicy(overrides = {}) {
       publishToInvokingConversation:
         overrides.publishToInvokingConversation ?? false,
     },
+  };
+}
+
+function publicationDisposition(
+  disposition,
+  isDefinite,
+  hasIntegrityWarning = false,
+  operationId = "publication-operation",
+) {
+  return {
+    operationId,
+    disposition,
+    detail:
+      "Canonical publication disposition supplied by the public runtime projection.",
+    isDefinite,
+    hasIntegrityWarning,
+    eventSequences: [],
+  };
+}
+
+function runSummary(run) {
+  return {
+    id: run.id,
+    loopId: run.loopId,
+    definitionVersion: run.admittedDefinition.definitionVersion,
+    status: run.status,
+    createdAtUtc: run.createdAtUtc,
+    updatedAtUtc: run.updatedAtUtc,
+    completedAtUtc: run.completedAtUtc,
+    iteration: run.checkpoint.iteration,
+    nextStepIndex: run.checkpoint.nextStepIndex,
+    failureCode: run.failureCode,
+    isDeleted: false,
   };
 }
 
