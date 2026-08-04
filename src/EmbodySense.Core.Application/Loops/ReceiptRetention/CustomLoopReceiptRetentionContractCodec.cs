@@ -190,6 +190,10 @@ public static class CustomLoopReceiptRetentionContractCodec
         {
             throw new FormatException("Receipt cleanup journal is not canonical schema-1 JSON.", exception);
         }
+        catch (ArgumentException exception)
+        {
+            throw new FormatException("Receipt cleanup journal violates the persisted cleanup contract.", exception);
+        }
     }
 
     /// <summary>

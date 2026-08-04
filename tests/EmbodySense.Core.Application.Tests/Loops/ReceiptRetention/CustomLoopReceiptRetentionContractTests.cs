@@ -295,8 +295,29 @@ public sealed class CustomLoopReceiptRetentionContractTests
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(tombstone with { Candidates = [tombstone.Candidates[0] with { ExpiredOperationProof = noOpDeleteProof }] }));
     }
 
+    [Fact]
+    public void Cleanup_journal_ownership_chronology_is_independent_from_the_caller_request_timestamp()
+    {
+        var journal = Journal(CustomLoopReceiptCleanupStage.IntentPersisted, CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+        var futureRequest = journal.Request with
+        {
+            RequestedAtUtc = journal.Request.RequestedAtUtc.AddDays(1),
+            ReplayCutoffUtc = CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(journal.Request.RequestedAtUtc.AddDays(1))
+        };
+        journal = journal with
+        {
+            Request = futureRequest,
+            RequestHash = CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(futureRequest)
+        };
+
+        CustomLoopReceiptRetentionContractValidator.ValidateCleanupJournal(journal);
+
+        Assert.True(journal.OwnershipAcquiredAtUtc < journal.Request.RequestedAtUtc);
+    }
+
     [Theory]
     [InlineData(CustomLoopReceiptCleanupStage.IntentPersisted)]
+    [InlineData(CustomLoopReceiptCleanupStage.IntentAuditStarted)]
     [InlineData(CustomLoopReceiptCleanupStage.IntentAuditRecorded)]
     [InlineData(CustomLoopReceiptCleanupStage.ProofLedgerWritten)]
     [InlineData(CustomLoopReceiptCleanupStage.ArtifactsRemoved)]
@@ -393,6 +414,9 @@ public sealed class CustomLoopReceiptRetentionContractTests
         var noLiveUsage = mutation.Categories.SetItem(liveIndex, new CustomLoopReceiptCategoryUsage(CustomLoopReceiptArtifactCategory.Live, 0, 0));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { Categories = noLiveUsage }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { OldestExactReplayExpiresAtUtc = null, NewestExactReplayExpiresAtUtc = null }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { CompletedCleanupOperationCount = -1 }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { CompletedCleanupOperationCount = CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryEntryCount }));
+        Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateClassPosture(mutation with { CompletedCleanupHistoryUtf8Bytes = CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryUtf8Bytes }));
         Assert.Throws<ArgumentException>(() => CustomLoopReceiptRetentionContractValidator.ValidateWorkspacePosture(workspace with { Classes = [mutation, tombstone, tombstone] }));
     }
 
@@ -566,6 +590,8 @@ public sealed class CustomLoopReceiptRetentionContractTests
             Usage(artifactClass),
             _now.AddDays(1),
             _now.AddDays(2),
+            1,
+            7,
             CustomLoopReceiptQuotaExhaustionReason.None,
             CustomLoopReceiptCleanupBlockReason.None,
             "Bounded class posture.");

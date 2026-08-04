@@ -328,9 +328,20 @@ public static class CustomLoopReceiptRetentionContractValidator
             && (posture.ArtifactCount > posture.Budget.MaximumArtifactCount
                 || posture.ArtifactUtf8Bytes > posture.Budget.MaximumArtifactUtf8Bytes
                 || posture.ProofCount > posture.Budget.MaximumProofCount
-                || posture.ProofUtf8Bytes > posture.Budget.MaximumProofUtf8Bytes))
+                || posture.ProofUtf8Bytes > posture.Budget.MaximumProofUtf8Bytes
+                || posture.CompletedCleanupOperationCount >= CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryEntryCount
+                || posture.CompletedCleanupHistoryUtf8Bytes >= CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryUtf8Bytes))
         {
             throw new ArgumentException("Over-limit class posture must expose an actionable exhaustion reason.", nameof(posture));
+        }
+
+        if (posture.CompletedCleanupOperationCount < 0
+            || posture.CompletedCleanupOperationCount > CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryEntryCount
+            || posture.CompletedCleanupHistoryUtf8Bytes < 0
+            || posture.CompletedCleanupHistoryUtf8Bytes > CustomLoopReceiptRetentionPolicy.MaxCleanupHistoryUtf8Bytes
+            || posture.CompletedCleanupOperationCount == 0 != (posture.CompletedCleanupHistoryUtf8Bytes == 0))
+        {
+            throw new ArgumentException("Class posture contains invalid completed cleanup-history accounting.", nameof(posture));
         }
     }
 
@@ -393,7 +404,6 @@ public static class CustomLoopReceiptRetentionContractValidator
         RequireUtc(journal.UpdatedAtUtc, nameof(journal.UpdatedAtUtc));
         RequireBoundedText(journal.Detail, CustomLoopLimits.MaxRunDetailCharacters, nameof(journal.Detail));
         if (journal.OwnerProcessId <= 0
-            || journal.OwnershipAcquiredAtUtc < journal.Request.RequestedAtUtc
             || journal.UpdatedAtUtc < journal.OwnershipAcquiredAtUtc
             || journal.UpdatedAtUtc - journal.OwnershipAcquiredAtUtc > CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow
             || journal.Candidates.IsDefault
@@ -546,7 +556,7 @@ public static class CustomLoopReceiptRetentionContractValidator
 
         var validOutcome = journal.Stage switch
         {
-            CustomLoopReceiptCleanupStage.IntentPersisted or CustomLoopReceiptCleanupStage.IntentAuditRecorded or CustomLoopReceiptCleanupStage.ProofLedgerWritten or CustomLoopReceiptCleanupStage.ArtifactsRemoved or CustomLoopReceiptCleanupStage.OutcomeAuditStarted => journal.Outcome == CustomLoopReceiptCleanupOutcome.Unknown,
+            CustomLoopReceiptCleanupStage.IntentPersisted or CustomLoopReceiptCleanupStage.IntentAuditStarted or CustomLoopReceiptCleanupStage.IntentAuditRecorded or CustomLoopReceiptCleanupStage.ProofLedgerWritten or CustomLoopReceiptCleanupStage.ArtifactsRemoved or CustomLoopReceiptCleanupStage.OutcomeAuditStarted => journal.Outcome == CustomLoopReceiptCleanupOutcome.Unknown,
             CustomLoopReceiptCleanupStage.Completed => journal.Outcome == (journal.Candidates.Length == 0 ? CustomLoopReceiptCleanupOutcome.NothingEligible : CustomLoopReceiptCleanupOutcome.Succeeded),
             CustomLoopReceiptCleanupStage.CommittedWithAuditWarning => journal.Outcome == CustomLoopReceiptCleanupOutcome.AuditUnavailable && journal.Candidates.Length > 0,
             CustomLoopReceiptCleanupStage.AbandonedConflict => journal.Outcome == CustomLoopReceiptCleanupOutcome.Conflict,

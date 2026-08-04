@@ -118,9 +118,19 @@ public static class CustomLoopReceiptRetentionPolicy
     public const long MaxCleanupJournalUtf8Bytes = 8L * 1024 * 1024;
 
     /// <summary>
+    /// Maximum completed cleanup identities retained per receipt artifact class.
+    /// </summary>
+    public const int MaxCleanupHistoryEntryCount = 4_096;
+
+    /// <summary>
+    /// Maximum aggregate completed cleanup-journal bytes retained per receipt artifact class.
+    /// </summary>
+    public const long MaxCleanupHistoryUtf8Bytes = 8L * 1024 * 1024;
+
+    /// <summary>
     /// Maximum workspace-wide bytes accounted across raw artifacts, compact proof, and one active journal per class.
     /// </summary>
-    public const long MaxAccountedWorkspaceUtf8Bytes = MaxDefinitionMutationReceiptUtf8Bytes + MaxDefinitionTombstoneUtf8Bytes + MaxLifecycleControlReceiptUtf8Bytes + MaxProofLedgerUtf8Bytes + (3 * MaxCleanupJournalUtf8Bytes);
+    public const long MaxAccountedWorkspaceUtf8Bytes = MaxDefinitionMutationReceiptUtf8Bytes + MaxDefinitionTombstoneUtf8Bytes + MaxLifecycleControlReceiptUtf8Bytes + MaxProofLedgerUtf8Bytes + (3 * MaxCleanupJournalUtf8Bytes) + (3 * MaxCleanupHistoryUtf8Bytes);
 
     /// <summary>
     /// Gets the exact replay duration promised for completed receipts.

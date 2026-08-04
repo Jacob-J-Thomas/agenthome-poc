@@ -4,7 +4,7 @@ This document defines the schema-1 contract shared by custom-loop definition mut
 
 ## Capacity and reservation
 
-All sizes are measured from canonical persisted UTF-8 bytes. Every schema-1 JSON property is required on input, including properties whose intentional value is `null`; omission is not equivalent to an explicit semantic null. Per-class compact-proof bytes are the canonical proof-entry bytes plus their array separators; the shared ledger envelope is enforced by the aggregate ledger ceiling. Accounted workspace bytes include raw artifacts, compact proof, and at most one active cleanup journal for each of the three artifact classes.
+All sizes are measured from canonical persisted UTF-8 bytes. Every schema-1 JSON property is required on input, including properties whose intentional value is `null`; omission is not equivalent to an explicit semantic null. Per-class compact-proof bytes are the canonical proof-entry bytes plus their array separators; the shared ledger envelope is enforced by the aggregate ledger ceiling. Accounted workspace bytes include raw artifacts, compact proof, at most one active cleanup journal for each of the three artifact classes, and bounded completed cleanup-operation history for each class.
 
 | Artifact class | Raw count | Raw aggregate bytes | Pending-completion reserve | Compact proof count | Compact proof bytes |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -12,7 +12,7 @@ All sizes are measured from canonical persisted UTF-8 bytes. Every schema-1 JSON
 | Definition tombstone | 10,000 | 64 MiB | 64 tombstones / 1 MiB | 10,000 lineage identities | 16 MiB |
 | Lifecycle-control receipt | 20,000 | 128 MiB | 128 receipts / 8 MiB | 100,000 expired operations | 32 MiB |
 
-Normal admission stops at the raw ceiling minus the reserve. Reserved capacity is not spare capacity for new work: only the integrity-preserving completion of already-pending work may consume it. Each cleanup selects at most 64 raw artifacts and 4 MiB. A compact proof ledger is capped at 80 MiB, each active class journal at 8 MiB, and total accounted workspace usage at 424 MiB.
+Normal admission stops at the raw ceiling minus the reserve. Reserved capacity is not spare capacity for new work: only the integrity-preserving completion of already-pending work may consume it. Each cleanup selects at most 64 raw artifacts and 4 MiB. A compact proof ledger is capped at 80 MiB, each active class journal at 8 MiB, each class's completed cleanup history at 4,096 identities and 8 MiB, and total accounted workspace usage at 448 MiB.
 
 Compact proof is deliberately finite. If it cannot accept every required operation fingerprint and lineage record, cleanup and new admission fail closed with `ProofCountLimit`, `ProofByteLimit`, or `ProofCapacityExhausted`. The runtime must never regain capacity by forgetting an old operation identity or deleted loop identity.
 
@@ -41,6 +41,7 @@ Every class posture reports a count and aggregate bytes for every category, incl
 - `Unaudited`: the terminal outcome is not durably audit-marked.
 - `Degraded`: readable evidence carries an integrity or recovery warning.
 - `Compactable`: complete, audited, unambiguous, ownership-resolved evidence is outside the replay horizon.
+- `RetainedLiveLineage`: an expired Create receipt remains the required raw lineage of a live definition and is not compactable.
 - `RetainedLineage`: compact definition lineage or non-reuse proof.
 - `ExpiredIdempotency`: compact expired-operation fingerprint proof.
 - `Corrupt`: canonical validation failed.
@@ -53,18 +54,21 @@ Posture also exposes the oldest and newest exact-replay expiry exactly when live
 
 ## Cleanup journal and recovery
 
-A caller submits a governed schema-1 cleanup command containing only the artifact class, operation ID, actor, surface, and count/byte bounds. It has no caller-controlled timestamp or replay cutoff. The class-specific adapter observes current UTC from its trusted `TimeProvider` and uses the canonical request factory to derive the persisted request time and exact replay cutoff. The resulting request binds the command scope to that trusted time observation; its canonical SHA-256 hash prevents a reused cleanup ID from changing scope.
+A caller submits a governed schema-1 cleanup command containing only the artifact class, operation ID, actor, surface, and count/byte bounds. It has no caller-controlled timestamp or replay cutoff. The class-specific adapter observes current UTC from its trusted `TimeProvider` and uses the canonical request factory to derive the persisted request time and exact replay cutoff. A retry with the same stable command fields reuses the original persisted trusted-time request; changing any stable field while reusing the operation ID fails closed. The resulting request binds the command scope to that trusted time observation; its canonical SHA-256 hash prevents a reused cleanup ID from changing scope.
 
 The durable schema-1 journal advances through explicit stages:
 
 1. `IntentPersisted`: immutable candidate IDs, hashes, sizes, compact proof, and bounded cross-process owner are durable before mutation.
-2. `IntentAuditRecorded`: the governed intent is durably audited.
-3. `ProofLedgerWritten`: a canonical replacement proof ledger is atomically written and hash-verified.
-4. `ArtifactsRemoved`: each candidate is hash-revalidated and the selected raw artifacts are removed as one attributed batch.
-5. `OutcomeAuditStarted`: the single bounded outcome-audit attempt is durably marked.
-6. `Completed` or `CommittedWithAuditWarning`: completion is durable, with an explicit warning if the bounded audit attempt could not be confirmed.
+2. `IntentAuditStarted`: the single bounded intent-audit attempt is durably marked before the append-only audit mutation.
+3. `IntentAuditRecorded`: the governed intent is durably audited.
+4. `ProofLedgerWritten`: a canonical replacement proof ledger is atomically written and hash-verified.
+5. `ArtifactsRemoved`: each candidate is hash-revalidated and the selected raw artifacts are removed as one attributed batch.
+6. `OutcomeAuditStarted`: the single bounded outcome-audit attempt is durably marked.
+7. `Completed` or `CommittedWithAuditWarning`: completion is durable, with an explicit warning if the bounded audit attempt could not be confirmed.
 
-`AbandonedConflict` means a candidate changed or disappeared and nothing is attributed to that batch. `Degraded` means recovery cannot advance safely; if degradation occurs after artifact removal, the journal retains the proof-ledger hash plus the full immutable candidate count and byte attribution rather than erasing committed-removal evidence. A cleanup implementation must resume from the last durable stage under a fresh bounded owner; it must not infer a later stage from missing files, repeat an uncertain audit append, or delete evidence when corruption, audit availability, ownership, or attribution is unresolved.
+`IntentAuditStarted` and `OutcomeAuditStarted` do not claim that their append-only audit write was atomic with the journal. On recovery, either stage is treated as an uncertain prior append and is not retried. `AbandonedConflict` means a candidate changed or disappeared and nothing is attributed to that batch. `Degraded` means recovery cannot advance safely; if degradation occurs after artifact removal, the journal retains the proof-ledger hash plus the full immutable candidate count and byte attribution rather than erasing committed-removal evidence. A cleanup implementation must resume from the last durable stage under a fresh bounded owner; it must not infer a later stage from missing files, repeat an uncertain audit append, or delete evidence when corruption, audit availability, ownership, or attribution is unresolved.
+
+Before a different operation replaces a terminal active journal, that terminal journal is atomically archived under its operation ID in the class-specific completed cleanup history. Retries consult both the active journal and this immutable history, so rotation cannot authorize delayed reuse of a completed operation ID. The complete history inventory is validated before read or mutation. Unknown files, non-canonical names, identity mismatches, invalid terminal journals, subdirectories, and count or byte overflow fail closed. If the bounded history cannot preserve the prior terminal identity, the active journal remains in place and the new cleanup returns explicit history-capacity exhaustion.
 
 ## Architecture boundary
 

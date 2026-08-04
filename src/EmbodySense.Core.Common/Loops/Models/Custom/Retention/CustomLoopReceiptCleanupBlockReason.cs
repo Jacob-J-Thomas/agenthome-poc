@@ -53,5 +53,10 @@ public enum CustomLoopReceiptCleanupBlockReason
     /// <summary>
     /// Compact proof has no capacity for the required lineage or idempotency evidence.
     /// </summary>
-    ProofCapacityExhausted
+    ProofCapacityExhausted,
+
+    /// <summary>
+    /// Completed cleanup-operation history has no capacity for another immutable identity.
+    /// </summary>
+    CleanupHistoryCapacityExhausted
 }

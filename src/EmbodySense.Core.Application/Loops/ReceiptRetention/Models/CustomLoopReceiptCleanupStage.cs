@@ -16,6 +16,11 @@ public enum CustomLoopReceiptCleanupStage
     IntentPersisted,
 
     /// <summary>
+    /// The single bounded intent-audit attempt is durably started before append-only audit mutation.
+    /// </summary>
+    IntentAuditStarted,
+
+    /// <summary>
     /// The cleanup intent audit is durably recorded.
     /// </summary>
     IntentAuditRecorded,
