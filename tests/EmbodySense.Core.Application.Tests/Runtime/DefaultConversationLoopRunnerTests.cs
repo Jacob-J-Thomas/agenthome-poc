@@ -395,7 +395,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
-        var graph = LoopGraphDefinition.CreateDefaultConversation();
+        var graph = BuiltInLoopGraphDefinition.CreateDefaultConversation();
         var extendedLoop = LoopDefinition.CreateDefaultConversation() with
         {
             Graph = graph with
@@ -450,7 +450,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
-        var graph = LoopGraphDefinition.CreateDefaultConversation();
+        var graph = BuiltInLoopGraphDefinition.CreateDefaultConversation();
         var changedLoop = LoopDefinition.CreateDefaultConversation() with
         {
             Graph = graph with
