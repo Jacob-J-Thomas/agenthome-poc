@@ -1,0 +1,172 @@
+name: PR 255 Repair Runner
+
+on:
+  push:
+    branches:
+      - agent/pr-255-repair-runner-20260805
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Reconstruct reviewed PR 255 delta on current main
+        id: reconstruct
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+          git fetch origin main codex/issue-228-retention-posture --force
+
+          $mainSha = (git rev-parse origin/main).Trim()
+          $oldHead = '7e25d6da0dc4526d1fc81c400979741ab54b2ec4'
+          $implementationBase = '0c5eb7e42fdc91f75dae86beac02debee0607e8a'
+          $reviewedImplementationHead = 'fa2191da58fea847f23b4ee0072d2050131b11d5'
+
+          if ((git rev-parse origin/codex/issue-228-retention-posture).Trim() -ne $oldHead) {
+            throw 'PR 255 moved after this repair was prepared; refusing to reconstruct a stale head.'
+          }
+
+          git switch --detach $mainSha
+          git switch -c repair-pr-255-golden
+
+          $implementationCommits = @(
+            git rev-list --reverse --no-merges "$implementationBase..$reviewedImplementationHead"
+          )
+          if ($implementationCommits.Count -ne 4) {
+            throw "Expected four non-merge implementation commits, found $($implementationCommits.Count): $($implementationCommits -join ', ')"
+          }
+
+          $commits = @($implementationCommits) + @(
+            'ae7a4107dc14bf0c031e408a16630812abf6005a',
+            '4c713d0bef4ace49b955e5bd1028d1d826b56663',
+            '7e25d6da0dc4526d1fc81c400979741ab54b2ec4'
+          )
+
+          'Cherry-pick sequence:'
+          $commits | ForEach-Object { "  $_ $(git show -s --format=%s $_)" }
+
+          foreach ($commit in $commits) {
+            git cherry-pick --empty=drop $commit
+            if ($LASTEXITCODE -ne 0) {
+              throw "Cherry-pick failed for $commit."
+            }
+          }
+
+          git diff --check
+          if ($LASTEXITCODE -ne 0) {
+            throw 'git diff --check failed on the reconstructed tree.'
+          }
+
+          $conflictMarkers = git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ':(exclude).github/workflows/pr-255-repair-runner.yml'
+          if ($LASTEXITCODE -eq 0 -and $conflictMarkers) {
+            $conflictMarkers
+            throw 'Conflict markers remain in the reconstructed tree.'
+          }
+          if ($LASTEXITCODE -notin @(0, 1)) {
+            throw 'Conflict-marker scan failed.'
+          }
+
+          $goldenSha = (git rev-parse HEAD).Trim()
+          "MAIN_SHA=$mainSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OLD_HEAD=$oldHead" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GOLDEN_SHA=$goldenSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Capture reconstruction diagnostics
+        if: steps.reconstruct.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $root = Join-Path $PWD '_repair_conflicts'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          git status --short | Out-File (Join-Path $root 'status.txt') -Encoding utf8
+          git diff --name-only --diff-filter=U | Out-File (Join-Path $root 'conflicted-files.txt') -Encoding utf8
+          git diff --cc | Out-File (Join-Path $root 'combined.diff') -Encoding utf8
+          git log --oneline --decorate --graph -40 | Out-File (Join-Path $root 'history.txt') -Encoding utf8
+
+          $conflicts = @(git diff --name-only --diff-filter=U)
+          foreach ($path in $conflicts) {
+            $safe = $path -replace '[\\/:*?"<>|]', '_'
+            Copy-Item -LiteralPath $path -Destination (Join-Path $root "$safe.markers") -Force -ErrorAction SilentlyContinue
+            foreach ($stage in 1, 2, 3) {
+              git show ":$stage`:$path" 2>$null | Out-File (Join-Path $root "$safe.stage-$stage") -Encoding utf8
+            }
+          }
+
+      - name: Upload reconstruction diagnostics
+        if: steps.reconstruct.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-255-repair-conflicts
+          path: _repair_conflicts
+          if-no-files-found: error
+
+      - name: Stop after reconstruction failure
+        if: steps.reconstruct.outcome == 'failure'
+        shell: pwsh
+        run: throw 'PR 255 reconstruction failed; diagnostics were uploaded.'
+
+      - name: Install pinned .NET SDK
+        if: steps.reconstruct.outcome == 'success'
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install pinned Node.js
+        if: steps.reconstruct.outcome == 'success'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.1
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Run canonical verifier
+        if: steps.reconstruct.outcome == 'success'
+        shell: pwsh
+        run: ./scripts/verify.ps1 -Configuration Release
+
+      - name: Publish ancestry-preserving repair branch
+        if: steps.reconstruct.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:GOLDEN_SHA) {
+            throw 'Verification changed the reconstructed commit unexpectedly.'
+          }
+
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          $message = 'Repair PR #255 against current main while preserving reviewed ancestry'
+          $newHead = ($message | git commit-tree $tree -p $env:OLD_HEAD -p $env:MAIN_SHA).Trim()
+
+          git diff --exit-code $env:GOLDEN_SHA $newHead
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Synthetic merge tree differs from the verified golden tree.'
+          }
+
+          git merge-base --is-ancestor $env:OLD_HEAD $newHead
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Original PR 255 head is not an ancestor of the repair commit.'
+          }
+
+          git merge-base --is-ancestor $env:MAIN_SHA $newHead
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Current main is not an ancestor of the repair commit.'
+          }
+
+          git push origin "$newHead`:refs/heads/agent/repair-pr-255" --force
+          "REPAIR_HEAD=$newHead" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Published repair head $newHead"
