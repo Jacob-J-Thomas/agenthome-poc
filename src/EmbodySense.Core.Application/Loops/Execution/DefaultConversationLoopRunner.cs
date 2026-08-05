@@ -254,6 +254,21 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 }
 
                 var observedResponse = exception.Response;
+                if (string.IsNullOrWhiteSpace(observedResponse.OutputText))
+                {
+                    var emptyDetail = $"Provider completed without a usable assistant message body; the terminal provider outcome is conclusive, but no assistant transcript message can be published. Completion audit detail: {exception.Message}";
+                    turn = await AdvanceAsync(
+                        turn,
+                        DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
+                        emptyDetail,
+                        DefaultConversationTurnBoundary.ProviderOutcomeObserved,
+                        CancellationToken.None,
+                        providerOutcome: DefaultConversationProviderOutcome.ObservedFailure,
+                        providerResponseId: observedResponse.ProviderResponseId);
+                    turn = await FinalizeAsync(turn, LoopRunStatus.Failed, emptyDetail, CancellationToken.None);
+                    return DefaultConversationLoopTurnResult.Failed(emptyDetail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+                }
+
                 var observedAssistantMessage = new DefaultConversationTurnMessage(DefaultConversationTurnProtocol.CreateAssistantMessageId(turn.TurnId), LlmMessageRole.Assistant, observedResponse.OutputText);
                 var detail = exception.Message;
                 turn = await AdvanceAsync(
@@ -291,6 +306,21 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             if (!dispatchStarted)
             {
                 throw new InvalidOperationException("The inference adapter returned without invoking the required provider-dispatch boundary callback.");
+            }
+
+            if (string.IsNullOrWhiteSpace(response.OutputText))
+            {
+                var detail = "Provider completed without a usable assistant message body; the terminal provider outcome is conclusive, but no assistant transcript message can be published.";
+                turn = await AdvanceAsync(
+                    turn,
+                    DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
+                    detail,
+                    DefaultConversationTurnBoundary.ProviderOutcomeObserved,
+                    CancellationToken.None,
+                    providerOutcome: DefaultConversationProviderOutcome.ObservedFailure,
+                    providerResponseId: response.ProviderResponseId);
+                turn = await FinalizeAsync(turn, LoopRunStatus.Failed, detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.Failed(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
             }
 
             var assistantMessage = new DefaultConversationTurnMessage(DefaultConversationTurnProtocol.CreateAssistantMessageId(turn.TurnId), LlmMessageRole.Assistant, response.OutputText);

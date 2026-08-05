@@ -93,8 +93,10 @@ public sealed class LoopApiControllerTests
                 Assert.Equal(expected.Condition, actual.Condition);
                 Assert.Equal(expected.Description, actual.Description);
             }
-            Assert.All(systemDefinition.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, node.ExecutionSemantics));
-            Assert.All(systemDefinition.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, edge.ExecutionSemantics));
+            Assert.All(systemDefinition.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, node.ExecutionSemantics));
+            Assert.All(systemDefinition.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, edge.ExecutionSemantics));
+            Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, systemDefinition.ExecutionContract.GraphSemantics);
+            Assert.Contains("does not certify", systemDefinition.ExecutionContract.Detail, StringComparison.Ordinal);
             Assert.False(systemDefinition.ExecutionContract.UsesGenericGraphDispatcher);
             Assert.DoesNotContain("\"inferenceSteps\"", systemJson, StringComparison.Ordinal);
             Assert.DoesNotContain("\"triggerPolicy\"", systemJson, StringComparison.Ordinal);

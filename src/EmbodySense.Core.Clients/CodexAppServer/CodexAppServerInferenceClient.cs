@@ -44,7 +44,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     /// <param name="toolBroker">The governed tool broker, or <see langword="null"/> to expose no EmbodySense commands.</param>
     /// <param name="transport">An injected protocol transport, or <see langword="null"/> to launch <c>codex app-server --stdio</c>.</param>
     /// <param name="auditLog">The audit sink for declined native app-server requests, or <see langword="null"/> when unavailable.</param>
-    /// <param name="providerRequestStarted">An optional callback invoked immediately before <c>turn/start</c> is sent.</param>
+    /// <param name="providerRequestStarted">An optional legacy dispatch notification. It is invoked at the pre-write boundary only when no durable callback is supplied.</param>
     public CodexAppServerInferenceClient(
         LlmInferenceClientOptions options,
         IToolBroker? toolBroker = null,
@@ -97,12 +97,6 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
             var requestId = NextRequestId();
             var userText = _contextBuilder.CreateTurnInput(request);
-            if (providerRequestStarting is not null)
-            {
-                await providerRequestStarting(cancellationToken);
-            }
-
-            _providerRequestStarted?.Invoke();
             await SendRequestAsync("turn/start", requestId, new JsonObject
             {
                 ["threadId"] = _threadId,
@@ -114,7 +108,21 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                     ["text"] = userText
                 }
             }
-            }, cancellationToken);
+            }, cancellationToken, async token =>
+            {
+                if (providerRequestStarting is not null)
+                {
+                    await providerRequestStarting(token);
+                }
+                else
+                {
+                    _providerRequestStarted?.Invoke();
+                }
+            });
+            if (providerRequestStarting is not null)
+            {
+                _providerRequestStarted?.Invoke();
+            }
 
             var streamedText = new StringBuilder();
             string? turnId = null;
@@ -137,7 +145,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
                 if (IsResponse(message, requestId))
                 {
-                    ThrowIfError(message);
+                    ThrowIfTurnStartError(message);
                     turnStartResponseReceived = true;
                     turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
                     continue;
@@ -414,14 +422,19 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }, cancellationToken);
     }
 
-    private async Task SendRequestAsync(string method, int requestId, JsonObject parameters, CancellationToken cancellationToken)
+    private async Task SendRequestAsync(
+        string method,
+        int requestId,
+        JsonObject parameters,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? beforeTransportWrite = null)
     {
         await SendAsync(new JsonObject
         {
             ["id"] = requestId,
             ["method"] = method,
             ["params"] = parameters
-        }, cancellationToken);
+        }, cancellationToken, beforeTransportWrite);
     }
 
     private async Task SendNotificationAsync(string method, JsonObject parameters, CancellationToken cancellationToken)
@@ -433,9 +446,18 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }, cancellationToken);
     }
 
-    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken)
+    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken, Func<CancellationToken, Task>? beforeTransportWrite = null)
     {
-        await GetTransport().WriteLineAsync(message.ToJsonString(), cancellationToken);
+        var transport = GetTransport();
+        if (beforeTransportWrite is not null)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await beforeTransportWrite(CancellationToken.None);
+            await transport.WriteLineAsync(message.ToJsonString(), CancellationToken.None);
+            return;
+        }
+
+        await transport.WriteLineAsync(message.ToJsonString(), cancellationToken);
     }
 
     private async Task<JsonDocument> ReadMessageAsync(CancellationToken cancellationToken)
@@ -542,6 +564,18 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         var errorMessage = TryGetString(error, "message") ?? error.GetRawText();
         throw new InvalidOperationException($"Codex app-server request failed: {errorMessage}");
+    }
+
+    private static void ThrowIfTurnStartError(JsonElement message)
+    {
+        if (!message.TryGetProperty("error", out var error))
+        {
+            return;
+        }
+
+        var errorMessage = TryGetString(error, "message") ?? error.GetRawText();
+        var providerResponseId = TryGetNestedString(message, "error", "data", "turnId") ?? TryGetNestedString(message, "error", "data", "turn", "id");
+        throw new LlmInferenceTerminalFailureException($"Codex app-server turn/start failed: {errorMessage}", providerResponseId);
     }
 
     private static void ThrowIfTurnFailed(JsonElement message, string? providerResponseId)
