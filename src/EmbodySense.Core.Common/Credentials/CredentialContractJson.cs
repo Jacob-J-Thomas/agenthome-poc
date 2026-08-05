@@ -388,6 +388,7 @@ public static class CredentialContractJson
 
     private static CredentialContractValidationResult Invalid(CredentialContractErrorCode code) => CredentialContractValidationResult.Rejected(code);
 
+    // TODO(#264): Extract the accumulated wire DTOs into matching model files without changing schema-1 bytes. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/264
     private sealed record ReferenceDto(int SchemaVersion, string Id, string Type, string Status, string OwnerId, string Purpose, string ProviderId, string CreatedAtUtc, string UpdatedAtUtc, string? ExpiresAtUtc, SortedDictionary<string, string> Metadata);
     private sealed record CapabilityDto(string Id, string Version, string DescriptorHash, string ProviderId, string ImplementationId);
     private sealed record ScopeDto(string? WorkspaceId, string? RoleId, string? LoopId, long? LoopRevision, string? NodeId, CapabilityDto? Capability, string? Service, string? Target, string? OperationClass, string? ActorId, string? NotBeforeUtc, string? NotAfterUtc);
