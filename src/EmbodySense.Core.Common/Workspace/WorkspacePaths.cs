@@ -156,6 +156,48 @@ public sealed class WorkspacePaths
     public string CustomLoopDefinitionOperationsPath => Path.Combine(LoopDefinitionsPath, "custom-create-operations");
 
     /// <summary>
+    /// Gets the shared custom-loop receipt-retention state path.
+    /// </summary>
+    /// <value>The receipt-retention state path.</value>
+    public string CustomLoopReceiptRetentionPath => Path.Combine(LoopsPath, "receipt-retention");
+
+    /// <summary>
+    /// Gets the canonical compact custom-loop receipt proof ledger path.
+    /// </summary>
+    /// <value>The proof-ledger path.</value>
+    public string CustomLoopReceiptProofLedgerPath => Path.Combine(CustomLoopReceiptRetentionPath, "proof-ledger.json");
+
+    /// <summary>
+    /// Gets the definition-mutation receipt cleanup journal path.
+    /// </summary>
+    /// <value>The definition-mutation cleanup journal path.</value>
+    public string CustomLoopDefinitionMutationReceiptCleanupJournalPath => Path.Combine(CustomLoopReceiptRetentionPath, "definition-mutation-receipt-cleanup.json");
+
+    /// <summary>
+    /// Gets the definition-tombstone cleanup journal path.
+    /// </summary>
+    /// <value>The definition-tombstone cleanup journal path.</value>
+    public string CustomLoopDefinitionTombstoneCleanupJournalPath => Path.Combine(CustomLoopReceiptRetentionPath, "definition-tombstone-cleanup.json");
+
+    /// <summary>
+    /// Gets the bounded completed cleanup-operation history root.
+    /// </summary>
+    /// <value>The receipt cleanup history root.</value>
+    public string CustomLoopReceiptCleanupHistoryPath => Path.Combine(LoopsPath, "receipt-cleanup-history");
+
+    /// <summary>
+    /// Gets the completed definition-mutation receipt cleanup history path.
+    /// </summary>
+    /// <value>The definition-mutation cleanup history path.</value>
+    public string CustomLoopDefinitionMutationReceiptCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "definition-mutation-receipt");
+
+    /// <summary>
+    /// Gets the completed definition-tombstone cleanup history path.
+    /// </summary>
+    /// <value>The definition-tombstone cleanup history path.</value>
+    public string CustomLoopDefinitionTombstoneCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "definition-tombstone");
+
+    /// <summary>
     /// Gets the loop runs path.
     /// </summary>
     /// <value>The loop runs path.</value>

@@ -1255,9 +1255,7 @@ function renderRunEvent(event) {
     event.retainedForLoopReasoning != null
       ? `loop reasoning ${event.retainedForLoopReasoning ? "retained" : "evidence only"}`
       : null,
-    event.publishedToInvokingConversation != null
-      ? `conversation ${event.publishedToInvokingConversation ? "published" : "not published"}${event.conversationPublicationId ? ` · ${event.conversationPublicationId}` : ""}`
-      : null,
+    publicationTimelineEvidence(event),
     event.exitDecision
       ? `Exit decision ${formatStatus(event.exitDecision)}`
       : null,
@@ -1582,20 +1580,14 @@ function renderRunEvidence() {
     }
   }
 
-  const publicationEvents = (selectedRun.events ?? []).filter(
-    (event) => event.conversationPublicationId,
-  );
+  const publicationDispositions =
+    selectedRun.conversationPublicationDispositions ?? [];
   appendEvidenceSection(
     "Output disposition",
     selectedRun.finalOutput ?? "No terminal output",
-    publicationEvents.length
-      ? publicationEvents
-          .map(
-            (event) =>
-              `${event.conversationPublicationId}: ${event.publishedToInvokingConversation ? "published" : "not published"}`,
-          )
-          .join("\n")
-      : "Evidence retained; no conversation publication correlation recorded.",
+    publicationDispositionLines(selectedRun, publicationDispositions).join(
+      "\n",
+    ),
   );
   if (selectedRun.failureCode || selectedRun.failureDetail)
     appendEvidenceSection(
@@ -1604,6 +1596,65 @@ function renderRunEvidence() {
       selectedRun.failureDetail ??
         "Inspect the ordered timeline for the persisted boundary.",
     );
+}
+
+function publicationDispositionLines(run, dispositions) {
+  if (dispositions.length === 0)
+    return [
+      "No conversation publication requested; no durable publication operation was recorded.",
+    ];
+
+  return dispositions.flatMap((disposition) => {
+    const phases = (run.events ?? [])
+      .filter(
+        (event) => event.conversationPublicationId === disposition.operationId,
+      )
+      .map(
+        (event) => `event ${event.sequence} · ${publicationPhaseLabel(event)}`,
+      );
+    return [
+      `${disposition.operationId}: ${formatPublicationDisposition(disposition)}${disposition.isDefinite ? " · definite" : " · review required"}`,
+      `  ${disposition.detail}`,
+      ...phases.map((phase) => `  ${phase}`),
+    ];
+  });
+}
+
+function formatPublicationDisposition(disposition) {
+  const label = formatStatus(disposition.disposition);
+  return disposition.hasIntegrityWarning
+    ? `Integrity warning: ${label}`
+    : label;
+}
+
+function publicationPhaseLabel(event) {
+  switch (event.kind) {
+    case "NodeOutcomeObserved":
+    case "ExitDecisionCompleted":
+      return "output policy selected";
+    case "ConversationPublicationStarted":
+      return "intent committed";
+    case "ConversationPublished":
+      return "terminal outcome recorded";
+    default:
+      return `${formatStatus(event.kind)} correlated evidence`;
+  }
+}
+
+function publicationTimelineEvidence(event) {
+  if (event.conversationPublicationId) {
+    const disposition = (
+      selectedRun?.conversationPublicationDispositions ?? []
+    ).find((item) => item.operationId === event.conversationPublicationId);
+    const terminal =
+      event.kind === "ConversationPublished" && disposition
+        ? ` · ${formatPublicationDisposition(disposition)}`
+        : "";
+    return `conversation publication ${publicationPhaseLabel(event)} · ${event.conversationPublicationId}${terminal}`;
+  }
+
+  if (event.publishedToInvokingConversation == null) return null;
+  return `conversation publication ${event.publishedToInvokingConversation ? "selected" : "not selected"}`;
 }
 
 function appendRunProgressEvidence(run, definition) {

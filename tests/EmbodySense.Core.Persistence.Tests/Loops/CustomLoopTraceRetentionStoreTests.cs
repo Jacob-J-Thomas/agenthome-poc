@@ -11,7 +11,10 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Tests.Verification;
+using EmbodySense.Core.Persistence.Tests.Verification.Models;
 using EmbodySense.Tests.Support;
+using Xunit.Abstractions;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
 
@@ -25,6 +28,12 @@ public sealed class CustomLoopTraceRetentionStoreTests
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
+    private readonly ITestOutputHelper _output;
+
+    public CustomLoopTraceRetentionStoreTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
 
     [Fact]
     public async Task Inspection_reports_exact_persisted_hash_and_size_and_deletion_releases_live_quota_after_restart()
@@ -221,16 +230,18 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    [Trait(VerificationTier.TraitName, VerificationTier.Stress)]
     public async Task Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible()
     {
+        var probe = new VerificationPhaseProbe(_output, nameof(Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible), VerificationTier.Stress);
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
-        var terminal = await CreateTerminalRunAsync(store);
-        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var terminal = await probe.RunAsync(Amplification("terminal trace fixture materialization", 5, 60), () => CreateTerminalRunAsync(store));
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await probe.RunAsync(Production("terminal trace inspection", 5, 60), () => store.InspectTraceAsync(terminal.Id)));
         var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;
         Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
-        await Parallel.ForEachAsync(Enumerable.Range(0, generalOperationCapacity), new ParallelOptions { MaxDegreeOfParallelism = 32 }, async (index, cancellationToken) =>
+        await probe.RunAsync(Amplification("10,000-operation fixture materialization", 180, 600), () => Parallel.ForEachAsync(Enumerable.Range(0, generalOperationCapacity), new ParallelOptions { MaxDegreeOfParallelism = 32 }, async (index, cancellationToken) =>
         {
             var request = Request($"missing-{index:D5}", new string('a', CustomLoopLimits.Sha256HexCharacters), $"reject-{index:D5}");
             var mutation = Mutation(request);
@@ -241,14 +252,14 @@ public sealed class CustomLoopTraceRetentionStoreTests
                 Integrity = CustomLoopTraceDeletionIntegrity.Complete
             };
             await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, operation.OperationId + ".json"), JsonSerializer.Serialize(operation, _jsonOptions) + "\n", cancellationToken);
-        });
+        }));
 
-        var quotaBefore = await store.GetTraceQuotaAsync();
+        var quotaBefore = await probe.RunAsync(Production("10,000-operation quota enumeration", 30, 180), () => store.GetTraceQuotaAsync());
         var deletionRequest = Request(terminal.Id, inspection.PersistedArtifactHash, "delete-reserved-trace");
-        var deleted = await store.DeleteTerminalTraceAsync(Mutation(deletionRequest));
-        var blockedRejection = await store.DeleteTerminalTraceAsync(Mutation(Request("missing-after-capacity", new string('a', CustomLoopLimits.Sha256HexCharacters), "reject-after-capacity")));
-        var replay = await store.DeleteTerminalTraceAsync(Mutation(deletionRequest));
-        var quotaAfter = await store.GetTraceQuotaAsync();
+        var deleted = await probe.RunAsync(Production("reserved tombstone deletion at operation capacity", 30, 180), () => store.DeleteTerminalTraceAsync(Mutation(deletionRequest)));
+        var blockedRejection = await probe.RunAsync(Production("rejected deletion at operation capacity", 30, 180), () => store.DeleteTerminalTraceAsync(Mutation(Request("missing-after-capacity", new string('a', CustomLoopLimits.Sha256HexCharacters), "reject-after-capacity"))));
+        var replay = await probe.RunAsync(Production("tombstone deletion replay at operation capacity", 30, 180), () => store.DeleteTerminalTraceAsync(Mutation(deletionRequest)));
+        var quotaAfter = await probe.RunAsync(Production("post-deletion 10,001-operation quota enumeration", 30, 180), () => store.GetTraceQuotaAsync());
 
         Assert.Equal(generalOperationCapacity, quotaBefore.DeletionOperationCount);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, deleted.Status);
@@ -537,6 +548,16 @@ public sealed class CustomLoopTraceRetentionStoreTests
     private static CustomLoopTraceDeletionMutation Mutation(CustomLoopTraceDeletionRequest request) => new(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(3));
 
     private static CustomLoopTraceDeletionOperation PendingOperation(CustomLoopTraceDeletionMutation mutation) => new(CustomLoopTraceDeletionOperation.CurrentSchemaVersion, mutation.Request.OperationId, mutation.RequestHash, mutation.Request, mutation.RequestedAtUtc, mutation.RequestedAtUtc, CustomLoopTraceDeletionOperationState.PendingMutation, CustomLoopTraceDeletionStoreStatus.Unknown, null, CustomLoopTraceDeletionIntegrity.Unknown);
+
+    private static VerificationPhaseBudget Production(string name, int proposedSeconds, int diagnosticSeconds)
+    {
+        return new VerificationPhaseBudget(name, VerificationPhaseClassification.ProductionBoundary, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds));
+    }
+
+    private static VerificationPhaseBudget Amplification(string name, int proposedSeconds, int diagnosticSeconds)
+    {
+        return new VerificationPhaseBudget(name, VerificationPhaseClassification.TestAmplification, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds));
+    }
 
     private static async Task WriteOperationAsync(WorkspacePaths paths, CustomLoopTraceDeletionOperation operation)
     {
