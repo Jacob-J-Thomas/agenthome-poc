@@ -57,7 +57,7 @@ public sealed class LoopRunApiControllerTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var unauthorized = await client.GetAsync("/api/loop-runs");
             var unauthorizedControlReceipt = await client.GetAsync("/api/loop-runs/controls/control-web");
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var beforeInitialization = await SendAsync(client, "/api/loop-runs", token);
             var controlBeforeInitialization = await SendAsync(client, "/api/loop-runs/controls/control-web", token);
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
@@ -198,7 +198,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var monitorBeforeInitialization = await SendAsync(client, "/api/loop-runs/run-missing/monitor", token);
             var invocationBeforeInitialization = await SendAsync(client, "/api/loop-runs/invocations/invoke-missing", token);
             var quotaBeforeInitialization = await SendAsync(client, "/api/loop-runs/quota", token);
@@ -248,7 +248,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
             var paths = new WorkspacePaths(workspace.RootPath);
             Directory.CreateDirectory(paths.CustomLoopRunsPath);
@@ -281,7 +281,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var host = app.Services.GetRequiredService<WebAgentRuntimeHost>();
             await host.InitializeWorkspaceAsync();
             var definition = await CreateInvocationLoopAsync(workspace);
@@ -367,7 +367,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, "/api/workspace/init", token, HttpMethod.Post)).StatusCode);
 
             var unauthorized = await client.PostAsJsonAsync("/api/loop-runs/run-missing/pause", new { expectedLifecycleVersion = 1, operationId = "pause-unauthorized" }, _jsonOptions);
@@ -417,7 +417,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
 
             var pause = await SendControlAsync(client, $"/api/loop-runs/{running.Id}/pause", token, new { expectedLifecycleVersion = running.LifecycleVersion, operationId = "pause-unsupported-index" });
             var cancel = await SendControlAsync(client, $"/api/loop-runs/{running.Id}/cancel", token, new { expectedLifecycleVersion = running.LifecycleVersion, operationId = "cancel-unsupported-index" });
@@ -458,7 +458,7 @@ public sealed class LoopRunApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
 
             var response = await SendAsync(client, "/api/loop-runs?maximumCount=50", token);
             var recovered = Assert.Single((await response.Content.ReadFromJsonAsync<LoopRunSummaryPageSnapshot>(_jsonOptions))!.Items);

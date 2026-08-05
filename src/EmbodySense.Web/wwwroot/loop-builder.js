@@ -1,4 +1,3 @@
-let sessionToken = "";
 let catalog = null;
 let currentDefinition = null;
 let draft = null;
@@ -10,7 +9,12 @@ let loopBuilderActivated = false;
 let loopBuilderEventsBound = false;
 let loopBuilderSurfaceActive = false;
 let loopBuilderRefresh = null;
+let loopBuilderRefreshAbortController = null;
 let loopBuilderRefreshQueued = false;
+let loopBuilderRecoveryQueued = false;
+let loopBuilderSessionAvailable =
+  window.embodySenseSession?.getState?.().connected ?? true;
+let loopBuilderSessionAbortController = new AbortController();
 let dirty = false;
 let currentView = "builder";
 let recentRuns = [];
@@ -140,6 +144,7 @@ const elements = {
 
 function activate() {
   loopBuilderSurfaceActive = true;
+  if (!loopBuilderSessionAvailable) return Promise.resolve(false);
   if (loopBuilderRefresh) return loopBuilderRefresh;
   if (loopBuilderActivated) {
     scheduleSelectedRunRefresh();
@@ -158,20 +163,37 @@ function deactivate() {
   scheduleSelectedRunRefresh();
 }
 
-function beginLoopBuilderRefresh(operation) {
-  const refresh = drainLoopBuilderRefresh(operation).finally(() => {
+function beginLoopBuilderRefresh(operation, externalSignal = null) {
+  const abortController = new AbortController();
+  loopBuilderRefreshAbortController = abortController;
+  const relayAbort = () => abortController.abort(externalSignal.reason);
+  if (externalSignal?.aborted) relayAbort();
+  else externalSignal?.addEventListener("abort", relayAbort, { once: true });
+  const refresh = drainLoopBuilderRefresh(
+    operation,
+    abortController.signal,
+  ).finally(() => {
+    externalSignal?.removeEventListener("abort", relayAbort);
+    if (loopBuilderRefreshAbortController === abortController)
+      loopBuilderRefreshAbortController = null;
     if (loopBuilderRefresh === refresh) loopBuilderRefresh = null;
   });
   loopBuilderRefresh = refresh;
   return refresh;
 }
 
-async function drainLoopBuilderRefresh(operation) {
-  let refreshed = await operation();
+async function drainLoopBuilderRefresh(operation, signal) {
+  let refreshed = await operation(signal);
   applyLoopBuilderRefreshOutcome(refreshed);
   while (loopBuilderRefreshQueued) {
+    const recoveryRefresh = loopBuilderRecoveryQueued;
     loopBuilderRefreshQueued = false;
-    refreshed = await refreshWorkspaceCore(Boolean(catalog));
+    loopBuilderRecoveryQueued = false;
+    refreshed = await refreshWorkspaceCore(
+      recoveryRefresh ? false : Boolean(catalog),
+      recoveryRefresh,
+      { signal, suppressRecovery: recoveryRefresh },
+    );
     applyLoopBuilderRefreshOutcome(refreshed);
   }
   return refreshed;
@@ -182,13 +204,16 @@ function applyLoopBuilderRefreshOutcome(refreshed) {
   if (!loopBuilderActivated) appendActivationRetry();
 }
 
-async function startLoopBuilder() {
+async function startLoopBuilder(signal) {
   try {
-    if (!sessionToken) {
-      const session = await requestJson("/api/session");
-      sessionToken = session.token;
-    }
-    return await refreshWorkspaceCore(Boolean(catalog));
+    if (window.embodySenseSession)
+      await waitForLoopBuilderOperation(
+        window.embodySenseSession.getHub(),
+        signal,
+      );
+    else await requestJson("/api/session", { signal });
+    if (signal.aborted) return false;
+    return await refreshWorkspaceCore(Boolean(catalog), false, { signal });
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
@@ -203,12 +228,57 @@ function refreshWorkspace() {
   }
   if (!loopBuilderActivated)
     return loopBuilderSurfaceActive ? activate() : Promise.resolve();
-  return beginLoopBuilderRefresh(refreshWorkspaceCore);
+  return beginLoopBuilderRefresh((signal) =>
+    refreshWorkspaceCore(false, false, { signal }),
+  );
 }
 
-async function refreshWorkspaceCore(reuseCatalog = false) {
+async function rehydrateSession({
+  approvals = [],
+  signal = null,
+  workspaceRoot = null,
+} = {}) {
+  renderLoopApprovals(approvals);
+  if (!loopBuilderEventsBound) return { refreshed: false, skipped: true };
+  if (loopBuilderRefresh) {
+    await loopBuilderRefresh;
+    if (signal?.aborted) return { refreshed: false };
+    return await rehydrateSession({ approvals, signal, workspaceRoot });
+  }
+  if (
+    workspaceRoot &&
+    elements.workspaceRoot.textContent &&
+    elements.workspaceRoot.textContent !== "Workspace loading" &&
+    elements.workspaceRoot.textContent !== workspaceRoot &&
+    dirty
+  ) {
+    showBanner(
+      "The host workspace changed. This unsaved loop draft remains loaded and was not applied to the new workspace.",
+    );
+    setInteractive(false);
+    return { requiresManualAction: true };
+  }
+  const refreshed = await beginLoopBuilderRefresh(
+    (refreshSignal) =>
+      refreshWorkspaceCore(false, true, {
+        propagateFailure: true,
+        signal: refreshSignal,
+        suppressRecovery: true,
+      }),
+    signal,
+  );
+  return { refreshed };
+}
+
+async function refreshWorkspaceCore(
+  reuseCatalog = false,
+  preserveUnsavedDraft = false,
+  { propagateFailure = false, signal = null, suppressRecovery = false } = {},
+) {
   try {
-    const status = await requestJson("/api/status");
+    const requestOptions = { signal, suppressRecovery };
+    const status = await requestJson("/api/status", requestOptions);
+    if (signal?.aborted) return false;
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
     } catch {
@@ -241,14 +311,17 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
       return true;
     }
 
-    if (!reuseCatalog || !catalog) await loadCatalog();
-    const runsLoaded = await loadRuns();
+    if (!reuseCatalog || !catalog)
+      await loadCatalog(undefined, preserveUnsavedDraft, requestOptions);
+    if (signal?.aborted) return false;
+    const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded === false) return false;
     renderAll();
     return true;
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
+    if (propagateFailure) throw error;
     return false;
   }
 }
@@ -390,11 +463,21 @@ function moveLoopOptionFocus(event, currentOption) {
 }
 
 async function requestJson(url, options = {}) {
-  const headers = { ...(options.headers ?? {}) };
-  if (sessionToken) headers["X-EmbodySense-Session"] = sessionToken;
-  if (options.body && !headers["Content-Type"])
+  const { suppressRecovery = false, ...fetchOptions } = options;
+  const signal =
+    fetchOptions.signal ?? loopBuilderSessionAbortController.signal;
+  const headers = { ...(fetchOptions.headers ?? {}) };
+  if (fetchOptions.body && !headers["Content-Type"])
     headers["Content-Type"] = "application/json";
-  const response = await fetch(url, { ...options, headers });
+  const response = await waitForLoopBuilderOperation(
+    fetch(url, {
+      ...fetchOptions,
+      credentials: "same-origin",
+      headers,
+      signal,
+    }),
+    signal,
+  );
   const text = await response.text();
   let payload = null;
   if (text) {
@@ -411,9 +494,15 @@ async function requestJson(url, options = {}) {
         : (payload?.detail ??
           payload?.title ??
           `Request failed (${response.status})`);
-    const error = new Error(detail);
+    const error = new Error(
+      response.status === 401 && url !== "/api/session"
+        ? "The local session changed. Recovery started, and the prior request was not replayed."
+        : detail,
+    );
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401 && url !== "/api/session" && !suppressRecovery)
+      beginSessionRecovery();
     throw error;
   }
   return payload;
@@ -421,12 +510,16 @@ async function requestJson(url, options = {}) {
 
 async function requestRunMonitor(runId) {
   const headers = {};
-  if (sessionToken) headers["X-EmbodySense-Session"] = sessionToken;
   if (selectedRunMonitorId === runId && selectedRunMonitorEtag)
     headers["If-None-Match"] = selectedRunMonitorEtag;
-  const response = await fetch(
-    `/api/loop-runs/${encodeURIComponent(runId)}/monitor`,
-    { headers },
+  const signal = loopBuilderSessionAbortController.signal;
+  const response = await waitForLoopBuilderOperation(
+    fetch(`/api/loop-runs/${encodeURIComponent(runId)}/monitor`, {
+      credentials: "same-origin",
+      headers,
+      signal,
+    }),
+    signal,
   );
   const etag = response.headers?.get?.("ETag") ?? selectedRunMonitorEtag;
   if (response.status === 304)
@@ -450,14 +543,25 @@ async function requestRunMonitor(runId) {
     const error = new Error(detail);
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401) beginSessionRecovery();
     throw error;
   }
   return { notModified: false, summary: payload, etag };
 }
 
-async function loadCatalog(preferredLoopId) {
-  catalog = await requestJson("/api/loops");
+async function loadCatalog(
+  preferredLoopId,
+  preserveUnsavedDraft = false,
+  requestOptions = {},
+) {
+  const nextCatalog = await requestJson("/api/loops", requestOptions);
+  const shouldPreserveDraft = preserveUnsavedDraft && dirty && draft;
+  catalog = nextCatalog;
   elements.roleId.textContent = catalog.roleId;
+  if (shouldPreserveDraft) {
+    renderList();
+    return;
+  }
   const definitions = allDefinitions();
   const requested = preferredLoopId ?? currentDefinition?.id;
   const next =
@@ -558,6 +662,8 @@ async function loadRuns({
   preferredRunId = null,
   preferredAdmissionOperationId = null,
   preserveEmptySelection = false,
+  propagateFailure = false,
+  requestOptions = {},
 } = {}) {
   if (!catalog) return;
   const requestGeneration = ++runEvidenceRequestGeneration;
@@ -566,12 +672,13 @@ async function loadRuns({
     const filteredPageRequest = loopId
       ? requestJson(
           `/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}`,
+          requestOptions,
         )
       : Promise.resolve(null);
     const [payload, filteredPayload, quotaPayload] = await Promise.all([
-      requestJson("/api/loop-runs?maximumCount=50"),
+      requestJson("/api/loop-runs?maximumCount=50", requestOptions),
       filteredPageRequest,
-      requestJson("/api/loop-runs/quota"),
+      requestJson("/api/loop-runs/quota", requestOptions),
     ]);
     if (
       requestGeneration !== runEvidenceRequestGeneration ||
@@ -618,7 +725,11 @@ async function loadRuns({
     if (selectedRunId) {
       const requestedRunId = selectedRunId;
       const summary = visible.find((run) => run.id === requestedRunId);
-      const evidence = await loadSelectedRunEvidence(requestedRunId, summary);
+      const evidence = await loadSelectedRunEvidence(
+        requestedRunId,
+        summary,
+        requestOptions,
+      );
       if (evidence.trace?.isDeleted) {
         recentRuns = mergeRunSummaries(
           [tombstoneRunSummary(evidence.trace)],
@@ -662,6 +773,7 @@ async function loadRuns({
       !silent
     )
       showBanner(`Run evidence unavailable: ${error.message}`);
+    if (propagateFailure) throw error;
     return false;
   }
 }
@@ -726,16 +838,17 @@ async function loadMoreRuns() {
   }
 }
 
-async function loadSelectedRunEvidence(runId, summary) {
+async function loadSelectedRunEvidence(runId, summary, requestOptions = {}) {
   const traceRequest = requestJson(
     `/api/loop-runs/${encodeURIComponent(runId)}/trace`,
+    requestOptions,
   );
   if (summary?.isDeleted) {
     return { run: null, trace: await traceRequest };
   }
 
   const [runResult, traceResult] = await Promise.allSettled([
-    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
+    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`, requestOptions),
     traceRequest,
   ]);
   if (traceResult.status === "rejected") throw traceResult.reason;
@@ -4492,6 +4605,7 @@ function scheduleSelectedRunRefresh() {
   }
   if (
     !loopBuilderSurfaceActive ||
+    !loopBuilderSessionAvailable ||
     selectedRunRefreshInFlight ||
     activeRunOperationMonitors > 0 ||
     currentView !== "runs" ||
@@ -4504,6 +4618,7 @@ function scheduleSelectedRunRefresh() {
     selectedRunRefreshTimer = null;
     if (
       !loopBuilderSurfaceActive ||
+      !loopBuilderSessionAvailable ||
       currentView !== "runs" ||
       selectedRun?.id !== runId
     )
@@ -4517,6 +4632,64 @@ function scheduleSelectedRunRefresh() {
       scheduleSelectedRunRefresh();
     }
   }, 1000);
+}
+
+function beginSessionRecovery() {
+  suspendSession();
+  void window.embodySenseSession?.recover();
+}
+
+function waitForLoopBuilderOperation(operation, signal) {
+  if (!signal) return Promise.resolve(operation);
+  if (signal.aborted)
+    return Promise.reject(
+      signal.reason ?? new Error("The browser session is unavailable."),
+    );
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () =>
+      finish(
+        reject,
+        signal.reason ?? new Error("The browser session is unavailable."),
+      );
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(operation).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+function suspendSession() {
+  loopBuilderSessionAvailable = false;
+  runEvidenceRequestGeneration++;
+  if (selectedRunRefreshTimer != null) {
+    window.clearTimeout(selectedRunRefreshTimer);
+    selectedRunRefreshTimer = null;
+  }
+  if (!loopBuilderRefreshAbortController?.signal.aborted)
+    loopBuilderRefreshAbortController?.abort(
+      new Error("The browser session is being recovered."),
+    );
+  if (!loopBuilderSessionAbortController.signal.aborted)
+    loopBuilderSessionAbortController.abort(
+      new Error("The browser session is being recovered."),
+    );
+  setInteractive(false);
+}
+
+function resumeSession() {
+  if (loopBuilderSessionAbortController.signal.aborted)
+    loopBuilderSessionAbortController = new AbortController();
+  loopBuilderSessionAvailable = true;
+  if (loopBuilderSurfaceActive && !loopBuilderEventsBound) void activate();
+  else scheduleSelectedRunRefresh();
 }
 
 function isNonterminalRun(run) {
@@ -4636,6 +4809,16 @@ async function deleteSelectedTrace() {
 }
 
 async function getHub() {
+  if (window.embodySenseSession) {
+    const sharedConnection = await window.embodySenseSession.getHub();
+    if (hub !== sharedConnection) {
+      hub = sharedConnection;
+      sharedConnection.on("ApprovalsChanged", (approvals) => {
+        if (hub === sharedConnection) renderLoopApprovals(approvals);
+      });
+    }
+    return sharedConnection;
+  }
   if (hub?.connected) return hub;
   const connection = new JsonSignalRConnection(createHubUrl());
   hub = connection;
@@ -4731,7 +4914,6 @@ async function decideLoopApproval(requestId, approved, button) {
 function createHubUrl() {
   const url = new URL("/hubs/session", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("access_token", sessionToken);
   return url.toString();
 }
 
@@ -5199,6 +5381,9 @@ class JsonSignalRConnection {
 window.embodySenseLoopBuilder = Object.freeze({
   activate,
   deactivate,
+  rehydrateSession,
   refreshWorkspace,
+  resumeSession,
+  suspendSession,
 });
 if (!elements.loopsView.hidden) void activate();
