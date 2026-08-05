@@ -49,6 +49,54 @@ public static class CustomLoopLimits
     /// </summary>
     public const int MaxGraphCanvasCoordinate = 1_000_000;
     /// <summary>
+    /// Maximum control-flow fan-out from one graph node.
+    /// </summary>
+    public const int MaxGraphControlFanOut = 16;
+    /// <summary>
+    /// Maximum depth of the acyclic control-flow graph after cycles are condensed.
+    /// </summary>
+    public const int MaxGraphControlDepth = 64;
+    /// <summary>
+    /// Maximum structured errors returned by graph normalization and validation.
+    /// </summary>
+    public const int MaxGraphValidationErrors = 128;
+    /// <summary>
+    /// Maximum characters in a graph validation error code.
+    /// </summary>
+    public const int MaxGraphValidationErrorCodeCharacters = 64;
+    /// <summary>
+    /// Maximum characters in a graph validation element path.
+    /// </summary>
+    public const int MaxGraphValidationErrorPathCharacters = 256;
+    /// <summary>
+    /// Maximum characters in a graph validation error message.
+    /// </summary>
+    public const int MaxGraphValidationErrorMessageCharacters = 512;
+    /// <summary>
+    /// Maximum explicit iterations permitted for one cyclic node descriptor.
+    /// </summary>
+    public const int MaxGraphCycleIterations = 10_000;
+    /// <summary>
+    /// Maximum explicit wall-clock budget permitted for one cyclic node descriptor.
+    /// </summary>
+    public const long MaxGraphCycleMilliseconds = 24L * 60 * 60 * 1_000;
+    /// <summary>
+    /// Maximum model or actuator attempts declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodeAttempts = MaxModelAttemptsPerRun;
+    /// <summary>
+    /// Maximum payload characters declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodePayloadCharacters = MaxLogicalProviderRequestCharacters;
+    /// <summary>
+    /// Maximum evidence items declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodeEvidenceItems = MaxGovernedToolRequestsPerRun;
+    /// <summary>
+    /// Maximum abstract resource units declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodeResourceUnits = 100_000;
+    /// <summary>
     /// Maximum definitions per workspace.
     /// </summary>
     public const int MaxDefinitionsPerWorkspace = 50;
