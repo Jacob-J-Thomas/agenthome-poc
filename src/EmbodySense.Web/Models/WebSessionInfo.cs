@@ -1,7 +1,7 @@
 namespace EmbodySense.Web.Models;
 
 /// <summary>
-/// Carries the bearer token issued to the bootstrapping local browser session.
+/// Describes the process generation established for a local browser session.
 /// </summary>
-/// <param name="Token">The opaque session token required by authenticated HTTP and SignalR surfaces.</param>
-public sealed record WebSessionInfo(string Token);
+/// <param name="GenerationId">A non-secret identifier that changes whenever the Web host process restarts.</param>
+public sealed record WebSessionInfo(string GenerationId);

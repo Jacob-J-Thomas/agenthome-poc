@@ -18,7 +18,7 @@ public sealed class BrowserFlowTests
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
     [InstalledBrowserFact]
-    public async Task Default_chat_reconnects_after_process_restart_and_requires_a_fresh_authenticated_page()
+    public async Task Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft()
     {
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
@@ -33,6 +33,12 @@ public sealed class BrowserFlowTests
             await SubmitMessageAsync(browser, "browser-first-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('createLoopButton').disabled");
+            await ClickAsync(browser, "#createLoopButton");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopDescription').disabled");
+            await SetValueAsync(browser, "#loopDescription", "unsaved restart draft");
+            await ClickAsync(browser, "#chatNav");
 
             app.AssertHealthy();
             browser.BeginExpectedServerRestart();
@@ -43,13 +49,17 @@ public sealed class BrowserFlowTests
             await Task.Delay(TimeSpan.FromMilliseconds(1250));
 
             app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
-            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             browser.EndExpectedServerRestart();
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.agent')).filter(message => message.textContent.includes('browser response: browser-first-turn')).length"));
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
+            await ClickAsync(browser, "#loopsNav");
+            Assert.Equal("unsaved restart draft", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
+            Assert.False(await browser.EvaluateBooleanAsync("document.getElementById('saveButton').disabled"));
+            await ClickAsync(browser, "#chatNav");
             await SubmitMessageAsync(browser, "browser-second-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-second-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
@@ -64,7 +74,7 @@ public sealed class BrowserFlowTests
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Default_chat_reconnects_after_process_restart_and_requires_a_fresh_authenticated_page), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft), browser, app);
             throw;
         }
         finally
@@ -88,7 +98,7 @@ public sealed class BrowserFlowTests
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
         var currentTranscriptPath = workspace.File(".agent", "memory", "conversations", "current.ndjson");
-        await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
+        await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
         await using var externalLease = new FileStream(currentTranscriptPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
@@ -140,6 +150,26 @@ public sealed class BrowserFlowTests
             Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('invokeButton').disabled && document.getElementById('saveButton').disabled && document.getElementById('deleteButton').disabled"));
             Assert.Contains("System definition is valid and read-only", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
             Assert.Contains("default-assistant", await browser.EvaluateStringAsync("document.getElementById('canvasAuthority').textContent"), StringComparison.Ordinal);
+            Assert.Equal(5, await browser.EvaluateInt32Async("document.querySelectorAll('#loopCanvas .node-card').length"));
+            Assert.Equal(4, await browser.EvaluateInt32Async("document.querySelectorAll('#loopCanvas .system-connector-label').length"));
+            var systemCanvas = await browser.EvaluateStringAsync("document.getElementById('loopCanvas').textContent");
+            Assert.Contains("Accept user message", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Assemble runtime context", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Dispatch provider inference", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Persist transcript", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("Complete loop run", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("accept-message-to-context", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("transcript-to-complete-run", systemCanvas, StringComparison.Ordinal);
+            Assert.DoesNotContain("Manual trigger", systemCanvas, StringComparison.Ordinal);
+            Assert.DoesNotContain("Respond in role", systemCanvas, StringComparison.Ordinal);
+            Assert.Contains("5 nodes · 4 edges", await browser.EvaluateStringAsync("document.getElementById('loopHeaderMeta').textContent"), StringComparison.Ordinal);
+            Assert.Contains("not dispatched by the custom-loop or a generic graph executor", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
+            await ClickAsync(browser, "#loopSettingsButton");
+            var systemPolicy = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
+            Assert.Contains("Human message", systemPolicy, StringComparison.Ordinal);
+            Assert.Contains("Workspace startup context", systemPolicy, StringComparison.Ordinal);
+            Assert.Contains("workspace.command", systemPolicy, StringComparison.Ordinal);
+            Assert.Contains("Generic graph dispatch: Not implemented", systemPolicy, StringComparison.Ordinal);
 
             await ClickAsync(browser, "#createLoopButton");
             await browser.WaitForExpressionAsync("!document.getElementById('loopName').disabled && document.querySelector('#loopCanvas .node-card.inference')");
@@ -171,6 +201,19 @@ public sealed class BrowserFlowTests
             await ClickButtonByTextAsync(browser, "#loopApprovals button", "Approve");
             await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('approved browser evidence')");
             Assert.Contains("browser governed tool approved", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.OrdinalIgnoreCase);
+            var publicationInspector = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
+            Assert.Contains("Published", publicationInspector, StringComparison.Ordinal);
+            Assert.Contains("definite", publicationInspector, StringComparison.Ordinal);
+            Assert.DoesNotContain("not published", publicationInspector, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("terminal outcome recorded", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.Ordinal);
+
+            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Browser governed loop'))");
+            await ClickLoopByNameAsync(browser, LoopName);
+            await ClickAsync(browser, "#runsTab");
+            await browser.WaitForExpressionAsync("document.getElementById('inspectorContent').textContent.includes('Published') && !document.getElementById('inspectorContent').textContent.toLowerCase().includes('not published')");
 
             await ClickAsync(browser, "#builderTab");
             await InvokeLoopAsync(browser, "browser-approval-reject");
@@ -878,7 +921,9 @@ public sealed class BrowserFlowTests
             var url = entry.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null;
             return string.Equals(source, "network", StringComparison.Ordinal)
                 && (ContainsTargetAuthority(text) || ContainsTargetAuthority(url))
-                && (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true || url?.StartsWith("ws", StringComparison.OrdinalIgnoreCase) == true)
+                && (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true
+                    || url?.StartsWith("ws", StringComparison.OrdinalIgnoreCase) == true
+                    || IsSessionBootstrapUrl(url))
                 && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true || text?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true);
         }
 
@@ -894,7 +939,7 @@ public sealed class BrowserFlowTests
             if (Volatile.Read(ref _expectedServerRestart) == 0
                 || !Uri.TryCreate(requestUrl, UriKind.Absolute, out var uri)
                 || !string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(uri.Scheme, "ws", StringComparison.OrdinalIgnoreCase) && !string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase))
+                || !IsExpectedRecoveryScheme(uri))
             {
                 return false;
             }
@@ -907,6 +952,22 @@ public sealed class BrowserFlowTests
         private bool ContainsTargetAuthority(string? value)
         {
             return value?.Contains(_targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
+        }
+
+        private bool IsSessionBootstrapUrl(string? value)
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+                && string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(uri.AbsolutePath, "/api/session", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsExpectedRecoveryScheme(Uri uri)
+        {
+            return string.Equals(uri.Scheme, "ws", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase)
+                || (string.Equals(uri.AbsolutePath, "/api/session", StringComparison.OrdinalIgnoreCase)
+                    && (string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)));
         }
 
         private void AddDiagnostic(string diagnostic)

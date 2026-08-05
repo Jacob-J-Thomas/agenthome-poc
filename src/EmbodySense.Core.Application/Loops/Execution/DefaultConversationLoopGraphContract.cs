@@ -6,7 +6,7 @@ namespace EmbodySense.Core.Application.Loops.Execution;
 /// <summary>
 /// Provides operations for default conversation loop graph contract.
 /// </summary>
-internal static class DefaultConversationLoopGraphContract
+public static class DefaultConversationLoopGraphContract
 {
     private static readonly string[] _requiredNodeIds =
     [
