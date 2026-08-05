@@ -20,4 +20,17 @@ public sealed class VerificationPhaseProbeTests
         Assert.DoesNotContain(output.Lines, line => line.StartsWith("VERIFY_TEST_PHASE_COMPLETE=") && line.Contains("\"phase\":\"over-bound\"", StringComparison.Ordinal));
         Assert.Contains(output.Lines, line => line.StartsWith("VERIFY_TEST_PHASE_FAILED=") && line.Contains("\"phase\":\"over-bound\"", StringComparison.Ordinal) && line.Contains("\"lastCompletedPhase\":\"within-bound\"", StringComparison.Ordinal));
     }
+    [Fact]
+    public void Over_allocation_phase_fails_without_announcing_completion()
+    {
+        var output = new RecordingTestOutputHelper();
+        var probe = new VerificationPhaseProbe(output, nameof(Over_allocation_phase_fails_without_announcing_completion), VerificationTier.PullRequest);
+        var budget = new VerificationPhaseBudget("allocation-bound", VerificationPhaseClassification.ProductionBoundary, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), 1024);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => probe.Run(budget, static () => GC.AllocateUninitializedArray<byte>(1024 * 1024)));
+
+        Assert.Contains("exceeding its 1,024-byte maximum", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(output.Lines, line => line.StartsWith("VERIFY_TEST_PHASE_COMPLETE=") && line.Contains("\"phase\":\"allocation-bound\"", StringComparison.Ordinal));
+        Assert.Contains(output.Lines, line => line.StartsWith("VERIFY_TEST_PHASE_FAILED=") && line.Contains("\"phase\":\"allocation-bound\"", StringComparison.Ordinal));
+    }
 }
