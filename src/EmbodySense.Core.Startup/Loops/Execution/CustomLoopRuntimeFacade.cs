@@ -1456,7 +1456,10 @@ internal sealed class CustomLoopRuntimeFacade : IAsyncDisposable
             run.Events.Select(Map).ToArray(),
             run.FinalOutput,
             run.FailureCode,
-            run.FailureDetail);
+            run.FailureDetail)
+        {
+            ConversationPublicationDispositions = LoopRunConversationPublicationDispositionProjector.Project(run)
+        };
     }
 
     private static LoopRunMessageSnapshot Map(CustomLoopMessageSnapshot message)

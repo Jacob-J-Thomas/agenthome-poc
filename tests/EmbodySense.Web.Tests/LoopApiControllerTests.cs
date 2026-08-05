@@ -13,6 +13,7 @@ using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace EmbodySense.Web.Tests;
 
@@ -31,7 +32,7 @@ public sealed class LoopApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var rejected = await client.GetAsync("/api/loops");
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var uninitializedCatalog = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
             var uninitializedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-before-init" });
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
@@ -122,7 +123,7 @@ public sealed class LoopApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { })).StatusCode);
 
             var unknownMember = await SendRawJsonAsync(client, HttpMethod.Post, "/api/loops", token, """{"operationId":"unknown-field","unexpected":true}""");
