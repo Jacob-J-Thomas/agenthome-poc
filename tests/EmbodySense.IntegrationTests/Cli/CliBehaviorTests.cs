@@ -45,7 +45,7 @@ public sealed class CliBehaviorTests
     public async Task Audit_tail_uses_tail_subcommand_root_operand_and_limit_option()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var auditLog = new AuditLog(new WorkspacePaths(workspace.RootPath));
         await auditLog.AppendAsync(AuditEvent.Create("test", "first.extra", "target", "ok", "first event"));
         await auditLog.AppendAsync(AuditEvent.Create("test", "second.extra", "target", "ok", "second event"));
@@ -131,7 +131,7 @@ public sealed class CliBehaviorTests
     public async Task Run_command_does_not_reinitialize_initialized_workspace()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var auditPath = workspace.File(".agent", "audit", "events.ndjson");
         var beforeInitEventCount = CountOccurrences(await File.ReadAllTextAsync(auditPath), "workspace.init");
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
@@ -147,7 +147,7 @@ public sealed class CliBehaviorTests
     public async Task Run_command_starts_fresh_conversation_instead_of_restoring_current_transcript()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("old prompt"));
@@ -165,7 +165,7 @@ public sealed class CliBehaviorTests
     public async Task Run_command_history_command_lists_and_loads_saved_conversation()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var longPrompt = "Alpha prompt for picker " + new string('x', 120) + " hidden suffix";
         await WriteConversationAsync(
@@ -205,7 +205,7 @@ public sealed class CliBehaviorTests
     public async Task Run_command_help_command_lists_runtime_commands()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var codexPath = await CreateFakeCodexExecutableAsync(workspace);
 
         var result = await RunCliWithInputAsync("/help" + Environment.NewLine + "/exit" + Environment.NewLine, "run", "--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath);
@@ -221,7 +221,7 @@ public sealed class CliBehaviorTests
     public async Task Run_command_new_command_starts_fresh_conversation_without_exiting()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await WriteConversationAsync(
             paths,

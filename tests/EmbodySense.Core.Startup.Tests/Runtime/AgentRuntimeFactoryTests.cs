@@ -33,7 +33,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_starts_with_fresh_transcript_without_exposing_runtime_internals()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await new ConversationMemoryStore(paths).AppendMessageAsync(LlmMessage.User("old transcript"));
 
@@ -51,7 +51,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_surfaces_actionable_cleanup_without_rewriting_a_superseded_identityless_transcript()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var legacyEntry = """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-31T00:00:00Z","role":"user","content":"legacy prompt"}""";
         await File.WriteAllTextAsync(paths.CurrentConversationPath, legacyEntry);
@@ -88,7 +88,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_requires_explicit_runtime_surface()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var fakeCodex = await CreateFakeCodexExecutableAsync(workspace);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
@@ -163,7 +163,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_uses_startup_context_and_streams_response_through_public_runtime()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "ROLE.md"), "runtime guide");
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
         var chunks = new List<string>();
@@ -208,7 +208,7 @@ public sealed class AgentRuntimeFactoryTests
         }
 
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.LoopRunsPath);
         var conversationMemory = new ConversationMemoryStore(paths);
@@ -270,7 +270,7 @@ public sealed class AgentRuntimeFactoryTests
         }
 
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         var running = RunningRun("run-owner-exit-recovery");
@@ -296,7 +296,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_keeps_ordinary_chat_available_while_an_in_process_custom_loop_owns_execution()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
         using var activeExecution = gate.TryAcquire("active-custom-loop", new string('a', CustomLoopLimits.Sha256HexCharacters)).Lease!;
@@ -315,7 +315,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_keeps_ordinary_chat_available_when_custom_loop_recovery_cannot_read_persisted_state()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var conversationMemory = new ConversationMemoryStore(paths);
         await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved recovery-failure transcript"));
@@ -341,7 +341,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task Startup_recovery_preserves_unsupported_discovery_index_guidance_and_retries_after_cleanup()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         await PersistRunningRunAsync(runStore, RunningRun("run-unsupported-startup-recovery"));
@@ -368,7 +368,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task Lifecycle_control_preserves_unsupported_discovery_index_guidance_and_retries_the_same_receipt()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         var running = RunningRun("run-unsupported-control");
@@ -398,7 +398,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_closes_a_conclusive_terminal_provider_failure_without_review_or_quarantine()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var fakeCodex = await CreateFakeCodexExecutableAsync(workspace, "provider exploded");
         AgentRuntimeTurnResult response;
         await using (var runtime = await CreateRuntimeAsync(workspace, codexPath: fakeCodex))
@@ -595,7 +595,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_returns_failed_runtime_result_when_default_loop_is_disabled()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await new LoopDefinitionStore(paths).SaveAsync(LoopDefinition.CreateDefaultConversation() with { State = LoopState.Disabled });
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -614,7 +614,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_emits_visible_context_when_verbose_is_enabled()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "ROLE.md"), "runtime guide");
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
         var contexts = new List<string>();
@@ -640,7 +640,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_handles_commands_and_routes_unknown_slash_text_to_model()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
 
         Assert.True(AgentRuntime.TryHandleStaticRuntimeCommand("/help", out var staticResult));
@@ -665,7 +665,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_loads_pending_history_selection()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
@@ -709,7 +709,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_handles_pending_history_cancel_and_invalid_selection()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
         await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -733,7 +733,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_requires_history_before_model_turn_and_new_resets_state()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
 
         _ = await runtime.RunTurnAsync("hello");

@@ -256,7 +256,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 var observedResponse = exception.Response;
                 if (string.IsNullOrWhiteSpace(observedResponse.OutputText))
                 {
-                    var emptyOutputDetail = $"{exception.Message} The provider completed successfully but returned no usable assistant output.";
+                    var emptyOutputDetail = $"Provider completed without a usable assistant message body and returned no usable assistant output; the terminal provider outcome is conclusive, so no assistant transcript message can be published. Completion audit detail: {exception.Message}";
                     turn = await AdvanceAsync(
                         turn,
                         DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
@@ -310,7 +310,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
 
             if (string.IsNullOrWhiteSpace(response.OutputText))
             {
-                const string Detail = "The provider completed successfully but returned no usable assistant output.";
+                const string Detail = "Provider completed without a usable assistant message body and returned no usable assistant output; the terminal provider outcome is conclusive, so no assistant transcript message can be published.";
                 turn = await AdvanceAsync(
                     turn,
                     DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,

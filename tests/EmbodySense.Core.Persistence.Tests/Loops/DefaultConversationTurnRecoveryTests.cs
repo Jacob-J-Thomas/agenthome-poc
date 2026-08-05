@@ -179,6 +179,44 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
+    public async Task Restart_finalizes_an_empty_observed_audit_failure_as_conclusive_failure_without_abandonment_or_redispatch()
+    {
+        using var workspace = new TestWorkspace();
+        var response = new LlmInferenceResponse(string.Empty, LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-empty-audit-restart");
+        var client = new RecordingInferenceClient("unused")
+        {
+            Failure = new LlmInferenceObservedResponseException("completion audit failed after provider success", response, new IOException("audit unavailable"))
+        };
+        var fixture = CreateFixture(workspace, new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderOutcomeObserved), client);
+        const string RequestId = "empty-observed-audit-restart";
+
+        await Assert.ThrowsAsync<DefaultConversationTurnInterruptedException>(() => fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId)));
+        var interrupted = fixture.Failpoint!.InterruptedRecord;
+        Assert.NotNull(interrupted);
+        Assert.Equal(DefaultConversationProviderOutcome.ObservedFailure, interrupted.ProviderOutcome);
+        Assert.Equal("provider-empty-audit-restart", interrupted.ProviderResponseId);
+        Assert.Null(interrupted.AssistantMessage);
+
+        var result = Assert.Single((await fixture.Recovery.RecoverAsync()).Results);
+        var recovered = await fixture.Turns.LoadAsync(result.TurnId);
+        Assert.NotNull(recovered);
+        Assert.Equal(DefaultConversationTurnRecoveryClassification.ProviderOutcomeObserved, result.Classification);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, recovered.Checkpoint);
+        Assert.Equal(LoopRunStatus.Failed, recovered.Run.Status);
+        Assert.Contains("no usable assistant output", recovered.Run.FailureDetail, StringComparison.Ordinal);
+        Assert.False(DefaultConversationTurnProtocol.CanAbandonReview(recovered));
+        Assert.Empty(await fixture.Turns.ListNeedsReviewAsync());
+        Assert.Equal(1, client.GenerateCount);
+        Assert.Equal(0, client.QuarantineCount);
+
+        var replay = await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, replay.Status);
+        Assert.Equal(1, client.GenerateCount);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+    }
+
+    [Fact]
     public async Task Restart_preserves_concurrent_transcript_content_but_still_closes_a_conclusive_provider_failure()
     {
         using var workspace = new TestWorkspace();
@@ -756,6 +794,16 @@ public sealed class DefaultConversationTurnRecoveryTests
             }
 
             return new LlmInferenceResponse(output, LlmInferenceSurface.OpenAiCodex, "test-model", "provider-response-1");
+        }
+
+        public async Task<LlmInferenceResponse> GenerateAsync(
+            LlmInferenceRequest request,
+            Func<string, CancellationToken, Task>? responseChunkHandler,
+            CancellationToken cancellationToken,
+            Func<CancellationToken, Task> providerRequestStarting)
+        {
+            await providerRequestStarting(CancellationToken.None);
+            return await GenerateAsync(request, responseChunkHandler, cancellationToken);
         }
 
         public Task QuarantineAsync(CancellationToken cancellationToken = default)
