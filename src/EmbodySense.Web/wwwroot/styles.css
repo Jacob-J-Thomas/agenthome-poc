@@ -273,6 +273,23 @@ p {
   outline: 2px solid rgba(138, 91, 32, 0.16);
   outline-offset: 1px;
 }
+.statusbar-retry {
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid #b96a5b;
+  border-radius: 999px;
+  color: #7b3026;
+  background: #fff3ef;
+  font-size: 8px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.statusbar-retry:hover,
+.statusbar-retry:focus-visible {
+  border-color: #8d4034;
+  outline: 2px solid rgba(141, 64, 52, 0.16);
+  outline-offset: 1px;
+}
 .app-main,
 .app-view {
   min-width: 0;

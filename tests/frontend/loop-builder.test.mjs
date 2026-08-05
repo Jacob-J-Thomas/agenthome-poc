@@ -20,9 +20,10 @@ test("catalog loading is authenticated and projects the system loop as read-only
   const catalogRequest = app.server.calls.find(
     (call) => call.method === "GET" && call.url === "/api/loops",
   );
+  assert.equal(catalogRequest.options.credentials, "same-origin");
   assert.equal(
     catalogRequest.options.headers["X-EmbodySense-Session"],
-    "loop-test-token",
+    undefined,
   );
   assert.match(app.elements.loopList.textContent, /Default conversation/);
   assert.match(app.elements.loopList.textContent, /Research pass/);
@@ -30,6 +31,37 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.deleteButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "System managed");
+  assert.equal(findByClass(app.elements.loopCanvas, "node-card").length, 5);
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /Accept user message.*Assemble runtime context.*Dispatch provider inference.*Persist transcript.*Complete loop run/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /accept-message-to-context.*context-to-inference.*inference-to-transcript.*transcript-to-complete-run/,
+  );
+  assert.doesNotMatch(
+    app.elements.loopCanvas.textContent,
+    /Manual trigger|Respond in role|Deterministic complete/,
+  );
+  assert.equal(
+    app.elements.loopHeaderMeta.textContent,
+    "default · Schema v1 · 5 nodes · 4 edges",
+  );
+  assert.equal(
+    app.elements.canvasStepCount.textContent,
+    "5 system nodes · 4 edges",
+  );
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /DefaultConversationLoopRunner.*not dispatched by the custom-loop or a generic graph executor/,
+  );
+
+  await app.elements.loopSettingsButton.click();
+  assert.match(
+    app.elements.inspectorContent.textContent,
+    /Human message.*Workspace startup context.*conversation\.turn.*workspace\.command.*Generic graph dispatch: Not implemented/,
+  );
 
   await selectCustomLoop(app);
 
@@ -37,6 +69,57 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("a rejected system runner contract is shown as invalid throughout the graph", async () => {
+  const catalog = createCatalog();
+  catalog.systemDefault.executionContract.graphSemantics = "unknown";
+  catalog.systemDefault.executionContract.detail =
+    "The default conversation graph does not match the dedicated runner contract.";
+  catalog.systemDefault.graph.edges.push(
+    createSystemEdge(
+      "rejected-branch",
+      "accept-user-message",
+      "dispatch-provider-inference",
+      "success",
+      "A noncanonical branch that the dedicated runner rejects.",
+    ),
+  );
+  for (const graphNode of catalog.systemDefault.graph.nodes)
+    graphNode.executionSemantics = "unknown";
+  for (const edge of catalog.systemDefault.graph.edges)
+    edge.executionSemantics = "unknown";
+
+  const app = await loadLoopBuilder({ catalog });
+
+  assert.equal(
+    app.elements.validationBanner.className,
+    "validation-banner visible error",
+  );
+  assert.equal(
+    app.elements.validationBanner.textContent,
+    "The default conversation graph does not match the dedicated runner contract.",
+  );
+  assert.match(
+    app.elements.validationBanner.attributes.get("aria-label"),
+    /Definition needs attention/,
+  );
+  assert.doesNotMatch(
+    app.elements.loopCanvas.textContent,
+    /Validated runner contract/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /Runner contract not validated/,
+  );
+  assert.match(
+    app.elements.loopCanvas.textContent,
+    /rejected-branch.*accept-user-message → dispatch-provider-inference/,
+  );
+  assert.equal(
+    findByClass(app.elements.loopCanvas, "system-connector").length,
+    5,
+  );
 });
 
 test("initialization refresh hydrates a loop builder that booted disabled", async () => {
@@ -121,6 +204,36 @@ test("hidden Loops defers catalog and evidence requests until first activation",
   );
 });
 
+test("a loop route loaded during session recovery waits for promotion before activation", async () => {
+  let hubReads = 0;
+  const sharedHub = { connected: true, on() {} };
+  const app = await loadLoopBuilder({
+    embodySenseSession: {
+      getState: () => ({ connected: false }),
+      getHub: async () => {
+        hubReads++;
+        return sharedHub;
+      },
+    },
+  });
+
+  assert.equal(hubReads, 0);
+  assert.equal(
+    app.server.calls.filter((call) => call.url === "/api/loops").length,
+    0,
+  );
+
+  app.window.embodySenseLoopBuilder.resumeSession();
+  await flushAsyncWork();
+
+  assert.equal(hubReads, 1);
+  assert.equal(
+    app.server.calls.filter((call) => call.url === "/api/loops").length,
+    1,
+  );
+  assert.equal(app.elements.roleId.textContent, app.server.catalog.roleId);
+});
+
 test("revisiting Loops preserves an unsaved draft without reloading the catalog", async () => {
   const server = new FakeFetchServer(createCatalog());
   const app = await loadLoopBuilder({ server, loopsViewHidden: true });
@@ -140,6 +253,99 @@ test("revisiting Loops preserves an unsaved draft without reloading the catalog"
     server.calls.filter((call) => call.url === "/api/loops").length,
     catalogRequests,
   );
+});
+
+test("session rehydration reloads authoritative loop evidence without overwriting an unsaved draft", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved recovery draft";
+  await app.elements.loopDescription.input();
+  const catalogRequests = server.calls.filter(
+    (call) => call.url === "/api/loops",
+  ).length;
+  const runRequests = server.calls.filter((call) =>
+    call.url.startsWith("/api/loop-runs"),
+  ).length;
+
+  const outcome = await app.window.embodySenseLoopBuilder.rehydrateSession({
+    approvals: [],
+    workspaceRoot: "C:/workspace",
+  });
+
+  assert.equal(outcome.refreshed, true);
+  assert.equal(app.elements.loopDescription.value, "Unsaved recovery draft");
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.equal(
+    server.calls.filter((call) => call.url === "/api/loops").length,
+    catalogRequests + 1,
+  );
+  assert.ok(
+    server.calls.filter((call) => call.url.startsWith("/api/loop-runs"))
+      .length > runRequests,
+  );
+});
+
+test("session rehydration waits for its authoritative refresh when another refresh is active", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusReads = 0;
+  let releaseActiveRefresh;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 2) {
+      return new Promise((resolve) => {
+        releaseActiveRefresh = () =>
+          resolve({
+            status: 200,
+            body: { workspaceRoot: "C:/workspace", initialized: true },
+          });
+      });
+    }
+    return {
+      status: 200,
+      body: { workspaceRoot: "C:/workspace", initialized: true },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  const activeRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  for (let attempt = 0; attempt < 20 && !releaseActiveRefresh; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+  let recoveryFinished = false;
+  const recovery = app.window.embodySenseLoopBuilder
+    .rehydrateSession({ approvals: [], workspaceRoot: "C:/workspace" })
+    .then((outcome) => {
+      recoveryFinished = true;
+      return outcome;
+    });
+  await Promise.resolve();
+  assert.equal(recoveryFinished, false);
+
+  releaseActiveRefresh();
+  const [recoveryOutcome] = await Promise.all([recovery, activeRefresh]);
+
+  assert.equal(recoveryOutcome.refreshed, true);
+  assert.equal(statusReads, 3);
+});
+
+test("session rehydration stops on a changed workspace and retains the draft for manual recovery", async () => {
+  const app = await loadLoopBuilder();
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Draft scoped to the original workspace";
+  await app.elements.loopDescription.input();
+
+  const outcome = await app.window.embodySenseLoopBuilder.rehydrateSession({
+    approvals: [],
+    workspaceRoot: "C:/different-workspace",
+  });
+
+  assert.equal(outcome.requiresManualAction, true);
+  assert.equal(
+    app.elements.loopDescription.value,
+    "Draft scoped to the original workspace",
+  );
+  assert.equal(app.elements.loopDescription.disabled, true);
+  assert.match(app.elements.validationBanner.textContent, /workspace changed/i);
 });
 
 test("a transient first activation failure retries without rebinding events", async () => {
@@ -858,10 +1064,8 @@ test("create and save send versioned server-owned definition shapes", async () =
   const save = server.calls.find(
     (call) => call.method === "PUT" && call.url === "/api/loops/loop-created",
   );
-  assert.equal(
-    save.options.headers["X-EmbodySense-Session"],
-    "loop-test-token",
-  );
+  assert.equal(save.options.credentials, "same-origin");
+  assert.equal(save.options.headers["X-EmbodySense-Session"], undefined);
   assert.equal(save.body.expectedDefinitionVersion, 1);
   assert.equal(typeof save.body.operationId, "string");
   assert.deepEqual(save.body.definition.triggerPolicy, {
@@ -1372,6 +1576,188 @@ test("Runs projects durable timeline and context evidence from the authenticated
   );
 });
 
+test("conversation publication disposition is table-driven, definite, and phase-aware", async (t) => {
+  const publicationId = "publication-operation";
+  const event = (sequence, kind, publishedToInvokingConversation = null) => ({
+    sequence,
+    eventId: `publication-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: 1,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: publicationId,
+  });
+  const cases = [
+    {
+      name: "no publication requested",
+      dispositions: [],
+      events: [],
+      expected: "No conversation publication requested",
+    },
+    {
+      name: "omitted without a bound conversation",
+      dispositions: [
+        publicationDisposition("OmittedNoInvokingConversation", true),
+      ],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Omitted No Invoking Conversation",
+    },
+    {
+      name: "intent is pending",
+      dispositions: [publicationDisposition("Pending", false)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+      ],
+      expected: "Pending",
+      phase: "intent committed",
+    },
+    {
+      name: "publication succeeds once",
+      dispositions: [publicationDisposition("Published", true)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+        event(5, "ConversationPublished", true),
+      ],
+      expected: "Published",
+      phase: "terminal outcome recorded",
+    },
+    {
+      name: "a prior commit is reconciled",
+      dispositions: [publicationDisposition("AlreadyPublished", true)],
+      events: [event(5, "ConversationPublished", true)],
+      expected: "Already Published",
+    },
+    {
+      name: "a definite failure remains distinct",
+      dispositions: [publicationDisposition("DefinitelyFailed", true)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Definitely Failed",
+    },
+    {
+      name: "an uncertain outcome requires review",
+      dispositions: [publicationDisposition("Uncertain", false)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Uncertain",
+    },
+    {
+      name: "duplicate terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("DuplicateTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", true),
+      ],
+      expected: "Integrity warning: Duplicate Terminal Outcomes",
+    },
+    {
+      name: "conflicting terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("ConflictingTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", false),
+      ],
+      expected: "Integrity warning: Conflicting Terminal Outcomes",
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const server = new FakeFetchServer(createCatalog());
+      const run = createRunSnapshot();
+      run.events = scenario.events;
+      run.conversationPublicationDispositions = scenario.dispositions;
+      server.runs = [runSummary(run)];
+      server.runDetails.set(run.id, run);
+      const app = await loadLoopBuilder({ server });
+      await selectCustomLoop(app);
+
+      await app.elements.runsTab.click();
+      await flushAsyncWork();
+
+      assert.match(
+        app.elements.inspectorContent.textContent,
+        new RegExp(scenario.expected),
+      );
+      assert.doesNotMatch(
+        app.elements.inspectorContent.textContent,
+        /not published/i,
+      );
+      if (scenario.phase)
+        assert.match(
+          app.elements.runTimeline.textContent,
+          new RegExp(scenario.phase),
+        );
+    });
+  }
+});
+
+test("multiple conversation publication operations keep canonical grouping and durable order", async () => {
+  const event = (
+    sequence,
+    operationId,
+    kind,
+    publishedToInvokingConversation = null,
+  ) => ({
+    sequence,
+    eventId: `${operationId}-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: operationId === "publication-first" ? 1 : 2,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: operationId,
+  });
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.events = [
+    event(2, "publication-first", "ExitDecisionCompleted", true),
+    event(3, "publication-first", "ConversationPublicationStarted"),
+    event(4, "publication-first", "ConversationPublished", true),
+    event(5, "publication-second", "ExitDecisionCompleted", true),
+    event(6, "publication-second", "ConversationPublicationStarted"),
+    event(7, "publication-second", "ConversationPublished", true),
+  ];
+  run.conversationPublicationDispositions = [
+    publicationDisposition("Published", true, false, "publication-first"),
+    publicationDisposition("Published", true, false, "publication-second"),
+  ];
+  server.runs = [runSummary(run)];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  const inspector = app.elements.inspectorContent.textContent;
+  assert.ok(
+    inspector.indexOf("publication-first") <
+      inspector.indexOf("publication-second"),
+  );
+  assert.equal(inspector.match(/publication-first/g)?.length, 1);
+  assert.equal(inspector.match(/publication-second/g)?.length, 1);
+  assert.equal(inspector.match(/Published · definite/g)?.length, 2);
+  assert.equal(
+    app.elements.runTimeline.textContent.match(/terminal outcome recorded/g)
+      ?.length,
+    2,
+  );
+});
+
 test("standalone integrity evidence reports governance as intentionally not evaluated", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();
@@ -1488,10 +1874,8 @@ test("run discovery progressively loads cursor pages without losing the selected
   const pageCall = server.calls.find((call) =>
     call.url.includes("cursor=cursor-one"),
   );
-  assert.equal(
-    pageCall.options.headers["X-EmbodySense-Session"],
-    "loop-test-token",
-  );
+  assert.equal(pageCall.options.credentials, "same-origin");
+  assert.equal(pageCall.options.headers["X-EmbodySense-Session"], undefined);
 });
 
 test("refreshing a selected continuation-page run recovers an externally deleted trace as a tombstone", async () => {
@@ -5730,6 +6114,88 @@ test("run monitoring stops while Loops is hidden and resumes when it returns", a
   );
 });
 
+test("an unauthorized run monitor suspends polling and delegates one shared recovery", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [
+    {
+      id: run.id,
+      loopId: run.loopId,
+      admissionOperationId: run.admissionOperationId,
+      definitionVersion: 2,
+      lifecycleVersion: run.lifecycleVersion,
+      status: run.status,
+      createdAtUtc: run.createdAtUtc,
+      updatedAtUtc: run.updatedAtUtc,
+      completedAtUtc: null,
+      iteration: 1,
+      nextStepIndex: 1,
+      failureCode: null,
+      isDeleted: false,
+    },
+  ];
+  server.runDetails.set(run.id, run);
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => ({
+    status: 401,
+    body: { detail: "The host restarted." },
+  }));
+  let recoveries = 0;
+  const sharedHub = { connected: true, on() {} };
+  const app = await loadLoopBuilder({
+    server,
+    embodySenseSession: {
+      getHub: async () => sharedHub,
+      recover() {
+        recoveries++;
+      },
+    },
+  });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const refresh = app.window.delayedHandlers.find(
+    (item) => item.delay === 1000 && !item.cancelled,
+  );
+  assert.ok(refresh);
+
+  refresh.cancelled = true;
+  await refresh.handler();
+
+  assert.equal(recoveries, 1);
+  assert.equal(
+    app.window.delayedHandlers.filter(
+      (item) => item.delay === 1000 && !item.cancelled,
+    ).length,
+    0,
+  );
+});
+
+test("recovery rehydration propagates a 401 without recursively starting recovery", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  let recoveries = 0;
+  app.window.embodySenseSession = {
+    recover() {
+      recoveries++;
+    },
+  };
+  server.on("GET", "/api/status", () => ({
+    status: 401,
+    body: { detail: "The host restarted during rehydration." },
+  }));
+
+  await assert.rejects(
+    app.window.embodySenseLoopBuilder.rehydrateSession({
+      approvals: [],
+      workspaceRoot: "C:/workspace",
+    }),
+    (error) => error.status === 401,
+  );
+
+  assert.equal(recoveries, 0);
+});
+
 test("rapidly leaving and returning during an in-flight run poll keeps one monitoring chain", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();
@@ -6998,6 +7464,7 @@ async function loadLoopBuilder(options = {}) {
     location: { href: "http://127.0.0.1:4378/loops.html" },
     localStorage,
     sessionStorage,
+    embodySenseSession: options.embodySenseSession,
     addEventListener() {},
     confirm(message) {
       this.confirmations.push(message);
@@ -7158,13 +7625,6 @@ function findAll(root, predicate) {
 }
 
 function createCatalog() {
-  const defaults = {
-    inference: createContextPolicy({ publishToInvokingConversation: false }),
-    exit: createContextPolicy({
-      includePreviousIterationResult: true,
-      retainForLoopReasoning: false,
-    }),
-  };
   return {
     roleId: "default",
     runtimeModel: { provider: "OpenAiCodex", model: "gpt-5-test" },
@@ -7173,26 +7633,104 @@ function createCatalog() {
       customAuthorityCeiling: "workspaceReadOnly",
     },
     systemDefault: {
-      ...createCustomDefinition({
-        id: "default-conversation",
-        displayName: "Default conversation",
-        definitionVersion: 1,
-      }),
+      schemaVersion: 1,
+      id: "default-conversation",
+      displayName: "Default conversation",
       description: "System-managed conversation loop.",
-      contextDefaults: clone(defaults),
-      inferenceSteps: [
-        {
-          id: "dispatch-inference",
-          name: "Respond in role",
-          instruction: "System-managed default conversation behavior.",
-          contextPolicy: {
-            mode: "custom",
-            customPolicy: createContextPolicy({
-              publishToInvokingConversation: true,
-            }),
-          },
-        },
+      roleId: "default",
+      trigger: "human-message",
+      memoryScope: "workspace-startup-context",
+      capabilityIds: [
+        "conversation.turn",
+        "conversation.history",
+        "agent.context",
+        "provider.inference",
+        "workspace.command",
+        "approval.request",
+        "audit.write",
       ],
+      reviewPolicy: "review-at-authority-boundaries",
+      failurePolicy: "record-failure-and-surface-to-user",
+      state: "enabled",
+      editMode: "system-locked",
+      graph: {
+        entryNodeId: "accept-user-message",
+        terminalNodeIds: ["complete-run"],
+        nodes: [
+          createSystemNode(
+            "accept-user-message",
+            "Accept user message",
+            "trigger",
+            ["conversation.turn"],
+            "Receives the current human message as the trigger for the governed default conversation turn.",
+          ),
+          createSystemNode(
+            "assemble-runtime-context",
+            "Assemble runtime context",
+            "context-assembly",
+            ["agent.context", "conversation.history"],
+            "Combines startup context, restored/session transcript context, and current turn input before provider dispatch.",
+          ),
+          createSystemNode(
+            "dispatch-provider-inference",
+            "Dispatch provider inference",
+            "model-inference",
+            ["provider.inference"],
+            "Sends the assembled turn request to the configured inference adapter.",
+          ),
+          createSystemNode(
+            "persist-transcript",
+            "Persist transcript",
+            "transcript-persistence",
+            ["conversation.turn", "conversation.history"],
+            "Persists accepted user and assistant messages into runtime state and conversation memory.",
+          ),
+          createSystemNode(
+            "complete-run",
+            "Complete loop run",
+            "run-finalization",
+            ["audit.write"],
+            "Records the terminal loop run status and returns the typed runtime turn result to the active surface.",
+          ),
+        ],
+        edges: [
+          createSystemEdge(
+            "accept-message-to-context",
+            "accept-user-message",
+            "assemble-runtime-context",
+            "always",
+            "Accepted user input flows into context assembly.",
+          ),
+          createSystemEdge(
+            "context-to-inference",
+            "assemble-runtime-context",
+            "dispatch-provider-inference",
+            "success",
+            "Context assembly must succeed before provider inference.",
+          ),
+          createSystemEdge(
+            "inference-to-transcript",
+            "dispatch-provider-inference",
+            "persist-transcript",
+            "success",
+            "A completed inference response is persisted into the transcript.",
+          ),
+          createSystemEdge(
+            "transcript-to-complete-run",
+            "persist-transcript",
+            "complete-run",
+            "success",
+            "Persisted transcript state completes the run.",
+          ),
+        ],
+      },
+      executionContract: {
+        runner: "DefaultConversationLoopRunner",
+        graphSemantics: "validated-runner-contract",
+        usesGenericGraphDispatcher: false,
+        detail:
+          "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor.",
+      },
     },
     customDefinitions: [createCustomDefinition()],
     limits: {
@@ -7220,6 +7758,29 @@ function createCatalog() {
       maxRunTraceUtf8Bytes: 16777216,
       maxRunExecutionMilliseconds: 1800000,
     },
+  };
+}
+
+function createSystemNode(id, displayName, kind, capabilityIds, description) {
+  return {
+    id,
+    displayName,
+    description,
+    kind,
+    editMode: "system-locked",
+    capabilityIds,
+    executionSemantics: "validated-runner-contract",
+  };
+}
+
+function createSystemEdge(id, fromNodeId, toNodeId, condition, description) {
+  return {
+    id,
+    fromNodeId,
+    toNodeId,
+    condition,
+    description,
+    executionSemantics: "validated-runner-contract",
   };
 }
 
@@ -7280,6 +7841,39 @@ function createContextPolicy(overrides = {}) {
       publishToInvokingConversation:
         overrides.publishToInvokingConversation ?? false,
     },
+  };
+}
+
+function publicationDisposition(
+  disposition,
+  isDefinite,
+  hasIntegrityWarning = false,
+  operationId = "publication-operation",
+) {
+  return {
+    operationId,
+    disposition,
+    detail:
+      "Canonical publication disposition supplied by the public runtime projection.",
+    isDefinite,
+    hasIntegrityWarning,
+    eventSequences: [],
+  };
+}
+
+function runSummary(run) {
+  return {
+    id: run.id,
+    loopId: run.loopId,
+    definitionVersion: run.admittedDefinition.definitionVersion,
+    status: run.status,
+    createdAtUtc: run.createdAtUtc,
+    updatedAtUtc: run.updatedAtUtc,
+    completedAtUtc: run.completedAtUtc,
+    iteration: run.checkpoint.iteration,
+    nextStepIndex: run.checkpoint.nextStepIndex,
+    failureCode: run.failureCode,
+    isDeleted: false,
   };
 }
 
@@ -7584,7 +8178,10 @@ class FakeFetchServer {
     const custom = this.handlers.get(`${method} ${url}`);
     if (custom) return responseFrom(await custom(call));
     if (method === "GET" && url === "/api/session")
-      return responseFrom({ status: 200, body: { token: "loop-test-token" } });
+      return responseFrom({
+        status: 200,
+        body: { generationId: "loop-process-generation" },
+      });
     if (method === "GET" && url === "/api/status")
       return responseFrom({
         status: 200,
