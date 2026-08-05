@@ -16,7 +16,7 @@ public enum CustomLoopReceiptCleanupStage
     IntentPersisted,
 
     /// <summary>
-    /// The single bounded intent-audit attempt is durably started before append-only audit mutation.
+    /// The bounded cleanup intent-audit append was durably started but cannot yet be treated as confirmed.
     /// </summary>
     IntentAuditStarted,
 
@@ -26,7 +26,7 @@ public enum CustomLoopReceiptCleanupStage
     IntentAuditRecorded,
 
     /// <summary>
-    /// The replacement compact proof ledger is durably written and verified.
+    /// The replacement compact proof ledger is durable; removal fields track its exact canonical candidate prefix.
     /// </summary>
     ProofLedgerWritten,
 

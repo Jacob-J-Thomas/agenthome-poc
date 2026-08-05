@@ -61,6 +61,16 @@ public static partial class AuditSchema
         public const string LoopInvocationReceiptRetentionOutcome = "loop.invocation_receipt.retention.outcome";
 
         /// <summary>
+        /// Identifies the lifecycle-control receipt retention intent audit action.
+        /// </summary>
+        public const string LoopControlReceiptRetentionIntent = "loop.control_receipt.retention.intent";
+
+        /// <summary>
+        /// Identifies the lifecycle-control receipt retention outcome audit action.
+        /// </summary>
+        public const string LoopControlReceiptRetentionOutcome = "loop.control_receipt.retention.outcome";
+
+        /// <summary>
         /// Identifies a governed definition authoring-receipt cleanup intent.
         /// </summary>
         public const string LoopDefinitionReceiptRetentionIntent = "loop.definition_receipt.retention.intent";

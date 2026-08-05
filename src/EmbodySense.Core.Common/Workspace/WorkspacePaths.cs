@@ -198,6 +198,12 @@ public sealed class WorkspacePaths
     public string CustomLoopDefinitionTombstoneCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "definition-tombstone");
 
     /// <summary>
+    /// Gets the completed lifecycle-control receipt cleanup history path.
+    /// </summary>
+    /// <value>The lifecycle-control cleanup history path.</value>
+    public string CustomLoopLifecycleControlReceiptCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "lifecycle-control-receipt");
+
+    /// <summary>
     /// Gets the loop runs path.
     /// </summary>
     /// <value>The loop runs path.</value>
@@ -220,6 +226,12 @@ public sealed class WorkspacePaths
     /// </summary>
     /// <value>The custom loop control operations path.</value>
     public string CustomLoopControlOperationsPath => Path.Combine(LoopRunsPath, "custom-control-operations");
+
+    /// <summary>
+    /// Gets the lifecycle-control receipt cleanup journal path.
+    /// </summary>
+    /// <value>The path that owns the one active lifecycle-control cleanup journal.</value>
+    public string CustomLoopControlReceiptCleanupPath => Path.Combine(CustomLoopReceiptRetentionPath, "lifecycle-control");
 
     /// <summary>
     /// Gets the custom loop invocation operations path.

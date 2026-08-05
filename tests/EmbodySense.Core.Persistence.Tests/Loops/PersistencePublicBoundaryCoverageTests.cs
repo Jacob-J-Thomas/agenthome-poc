@@ -143,10 +143,13 @@ public sealed class PersistencePublicBoundaryCoverageTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopControlOperationStore(paths);
         Directory.CreateDirectory(paths.CustomLoopControlOperationsPath);
-        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopControlOperationsPath, "control-corrupt.json"), "{ malformed");
+        var corruptPath = Path.Combine(paths.CustomLoopControlOperationsPath, "control-corrupt.json");
+        await File.WriteAllTextAsync(corruptPath, "{ malformed");
         await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("control-corrupt"));
 
         var pending = PendingControl("control-embedded", "web");
+        await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(pending));
+        File.Delete(corruptPath);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
         var source = Path.Combine(paths.CustomLoopControlOperationsPath, pending.OperationId + ".json");
         var mismatch = Path.Combine(paths.CustomLoopControlOperationsPath, "control-other.json");

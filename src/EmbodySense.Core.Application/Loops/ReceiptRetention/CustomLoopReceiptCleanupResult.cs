@@ -23,6 +23,12 @@ public sealed record CustomLoopReceiptCleanupResult(
     string Detail)
 {
     /// <summary>
+    /// Gets a value indicating whether this result replays a previously terminal cleanup identity.
+    /// </summary>
+    /// <value><see langword="true"/> only when no new cleanup attempt was started.</value>
+    public bool IsReplay { get; init; }
+
+    /// <summary>
     /// Gets a value indicating whether cleanup replaced raw evidence or replayed that committed replacement.
     /// </summary>
     /// <value><see langword="true"/> for a committed or replayed cleanup result.</value>
