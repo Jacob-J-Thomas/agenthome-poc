@@ -464,6 +464,101 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     [Fact]
+    public async Task Run_store_accounts_for_completed_and_standalone_tool_evidence_lifecycles()
+    {
+        using var completedWorkspace = new TestWorkspace();
+        var completedStore = new CustomLoopRunStore(new WorkspacePaths(completedWorkspace.RootPath));
+        var completed = CreateToolRun();
+        var completedInitial = CustomLoopAdmissionRequestHash.Apply(completed with
+        {
+            LifecycleVersion = 1,
+            Events = [completed.Events[0]],
+            Checkpoint = CustomLoopRunCheckpoint.Start()
+        });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await completedStore.CreateAsync(completedInitial)).Status);
+        Assert.True(await completedStore.HasSufficientTraceCapacityForDispatchAsync(completed, completedInitial.LifecycleVersion));
+        using var missingWorkspace = new TestWorkspace();
+        Assert.True(await new CustomLoopRunStore(new WorkspacePaths(missingWorkspace.RootPath)).HasSufficientTraceCapacityForDispatchAsync(completed, completedInitial.LifecycleVersion));
+        var completedCurrent = completedInitial;
+        for (var eventCount = 2; eventCount <= completed.Events.Length; eventCount++)
+        {
+            var next = completed with
+            {
+                LifecycleVersion = completedCurrent.LifecycleVersion + 1,
+                Events = completed.Events.Take(eventCount).ToArray(),
+                Checkpoint = eventCount < 3 ? CustomLoopRunCheckpoint.Start() : completed.Checkpoint
+            };
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await completedStore.UpdateAsync(next, completedCurrent.LifecycleVersion)).Status);
+            completedCurrent = next;
+        }
+        var completedQuota = await completedStore.GetTraceQuotaAsync();
+        var completedReloaded = Assert.IsType<CustomLoopRunRecord>(await completedStore.GetAsync(completed.Id));
+
+        Assert.Equal(completed.Events.Length, completedReloaded.Events.Length);
+        Assert.True(await completedStore.HasSufficientTraceCapacityForDispatchAsync(completed, completed.LifecycleVersion));
+        Assert.True(await completedStore.HasSufficientTraceCapacityForDispatchAsync(completed, completed.LifecycleVersion - 1));
+        Assert.Equal(1, completedQuota.ActiveReservationCount);
+        Assert.True(completedQuota.AccountedTraceUtf8Bytes > 0);
+
+        using var integrityWorkspace = new TestWorkspace();
+        var integrityStore = new CustomLoopRunStore(new WorkspacePaths(integrityWorkspace.RootPath));
+        var integrity = CreateStandaloneRepeatedIntegrityRun();
+        var integrityInitial = CustomLoopAdmissionRequestHash.Apply(integrity with
+        {
+            LifecycleVersion = 1,
+            Events = [integrity.Events[0]],
+            Checkpoint = CustomLoopRunCheckpoint.Start()
+        });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await integrityStore.CreateAsync(integrityInitial)).Status);
+        var integrityCurrent = integrityInitial;
+        for (var eventCount = 2; eventCount <= integrity.Events.Length; eventCount++)
+        {
+            var next = integrity with
+            {
+                LifecycleVersion = integrityCurrent.LifecycleVersion + 1,
+                Events = integrity.Events.Take(eventCount).ToArray(),
+                Checkpoint = eventCount < 3 ? CustomLoopRunCheckpoint.Start() : integrity.Checkpoint
+            };
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await integrityStore.UpdateAsync(next, integrityCurrent.LifecycleVersion)).Status);
+            integrityCurrent = next;
+        }
+        var integrityQuota = await integrityStore.GetTraceQuotaAsync();
+
+        Assert.Equal(integrity.Events.Length, (await integrityStore.GetAsync(integrity.Id))!.Events.Length);
+        Assert.Equal(1, integrityQuota.ActiveReservationCount);
+        Assert.True(integrityQuota.AccountedTraceUtf8Bytes > 0);
+
+        using var legacyWorkspace = new TestWorkspace();
+        var legacyStore = new CustomLoopRunStore(new WorkspacePaths(legacyWorkspace.RootPath));
+        var legacy = CreateToolRun(includeIntegrity: true) with { Id = "run-tool-legacy", AdmissionOperationId = "invoke-tool-legacy" };
+        legacy = CustomLoopAdmissionRequestHash.Apply(legacy with { AdmissionRequestHash = string.Empty });
+        var legacyInitial = CustomLoopAdmissionRequestHash.Apply(legacy with
+        {
+            LifecycleVersion = 1,
+            Events = [legacy.Events[0]],
+            Checkpoint = CustomLoopRunCheckpoint.Start()
+        });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await legacyStore.CreateAsync(legacyInitial)).Status);
+        var legacyCurrent = legacyInitial;
+        for (var eventCount = 2; eventCount <= legacy.Events.Length; eventCount++)
+        {
+            var next = legacy with
+            {
+                LifecycleVersion = legacyCurrent.LifecycleVersion + 1,
+                Events = legacy.Events.Take(eventCount).ToArray(),
+                Checkpoint = eventCount < 3 ? CustomLoopRunCheckpoint.Start() : legacy.Checkpoint
+            };
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await legacyStore.UpdateAsync(next, legacyCurrent.LifecycleVersion)).Status);
+            legacyCurrent = next;
+        }
+
+        Assert.True((await legacyStore.GetTraceQuotaAsync()).AccountedTraceUtf8Bytes > 0);
+    }
+
+    [Fact]
     public void Tool_evidence_artifact_round_trips_refreshed_pre_actuation_authority()
     {
         var run = CreateToolRun();

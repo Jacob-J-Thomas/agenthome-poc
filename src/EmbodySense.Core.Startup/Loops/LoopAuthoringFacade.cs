@@ -84,6 +84,7 @@ public sealed class LoopAuthoringFacade
             systemDefinition.RoleId,
             MapSystemDefinition(systemDefinition),
             definitions.Select(Map).ToArray(),
+            CreateDraftTemplate(systemDefinition.RoleId),
             CreateLimits(),
             CreateToolCatalog(systemDefinition));
     }
@@ -102,7 +103,7 @@ public sealed class LoopAuthoringFacade
     }
 
     /// <summary>
-    /// Creates a new server-owned custom-loop draft for the current role.
+    /// Creates a new server-owned custom-loop seed for the current role.
     /// </summary>
     /// <param name="operationId">The idempotency identity to reuse when the caller cannot determine whether a prior response committed.</param>
     /// <param name="cancellationToken">The token used to cancel the authoring operation.</param>
@@ -111,6 +112,23 @@ public sealed class LoopAuthoringFacade
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
         return Map(await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, cancellationToken));
+    }
+
+    /// <summary>
+    /// Validates and atomically creates the first durable version of a client-authored loop draft.
+    /// </summary>
+    /// <param name="operationId">The idempotency identity reused until an uncertain first-save outcome is resolved.</param>
+    /// <param name="input">The complete editable definition captured at the explicit first-save boundary.</param>
+    /// <param name="cancellationToken">The token used to cancel validation, persistence, and auditing.</param>
+    /// <returns>A task whose result reports commit, replay, validation, authority, quota, conflict, and audit-integrity status.</returns>
+    public async Task<LoopAuthoringResponse> CreateAsync(string operationId, LoopDefinitionInput input, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
+        var result = await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
+        return Map(result);
     }
 
     /// <summary>
@@ -127,15 +145,8 @@ public sealed class LoopAuthoringFacade
         ArgumentNullException.ThrowIfNull(input);
 
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
-        var applicationInput = new CustomLoopDefinitionInput(
-            input.DisplayName,
-            input.Description,
-            Map(input.TriggerPolicy)!,
-            input.InferenceSteps?.Select(step => step is null ? null! : new CustomLoopInferenceStepInput(step.Id, step.Name, step.Instruction, Map(step.ContextPolicy)!)).ToArray()!,
-            input.ToolAssignments?.Select(Map).ToArray()!,
-            Map(input.ExitPolicy)!);
         var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
-        var result = await _service.UpdateAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, applicationInput, currentRoleCeiling, cancellationToken);
+        var result = await _service.UpdateAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
         return Map(result);
     }
 
@@ -200,6 +211,31 @@ public sealed class LoopAuthoringFacade
             CustomLoopLimits.MaxLifecycleControlDetailCharacters,
             CustomLoopLimits.MaxRunTraceUtf8Bytes,
             CustomLoopLimits.MaxRunExecutionMilliseconds);
+    }
+
+    private static LoopDefinitionDraftTemplate CreateDraftTemplate(string roleId)
+    {
+        var seed = CustomLoopDefinition.CreateSeed("draft-template", roleId, "draft-template-step", "draft-template-operation", DateTimeOffset.UnixEpoch);
+        var definition = new LoopDefinitionInput(
+            seed.DisplayName,
+            seed.Description,
+            Map(seed.TriggerPolicy),
+            seed.InferenceSteps.Select(step => new LoopInferenceStep(null, step.Name, step.Instruction, Map(step.ContextPolicy))).ToArray(),
+            seed.ToolAssignments.Select(Map).ToArray(),
+            Map(seed.ExitPolicy));
+        var contextDefaults = new LoopContextDefaults(Map(seed.ContextDefaults.Inference), Map(seed.ContextDefaults.Exit));
+        return new LoopDefinitionDraftTemplate(seed.SchemaVersion, seed.RoleId, definition, contextDefaults);
+    }
+
+    private static CustomLoopDefinitionInput MapDefinitionInput(LoopDefinitionInput input)
+    {
+        return new CustomLoopDefinitionInput(
+            input.DisplayName,
+            input.Description,
+            Map(input.TriggerPolicy)!,
+            input.InferenceSteps?.Select(step => step is null ? null! : new CustomLoopInferenceStepInput(step.Id, step.Name, step.Instruction, Map(step.ContextPolicy)!)).ToArray()!,
+            input.ToolAssignments?.Select(Map).ToArray()!,
+            Map(input.ExitPolicy)!);
     }
 
     private static LoopToolCatalog CreateToolCatalog(LoopDefinition systemDefinition)

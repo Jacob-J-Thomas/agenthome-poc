@@ -44,7 +44,17 @@ let selectedRunRefreshTimer = null;
 let selectedRunRefreshInFlight = false;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
-let pendingCreateOperationId = null;
+let newLoopDraftOperationId = null;
+let newLoopDraftCommitState = null;
+let newLoopDraftFailureDetail = null;
+let pendingCreateRequest = null;
+const newLoopDraftStorageKeyPrefix = "embodysense.unsaved-loop-draft.v1";
+const supportedCustomToolAssignments = Object.freeze([
+  "list",
+  "read",
+  "search",
+]);
+let newLoopDraftStorageKey = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
@@ -297,6 +307,7 @@ async function refreshWorkspaceCore(
       reconciledPendingLifecycleStorageKey = null;
       pendingLifecycleRequests.clear();
     }
+    configureNewLoopDraftStorage(status.workspaceRoot);
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized
@@ -558,8 +569,24 @@ async function loadCatalog(
   const shouldPreserveDraft = preserveUnsavedDraft && dirty && draft;
   catalog = nextCatalog;
   elements.roleId.textContent = catalog.roleId;
+  if (isNewLoopDraft()) {
+    const committed = reconcileNewLoopDraftFromCatalog();
+    if (committed) {
+      applyDefinition(committed);
+      return;
+    }
+
+    renderList();
+    return;
+  }
   if (shouldPreserveDraft) {
     renderList();
+    return;
+  }
+  if (restoreNewLoopDraft()) {
+    const committed = reconcileNewLoopDraftFromCatalog();
+    if (committed) applyDefinition(committed);
+    else renderAll();
     return;
   }
   const definitions = allDefinitions();
@@ -591,6 +618,329 @@ function applyDefinition(definition) {
   renderAll();
 }
 
+function configureNewLoopDraftStorage(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  const nextKey = `${newLoopDraftStorageKeyPrefix}.${scope}`;
+  if (newLoopDraftStorageKey && newLoopDraftStorageKey !== nextKey) {
+    currentDefinition = null;
+    draft = null;
+    resetNewLoopDraftState(false);
+  }
+  newLoopDraftStorageKey = nextKey;
+}
+
+function startNewLoopDraft() {
+  const template = catalog?.draftTemplate;
+  if (!template)
+    throw new Error("The server did not provide a draft template.");
+  runEvidenceRequestGeneration++;
+  historicalLoopId = null;
+  currentView = "builder";
+  currentDefinition = null;
+  draft = {
+    schemaVersion: template.schemaVersion,
+    id: null,
+    definitionVersion: null,
+    contentHash: null,
+    createdAtUtc: null,
+    updatedAtUtc: null,
+    displayName: template.definition.displayName,
+    description: template.definition.description,
+    roleId: template.roleId,
+    triggerPolicy: clone(template.definition.triggerPolicy),
+    contextDefaults: clone(template.contextDefaults),
+    inferenceSteps: template.definition.inferenceSteps.map((step, index) => ({
+      ...clone(step),
+      id: `local-draft-${index + 1}-${newOperationId()}`,
+    })),
+    toolAssignments: [...template.definition.toolAssignments],
+    exitPolicy: clone(template.definition.exitPolicy),
+    lastMutationOperationId: null,
+  };
+  newLoopDraftOperationId = newOperationId();
+  newLoopDraftCommitState = "editing";
+  newLoopDraftFailureDetail = null;
+  pendingCreateRequest = null;
+  selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
+  dirty = true;
+  elements.name.value = draft.displayName;
+  elements.description.value = draft.description;
+  tryPersistNewLoopDraft();
+  renderAll();
+}
+
+function isNewLoopDraft() {
+  return (
+    currentDefinition === null &&
+    !historicalLoopId &&
+    draft?.id === null &&
+    typeof newLoopDraftOperationId === "string"
+  );
+}
+
+function isUncertainNewLoopDraft() {
+  return isNewLoopDraft() && newLoopDraftCommitState === "uncertain";
+}
+
+function canMutateDraft() {
+  return (
+    Boolean(draft) &&
+    !isSystemLoop() &&
+    !mutationInFlight &&
+    !isUncertainNewLoopDraft()
+  );
+}
+
+function persistNewLoopDraft() {
+  if (!isNewLoopDraft()) return;
+  if (!newLoopDraftStorageKey || !window.sessionStorage)
+    throw new Error("Tab-scoped draft storage is unavailable.");
+  window.sessionStorage.setItem(
+    newLoopDraftStorageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      roleId: draft.roleId,
+      operationId: newLoopDraftOperationId,
+      commitState:
+        newLoopDraftCommitState === "saving"
+          ? "uncertain"
+          : newLoopDraftCommitState,
+      failureDetail: newLoopDraftFailureDetail,
+      pendingCreateRequest,
+      draft,
+    }),
+  );
+}
+
+function restoreNewLoopDraft() {
+  if (!newLoopDraftStorageKey || !window.sessionStorage) return false;
+  const stored = window.sessionStorage.getItem(newLoopDraftStorageKey);
+  if (!stored) return false;
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    return false;
+  }
+  if (!isStoredNewLoopDraft(payload)) {
+    window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    return false;
+  }
+
+  currentDefinition = null;
+  historicalLoopId = null;
+  draft = clone(payload.draft);
+  newLoopDraftOperationId = payload.operationId;
+  newLoopDraftCommitState = payload.commitState;
+  newLoopDraftFailureDetail = payload.failureDetail;
+  pendingCreateRequest = payload.pendingCreateRequest
+    ? clone(payload.pendingCreateRequest)
+    : null;
+  selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
+  dirty = true;
+  elements.name.value = draft.displayName;
+  elements.description.value = draft.description;
+  return true;
+}
+
+function isStoredNewLoopDraft(payload) {
+  return (
+    payload?.schemaVersion === 1 &&
+    payload.roleId === catalog?.roleId &&
+    typeof payload.operationId === "string" &&
+    /^[a-z0-9-]{8,128}$/.test(payload.operationId) &&
+    ["editing", "failed", "conflict", "uncertain"].includes(
+      payload.commitState,
+    ) &&
+    (payload.failureDetail === null ||
+      (typeof payload.failureDetail === "string" &&
+        payload.failureDetail.length <= 4000)) &&
+    isStoredDraftShape(payload.draft, payload.roleId) &&
+    (payload.commitState !== "uncertain" ||
+      payload.pendingCreateRequest !== null) &&
+    isStoredPendingCreateRequest(
+      payload.pendingCreateRequest,
+      payload.operationId,
+    )
+  );
+}
+
+function isStoredDraftShape(candidate, roleId) {
+  return (
+    candidate?.schemaVersion === catalog?.draftTemplate?.schemaVersion &&
+    candidate.id === null &&
+    candidate.definitionVersion === null &&
+    candidate.roleId === roleId &&
+    typeof candidate.displayName === "string" &&
+    typeof candidate.description === "string" &&
+    isStoredTriggerPolicy(candidate.triggerPolicy) &&
+    isStoredContextDefaults(candidate.contextDefaults) &&
+    Array.isArray(candidate.inferenceSteps) &&
+    candidate.inferenceSteps.length >= 1 &&
+    candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
+    candidate.inferenceSteps.every(isStoredInferenceStep) &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
+    isStoredExitPolicy(candidate.exitPolicy)
+  );
+}
+
+function isStoredPendingCreateRequest(candidate, operationId) {
+  if (candidate === null) return true;
+  return (
+    candidate &&
+    typeof candidate.key === "string" &&
+    candidate.body?.operationId === operationId &&
+    candidate.key === JSON.stringify(candidate.body.definition) &&
+    isStoredDefinitionInput(candidate.body.definition)
+  );
+}
+
+function isStoredDefinitionInput(candidate) {
+  return (
+    candidate &&
+    typeof candidate.displayName === "string" &&
+    typeof candidate.description === "string" &&
+    isStoredTriggerPolicy(candidate.triggerPolicy) &&
+    Array.isArray(candidate.inferenceSteps) &&
+    candidate.inferenceSteps.length >= 1 &&
+    candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
+    candidate.inferenceSteps.every(isStoredInferenceStep) &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
+    isStoredExitPolicy(candidate.exitPolicy)
+  );
+}
+
+function isStoredTriggerPolicy(candidate) {
+  return (
+    candidate &&
+    ["invocation", "preset", "none"].includes(candidate.promptSource) &&
+    typeof candidate.presetPrompt === "string" &&
+    typeof candidate.includeInvokingConversation === "boolean"
+  );
+}
+
+function isStoredContextDefaults(candidate) {
+  return (
+    candidate &&
+    isStoredContextPolicy(candidate.inference) &&
+    isStoredContextPolicy(candidate.exit)
+  );
+}
+
+function isStoredContextPolicy(candidate) {
+  return (
+    candidate &&
+    candidate.contextIn &&
+    [
+      "includeRoleContext",
+      "includeTriggerPrompt",
+      "includeInvokingConversation",
+      "includeEarlierRetainedOutputs",
+      "includePreviousIterationResult",
+    ].every((key) => typeof candidate.contextIn[key] === "boolean") &&
+    candidate.contextOut &&
+    ["retainForLoopReasoning", "publishToInvokingConversation"].every(
+      (key) => typeof candidate.contextOut[key] === "boolean",
+    )
+  );
+}
+
+function isStoredNodeContextPolicy(candidate) {
+  return (
+    candidate &&
+    ["inherit", "custom"].includes(candidate.mode) &&
+    (candidate.mode === "inherit"
+      ? candidate.customPolicy === null
+      : isStoredContextPolicy(candidate.customPolicy))
+  );
+}
+
+function isStoredInferenceStep(candidate) {
+  return (
+    candidate &&
+    (candidate.id === null || typeof candidate.id === "string") &&
+    typeof candidate.name === "string" &&
+    typeof candidate.instruction === "string" &&
+    isStoredNodeContextPolicy(candidate.contextPolicy)
+  );
+}
+
+function isStoredExitPolicy(candidate) {
+  return (
+    candidate &&
+    Number.isInteger(candidate.maxAdditionalIterations) &&
+    typeof candidate.decisionInstruction === "string" &&
+    isStoredNodeContextPolicy(candidate.contextPolicy)
+  );
+}
+
+function isStoredToolAssignments(candidate) {
+  return (
+    Array.isArray(candidate) &&
+    candidate.length <= supportedCustomToolAssignments.length &&
+    candidate.every((value) =>
+      supportedCustomToolAssignments.includes(value),
+    ) &&
+    new Set(candidate).size === candidate.length
+  );
+}
+
+function reconcileNewLoopDraftFromCatalog() {
+  if (!isNewLoopDraft() || !pendingCreateRequest) return null;
+  const committed = catalog.customDefinitions.find(
+    (definition) =>
+      definition.lastMutationOperationId ===
+      pendingCreateRequest.body.operationId,
+  );
+  if (!committed) return null;
+  resetNewLoopDraftState(true);
+  showToast("The first save was already committed and has been restored.");
+  return committed;
+}
+
+function resetNewLoopDraftState(removeStored) {
+  if (removeStored && newLoopDraftStorageKey && window.sessionStorage) {
+    try {
+      window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    } catch {
+      // Clearing in-memory ownership remains safe; tab-scoped storage is discarded when the tab closes.
+    }
+  }
+  newLoopDraftOperationId = null;
+  newLoopDraftCommitState = null;
+  newLoopDraftFailureDetail = null;
+  pendingCreateRequest = null;
+}
+
+function discardNewLoopDraft() {
+  if (!isNewLoopDraft() || newLoopDraftCommitState === "uncertain") return;
+  resetNewLoopDraftState(true);
+  applyDefinition(
+    catalog.systemDefault ?? catalog.customDefinitions[0] ?? null,
+  );
+  showToast("Unsaved draft discarded. No durable loop was deleted.");
+}
+
+function tryPersistNewLoopDraft() {
+  try {
+    persistNewLoopDraft();
+    return true;
+  } catch (error) {
+    const outcomeMayBeUncertain = newLoopDraftCommitState === "uncertain";
+    newLoopDraftCommitState = outcomeMayBeUncertain ? "uncertain" : "failed";
+    const storageFailure = `This tab could not preserve the draft for reload: ${error.message}`;
+    newLoopDraftFailureDetail = newLoopDraftFailureDetail
+      ? `${newLoopDraftFailureDetail} ${storageFailure}`
+      : `The draft remains in memory, but ${storageFailure}`;
+    return false;
+  }
+}
+
 function renderAll() {
   renderList();
   renderTabs();
@@ -609,7 +959,7 @@ function renderAll() {
 function renderTabs() {
   const builderActive = currentView === "builder" && !historicalLoopId;
   elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
-  elements.runsTab.disabled = mutationInFlight;
+  elements.runsTab.disabled = mutationInFlight || isNewLoopDraft();
   elements.builderTab.classList.toggle("active", builderActive);
   elements.runsTab.classList.toggle("active", !builderActive);
   elements.builderTab.setAttribute("aria-selected", String(builderActive));
@@ -639,6 +989,7 @@ async function switchView(view) {
   if (mutationInFlight) return;
   if (view !== "builder" && view !== "runs") return;
   if (view === "builder" && historicalLoopId) return;
+  if (view === "runs" && isNewLoopDraft()) return;
   currentView = view;
   if (view === "runs") {
     renderAll();
@@ -1781,6 +2132,40 @@ function renderList() {
     catalog.systemDefault,
   ].filter(matchesSearch);
   let visibleGroup = null;
+  if (
+    isNewLoopDraft() &&
+    (!loopSearchQuery ||
+      [draft.displayName, draft.description, "unsaved draft"].some((value) =>
+        String(value ?? "")
+          .toLocaleLowerCase()
+          .includes(loopSearchQuery),
+      ))
+  ) {
+    elements.list.append(node("div", "loop-list-group", "Draft"));
+    visibleGroup = "Draft";
+    const button = node("button", "loop-list-item selected");
+    button.type = "button";
+    button.disabled = mutationInFlight;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "true");
+    button.tabIndex = 0;
+    button.dataset.loopOptionKey = "draft:new-loop";
+    button.append(node("span", "loop-icon custom", "D"));
+    const copy = node("span", "loop-list-copy");
+    copy.append(node("span", "loop-list-name", draft.displayName));
+    const meta = node("span", "loop-list-meta");
+    meta.append(
+      node("span", "version-chip", "Unsaved draft"),
+      node("span", "", "Not durable"),
+    );
+    copy.append(meta);
+    button.append(copy);
+    button.addEventListener("keydown", (event) =>
+      moveLoopOptionFocus(event, button),
+    );
+    elements.list.append(button);
+    listOptions.push(button);
+  }
   for (const definition of visibleDefinitions) {
     const projectedDefinition =
       draft?.id === definition.id ? draft : definition;
@@ -1906,7 +2291,14 @@ function renderList() {
 async function selectDefinition(definition) {
   if (mutationInFlight) return;
   if (definition.id === currentDefinition?.id && !historicalLoopId) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before leaving this draft.",
+    );
+    return;
+  }
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
   runSelectionGeneration++;
   applyDefinition(definition);
   if (currentView === "runs") await loadRuns({ silent: false });
@@ -1914,7 +2306,14 @@ async function selectDefinition(definition) {
 
 async function selectHistoricalLoop(loopId) {
   if (mutationInFlight) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before leaving this draft.",
+    );
+    return;
+  }
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
   runSelectionGeneration++;
   runEvidenceRequestGeneration++;
   historicalLoopId = loopId;
@@ -2413,19 +2812,31 @@ function renderLoopInspector() {
       "Assignments allow inference nodes to request governed capabilities. Permission, approval, and audit policy still decide whether each request may execute. Exit decisions are always tool-less.",
     ),
   );
-  for (const assignment of catalog.tools?.customAssignable ?? []) {
+  const assignableTools = catalog.tools?.customAssignable ?? [];
+  const staleAssignments = [
+    ...new Set(
+      draft.toolAssignments.filter(
+        (assignment) => !assignableTools.includes(assignment),
+      ),
+    ),
+  ];
+  for (const assignment of [...assignableTools, ...staleAssignments]) {
+    const isStaleAssignment = staleAssignments.includes(assignment);
     authority.append(
       checkboxRow(
         capitalize(assignment),
-        `Allow inference nodes to request the governed ${assignment} command.`,
+        isStaleAssignment
+          ? `This assignment is outside the current role authority. Uncheck it before saving the draft.`
+          : `Allow inference nodes to request the governed ${assignment} command.`,
         draft.toolAssignments.includes(assignment),
         (checked) => {
+          if (!canMutateDraft()) return;
           draft.toolAssignments = checked
             ? [...draft.toolAssignments, assignment]
             : draft.toolAssignments.filter((value) => value !== assignment);
           markDirty();
         },
-        isSystemLoop(),
+        !canMutateDraft(),
       ),
     );
   }
@@ -2461,8 +2872,9 @@ function renderTriggerInspector() {
     option.selected = trigger.promptSource === value;
     source.append(option);
   }
-  source.disabled = isSystemLoop();
+  source.disabled = !canMutateDraft();
   source.addEventListener("change", (event) => {
+    if (!canMutateDraft()) return;
     trigger.promptSource = event.target.value;
     if (trigger.promptSource !== "preset") trigger.presetPrompt = "";
     markDirty();
@@ -2480,8 +2892,9 @@ function renderTriggerInspector() {
     const preset = document.createElement("textarea");
     preset.maxLength = catalog.limits.maxTriggerPromptCharacters;
     preset.value = trigger.presetPrompt;
-    preset.disabled = isSystemLoop();
+    preset.disabled = !canMutateDraft();
     preset.addEventListener("input", (event) => {
+      if (!canMutateDraft()) return;
       trigger.presetPrompt = event.target.value;
       markDirty();
     });
@@ -2499,11 +2912,12 @@ function renderTriggerInspector() {
       "Admit a bounded snapshot of the logical user session when one exists. Provider-thread history is never used.",
       trigger.includeInvokingConversation,
       (checked) => {
+        if (!canMutateDraft()) return;
         trigger.includeInvokingConversation = checked;
         markDirty();
         renderCanvas();
       },
-      isSystemLoop(),
+      !canMutateDraft(),
     ),
   );
   purpose.append(
@@ -2530,8 +2944,9 @@ function renderInferenceInspector(step) {
   const name = document.createElement("input");
   name.maxLength = catalog.limits.maxNameCharacters;
   name.value = step.name;
-  name.disabled = isSystemLoop();
+  name.disabled = !canMutateDraft();
   name.addEventListener("input", (event) => {
+    if (!canMutateDraft()) return;
     step.name = event.target.value;
     markDirty();
     renderCanvas();
@@ -2539,8 +2954,9 @@ function renderInferenceInspector(step) {
   const prompt = document.createElement("textarea");
   prompt.maxLength = catalog.limits.maxInstructionCharacters;
   prompt.value = step.instruction;
-  prompt.disabled = isSystemLoop();
+  prompt.disabled = !canMutateDraft();
   prompt.addEventListener("input", (event) => {
+    if (!canMutateDraft()) return;
     step.instruction = event.target.value;
     markDirty();
     renderCanvas();
@@ -2558,17 +2974,17 @@ function renderInferenceInspector(step) {
     actionButton(
       "↑ Move earlier",
       () => moveStep(index, -1),
-      index === 0 || isSystemLoop(),
+      index === 0 || !canMutateDraft(),
     ),
     actionButton(
       "↓ Move later",
       () => moveStep(index, 1),
-      index === draft.inferenceSteps.length - 1 || isSystemLoop(),
+      index === draft.inferenceSteps.length - 1 || !canMutateDraft(),
     ),
     actionButton(
       "Remove",
       () => removeStep(index),
-      draft.inferenceSteps.length === 1 || isSystemLoop(),
+      draft.inferenceSteps.length === 1 || !canMutateDraft(),
       "danger-button",
     ),
   );
@@ -2625,20 +3041,22 @@ function renderExitInspector() {
       "Exit may ask to return to Step 1. The ceiling never causes a repeat by itself.",
       exit.maxAdditionalIterations > 0,
       (checked) => {
+        if (!canMutateDraft()) return;
         exit.maxAdditionalIterations = checked ? 1 : 0;
         markDirty();
         renderInspector();
         renderCanvas();
       },
-      isSystemLoop(),
+      !canMutateDraft(),
     ),
   );
   if (exit.maxAdditionalIterations > 0) {
     const decision = document.createElement("textarea");
     decision.maxLength = catalog.limits.maxInstructionCharacters;
     decision.value = exit.decisionInstruction;
-    decision.disabled = isSystemLoop();
+    decision.disabled = !canMutateDraft();
     decision.addEventListener("input", (event) => {
+      if (!canMutateDraft()) return;
       exit.decisionInstruction = event.target.value;
       markDirty();
     });
@@ -2647,8 +3065,9 @@ function renderExitInspector() {
     ceiling.min = "1";
     ceiling.max = String(catalog.limits.maxAdditionalIterations);
     ceiling.value = String(exit.maxAdditionalIterations);
-    ceiling.disabled = isSystemLoop();
+    ceiling.disabled = !canMutateDraft();
     ceiling.addEventListener("change", (event) => {
+      if (!canMutateDraft()) return;
       const value = Math.max(
         1,
         Math.min(
@@ -2697,8 +3116,9 @@ function contextEditor(owner, kind) {
     option.selected = owner.contextPolicy.mode === value;
     select.append(option);
   }
-  select.disabled = isSystemLoop();
+  select.disabled = !canMutateDraft();
   select.addEventListener("change", (event) => {
+    if (!canMutateDraft()) return;
     owner.contextPolicy =
       event.target.value === "custom"
         ? { mode: "custom", customPolicy: clone(draft.contextDefaults[kind]) }
@@ -2712,7 +3132,7 @@ function contextEditor(owner, kind) {
     owner.contextPolicy.mode === "custom"
       ? owner.contextPolicy.customPolicy
       : draft.contextDefaults[kind];
-  const disabled = isSystemLoop() || owner.contextPolicy.mode !== "custom";
+  const disabled = !canMutateDraft() || owner.contextPolicy.mode !== "custom";
   container.append(node("h3", "section-heading", "Context in"));
   const inputOptions = [
     [
@@ -2749,6 +3169,7 @@ function contextEditor(owner, kind) {
         hint,
         policy.contextIn[key],
         (checked) => {
+          if (!canMutateDraft()) return;
           policy.contextIn[key] = checked;
           markDirty();
         },
@@ -2763,6 +3184,7 @@ function contextEditor(owner, kind) {
       "Makes this canonical output selectable at later model boundaries.",
       policy.contextOut.retainForLoopReasoning,
       (checked) => {
+        if (!canMutateDraft()) return;
         policy.contextOut.retainForLoopReasoning = checked;
         markDirty();
       },
@@ -2775,6 +3197,7 @@ function contextEditor(owner, kind) {
       "Appends idempotently only to the server-bound invoking conversation when one exists.",
       policy.contextOut.publishToInvokingConversation,
       (checked) => {
+        if (!canMutateDraft()) return;
         policy.contextOut.publishToInvokingConversation = checked;
         markDirty();
       },
@@ -2808,23 +3231,41 @@ function evidenceNote() {
 }
 
 function renderToolbar() {
-  const editable = Boolean(draft) && !isSystemLoop() && !mutationInFlight;
+  const newDraft = isNewLoopDraft();
+  const uncertainFirstSave =
+    newDraft && newLoopDraftCommitState === "uncertain";
+  const editable =
+    Boolean(draft) &&
+    !isSystemLoop() &&
+    !mutationInFlight &&
+    !uncertainFirstSave;
   const stepCount = isSystemLoop() ? 0 : (draft?.inferenceSteps.length ?? 0);
   const systemNodeCount = isSystemLoop() ? draft.graph.nodes.length : 0;
   const systemEdgeCount = isSystemLoop() ? draft.graph.edges.length : 0;
   const hasValidationErrors = validateDraft().length > 0;
   elements.name.disabled = !editable;
   elements.description.disabled = !editable;
-  elements.saveButton.disabled = !editable || !dirty || hasValidationErrors;
-  elements.reloadButton.disabled = mutationInFlight || !draft || !dirty;
-  elements.deleteButton.disabled = !editable;
-  elements.invokeButton.disabled = !editable || dirty;
+  elements.saveButton.disabled =
+    mutationInFlight ||
+    !draft ||
+    isSystemLoop() ||
+    (!dirty && !uncertainFirstSave) ||
+    hasValidationErrors;
+  elements.saveButton.textContent = uncertainFirstSave ? "Retry save" : "Save";
+  elements.reloadButton.disabled =
+    mutationInFlight || !draft || (!newDraft && !dirty) || uncertainFirstSave;
+  elements.reloadButton.textContent = newDraft
+    ? "Discard draft"
+    : "Reload saved version";
+  elements.deleteButton.disabled = !editable || newDraft;
+  elements.invokeButton.disabled = !editable || dirty || newDraft;
   elements.addStepButton.disabled =
     !editable || stepCount >= catalog.limits.maxInferenceSteps;
   elements.loopSettingsButton.disabled = mutationInFlight || !draft;
   elements.selectedNodeButton.disabled = mutationInFlight || !draft;
   elements.createLoopButton.disabled =
     mutationInFlight ||
+    uncertainFirstSave ||
     !catalog ||
     catalog.customDefinitions.length >=
       catalog.limits.maxDefinitionsPerWorkspace;
@@ -2838,11 +3279,19 @@ function renderToolbar() {
       ? "No loop selected"
       : isSystemLoop()
         ? "System managed"
-        : dirty
-          ? "Unsaved changes"
-          : hasValidationErrors
-            ? `Saved · v${draft.definitionVersion} · needs attention`
-            : `Saved · v${draft.definitionVersion}`;
+        : newDraft
+          ? newLoopDraftCommitState === "uncertain"
+            ? "First save uncertain · retry required"
+            : newLoopDraftCommitState === "conflict"
+              ? "First save conflict"
+              : newLoopDraftCommitState === "failed"
+                ? "First save failed"
+                : "Unsaved draft · this tab only"
+          : dirty
+            ? "Unsaved changes"
+            : hasValidationErrors
+              ? `Saved · v${draft.definitionVersion} · needs attention`
+              : `Saved · v${draft.definitionVersion}`;
   elements.canvasStepCount.textContent = isSystemLoop()
     ? `${systemNodeCount} system nodes · ${systemEdgeCount} edges`
     : `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
@@ -2850,7 +3299,9 @@ function renderToolbar() {
     ? "No loop selected"
     : isSystemLoop()
       ? `${draft.roleId} · Schema v${draft.schemaVersion} · ${systemNodeCount} nodes · ${systemEdgeCount} edges`
-      : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+      : newDraft
+        ? `${draft.roleId} · Unsaved client draft · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`
+        : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
   elements.canvasAuthority.replaceChildren();
   if (draft) {
     if (isSystemLoop())
@@ -2878,18 +3329,43 @@ function renderValidation() {
     elements.validationBanner.className = "validation-banner";
     return;
   }
+  if (
+    isNewLoopDraft() &&
+    ["uncertain", "conflict", "failed"].includes(newLoopDraftCommitState)
+  ) {
+    const stateLabel =
+      newLoopDraftCommitState === "uncertain"
+        ? "First save outcome is uncertain"
+        : newLoopDraftCommitState === "conflict"
+          ? "First save operation conflicted"
+          : "First save failed";
+    const detail =
+      newLoopDraftFailureDetail ??
+      "The draft remains local and has not been treated as a runnable definition.";
+    elements.validationBanner.textContent = `${stateLabel}. ${detail}`;
+    elements.validationBanner.setAttribute(
+      "aria-label",
+      `${stateLabel}: ${detail}`,
+    );
+    elements.validationBanner.className = "validation-banner visible error";
+    return;
+  }
   if (errors.length === 0) {
     const copy = node("span", "validation-copy");
     const title = isSystemLoop()
       ? "System definition is valid and read-only"
-      : dirty
-        ? "Draft is valid and ready to save"
-        : `Definition v${draft.definitionVersion} is valid and runnable`;
+      : isNewLoopDraft()
+        ? "Unsaved draft is valid and ready for first save"
+        : dirty
+          ? "Draft is valid and ready to save"
+          : `Definition v${draft.definitionVersion} is valid and runnable`;
     const detail = isSystemLoop()
       ? draft.executionContract.detail
-      : dirty
-        ? "Save this definition before starting a run."
-        : "The server will validate again before saving or admitting a run.";
+      : isNewLoopDraft()
+        ? "Save deliberately creates the first durable definition. This tab keeps the draft across navigation, reload, and reconnect; closing the tab or choosing Discard draft removes it."
+        : dirty
+          ? "Save this definition before starting a run."
+          : "The server will validate again before saving or admitting a run.";
     copy.append(node("strong", "", title));
     copy.append(node("span", "", detail));
     elements.validationBanner.append(
@@ -2960,40 +3436,159 @@ function runnerContractLabel(executionSemantics) {
 }
 
 function markDirty() {
-  if (isSystemLoop()) return;
+  if (!canMutateDraft()) return;
   dirty = true;
+  if (isNewLoopDraft()) {
+    if (pendingCreateRequest) {
+      newLoopDraftOperationId = newOperationId();
+      pendingCreateRequest = null;
+    }
+    newLoopDraftCommitState = "editing";
+    newLoopDraftFailureDetail = null;
+    tryPersistNewLoopDraft();
+  }
   renderList();
   renderToolbar();
   renderValidation();
 }
 
 function updateDraftValue(fieldName, value) {
-  if (mutationInFlight || !draft || isSystemLoop()) return;
+  if (!canMutateDraft()) return;
   draft[fieldName] = value;
   markDirty();
 }
 
 async function createLoop() {
   if (mutationInFlight) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before starting another draft.",
+    );
+    return;
+  }
   if (
     dirty &&
     !window.confirm("Discard unsaved loop edits and create a new loop?")
   )
     return;
-  pendingCreateOperationId ??= newOperationId();
-  setBusy(true, "Creating");
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
+  try {
+    startNewLoopDraft();
+    showToast("Draft started. Nothing has been saved yet.");
+  } catch (error) {
+    showBanner(`Draft unavailable: ${error.message}`);
+  }
+}
+
+function definitionInputFromDraft() {
+  return {
+    displayName: draft.displayName,
+    description: draft.description,
+    triggerPolicy: clone(draft.triggerPolicy),
+    inferenceSteps: draft.inferenceSteps.map((step) => ({
+      id: step.id?.startsWith("local-") ? null : step.id,
+      name: step.name,
+      instruction: step.instruction,
+      contextPolicy: clone(step.contextPolicy),
+    })),
+    toolAssignments: [...draft.toolAssignments],
+    exitPolicy: clone(draft.exitPolicy),
+  };
+}
+
+async function saveNewLoopDraft(definition) {
+  const requestKey = JSON.stringify(definition);
+  if (pendingCreateRequest?.key !== requestKey) {
+    pendingCreateRequest = {
+      key: requestKey,
+      body: {
+        operationId: newLoopDraftOperationId ?? newOperationId(),
+        definition,
+      },
+    };
+    newLoopDraftOperationId = pendingCreateRequest.body.operationId;
+  }
+
+  newLoopDraftCommitState = "saving";
+  newLoopDraftFailureDetail = null;
+  if (!tryPersistNewLoopDraft()) {
+    renderToolbar();
+    renderValidation();
+    return;
+  }
+
+  let catalogRefreshFailure = null;
+  setBusy(true, "Saving draft");
   try {
     const response = await requestJson("/api/loops", {
       method: "POST",
-      body: JSON.stringify({ operationId: pendingCreateOperationId }),
+      body: JSON.stringify(pendingCreateRequest.body),
     });
-    await loadCatalog(response.definition.id);
-    pendingCreateOperationId = null;
-    showToast("Loop created. Add instructions, review context, then Save.");
+    const committed = response.definition;
+    if (
+      response.isCommitted !== true ||
+      !["Created", "Replayed", "CommittedWithAuditWarning"].includes(
+        response.status,
+      ) ||
+      typeof committed?.id !== "string" ||
+      committed.definitionVersion !== 1 ||
+      committed.roleId !== catalog.roleId ||
+      committed.lastMutationOperationId !==
+        pendingCreateRequest.body.operationId
+    ) {
+      throw new Error(
+        "The server returned an invalid first-save receipt, so the commit outcome remains uncertain.",
+      );
+    }
+    resetNewLoopDraftState(true);
+    catalog.customDefinitions = [
+      ...catalog.customDefinitions.filter(
+        (definition) => definition.id !== committed.id,
+      ),
+      committed,
+    ];
+    applyDefinition(committed);
+    try {
+      await loadCatalog(committed.id);
+    } catch (error) {
+      catalogRefreshFailure = error;
+    }
+    showToast(
+      response.status === "CommittedWithAuditWarning"
+        ? response.detail
+        : "Loop saved for the first time.",
+    );
   } catch (error) {
-    showResponseError(error);
+    const responseStatus =
+      typeof error.payload?.status === "string" ? error.payload.status : null;
+    if (error.status === 409 && responseStatus === "Conflict") {
+      newLoopDraftCommitState = "conflict";
+      newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved for an explicit retry.`;
+      pendingCreateRequest = null;
+      newLoopDraftOperationId = newOperationId();
+    } else if (error.status === 409 && responseStatus === "LimitExceeded") {
+      newLoopDraftCommitState = "failed";
+      newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved so Save can retry after capacity is available.`;
+      pendingCreateRequest = null;
+      newLoopDraftOperationId = newOperationId();
+    } else if (
+      typeof error.status !== "number" ||
+      (error.status >= 500 && responseStatus === null)
+    ) {
+      newLoopDraftCommitState = "uncertain";
+      newLoopDraftFailureDetail = `${error.message} The server may have committed the definition. Retry Save to send the exact same request, or reload after reconnect to reconcile the catalog without another mutation.`;
+    } else {
+      newLoopDraftCommitState = "failed";
+      newLoopDraftFailureDetail = error.message;
+    }
+    tryPersistNewLoopDraft();
   } finally {
     setBusy(false);
+    if (catalogRefreshFailure)
+      showBanner(
+        `Loop saved, but the catalog could not be refreshed: ${catalogRefreshFailure.message}`,
+      );
+    else renderValidation();
   }
 }
 
@@ -3004,21 +3599,13 @@ async function saveLoop() {
     showBanner(errors[0]);
     return;
   }
+  const definition = definitionInputFromDraft();
+  if (isNewLoopDraft()) {
+    await saveNewLoopDraft(definition);
+    return;
+  }
   setBusy(true, "Saving");
   try {
-    const definition = {
-      displayName: draft.displayName,
-      description: draft.description,
-      triggerPolicy: clone(draft.triggerPolicy),
-      inferenceSteps: draft.inferenceSteps.map((step) => ({
-        id: step.id?.startsWith("local-") ? null : step.id,
-        name: step.name,
-        instruction: step.instruction,
-        contextPolicy: clone(step.contextPolicy),
-      })),
-      toolAssignments: [...draft.toolAssignments],
-      exitPolicy: clone(draft.exitPolicy),
-    };
     const requestKey = JSON.stringify({
       loopId: draft.id,
       expectedDefinitionVersion: currentDefinition.definitionVersion,
@@ -3056,6 +3643,7 @@ async function deleteLoop() {
   if (mutationInFlight) return;
   if (
     !draft ||
+    isNewLoopDraft() ||
     isSystemLoop() ||
     !window.confirm(
       `Delete “${draft.displayName}”? Historical run evidence will remain available.`,
@@ -3098,7 +3686,14 @@ async function deleteLoop() {
 }
 
 function openInvokeModal() {
-  if (!draft || isSystemLoop() || dirty || invocationInFlight) return;
+  if (
+    !draft ||
+    isSystemLoop() ||
+    isNewLoopDraft() ||
+    dirty ||
+    invocationInFlight
+  )
+    return;
   invokeReturnFocus = document.activeElement ?? elements.invokeButton;
   const trigger = draft.triggerPolicy;
   const promptRequired = trigger.promptSource === "invocation";
@@ -3193,7 +3788,14 @@ function trapInvokeModalFocus(event) {
 }
 
 async function startRun() {
-  if (!draft || dirty || isSystemLoop() || invocationInFlight) return;
+  if (
+    !draft ||
+    dirty ||
+    isSystemLoop() ||
+    isNewLoopDraft() ||
+    invocationInFlight
+  )
+    return;
   clearInvokeError();
   const invocationPrompt =
     draft.triggerPolicy.promptSource === "invocation"
@@ -4933,7 +5535,23 @@ function promptSourceLabel(value) {
 }
 
 async function reloadCurrent() {
-  if (mutationInFlight || !currentDefinition) return;
+  if (mutationInFlight) return;
+  if (isNewLoopDraft()) {
+    if (newLoopDraftCommitState === "uncertain") {
+      showBanner(
+        "The draft cannot be discarded while its first-save outcome is uncertain. Retry Save to resolve the exact operation first.",
+      );
+      return;
+    }
+    if (
+      window.confirm(
+        "Discard this unsaved draft? No durable loop will be deleted.",
+      )
+    )
+      discardNewLoopDraft();
+    return;
+  }
+  if (!currentDefinition) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   const loopId = currentDefinition.id;
   setBusy(true, "Reloading");
@@ -4953,8 +5571,7 @@ function addInferenceStep() {
 
 function insertInferenceStep(index) {
   if (
-    !draft ||
-    isSystemLoop() ||
+    !canMutateDraft() ||
     draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps
   )
     return;
@@ -4999,6 +5616,7 @@ function fitCanvas() {
 }
 
 function moveStep(index, delta) {
+  if (!canMutateDraft()) return;
   const next = index + delta;
   if (next < 0 || next >= draft.inferenceSteps.length) return;
   const [step] = draft.inferenceSteps.splice(index, 1);
@@ -5009,6 +5627,7 @@ function moveStep(index, delta) {
 }
 
 function removeStep(index) {
+  if (!canMutateDraft()) return;
   if (draft.inferenceSteps.length <= 1) return;
   draft.inferenceSteps.splice(index, 1);
   selectedNodeId =

@@ -99,9 +99,9 @@ public sealed class LoopsController : ControllerBase
     }
 
     /// <summary>
-    /// Creates a new first-wave custom-loop definition.
+    /// Atomically creates the first durable version of an explicit client-side custom-loop draft.
     /// </summary>
-    /// <param name="request">The caller-owned idempotency identity.</param>
+    /// <param name="request">The caller-owned idempotency identity and complete first-save definition.</param>
     /// <param name="cancellationToken">The token used to cancel authoring.</param>
     /// <returns>
     /// HTTP 201 for a newly created definition; otherwise the facade response projected as HTTP
@@ -115,7 +115,18 @@ public sealed class LoopsController : ControllerBase
             return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
         }
 
-        var response = await _loops.CreateAsync(request.OperationId, cancellationToken);
+        if (request.Definition is null)
+        {
+            return Project(new LoopAuthoringResponse(
+                "Invalid",
+                false,
+                null,
+                [new LoopValidationError("definition_required", "definition", "The complete first-save definition is required.")],
+                null,
+                "The first-save definition is required."));
+        }
+
+        var response = await _loops.CreateAsync(request.OperationId, request.Definition, cancellationToken);
         return response.Status == "Created"
             ? CreatedAtAction(nameof(Get), new { loopId = response.Definition!.Id }, response)
             : Project(response);
