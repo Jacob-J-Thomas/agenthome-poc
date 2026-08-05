@@ -349,7 +349,17 @@ public sealed class BrowserFlowTests
 
     private static async Task<int> GetCustomDefinitionCountAsync(string workspaceRoot)
     {
-        return (await new CustomLoopDefinitionStore(new WorkspacePaths(workspaceRoot)).ListAsync()).Count;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return (await new CustomLoopDefinitionStore(new WorkspacePaths(workspaceRoot)).ListAsync()).Count;
+            }
+            catch (InvalidOperationException exception) when (attempt < 39 && exception.InnerException is IOException && exception.Message.Contains("locked by another process", StringComparison.Ordinal))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50));
+            }
+        }
     }
 
     private static async Task SubmitMessageAsync(HeadlessBrowserSession browser, string message)
