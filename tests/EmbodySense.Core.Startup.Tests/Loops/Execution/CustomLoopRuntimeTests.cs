@@ -488,6 +488,11 @@ public sealed class CustomLoopRuntimeTests
         Assert.Empty(startedAttempt.ToolAuthority.EffectiveAssignments);
         Assert.Null(startedAttempt.ToolEvidence);
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == true);
+        var publishedDisposition = Assert.Single(response.Run.ConversationPublicationDispositions);
+        Assert.Equal("Published", publishedDisposition.Disposition);
+        Assert.True(publishedDisposition.IsDefinite);
+        Assert.False(publishedDisposition.HasIntegrityWarning);
+        Assert.True(publishedDisposition.EventSequences.Count >= 3);
         Assert.NotNull(response.Run.FinalOutput);
         AssertInspectableProjection(response.Run, Assert.Single(listed, summary => summary.Id == response.Run.Id));
         Assert.Equal(response.Run.Id, fetched!.Id);
@@ -539,7 +544,9 @@ public sealed class CustomLoopRuntimeTests
         var defaultTurn = runtime.RunTurnAsync("delayed default turn");
         await WaitForAttemptStartAsync(workspace);
         await conversationMemory.StartFreshConversationAsync();
-        Assert.Equal("MessageCompleted", (await defaultTurn).Status.ToString());
+        var divergentDefaultTurn = await defaultTurn;
+        Assert.Equal("MessageNeedsReview", divergentDefaultTurn.Status.ToString());
+        Assert.Contains("Existing user-owned content was preserved", divergentDefaultTurn.FailureDetail, StringComparison.Ordinal);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-divergent-context", "custom task")));
         var followingTurn = await runtime.RunTurnAsync("following default turn");
@@ -602,6 +609,16 @@ public sealed class CustomLoopRuntimeTests
 
         Assert.Equal("Completed", response.ExecutionStatus);
         Assert.Equal(3, publications.Length);
+        var dispositions = response.Run.ConversationPublicationDispositions;
+        Assert.Equal(3, dispositions.Count);
+        Assert.Equal(publications.Select(item => item.ConversationPublicationId), dispositions.Select(item => item.OperationId));
+        Assert.All(dispositions, disposition =>
+        {
+            Assert.Equal("Published", disposition.Disposition);
+            Assert.True(disposition.IsDefinite);
+            Assert.False(disposition.HasIntegrityWarning);
+        });
+        Assert.Equal(dispositions.Select(item => item.EventSequences[0]).Order(), dispositions.Select(item => item.EventSequences[0]));
         Assert.Equal(3, persistedConversation.Count);
         Assert.Equal(publications.Select(item => item.CanonicalOutput), persistedConversation.Select(item => item.Content));
     }
@@ -817,6 +834,9 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("Completed", response.ExecutionStatus);
         Assert.Equal(expectedOutput, response.Run!.FinalOutput);
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.Detail.Contains("already committed", StringComparison.Ordinal));
+        var disposition = Assert.Single(response.Run.ConversationPublicationDispositions);
+        Assert.Equal("AlreadyPublished", disposition.Disposition);
+        Assert.True(disposition.IsDefinite);
         Assert.Collection(persistedConversation, message => Assert.Equal(expectedOutput, message.Content));
     }
 
@@ -838,6 +858,9 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("Failed", response.Run!.Status);
         Assert.Equal("conversation_publication_failed", response.Run.FailureCode);
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == false);
+        var disposition = Assert.Single(response.Run.ConversationPublicationDispositions);
+        Assert.Equal("DefinitelyFailed", disposition.Disposition);
+        Assert.True(disposition.IsDefinite);
     }
 
     [Fact]

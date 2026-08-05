@@ -376,7 +376,7 @@ public sealed class CliBehaviorTests
 
     private static ConversationMemoryEntry Entry(string conversationId, int sequence, string role, string content)
     {
-        return new ConversationMemoryEntry(1, conversationId, sequence, DateTimeOffset.Parse("2026-06-01T00:00:00+00:00").AddMinutes(sequence), role, content);
+        return new ConversationMemoryEntry(1, conversationId, sequence, DateTimeOffset.Parse("2026-06-01T00:00:00+00:00").AddMinutes(sequence), $"message-{sequence}", $"publication-{sequence}", role, content);
     }
 
     private sealed record CliResult(int ExitCode, string Output, string Error);

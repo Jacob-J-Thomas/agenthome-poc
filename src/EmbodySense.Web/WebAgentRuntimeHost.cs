@@ -437,6 +437,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// The SignalR connection that owns governed approvals, or null to make approval-required tools reject safely.
     /// </param>
     /// <param name="cancellationToken">The caller token used to cancel gate waits, runtime work, and event writes.</param>
+    /// <param name="requestId">An optional browser-owned idempotency identity.</param>
     /// <returns>A task that completes after the terminal event is written.</returns>
     /// <exception cref="ArgumentException">The message is null, empty, or whitespace.</exception>
     /// <exception cref="OperationCanceledException">
@@ -452,7 +453,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         string message,
         Func<WebStreamEvent, CancellationToken, Task> writeEventAsync,
         string? ownerConnectionId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? requestId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
         ArgumentNullException.ThrowIfNull(writeEventAsync);
@@ -480,7 +482,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                         : writeEventAsync(WebStreamEvent.AssistantDelta(chunk), token);
                 },
                 (context, token) => writeEventAsync(WebStreamEvent.VerboseContext(context), token),
-                cancellationToken: turnCancellation.Token);
+                cancellationToken: turnCancellation.Token,
+                requestId: requestId);
 
             discardRuntime = turnResult.IsCancelled;
             await WriteTurnResultAsync(turnResult, writeEventAsync, cancellationToken);
@@ -843,6 +846,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
                 case AgentRuntimeTurnEventKind.Failure:
                     await writeEventAsync(WebStreamEvent.Failure(turnEvent.Text), cancellationToken);
+                    break;
+
+                case AgentRuntimeTurnEventKind.NeedsReview:
+                    await writeEventAsync(WebStreamEvent.NeedsReview(turnEvent.Text), cancellationToken);
                     break;
 
                 case AgentRuntimeTurnEventKind.Cancellation:

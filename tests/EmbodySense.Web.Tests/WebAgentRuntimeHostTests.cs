@@ -378,7 +378,7 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
-    public async Task SendMessageAsync_surfaces_loop_failure_as_error_event()
+    public async Task SendMessageAsync_surfaces_a_conclusive_terminal_provider_failure_as_an_error_event()
     {
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, "provider down");
@@ -394,7 +394,8 @@ public sealed class WebAgentRuntimeHostTests
 
         var streamEvent = Assert.Single(events);
         Assert.Equal("error", streamEvent.Type);
-        Assert.Equal("Codex app-server turn failed: provider down", streamEvent.Error);
+        Assert.Contains("Codex app-server turn failed: provider down", streamEvent.Error, StringComparison.Ordinal);
+        Assert.Null(streamEvent.Text);
     }
 
     [Fact]
@@ -709,8 +710,8 @@ public sealed class WebAgentRuntimeHostTests
         var path = CurrentTranscriptPath(workspace);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, $$"""
-            {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","role":"user","content":"{{prompt}}"}
-            {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","role":"assistant","content":"{{answer}}"}
+            {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"{{prompt}}"}
+            {"schemaVersion":1,"conversationId":"current","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","messageId":"message-2","publicationId":"publication-2","role":"assistant","content":"{{answer}}"}
             """);
     }
 

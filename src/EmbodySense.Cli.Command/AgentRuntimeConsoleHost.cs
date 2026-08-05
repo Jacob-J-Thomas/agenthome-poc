@@ -184,6 +184,7 @@ public sealed class AgentRuntimeConsoleHost
                     break;
 
                 case AgentRuntimeTurnEventKind.Failure:
+                case AgentRuntimeTurnEventKind.NeedsReview:
                 case AgentRuntimeTurnEventKind.Cancellation:
                     _console.WriteLine(turnEvent.Text);
                     break;

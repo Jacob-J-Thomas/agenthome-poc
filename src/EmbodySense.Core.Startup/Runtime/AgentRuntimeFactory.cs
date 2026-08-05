@@ -247,6 +247,13 @@ public sealed class AgentRuntimeFactory
             var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog, defaultLoop, new ToolResultRetentionStore(paths));
             var conversationMemory = new ConversationMemoryStore(paths);
             var loopRunStore = new LoopRunStore(paths);
+            var conversationTurnStore = new DefaultConversationTurnStore(paths);
+            var conversationTurnRecovery = await new DefaultConversationTurnRecoveryService(
+                conversationTurnStore,
+                conversationMemory,
+                loopRunStore,
+                new FileConversationWorkspaceLease(paths)).RecoverAsync(cancellationToken);
+            preserveCurrentConversation |= conversationTurnRecovery.PreserveCurrentConversation;
             var startupContext = await new AgentContextProvider(new WorkspaceContextStore()).LoadAsync(paths, cancellationToken);
             var inferenceClient = new LlmInferenceClient(effectiveOptions, toolBroker);
             var conversationState = new ConversationRuntimeState(startupContext, inferenceClient, Path.TrimEndingDirectorySeparator(paths.RootPath), new FileConversationWorkspaceLease(paths));
@@ -266,11 +273,12 @@ public sealed class AgentRuntimeFactory
                 conversationState.SetDurableConversationVersion(activeConversation.Version);
             }
 
-            var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId);
+            var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId, conversationTurnStore);
+            var defaultConversationReviews = new DefaultConversationTurnReviewService(conversationTurnStore, inferenceClient, new FileConversationWorkspaceLease(paths));
             var customDefinitionStore = new CustomLoopDefinitionStore(paths);
             var customInvocationOperations = new CustomLoopInvocationOperationStore(paths);
             var customInvocationReceiptRetention = new CustomLoopInvocationReceiptRetentionService(customInvocationOperations, auditLog);
-            var customControlOperations = new CustomLoopControlOperationStore(paths);
+            var customControlOperations = new CustomLoopControlOperationStore(paths, auditLog);
             var customToolAuthority = new CustomLoopToolAuthorityProvider(loopDefinitionStore);
             var customToolEvidence = new CustomLoopRunToolEvidenceSink(customRunStore);
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority);
@@ -278,7 +286,7 @@ public sealed class AgentRuntimeFactory
             var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
             var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(effectiveOptions, _approvalPrompt, customToolAuthority, customToolEvidence);
             var customRunner = new CustomLoopOrderedRunner(customRunStore, new CustomLoopContextResolver(), customInferenceExecutor, customPublisher, auditLog, customToolAuthority, attemptCancellationBroker: customExecutionGate);
-            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, customRunner, customInferenceExecutor, customRunner, auditLog, customExecutionGate);
+            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, customRunner, customInferenceExecutor, customRunner, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,
@@ -309,6 +317,7 @@ public sealed class AgentRuntimeFactory
                 inferenceClient,
                 loopRunner,
                 customLoops,
+                defaultConversationReviews,
                 codexRuntimeStatus);
         }
         catch

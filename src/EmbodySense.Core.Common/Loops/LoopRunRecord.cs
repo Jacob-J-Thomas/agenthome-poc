@@ -116,4 +116,17 @@ public sealed record LoopRunRecord(
         ArgumentException.ThrowIfNullOrWhiteSpace(detail);
         return this with { Status = LoopRunStatus.Cancelled, CompletedAtUtc = completedAtUtc, FailureDetail = detail };
     }
+
+    /// <summary>
+    /// Returns a terminal copy that preserves an ambiguous outcome for explicit review.
+    /// </summary>
+    /// <param name="completedAtUtc">The UTC time at which automatic continuation stopped.</param>
+    /// <param name="detail">The actionable ambiguity or conflict evidence.</param>
+    /// <returns>A copy in <see cref="LoopRunStatus.NeedsReview"/> state.</returns>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="detail"/> is empty or whitespace.</exception>
+    public LoopRunRecord NeedsReview(DateTimeOffset completedAtUtc, string detail)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(detail);
+        return this with { Status = LoopRunStatus.NeedsReview, CompletedAtUtc = completedAtUtc, FailureDetail = detail };
+    }
 }
