@@ -317,6 +317,10 @@ public sealed class LoopRunApiControllerTests
             Assert.True(detailResponse.Headers.CacheControl?.NoStore == true);
             Assert.Equal(invocation.Run.Id, detail!.Id);
             Assert.Equal(invocation.Run.Context.ManifestHash, detail.Context.ManifestHash);
+            var publicationDisposition = Assert.Single(detail.ConversationPublicationDispositions);
+            Assert.Equal("Published", publicationDisposition.Disposition);
+            Assert.True(publicationDisposition.IsDefinite);
+            Assert.False(publicationDisposition.HasIntegrityWarning);
             Assert.Equal(HttpStatusCode.OK, quotaResponse.StatusCode);
             Assert.Equal(1, quota!.LiveTraceCount);
             Assert.Equal(1, quota.ActiveReservationCount);
@@ -388,7 +392,7 @@ public sealed class LoopRunApiControllerTests
     public async Task Pause_and_cancel_routes_surface_unsupported_discovery_index_cleanup()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
         var interrupted = await CreateInterruptedRunAsync(store);
@@ -438,7 +442,7 @@ public sealed class LoopRunApiControllerTests
     public async Task Run_evidence_api_recovers_interrupted_runs_before_exposing_lifecycle_state()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         const string TranscriptEvidence = """
             {"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-20T11:58:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"recovered user prompt"}

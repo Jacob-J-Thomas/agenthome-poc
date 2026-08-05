@@ -248,10 +248,21 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return candidate.ProviderOutcome >= existing.ProviderOutcome
             && (existing.AssistantMessage is null || existing.AssistantMessage == candidate.AssistantMessage)
             && (existing.ProviderResponseId is null || string.Equals(existing.ProviderResponseId, candidate.ProviderResponseId, StringComparison.Ordinal))
+            && ReviewCauseAdvances(existing, candidate)
             && (existing.ReviewDetail is null || string.Equals(existing.ReviewDetail, candidate.ReviewDetail, StringComparison.Ordinal))
             && (existing.ReviewResolution is null || existing.ReviewResolution == candidate.ReviewResolution)
             && (!existing.RunProjectionSynchronized || candidate.RunProjectionSynchronized)
             && (existing.Run.Status == LoopRunStatus.Started || RunsEqual(existing.Run, candidate.Run));
+    }
+
+    private static bool ReviewCauseAdvances(DefaultConversationTurnRecord existing, DefaultConversationTurnRecord candidate)
+    {
+        return existing.ReviewCause == candidate.ReviewCause
+            || existing.ReviewCause == DefaultConversationTurnReviewCause.None
+            && candidate.ReviewCause != DefaultConversationTurnReviewCause.None
+            && existing.Checkpoint < DefaultConversationTurnCheckpoint.TerminalPrepared
+            && candidate.Checkpoint == DefaultConversationTurnCheckpoint.TerminalPrepared
+            && candidate.Run.Status == LoopRunStatus.NeedsReview;
     }
 
     private static bool TransitionHistoryExtends(DefaultConversationTurnRecord existing, DefaultConversationTurnRecord candidate)

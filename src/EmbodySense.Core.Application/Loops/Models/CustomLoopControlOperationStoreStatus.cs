@@ -28,5 +28,13 @@ public enum CustomLoopControlOperationStoreStatus
     /// <summary>
     /// Identifies the ownership unproven custom loop control operation store status.
     /// </summary>
-    OwnershipUnproven = 6
+    OwnershipUnproven = 6,
+    /// <summary>
+    /// Identifies the quota exceeded custom loop control operation store status.
+    /// </summary>
+    QuotaExceeded = 7,
+    /// <summary>
+    /// Identifies the expired custom loop control operation store status.
+    /// </summary>
+    Expired = 8
 }

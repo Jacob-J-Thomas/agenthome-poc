@@ -19,7 +19,7 @@ public sealed class LlmInferenceClientTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var client = new LlmInferenceClient(new LlmInferenceClientOptions
         {
             Surface = LlmInferenceSurface.AzureAiFoundry,
@@ -48,7 +48,7 @@ public sealed class LlmInferenceClientTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var governance = EmbodySenseDeveloperInstructions.Capture();
         var trustedInstructions = new[]
         {
