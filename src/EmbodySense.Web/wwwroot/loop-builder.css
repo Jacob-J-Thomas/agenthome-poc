@@ -1435,6 +1435,22 @@
   background: var(--green-soft);
   outline: none;
 }
+.system-connector {
+  height: 64px;
+}
+.system-connector-label {
+  z-index: 1;
+  max-width: calc(100% - 32px);
+  padding: 4px 8px;
+  overflow: hidden;
+  border: 1px solid #dfe7e3;
+  border-radius: 999px;
+  color: #53625c;
+  background: white;
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .inspector {
   grid-template-rows: auto auto minmax(0, 1fr);
 }

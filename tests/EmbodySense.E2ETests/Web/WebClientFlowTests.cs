@@ -36,13 +36,15 @@ public sealed class WebClientFlowTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var index = await client.GetStringAsync("/");
             var script = await client.GetStringAsync("/app.js");
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
-            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
             var rejectedConfig = await client.GetAsync("/api/configuration");
+            using var sessionResponse = await client.GetAsync("/api/session");
+            var session = await sessionResponse.Content.ReadFromJsonAsync<WebSessionInfo>(_jsonOptions);
+            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
 
             Assert.Contains("EmbodySense", index);
             Assert.Contains("JsonSignalRConnection", script);
-            Assert.False(string.IsNullOrWhiteSpace(session!.Token));
+            Assert.False(string.IsNullOrWhiteSpace(session!.GenerationId));
+            Assert.Contains("HttpOnly", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
             Assert.False(status!.Initialized);
             Assert.Equal("web", status.Client);
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedConfig.StatusCode);
@@ -64,8 +66,8 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
-            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
+            var sessionCookie = await BootstrapSessionCookieAsync(client);
+            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, sessionCookie);
 
             var initializeMessages = await signalr.InvokeAndCollectAsync("InitializeWorkspace");
             var initializeResult = Deserialize<WebStatus>(GetCompletionResult(initializeMessages));
@@ -75,13 +77,15 @@ public sealed class WebClientFlowTests
             await WriteCurrentTranscriptAsync(workspace, "e2e restored prompt", "e2e restored answer");
             await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).StartFreshConversationAsync();
 
-            var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history");
-            var historyEvent = Assert.Single(GetStreamEvents(historyMessages));
-            Assert.Equal("assistant_final", historyEvent.GetProperty("type").GetString());
+            var historyMessages = await signalr.InvokeAndCollectAsync("SendMessage", "/history", "e2e-history-request");
+            var historyEvents = GetStreamEvents(historyMessages);
+            Assert.True(historyEvents.Count == 1, "Expected one history stream event. Raw SignalR messages: " + JsonSerializer.Serialize(historyMessages, _jsonOptions));
+            var historyEvent = historyEvents[0];
+            Assert.True(historyEvent.GetProperty("type").GetString() == "assistant_final", "Expected history output, received: " + historyEvent.GetRawText());
             Assert.Contains("Stored conversations:", historyEvent.GetProperty("text").GetString());
             Assert.Contains("Send conversation number to load", historyEvent.GetProperty("text").GetString());
 
-            var loadMessages = await signalr.InvokeAndCollectAsync("SendMessage", "1");
+            var loadMessages = await signalr.InvokeAndCollectAsync("SendMessage", "1", "e2e-load-request");
             var streamEvents = GetStreamEvents(loadMessages).ToArray();
             var loadedEvent = Assert.Single(streamEvents, streamEvent => streamEvent.GetProperty("type").GetString() == "history_loaded");
             var confirmationEvent = Assert.Single(streamEvents, streamEvent => streamEvent.GetProperty("type").GetString() == "assistant_final");
@@ -122,8 +126,8 @@ public sealed class WebClientFlowTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
-            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, session!.Token);
+            var sessionCookie = await BootstrapSessionCookieAsync(client);
+            await using var signalr = await SignalRTestClient.ConnectAsync(options.Url, sessionCookie);
             var input = new LoopRunInvocationInput("loop-approval", 1, new string('a', 64), "invoke-concurrent-approval", "prompt");
 
             var (invocationCompletion, decisionCompletion) = await signalr.InvokeLoopAndApproveAsync(input);
@@ -142,7 +146,7 @@ public sealed class WebClientFlowTests
     }
 
     [Fact]
-    public async Task Direct_websocket_rejects_missing_or_invalid_session_token()
+    public async Task Direct_websocket_rejects_missing_or_invalid_session_cookie()
     {
         using var workspace = new TestWorkspace();
         await using var app = CreateApp(workspace.RootPath, out var options);
@@ -151,7 +155,7 @@ public sealed class WebClientFlowTests
         try
         {
             await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, null));
-            await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, "wrong-token"));
+            await Assert.ThrowsAnyAsync<WebSocketException>(() => ConnectWebSocketAsync(options.Url, $"{WebSessionSecurity.GetCookieName(options.Port)}=wrong-token"));
         }
         finally
         {
@@ -212,10 +216,22 @@ public sealed class WebClientFlowTests
         return port;
     }
 
-    private static async Task ConnectWebSocketAsync(string baseUrl, string? sessionToken)
+    private static async Task ConnectWebSocketAsync(string baseUrl, string? sessionCookie)
     {
         using var socket = new ClientWebSocket();
-        await socket.ConnectAsync(CreateHubUri(baseUrl, sessionToken), CancellationToken.None);
+        if (!string.IsNullOrWhiteSpace(sessionCookie))
+        {
+            socket.Options.Cookies = new CookieContainer();
+            socket.Options.Cookies.SetCookies(new Uri(baseUrl), sessionCookie);
+        }
+        await socket.ConnectAsync(CreateHubUri(baseUrl), CancellationToken.None);
+    }
+
+    private static async Task<string> BootstrapSessionCookieAsync(HttpClient client)
+    {
+        using var response = await client.GetAsync("/api/session");
+        response.EnsureSuccessStatusCode();
+        return response.Headers.GetValues("Set-Cookie").Single().Split(';', 2)[0];
     }
 
     private static WebProcess StartWebProcess(string rootPath, int port)
@@ -285,8 +301,8 @@ public sealed class WebClientFlowTests
     {
         var path = workspace.File(".agent", "memory", "conversations", "current.ndjson");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "user", prompt);
-        var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "assistant", answer);
+        var first = new ConversationEntry(1, "current", 1, DateTimeOffset.Parse("2026-06-01T00:01:00+00:00", CultureInfo.InvariantCulture), "message-1", "publication-1", "user", prompt);
+        var second = new ConversationEntry(1, "current", 2, DateTimeOffset.Parse("2026-06-01T00:02:00+00:00", CultureInfo.InvariantCulture), "message-2", "publication-2", "assistant", answer);
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(first, _jsonOptions) + Environment.NewLine + JsonSerializer.Serialize(second, _jsonOptions) + Environment.NewLine);
     }
 
@@ -310,7 +326,7 @@ public sealed class WebClientFlowTests
         return JsonSerializer.Deserialize<T>(element.GetRawText(), _jsonOptions) ?? throw new InvalidOperationException($"Could not deserialize {typeof(T).Name}.");
     }
 
-    private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string Role, string Content);
+    private sealed record ConversationEntry(int SchemaVersion, string ConversationId, int Sequence, DateTimeOffset TimestampUtc, string MessageId, string PublicationId, string Role, string Content);
 
     private sealed class WebProcess : IDisposable
     {
@@ -400,10 +416,12 @@ public sealed class WebClientFlowTests
         private readonly StringBuilder _incoming = new();
         private int _nextInvocationId;
 
-        public static async Task<SignalRTestClient> ConnectAsync(string baseUrl, string sessionToken)
+        public static async Task<SignalRTestClient> ConnectAsync(string baseUrl, string sessionCookie)
         {
             var client = new SignalRTestClient();
-            await client._socket.ConnectAsync(CreateHubUri(baseUrl, sessionToken), CancellationToken.None);
+            client._socket.Options.Cookies = new CookieContainer();
+            client._socket.Options.Cookies.SetCookies(new Uri(baseUrl), sessionCookie);
+            await client._socket.ConnectAsync(CreateHubUri(baseUrl), CancellationToken.None);
             await client.SendRawAsync(new { protocol = "json", version = 1 }, CancellationToken.None);
             await client.WaitForHandshakeAsync();
             return client;
@@ -546,11 +564,6 @@ public sealed class WebClientFlowTests
             _incoming.Append(text[start..]);
         }
 
-        private static Uri CreateHubUri(string baseUrl, string sessionToken)
-        {
-            return WebClientFlowTests.CreateHubUri(baseUrl, sessionToken);
-        }
-
         private static bool IsCompletionFor(JsonElement message, string invocationId)
         {
             return message.TryGetProperty("type", out var type)
@@ -560,14 +573,14 @@ public sealed class WebClientFlowTests
         }
     }
 
-    private static Uri CreateHubUri(string baseUrl, string? sessionToken)
+    private static Uri CreateHubUri(string baseUrl)
     {
         var baseUri = new Uri(baseUrl);
         var builder = new UriBuilder(baseUri)
         {
             Scheme = baseUri.Scheme == "https" ? "wss" : "ws",
             Path = "/hubs/session",
-            Query = string.IsNullOrEmpty(sessionToken) ? "" : "access_token=" + Uri.EscapeDataString(sessionToken)
+            Query = ""
         };
         return builder.Uri;
     }

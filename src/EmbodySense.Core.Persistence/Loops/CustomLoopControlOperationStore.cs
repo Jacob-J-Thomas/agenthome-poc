@@ -1850,8 +1850,8 @@ public sealed class CustomLoopControlOperationStore : ICustomLoopControlOperatio
             || !Enum.IsDefined(operation.Outcome)
             || string.IsNullOrWhiteSpace(operation.Actor)
             || operation.Actor.Length > CustomLoopLimits.MaxTraceReferenceCharacters
-            || !operation.Actor.IsNormalized(NormalizationForm.FormC)
             || operation.Actor.Any(character => char.IsControl(character) || char.IsSurrogate(character))
+            || !operation.Actor.IsNormalized(NormalizationForm.FormC)
             || operation.RequestHash is not { Length: CustomLoopLimits.Sha256HexCharacters }
             || !operation.RequestHash.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f')
             || !CustomLoopControlRequestHash.Matches(operation)
