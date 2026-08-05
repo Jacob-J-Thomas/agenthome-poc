@@ -20,7 +20,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_returns_initialized_workspace_configuration_details()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await WriteTranscriptAsync(paths.CurrentConversationPath, "current", "current prompt", "current answer");
         Directory.CreateDirectory(paths.ArchivedConversationMemoryPath);
@@ -94,7 +94,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_caps_sensitive_snapshot_content()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await File.WriteAllTextAsync(paths.PermissionsPath, """{"version":2,"scope":"test","access_token":"secret-value","approved":[],"denied":[]}""");
         await File.WriteAllTextAsync(paths.AgentFile("ROLE.md"), "api_key=secret-value" + Environment.NewLine + new string('a', 41_000));
@@ -192,7 +192,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_coordinates_a_consistent_snapshot_with_conversation_rotation()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("overlap prompt"));
