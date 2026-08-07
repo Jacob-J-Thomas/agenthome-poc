@@ -67,4 +67,13 @@ public static class CapabilityContractLimits
 
     /// <summary>Gets the maximum declared concurrency.</summary>
     public const int MaxConcurrency = 1_024;
+
+    /// <summary>Gets the maximum required or optional dependency declarations in one manifest.</summary>
+    public const int MaxDependencyManifestDependencies = 64;
+
+    /// <summary>Gets the maximum canonical dependency-manifest JSON length.</summary>
+    public const int MaxDependencyManifestJsonCharacters = 32_768;
+
+    /// <summary>Gets the maximum opaque signature evidence length.</summary>
+    public const int MaxArtifactSignatureCharacters = 4_096;
 }

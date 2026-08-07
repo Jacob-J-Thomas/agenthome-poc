@@ -119,7 +119,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             if (activeReview is not null)
             {
                 var reviewRun = new LoopRunIdentity(activeReview.Run.LoopId, activeReview.Run.RunId, activeReview.Run.RoleId);
-                var detail = $"Default-conversation turn `{activeReview.TurnId}` remains in NeedsReview. {activeReview.ReviewDetail} Use `/review resolve {activeReview.TurnId}` only after inspecting provider and audit evidence; no later provider attempt can start before that explicit resolution.";
+                var detail = $"Default-conversation turn `{activeReview.TurnId}` remains in NeedsReview ({DefaultConversationTurnProtocol.GetReviewClassification(activeReview)}). {activeReview.ReviewDetail} {DefaultConversationTurnProtocol.GetReviewAction(activeReview)} No later provider attempt for that retained conversation version can start while this review remains unresolved.";
                 return DefaultConversationLoopTurnResult.NeedsReview(detail, runIdentity: reviewRun);
             }
 
@@ -217,7 +217,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             if (userPublication is null)
             {
                 var detail = TranscriptConflictDetail(turn, turn.UserMessage);
-                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None);
+                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None, DefaultConversationTurnReviewCause.TranscriptConflict);
                 return DefaultConversationLoopTurnResult.NeedsReview(detail, runIdentity: runIdentity, userMessageAccepted: true);
             }
 
@@ -256,17 +256,17 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 var observedResponse = exception.Response;
                 if (string.IsNullOrWhiteSpace(observedResponse.OutputText))
                 {
-                    var emptyDetail = $"Provider completed without a usable assistant message body; the terminal provider outcome is conclusive, but no assistant transcript message can be published. Completion audit detail: {exception.Message}";
+                    var emptyOutputDetail = $"Provider completed without a usable assistant message body and returned no usable assistant output; the terminal provider outcome is conclusive, so no assistant transcript message can be published. Completion audit detail: {exception.Message}";
                     turn = await AdvanceAsync(
                         turn,
                         DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
-                        emptyDetail,
+                        emptyOutputDetail,
                         DefaultConversationTurnBoundary.ProviderOutcomeObserved,
                         CancellationToken.None,
                         providerOutcome: DefaultConversationProviderOutcome.ObservedFailure,
                         providerResponseId: observedResponse.ProviderResponseId);
-                    turn = await FinalizeAsync(turn, LoopRunStatus.Failed, emptyDetail, CancellationToken.None);
-                    return DefaultConversationLoopTurnResult.Failed(emptyDetail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+                    turn = await FinalizeAsync(turn, LoopRunStatus.Failed, emptyOutputDetail, CancellationToken.None);
+                    return DefaultConversationLoopTurnResult.Failed(emptyOutputDetail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
                 }
 
                 var observedAssistantMessage = new DefaultConversationTurnMessage(DefaultConversationTurnProtocol.CreateAssistantMessageId(turn.TurnId), LlmMessageRole.Assistant, observedResponse.OutputText);
@@ -280,7 +280,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                     providerOutcome: DefaultConversationProviderOutcome.ObservedWithAuditFailure,
                     assistantMessage: observedAssistantMessage,
                     providerResponseId: observedResponse.ProviderResponseId);
-                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None);
+                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None, DefaultConversationTurnReviewCause.ObservedWithAuditFailure);
                 return DefaultConversationLoopTurnResult.NeedsReview(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
             }
             catch (LlmInferenceTerminalFailureException exception)
@@ -310,17 +310,17 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
 
             if (string.IsNullOrWhiteSpace(response.OutputText))
             {
-                var detail = "Provider completed without a usable assistant message body; the terminal provider outcome is conclusive, but no assistant transcript message can be published.";
+                const string Detail = "Provider completed without a usable assistant message body and returned no usable assistant output; the terminal provider outcome is conclusive, so no assistant transcript message can be published.";
                 turn = await AdvanceAsync(
                     turn,
                     DefaultConversationTurnCheckpoint.ProviderOutcomeObserved,
-                    detail,
+                    Detail,
                     DefaultConversationTurnBoundary.ProviderOutcomeObserved,
                     CancellationToken.None,
                     providerOutcome: DefaultConversationProviderOutcome.ObservedFailure,
                     providerResponseId: response.ProviderResponseId);
-                turn = await FinalizeAsync(turn, LoopRunStatus.Failed, detail, CancellationToken.None);
-                return DefaultConversationLoopTurnResult.Failed(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+                turn = await FinalizeAsync(turn, LoopRunStatus.Failed, Detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.Failed(Detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
             }
 
             var assistantMessage = new DefaultConversationTurnMessage(DefaultConversationTurnProtocol.CreateAssistantMessageId(turn.TurnId), LlmMessageRole.Assistant, response.OutputText);
@@ -338,7 +338,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             if (assistantPublication is null)
             {
                 var detail = TranscriptConflictDetail(turn, assistantMessage);
-                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None);
+                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None, DefaultConversationTurnReviewCause.TranscriptConflict);
                 return DefaultConversationLoopTurnResult.NeedsReview(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
             }
 
@@ -381,7 +381,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         {
             var quarantineDetail = await QuarantineProviderAsync();
             var ambiguity = $"Provider attempt `{turn.ProviderAttemptId}` with correlation `{turn.ProviderCorrelationId}` reached the irreversible turn/start transport-write boundary, but no terminal outcome was durably observed. Automatic redispatch is forbidden; inspect provider and audit evidence before retrying as a new turn. {quarantineDetail} Observed adapter detail: {detail}";
-            var finalDetail = await TryFinalizeWithEvidenceAsync(turn, LoopRunStatus.NeedsReview, ambiguity);
+            var finalDetail = await TryFinalizeWithEvidenceAsync(turn, LoopRunStatus.NeedsReview, ambiguity, DefaultConversationTurnReviewCause.OutcomeUnknown);
             return DefaultConversationLoopTurnResult.NeedsReview(finalDetail, acceptedMessages, runIdentity, userMessageAccepted);
         }
 
@@ -393,7 +393,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
 
         if (turn.ProviderOutcome == DefaultConversationProviderOutcome.ObservedWithAuditFailure)
         {
-            var auditFailureDetail = await TryFinalizeWithEvidenceAsync(turn, LoopRunStatus.NeedsReview, detail);
+            var auditFailureDetail = await TryFinalizeWithEvidenceAsync(turn, LoopRunStatus.NeedsReview, detail, DefaultConversationTurnReviewCause.ObservedWithAuditFailure);
             return DefaultConversationLoopTurnResult.NeedsReview(auditFailureDetail, acceptedMessages, runIdentity, userMessageAccepted);
         }
 
@@ -441,11 +441,11 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         }
     }
 
-    private async Task<string> TryFinalizeWithEvidenceAsync(DefaultConversationTurnRecord turn, LoopRunStatus status, string detail)
+    private async Task<string> TryFinalizeWithEvidenceAsync(DefaultConversationTurnRecord turn, LoopRunStatus status, string detail, DefaultConversationTurnReviewCause reviewCause = DefaultConversationTurnReviewCause.None)
     {
         try
         {
-            _ = await FinalizeAsync(turn, status, detail, CancellationToken.None);
+            _ = await FinalizeAsync(turn, status, detail, CancellationToken.None, reviewCause);
             return detail;
         }
         catch (Exception exception) when (exception is not DefaultConversationTurnInterruptedException)
@@ -454,7 +454,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         }
     }
 
-    private async Task<DefaultConversationTurnRecord> FinalizeAsync(DefaultConversationTurnRecord turn, LoopRunStatus status, string detail, CancellationToken cancellationToken)
+    private async Task<DefaultConversationTurnRecord> FinalizeAsync(DefaultConversationTurnRecord turn, LoopRunStatus status, string detail, CancellationToken cancellationToken, DefaultConversationTurnReviewCause reviewCause = DefaultConversationTurnReviewCause.None)
     {
         if (turn.Checkpoint < DefaultConversationTurnCheckpoint.TerminalPrepared)
         {
@@ -467,7 +467,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 LoopRunStatus.Failed => turn.Run.Fail(now, detail),
                 _ => throw new ArgumentOutOfRangeException(nameof(status), status, "Choose a terminal turn status.")
             };
-            turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.TerminalPrepared, "Desired terminal run status and checkpoint persisted.", DefaultConversationTurnBoundary.TerminalPrepared, cancellationToken, run: terminalRun, reviewDetail: status == LoopRunStatus.NeedsReview ? detail : null);
+            turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.TerminalPrepared, "Desired terminal run status and checkpoint persisted.", DefaultConversationTurnBoundary.TerminalPrepared, cancellationToken, run: terminalRun, reviewDetail: status == LoopRunStatus.NeedsReview ? detail : null, reviewCause: status == LoopRunStatus.NeedsReview ? reviewCause : DefaultConversationTurnReviewCause.None);
         }
 
         await SaveRunProjectionAsync(turn.Run, cancellationToken);
@@ -487,9 +487,10 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         string? providerResponseId = null,
         LoopRunRecord? run = null,
         bool? runProjectionSynchronized = null,
-        string? reviewDetail = null)
+        string? reviewDetail = null,
+        DefaultConversationTurnReviewCause? reviewCause = null)
     {
-        var candidate = turn.Advance(checkpoint, DateTimeOffset.UtcNow, detail, providerOutcome, assistantMessage, providerResponseId, run, runProjectionSynchronized, reviewDetail);
+        var candidate = turn.Advance(checkpoint, DateTimeOffset.UtcNow, detail, providerOutcome, assistantMessage, providerResponseId, run, runProjectionSynchronized, reviewDetail, reviewCause: reviewCause);
         var result = await _turnStore.UpdateAsync(candidate, turn.LifecycleVersion, cancellationToken);
         if (result.Status is not (DefaultConversationTurnStoreStatus.Updated or DefaultConversationTurnStoreStatus.Replay) || result.Record is null)
         {

@@ -46,6 +46,11 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
+        if (trustProvider.MaximumAuthenticationTagUtf8Bytes < 1 || trustProvider.MaximumAuthenticationTagUtf8Bytes > CapabilityCatalogLimits.MaximumArtifactUtf8Bytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(trustProvider), "The trust provider must declare a positive bounded authentication-tag size.");
+        }
+
         _paths = paths;
         _pathGuard = new CapabilityCatalogPathGuard(paths.RootPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
         _trustProvider = trustProvider;
@@ -293,7 +298,7 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
 
     private bool ValidateDocument(CapabilityCatalogDocument document, string workspaceIdentity)
     {
-        if (document.SchemaVersion != CapabilityCatalogDocument.CurrentSchemaVersion || !string.Equals(document.WorkspaceIdentity, workspaceIdentity, StringComparison.Ordinal) || document.Generation < 0 || document.CatalogRevision < 0 || document.Entries is null || document.Operations is null || document.Entries.Count > CapabilityCatalogLimits.MaximumEntries || document.Operations.Count > CapabilityCatalogLimits.MaximumOperationReceipts)
+        if (document.SchemaVersion != CapabilityCatalogDocument.CurrentSchemaVersion || !string.Equals(document.WorkspaceIdentity, workspaceIdentity, StringComparison.Ordinal) || document.Generation < 0 || document.CatalogRevision < 0 || string.IsNullOrEmpty(document.AuthenticationTag) || _strictUtf8.GetByteCount(document.AuthenticationTag) > _trustProvider.MaximumAuthenticationTagUtf8Bytes || document.Entries is null || document.Operations is null || document.Entries.Count > CapabilityCatalogLimits.MaximumEntries || document.Operations.Count > CapabilityCatalogLimits.MaximumOperationReceipts)
         {
             return false;
         }
@@ -437,6 +442,11 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
         var contentDigest = ComputeContentDigest(document).Value;
         var withDigest = document with { ContentDigest = contentDigest, AuthenticationTag = string.Empty };
         var authenticationTag = await _trustProvider.AuthenticateArtifactAsync(workspaceIdentity, document.Generation, contentDigest, cancellationToken);
+        if (string.IsNullOrEmpty(authenticationTag) || _strictUtf8.GetByteCount(authenticationTag) > _trustProvider.MaximumAuthenticationTagUtf8Bytes)
+        {
+            throw new IOException("The trust provider returned an authentication tag outside its declared bound.");
+        }
+
         var json = JsonSerializer.Serialize(withDigest with { AuthenticationTag = authenticationTag }, _jsonOptions) + Environment.NewLine;
         if (Encoding.UTF8.GetByteCount(json) > CapabilityCatalogLimits.MaximumArtifactUtf8Bytes)
         {
