@@ -14,16 +14,20 @@ namespace EmbodySense.Web.Controllers;
 public sealed class WorkspaceController : ControllerBase
 {
     private readonly WebAgentRuntimeHost _host;
+    private readonly IWebClientNotifier _notifier;
 
     /// <summary>
     /// Initializes the workspace endpoint.
     /// </summary>
     /// <param name="host">The Web host that owns workspace initialization.</param>
-    public WorkspaceController(WebAgentRuntimeHost host)
+    /// <param name="notifier">The authenticated client-status publication boundary.</param>
+    public WorkspaceController(WebAgentRuntimeHost host, IWebClientNotifier notifier)
     {
         ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(notifier);
 
         _host = host;
+        _notifier = notifier;
     }
 
     /// <summary>
@@ -34,6 +38,8 @@ public sealed class WorkspaceController : ControllerBase
     [HttpPost("init")]
     public async Task<ActionResult<WebStatus>> Initialize(CancellationToken cancellationToken)
     {
-        return Ok(await _host.InitializeWorkspaceAsync(cancellationToken));
+        var status = await _host.InitializeWorkspaceAsync(cancellationToken);
+        await _notifier.StatusChangedAsync(status);
+        return Ok(status);
     }
 }

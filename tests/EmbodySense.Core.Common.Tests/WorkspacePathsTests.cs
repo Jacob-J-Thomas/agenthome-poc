@@ -37,8 +37,25 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.AgentPath, "capabilities", "catalog.proved.json"), paths.CapabilityCatalogProofPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "capabilities", ".catalog.lock"), paths.CapabilityCatalogLockPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "ROLE.md"), paths.RolePath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "workspace-initialized.json"), paths.WorkspaceInitializationMarkerPath);
         Assert.Equal(Path.Combine(paths.RootPath, "shared"), paths.WorkspaceSharedPath);
         Assert.Equal(Path.Combine(paths.RootPath, "private"), paths.WorkspacePrivatePath);
+    }
+
+    [Fact]
+    public async Task IsInitialized_requires_the_completion_marker_after_role_and_permissions_exist()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        await File.WriteAllTextAsync(paths.RolePath, "role");
+        await File.WriteAllTextAsync(paths.PermissionsPath, "permissions");
+
+        Assert.False(paths.IsInitialized);
+
+        await File.WriteAllTextAsync(paths.WorkspaceInitializationMarkerPath, "marker");
+
+        Assert.True(paths.IsInitialized);
     }
 
     [Theory]

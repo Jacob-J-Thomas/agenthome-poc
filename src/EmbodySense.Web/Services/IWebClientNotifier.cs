@@ -9,6 +9,14 @@ namespace EmbodySense.Web.Services;
 public interface IWebClientNotifier
 {
     /// <summary>
+    /// Broadcasts the current authoritative workspace status to authenticated clients.
+    /// </summary>
+    /// <param name="status">The current Web workspace status.</param>
+    /// <param name="cancellationToken">Reserved for notifier implementations; the SignalR implementation does not observe this token.</param>
+    /// <returns>A task that completes when publication finishes.</returns>
+    Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Publishes the current pending approvals to the owning connection, or broadcasts an empty clear when ownership is absent.
     /// </summary>
     /// <param name="ownerConnectionId">The owning SignalR connection, or <see langword="null"/> or whitespace only when broadcasting an empty clear.</param>

@@ -99,7 +99,12 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
         var paths = new WorkspacePaths(rootPath);
         cancellationToken.ThrowIfCancellationRequested();
         Directory.CreateDirectory(paths.RootPath);
+        if (Directory.Exists(paths.AgentPath))
+        {
+            File.Delete(paths.WorkspaceInitializationMarkerPath);
+        }
         await _capabilitySeeder.SeedAsync(paths, cancellationToken);
         await _scaffolder.ApplyAsync(paths, WorkspaceDefaults.GetDirectories(paths), WorkspaceDefaults.GetSeedFiles(paths), _actor, cancellationToken);
+        await WorkspaceInitializationCompletion.WriteAsync(paths.WorkspaceInitializationMarkerPath, cancellationToken);
     }
 }

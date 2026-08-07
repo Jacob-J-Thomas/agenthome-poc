@@ -22,6 +22,34 @@ public sealed class WebApiControllerTests
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
 
     [Fact]
+    public async Task Workspace_init_rest_path_broadcasts_authoritative_status()
+    {
+        using var workspace = new TestWorkspace();
+        var notifier = new RecordingStatusNotifier();
+        await using var app = CreateApp(workspace.RootPath, out var options, notifier: notifier);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/workspace/init");
+            request.Headers.Add(WebSessionSecurity.HeaderName, app.Services.GetRequiredService<WebSessionSecurity>().Token);
+            request.Content = JsonContent.Create(new { }, options: _jsonOptions);
+
+            using var response = await client.SendAsync(request);
+
+            Assert.True(response.IsSuccessStatusCode);
+            var status = Assert.Single(notifier.Statuses);
+            Assert.True(status.Initialized);
+            Assert.Equal("initialized", status.InitializationState);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Configured_app_serves_status_init_and_approval_endpoints()
     {
         using var workspace = new TestWorkspace();
@@ -62,6 +90,8 @@ public sealed class WebApiControllerTests
             var missingApprovalResponse = await client.SendAsync(missingApproval);
 
             Assert.False(before!.Initialized);
+            Assert.Equal("uninitialized", before.InitializationState);
+            Assert.Null(before.InitializationOutcome);
             Assert.False(string.IsNullOrWhiteSpace(session!.GenerationId));
             Assert.DoesNotContain(app.Services.GetRequiredService<WebSessionSecurity>().Token, await sessionResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
             Assert.Contains("HttpOnly", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
@@ -82,6 +112,8 @@ public sealed class WebApiControllerTests
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedQueryTokenConfiguration.StatusCode);
             Assert.True(initialized.IsSuccessStatusCode);
             Assert.True(after!.Initialized);
+            Assert.Equal("initialized", after.InitializationState);
+            Assert.Equal("initialized", after.InitializationOutcome);
             Assert.Equal("web", after.Client);
             Assert.True(after.PrimaryClient);
             Assert.Equal(options.Url, after.Url);
@@ -241,7 +273,7 @@ public sealed class WebApiControllerTests
         throw new TimeoutException("Approval request was not queued.");
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoggerProvider? loggerProvider = null)
+    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoggerProvider? loggerProvider = null, IWebClientNotifier? notifier = null)
     {
         var port = GetFreePort();
         var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
@@ -250,6 +282,11 @@ public sealed class WebApiControllerTests
         if (loggerProvider is not null)
         {
             builder.Logging.AddProvider(loggerProvider);
+        }
+
+        if (notifier is not null)
+        {
+            builder.Services.AddSingleton<IWebClientNotifier>(notifier);
         }
 
         return BuildApp(builder);
@@ -276,6 +313,21 @@ public sealed class WebApiControllerTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private sealed class RecordingStatusNotifier : IWebClientNotifier
+    {
+        public List<WebStatus> Statuses { get; } = [];
+
+        public Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default)
+        {
+            Statuses.Add(status);
+            return Task.CompletedTask;
+        }
+
+        public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
 }

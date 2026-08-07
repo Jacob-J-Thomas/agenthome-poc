@@ -235,6 +235,80 @@
             aria-labelledby="loopsNav"
             hidden
           >
+            <section
+              id="loopInitializationPanel"
+              class="loop-initialization-panel"
+              aria-labelledby="loopInitializationTitle"
+              aria-describedby="loopInitializationEffects loopInitializationNoRun"
+              hidden
+            >
+              <p class="eyebrow">Workspace prerequisite</p>
+              <h1 id="loopInitializationTitle" tabindex="-1">
+                Initialize this workspace to author loops
+              </h1>
+              <p>
+                Loops are durable, governed workspace artifacts. EmbodySense
+                needs its local body scaffold before it can read a role, show
+                the loop catalog, or enable authoring for
+                <code id="loopInitializationRoot">this workspace</code>.
+              </p>
+              <div
+                id="loopInitializationEffects"
+                class="initialization-effects"
+              >
+                <strong>Initialization will:</strong>
+                <ul>
+                  <li>
+                    create <code>.agent/</code> identity, role, context, memory,
+                    permissions, audit, loop, task, skill, hook, recipe, log,
+                    and export scaffolding;
+                  </li>
+                  <li>
+                    create the workspace <code>private/</code>,
+                    <code>shared/</code>, <code>generated/</code>, and
+                    <code>system/</code> directories;
+                  </li>
+                  <li>
+                    preserve protected seed documents that already exist while
+                    refreshing generated memory, permissions, and audit
+                    guidance.
+                  </li>
+                </ul>
+              </div>
+              <p id="loopInitializationNoRun" class="initialization-no-run">
+                No custom loop is created, and no loop or model inference runs
+                as a side effect.
+              </p>
+              <p
+                id="loopInitializationStatus"
+                class="initialization-status"
+                role="status"
+                aria-live="polite"
+              ></p>
+              <div class="initialization-actions">
+                <button
+                  id="initializeLoopsWorkspaceButton"
+                  class="primary-button"
+                  type="button"
+                >
+                  Initialize workspace
+                </button>
+                <button
+                  id="declineLoopsInitializationButton"
+                  class="secondary-button"
+                  type="button"
+                >
+                  Not now
+                </button>
+              </div>
+            </section>
+            <p
+              id="loopInitializationAnnouncement"
+              class="sr-only"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            ></p>
             <div class="loop-workspace">
               <aside class="loop-sidebar" aria-label="Loop definitions">
                 <div class="sidebar-heading">
