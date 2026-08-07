@@ -4,9 +4,14 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -20,6 +25,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 /// </remarks>
 public sealed class CustomLoopLifecycleService
 {
+    private const int MaxRetentionCleanupReplayTraversalCount = 64;
     private static readonly TimeSpan _integrityWriteTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ICustomLoopRunStore _runStore;
@@ -30,6 +36,8 @@ public sealed class CustomLoopLifecycleService
     private readonly IAuditLog _auditLog;
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly TimeProvider _timeProvider;
+    private readonly ICustomLoopReceiptRetentionPort? _receiptRetention;
+    private readonly string _surface;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopLifecycleService"/> type.
@@ -42,6 +50,8 @@ public sealed class CustomLoopLifecycleService
     /// <param name="auditLog">The audit log.</param>
     /// <param name="executionGate">The execution gate.</param>
     /// <param name="timeProvider">The time provider.</param>
+    /// <param name="receiptRetention">The optional governed lifecycle-control receipt retention port.</param>
+    /// <param name="surface">The canonical runtime surface attributed to retention cleanup.</param>
     public CustomLoopLifecycleService(
         ICustomLoopRunStore runStore,
         ICustomLoopControlOperationStore operationStore,
@@ -50,7 +60,9 @@ public sealed class CustomLoopLifecycleService
         ICustomLoopExecutionCancellationSignal cancellationSignal,
         IAuditLog auditLog,
         ICustomLoopWorkspaceExecutionGate executionGate,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ICustomLoopReceiptRetentionPort? receiptRetention = null,
+        string? surface = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _operationStore = operationStore ?? throw new ArgumentNullException(nameof(operationStore));
@@ -60,6 +72,12 @@ public sealed class CustomLoopLifecycleService
         _auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _receiptRetention = receiptRetention;
+        _surface = surface ?? "runtime";
+        if (!CustomLoopArtifactIdentifier.IsValid(_surface))
+        {
+            throw new ArgumentException("Lifecycle-control receipt retention requires a canonical runtime surface.", nameof(surface));
+        }
     }
 
     /// <summary>
@@ -141,9 +159,26 @@ public sealed class CustomLoopLifecycleService
             return Result(CustomLoopControlStatus.Failed, null, operationId, $"The control-operation receipt could not be started safely: {SafeExceptionClass(exception)}.");
         }
 
+        CustomLoopReceiptCleanupResult? retentionAttempt = null;
+        if (begun.Status == CustomLoopControlOperationStoreStatus.QuotaExceeded && _receiptRetention is not null)
+        {
+            (begun, retentionAttempt) = await RetryBeginAfterGovernedRetentionAsync(pending, begun, cancellationToken);
+        }
+
         if (begun.Status == CustomLoopControlOperationStoreStatus.Conflict)
         {
             return Result(CustomLoopControlStatus.Conflict, null, operationId, "The operation id is already bound to different control-request content.");
+        }
+
+        if (begun.Status == CustomLoopControlOperationStoreStatus.QuotaExceeded)
+        {
+            var status = retentionAttempt?.Status == CustomLoopReceiptCleanupStatus.OperationInProgress ? CustomLoopControlStatus.OperationInProgress : CustomLoopControlStatus.Failed;
+            return Result(status, null, operationId, RetentionFailureDetail(retentionAttempt));
+        }
+
+        if (begun.Status == CustomLoopControlOperationStoreStatus.Expired)
+        {
+            return Result(CustomLoopControlStatus.Failed, null, operationId, "The lifecycle-control operation id has an expired receipt fingerprint, so exact replay is unavailable and the identity cannot be reused for another lifecycle mutation.");
         }
 
         var operation = begun.Operation ?? pending;
@@ -630,6 +665,95 @@ public sealed class CustomLoopLifecycleService
         }
     }
 
+    private async Task<(CustomLoopControlOperationStoreResult StoreResult, CustomLoopReceiptCleanupResult? CleanupResult)> RetryBeginAfterGovernedRetentionAsync(CustomLoopControlOperation pending, CustomLoopControlOperationStoreResult quotaResult, CancellationToken cancellationToken)
+    {
+        var cleanupOperationId = $"control-receipt-retention-{pending.RequestHash}";
+        CustomLoopReceiptCleanupResult? cleanup = null;
+        for (var replayTraversalCount = 0; replayTraversalCount <= MaxRetentionCleanupReplayTraversalCount; replayTraversalCount++)
+        {
+            var command = new CustomLoopReceiptCleanupCommand(
+                CustomLoopReceiptCleanupCommand.CurrentSchemaVersion,
+                CustomLoopReceiptArtifactClass.LifecycleControlReceipt,
+                cleanupOperationId,
+                pending.Actor,
+                _surface,
+                CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactCount,
+                CustomLoopReceiptRetentionPolicy.MaxCleanupBatchArtifactUtf8Bytes);
+            try
+            {
+                cleanup = await _receiptRetention!.CleanupAsync(command, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return (quotaResult, null);
+            }
+
+            var permitsAdmissionRetry = cleanup.IsCommitted || cleanup.IsReplay && cleanup.Status == CustomLoopReceiptCleanupStatus.NothingEligible;
+            if (!permitsAdmissionRetry)
+            {
+                return (quotaResult, cleanup);
+            }
+
+            try
+            {
+                quotaResult = await _operationStore.BeginAsync(pending, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return (quotaResult, cleanup);
+            }
+
+            if (quotaResult.Status != CustomLoopControlOperationStoreStatus.QuotaExceeded || !cleanup.IsReplay)
+            {
+                return (quotaResult, cleanup);
+            }
+
+            if (cleanup.Journal is null
+                || !string.Equals(cleanup.Journal.Request.OperationId, cleanupOperationId, StringComparison.Ordinal)
+                || replayTraversalCount == MaxRetentionCleanupReplayTraversalCount)
+            {
+                return (quotaResult, cleanup);
+            }
+
+            cleanupOperationId = NextRetentionCleanupOperationId(pending.RequestHash, cleanupOperationId);
+        }
+
+        return (quotaResult, cleanup);
+    }
+
+    private static string NextRetentionCleanupOperationId(string requestHash, string priorCleanupOperationId)
+    {
+        var material = Encoding.UTF8.GetBytes(requestHash + "\n" + priorCleanupOperationId);
+        try
+        {
+            return $"control-receipt-retention-{Convert.ToHexString(SHA256.HashData(material)).ToLowerInvariant()}";
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(material);
+        }
+    }
+
+    private static string RetentionFailureDetail(CustomLoopReceiptCleanupResult? cleanup)
+    {
+        return cleanup?.Status switch
+        {
+            CustomLoopReceiptCleanupStatus.OperationInProgress => "A governed lifecycle-control receipt cleanup is inside its bounded ownership window; no run read, lifecycle mutation, cancellation signal, or provider dispatch was attempted.",
+            CustomLoopReceiptCleanupStatus.AuditUnavailable => "Expired lifecycle-control receipts were eligible, but governed retention audit integrity was unavailable; no run read, lifecycle mutation, cancellation signal, or provider dispatch was attempted.",
+            CustomLoopReceiptCleanupStatus.Corrupt or CustomLoopReceiptCleanupStatus.Degraded or CustomLoopReceiptCleanupStatus.Invalid or CustomLoopReceiptCleanupStatus.CleanupConflict => "Lifecycle-control receipt retention evidence is corrupt, ambiguous, invalid, or conflicted and requires operator review; no lifecycle side effect was attempted.",
+            CustomLoopReceiptCleanupStatus.QuotaExhausted => "Lifecycle-control compact proof capacity is exhausted, so raw receipt cleanup cannot safely free admission capacity; no lifecycle side effect was attempted.",
+            _ => "The bounded lifecycle-control receipt capacity is exhausted and no expired audited receipt could be compacted; no run read, lifecycle mutation, cancellation signal, or provider dispatch was attempted."
+        };
+    }
+
     private static CustomLoopRunRecord CreateTransition(CustomLoopRunRecord run, CustomLoopRunStatus status, string eventId, string detail, DateTimeOffset now)
     {
         var isTerminal = status is CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview;
@@ -713,7 +837,7 @@ public sealed class CustomLoopLifecycleService
             throw new ArgumentOutOfRangeException(nameof(expectedLifecycleVersion), "Expected lifecycle version must be at least one.");
         }
 
-        if (string.IsNullOrWhiteSpace(actor) || actor.Length > CustomLoopLimits.MaxTraceReferenceCharacters || !actor.IsNormalized(NormalizationForm.FormC) || actor.Any(character => char.IsControl(character) || char.IsSurrogate(character)))
+        if (string.IsNullOrWhiteSpace(actor) || actor.Length > CustomLoopLimits.MaxTraceReferenceCharacters || actor.Any(character => char.IsControl(character) || char.IsSurrogate(character)) || !actor.IsNormalized(NormalizationForm.FormC))
         {
             throw new ArgumentException("Actor must be bounded normalized text without control or invalid surrogate characters.", nameof(actor));
         }

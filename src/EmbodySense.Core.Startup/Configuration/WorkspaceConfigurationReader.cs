@@ -275,43 +275,39 @@ public sealed class WorkspaceConfigurationReader
         var problems = new List<string>();
         var lineNumber = 0;
         var omittedEvents = 0;
-        await foreach (var line in File.ReadLinesAsync(paths.EventsLogPath, cancellationToken))
+        await using var stream = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var snapshotLength = stream.Length;
+        var buffer = new byte[4096];
+        using var lineBytes = new MemoryStream();
+
+        // The snapshot includes only bytes present when the reader opened the file. Complete newline-delimited records and
+        // one final unterminated record within that boundary use the same parsing policy as a file that ends at EOF. A
+        // concurrently appended partial record therefore remains visible as a read problem instead of being treated as healthy.
+        while (stream.Position < snapshotLength)
         {
-            lineNumber++;
-            if (string.IsNullOrWhiteSpace(line))
+            var remaining = snapshotLength - stream.Position;
+            var count = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining)), cancellationToken);
+            if (count == 0)
             {
-                continue;
+                break;
             }
 
-            try
+            for (var index = 0; index < count; index++)
             {
-                var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, _jsonOptions);
-                if (auditEvent is null)
+                if (buffer[index] == (byte)'\n')
                 {
-                    AddProblem(problems, $"Audit line {lineNumber} was empty after parsing.");
+                    AddAuditLine(lineBytes, ref lineNumber, events, problems, ref omittedEvents);
+                    lineBytes.SetLength(0);
                     continue;
                 }
 
-                if (events.Count == MaxAuditEvents)
-                {
-                    events.RemoveAt(0);
-                    omittedEvents++;
-                }
+                lineBytes.WriteByte(buffer[index]);
+            }
+        }
 
-                events.Add(new WorkspaceAuditLogEvent(
-                    lineNumber,
-                    auditEvent.TimestampUtc,
-                    auditEvent.Actor,
-                    auditEvent.Action,
-                    auditEvent.Target,
-                    auditEvent.Outcome,
-                    auditEvent.Detail,
-                    FormatMetadata(auditEvent.Metadata)));
-            }
-            catch (JsonException exception)
-            {
-                AddProblem(problems, $"Audit line {lineNumber}: {exception.Message}");
-            }
+        if (lineBytes.Length > 0)
+        {
+            AddAuditLine(lineBytes, ref lineNumber, events, problems, ref omittedEvents);
         }
 
         if (omittedEvents > 0)
@@ -320,6 +316,58 @@ public sealed class WorkspaceConfigurationReader
         }
 
         return new WorkspaceAuditConfiguration(paths.EventsLogPath, true, events, problems);
+    }
+
+    private static void AddAuditLine(MemoryStream lineBytes, ref int lineNumber, List<WorkspaceAuditLogEvent> events, List<string> problems, ref int omittedEvents)
+    {
+        lineNumber++;
+        var length = (int)lineBytes.Length;
+        var buffer = lineBytes.GetBuffer();
+        if (length > 0 && buffer[length - 1] == (byte)'\r')
+        {
+            length--;
+        }
+
+        var line = Encoding.UTF8.GetString(buffer, 0, length);
+        if (lineNumber == 1 && line.Length > 0 && line[0] == '\uFEFF')
+        {
+            line = line[1..];
+        }
+
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        try
+        {
+            var auditEvent = JsonSerializer.Deserialize<AuditEvent>(line, _jsonOptions);
+            if (auditEvent is null)
+            {
+                AddProblem(problems, $"Audit line {lineNumber} was empty after parsing.");
+                return;
+            }
+
+            if (events.Count == MaxAuditEvents)
+            {
+                events.RemoveAt(0);
+                omittedEvents++;
+            }
+
+            events.Add(new WorkspaceAuditLogEvent(
+                lineNumber,
+                auditEvent.TimestampUtc,
+                auditEvent.Actor,
+                auditEvent.Action,
+                auditEvent.Target,
+                auditEvent.Outcome,
+                auditEvent.Detail,
+                FormatMetadata(auditEvent.Metadata)));
+        }
+        catch (JsonException exception)
+        {
+            AddProblem(problems, $"Audit line {lineNumber}: {exception.Message}");
+        }
     }
 
     private static IReadOnlyDictionary<string, string> FormatMetadata(IReadOnlyDictionary<string, object?> metadata)

@@ -9,7 +9,7 @@ public sealed class WorkspaceStatusReaderTests
     public async Task Read_returns_paths_initialization_state_and_permission_summary()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         var status = new WorkspaceStatusReader().Read(workspace.RootPath);
 

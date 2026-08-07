@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -6,6 +7,10 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Application.Loops.ReceiptRetention;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Common.Loops.Custom.Retention;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
@@ -103,7 +108,7 @@ public sealed class BrowserFlowTests
     {
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var currentTranscriptPath = workspace.File(".agent", "memory", "conversations", "current.ndjson");
         await File.WriteAllTextAsync(currentTranscriptPath, """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-30T00:00:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"configuration overlap seed"}""" + Environment.NewLine);
         await using var externalLease = new FileStream(currentTranscriptPath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -172,7 +177,7 @@ public sealed class BrowserFlowTests
             Assert.DoesNotContain("Manual trigger", systemCanvas, StringComparison.Ordinal);
             Assert.DoesNotContain("Respond in role", systemCanvas, StringComparison.Ordinal);
             Assert.Contains("5 nodes · 4 edges", await browser.EvaluateStringAsync("document.getElementById('loopHeaderMeta').textContent"), StringComparison.Ordinal);
-            Assert.Contains("not dispatched by the custom-loop or a generic graph executor", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
+            Assert.Contains("does not certify the nodes and edges as an exact execution-order contract", await browser.EvaluateStringAsync("document.getElementById('validationBanner').textContent"), StringComparison.Ordinal);
             await ClickAsync(browser, "#loopSettingsButton");
             var systemPolicy = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
             Assert.Contains("Human message", systemPolicy, StringComparison.Ordinal);
@@ -244,6 +249,19 @@ public sealed class BrowserFlowTests
             await ClickButtonByTextAsync(browser, "#loopApprovals button", "Approve");
             await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('approved browser evidence')");
             Assert.Contains("browser governed tool approved", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.OrdinalIgnoreCase);
+            var publicationInspector = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
+            Assert.Contains("Published", publicationInspector, StringComparison.Ordinal);
+            Assert.Contains("definite", publicationInspector, StringComparison.Ordinal);
+            Assert.DoesNotContain("not published", publicationInspector, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("terminal outcome recorded", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.Ordinal);
+
+            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Browser governed loop'))");
+            await ClickLoopByNameAsync(browser, LoopName);
+            await ClickAsync(browser, "#runsTab");
+            await browser.WaitForExpressionAsync("document.getElementById('inspectorContent').textContent.includes('Published') && !document.getElementById('inspectorContent').textContent.toLowerCase().includes('not published')");
 
             await ClickAsync(browser, "#builderTab");
             await InvokeLoopAsync(browser, "browser-approval-reject");
@@ -331,6 +349,86 @@ public sealed class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
+    public async Task Browser_lazily_inspects_and_explicitly_requests_bounded_receipt_cleanup()
+    {
+        using var workspace = new TestWorkspace();
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
+        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+
+        try
+        {
+            await InitializeWorkspaceAsync(browser);
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            Assert.Equal(0, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention')).length"));
+            Assert.Equal(0, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention/cleanup')).length"));
+
+            await ClickAsync(browser, "#retentionTab");
+            await browser.WaitForExpressionAsync("document.getElementById('retentionContent').textContent.includes('Definition Mutation Receipt') && document.getElementById('retentionContent').textContent.includes('Exact replay horizon')");
+            Assert.Equal(1, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention')).length"));
+            await Task.Delay(250);
+            Assert.Equal(0, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention/cleanup')).length"));
+            Assert.True(
+                await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#retentionContent .retention-cleanup-button')].some((button) => !button.disabled)"),
+                await browser.EvaluateStringAsync("document.getElementById('retentionContent').textContent"));
+
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var ownershipAcquiredAtUtc = DateTimeOffset.UtcNow.AddSeconds(-25);
+            var interruptedRequest = new CustomLoopReceiptCleanupRequest(
+                CustomLoopReceiptCleanupRequest.CurrentSchemaVersion,
+                CustomLoopReceiptArtifactClass.DefinitionMutationReceipt,
+                "browser-retention-recovery",
+                "embodysense.web",
+                "web",
+                ownershipAcquiredAtUtc,
+                CustomLoopReceiptRetentionPolicy.GetReplayCutoffUtc(ownershipAcquiredAtUtc),
+                64,
+                4 * 1024 * 1024);
+            var interruptedJournal = new CustomLoopReceiptCleanupJournal(
+                CustomLoopReceiptCleanupJournal.CurrentSchemaVersion,
+                interruptedRequest,
+                CustomLoopReceiptRetentionContractCodec.ComputeCleanupRequestHash(interruptedRequest),
+                "cleanup-owner-interrupted-browser",
+                Environment.ProcessId,
+                ownershipAcquiredAtUtc,
+                CustomLoopReceiptCleanupStage.IntentPersisted,
+                CustomLoopReceiptCleanupOutcome.Unknown,
+                ownershipAcquiredAtUtc,
+                ImmutableArray<CustomLoopReceiptCleanupCandidate>.Empty,
+                null,
+                0,
+                0,
+                "The browser recovery test interrupted cleanup after its durable intent.");
+            Directory.CreateDirectory(paths.CustomLoopReceiptRetentionPath);
+            await File.WriteAllBytesAsync(paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath, CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(interruptedJournal));
+
+            await ClickAsync(browser, "#refreshRetentionButton");
+            const string TargetCleanup = "[...document.querySelectorAll('#retentionContent .retention-class-card')].find((card) => card.textContent.includes('Definition Mutation Receipt')).querySelector('.retention-cleanup-button')";
+            await browser.WaitForExpressionAsync("document.getElementById('retentionContent').textContent.toLowerCase().includes('recovery pending') && " + TargetCleanup + ".disabled");
+            Assert.Contains("Recovery available", await browser.EvaluateStringAsync("document.getElementById('retentionContent').textContent"), StringComparison.OrdinalIgnoreCase);
+            await browser.WaitForExpressionAsync("!" + TargetCleanup + ".disabled && " + TargetCleanup + ".textContent.includes('Retry cleanup recovery')");
+
+            await browser.EvaluateAsync("window.__retentionConfirmation = ''; window.confirm = (message) => { window.__retentionConfirmation = message; return true; };");
+            await browser.EvaluateAsync(TargetCleanup + ".click()");
+            await browser.WaitForExpressionAsync("document.getElementById('retentionNotice').textContent.includes('Nothing Eligible')");
+
+            Assert.Contains("64 artifacts", await browser.EvaluateStringAsync("window.__retentionConfirmation"), StringComparison.Ordinal);
+            Assert.Contains("4 MiB", await browser.EvaluateStringAsync("window.__retentionConfirmation"), StringComparison.Ordinal);
+            Assert.Equal(1, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention/cleanup')).length"));
+            Assert.Equal(3, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention')).length"));
+            Assert.Contains("No eligible expired receipt evidence was available for cleanup.", await browser.EvaluateStringAsync("document.getElementById('retentionNotice').textContent"), StringComparison.OrdinalIgnoreCase);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Browser_lazily_inspects_and_explicitly_requests_bounded_receipt_cleanup), browser, app);
+            throw;
+        }
+    }
+
+    [InstalledBrowserFact]
     public async Task Incompatible_runtime_is_visible_and_restores_chat_controls_after_rejection()
     {
         using var workspace = new TestWorkspace();
@@ -378,7 +476,17 @@ public sealed class BrowserFlowTests
 
     private static async Task<int> GetCustomDefinitionCountAsync(string workspaceRoot)
     {
-        return (await new CustomLoopDefinitionStore(new WorkspacePaths(workspaceRoot)).ListAsync()).Count;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return (await new CustomLoopDefinitionStore(new WorkspacePaths(workspaceRoot)).ListAsync()).Count;
+            }
+            catch (InvalidOperationException exception) when (attempt < 39 && exception.InnerException is IOException && exception.Message.Contains("locked by another process", StringComparison.Ordinal))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(50));
+            }
+        }
     }
 
     private static async Task SubmitMessageAsync(HeadlessBrowserSession browser, string message)

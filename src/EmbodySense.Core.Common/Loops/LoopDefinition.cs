@@ -43,7 +43,7 @@ public sealed record LoopDefinition(
     /// Gets the loop graph definition.
     /// </summary>
     /// <value>The loop graph definition.</value>
-    public LoopGraphDefinition Graph { get; init; } = null!;
+    public BuiltInLoopGraphDefinition Graph { get; init; } = null!;
 
     /// <summary>
     /// Creates the system-locked built-in conversation-loop definition.
@@ -73,7 +73,7 @@ public sealed record LoopDefinition(
             LoopState.Enabled)
         {
             EditMode = LoopEditMode.SystemLocked,
-            Graph = LoopGraphDefinition.CreateDefaultConversation()
+            Graph = BuiltInLoopGraphDefinition.CreateDefaultConversation()
         };
     }
 }

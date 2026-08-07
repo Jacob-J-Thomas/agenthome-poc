@@ -5,9 +5,11 @@ using EmbodySense.Core.Common.Loops.Models;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
@@ -97,8 +99,10 @@ public sealed class LoopApiControllerTests
                 Assert.Equal(expected.Condition, actual.Condition);
                 Assert.Equal(expected.Description, actual.Description);
             }
-            Assert.All(systemDefinition.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, node.ExecutionSemantics));
-            Assert.All(systemDefinition.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, edge.ExecutionSemantics));
+            Assert.All(systemDefinition.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, node.ExecutionSemantics));
+            Assert.All(systemDefinition.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, edge.ExecutionSemantics));
+            Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, systemDefinition.ExecutionContract.GraphSemantics);
+            Assert.Contains("does not certify", systemDefinition.ExecutionContract.Detail, StringComparison.Ordinal);
             Assert.False(systemDefinition.ExecutionContract.UsesGenericGraphDispatcher);
             Assert.DoesNotContain("\"inferenceSteps\"", systemJson, StringComparison.Ordinal);
             Assert.DoesNotContain("\"triggerPolicy\"", systemJson, StringComparison.Ordinal);
@@ -149,6 +153,92 @@ public sealed class LoopApiControllerTests
             }
 
             Assert.Empty(catalog.CustomDefinitions);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Receipt_retention_api_is_authenticated_no_store_and_explicitly_bounded()
+    {
+        using var workspace = new TestWorkspace();
+        await using var app = CreateApp(workspace.RootPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var rejected = await client.GetAsync("/api/loops/receipt-retention");
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var uninitialized = await SendAsync(client, HttpMethod.Get, "/api/loops/receipt-retention", token);
+            Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { })).StatusCode);
+
+            var postureResponse = await SendAsync(client, HttpMethod.Get, "/api/loops/receipt-retention", token);
+            var posture = await postureResponse.Content.ReadFromJsonAsync<LoopReceiptRetentionPostureSnapshot>(_jsonOptions);
+            var invalid = await SendAsync(client, HttpMethod.Post, "/api/loops/receipt-retention/cleanup", token, new
+            {
+                artifactClass = "Unknown",
+                operationId = "retention-api-invalid",
+                maximumArtifactCount = 64,
+                maximumArtifactUtf8Bytes = 4 * 1024 * 1024
+            });
+            var bounded = await SendAsync(client, HttpMethod.Post, "/api/loops/receipt-retention/cleanup", token, new
+            {
+                artifactClass = "LifecycleControlReceipt",
+                operationId = "retention-api-cleanup",
+                maximumArtifactCount = 65,
+                maximumArtifactUtf8Bytes = 4 * 1024 * 1024
+            });
+
+            Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, uninitialized.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, postureResponse.StatusCode);
+            Assert.True(postureResponse.Headers.CacheControl?.NoStore == true);
+            Assert.NotNull(posture);
+            Assert.Equal(3, posture.Classes.Count);
+            Assert.Contains(posture.Classes, item => item.ArtifactClass == "DefinitionMutationReceipt");
+            Assert.Contains(posture.Classes, item => item.ArtifactClass == "DefinitionTombstone");
+            Assert.Contains(posture.Classes, item => item.ArtifactClass == "LifecycleControlReceipt");
+            Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+            Assert.Equal("Invalid", (await invalid.Content.ReadFromJsonAsync<LoopReceiptCleanupResponse>(_jsonOptions))!.Status);
+            Assert.Equal(HttpStatusCode.BadRequest, bounded.StatusCode);
+            Assert.Equal("Invalid", (await bounded.Content.ReadFromJsonAsync<LoopReceiptCleanupResponse>(_jsonOptions))!.Status);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(LoopReceiptRetentionHealth.Healthy)]
+    [InlineData(LoopReceiptRetentionHealth.Exhausted)]
+    [InlineData(LoopReceiptRetentionHealth.Corrupt)]
+    [InlineData(LoopReceiptRetentionHealth.AuditUnavailable)]
+    [InlineData(LoopReceiptRetentionHealth.OwnershipConflict)]
+    [InlineData(LoopReceiptRetentionHealth.Degraded)]
+    [InlineData(LoopReceiptRetentionHealth.RecoveryPending)]
+    public async Task Receipt_retention_api_preserves_every_safe_health_state(LoopReceiptRetentionHealth health)
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var retention = new StubReceiptRetentionFacade(CreateRetentionPosture(health));
+        await using var app = CreateApp(workspace.RootPath, out var options, retention);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var response = await SendAsync(client, HttpMethod.Get, "/api/loops/receipt-retention", token);
+            var posture = await response.Content.ReadFromJsonAsync<LoopReceiptRetentionPostureSnapshot>(_jsonOptions);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.True(response.Headers.CacheControl?.NoStore == true);
+            Assert.Equal(health, posture!.Health);
+            Assert.Equal(health, Assert.Single(posture.Classes).Health);
         }
         finally
         {
@@ -317,15 +407,85 @@ public sealed class LoopApiControllerTests
         return await client.SendAsync(request);
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options)
+    private static async Task<HttpResponseMessage> SendRawJsonAsync(HttpClient client, HttpMethod method, string path, string token, string json)
+    {
+        var request = new HttpRequestMessage(method, path);
+        request.Headers.Add(WebSessionSecurity.HeaderName, token);
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        return await client.SendAsync(request);
+    }
+
+    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoopReceiptRetentionFacade? receiptRetention = null)
     {
         var port = GetFreePort();
         var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
+        if (receiptRetention is not null)
+        {
+            builder.Services.AddSingleton(receiptRetention);
+        }
+
         var app = builder.Build();
         Program.ConfigurePipeline(app);
         return app;
+    }
+
+    private static LoopReceiptRetentionPostureSnapshot CreateRetentionPosture(LoopReceiptRetentionHealth health)
+    {
+        var blockReason = health switch
+        {
+            LoopReceiptRetentionHealth.Corrupt => "CorruptEvidence",
+            LoopReceiptRetentionHealth.AuditUnavailable => "AuditUnavailable",
+            LoopReceiptRetentionHealth.OwnershipConflict or LoopReceiptRetentionHealth.RecoveryPending => "OwnershipUnresolved",
+            LoopReceiptRetentionHealth.Degraded => "DegradedEvidence",
+            _ => "None"
+        };
+        var exhaustionReason = health == LoopReceiptRetentionHealth.Exhausted ? "ArtifactCountLimit" : "None";
+        var item = new LoopReceiptRetentionClassSnapshot(
+            "DefinitionMutationReceipt",
+            health,
+            2,
+            2048,
+            10_000,
+            128 * 1024 * 1024,
+            64,
+            40 * 1024 * 1024,
+            1,
+            512,
+            100_000,
+            32 * 1024 * 1024,
+            0,
+            null,
+            0,
+            0,
+            DateTimeOffset.Parse("2026-08-30T12:00:00Z"),
+            DateTimeOffset.Parse("2026-08-31T12:00:00Z"),
+            exhaustionReason,
+            blockReason,
+            [new LoopReceiptCategoryUsageSnapshot("Live", 2, 2048)],
+            "Safe retention state projection.");
+        return new LoopReceiptRetentionPostureSnapshot(
+            DateTimeOffset.Parse("2026-08-01T12:00:00Z"),
+            health,
+            [item],
+            0,
+            2560,
+            512 * 1024 * 1024,
+            (512 * 1024 * 1024) - 2560,
+            exhaustionReason,
+            blockReason,
+            "Safe retention state projection.");
+    }
+
+    private sealed class StubReceiptRetentionFacade(LoopReceiptRetentionPostureSnapshot posture) : ILoopReceiptRetentionFacade
+    {
+        public Task<LoopReceiptRetentionPostureSnapshot> GetPostureAsync(CancellationToken cancellationToken = default) => Task.FromResult(posture);
+
+        public Task<LoopReceiptCleanupResponse> CleanupAsync(LoopReceiptCleanupInput input, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new LoopReceiptCleanupResponse("NothingEligible", LoopReceiptRetentionHealth.Healthy, false, "None", "None", 0, 0, "No eligible evidence."));
+        }
     }
 
     private static JsonSerializerOptions CreateJsonOptions()

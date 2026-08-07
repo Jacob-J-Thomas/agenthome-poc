@@ -54,7 +54,7 @@ test("catalog loading is authenticated and projects the system loop as read-only
   );
   assert.match(
     app.elements.validationBanner.textContent,
-    /DefaultConversationLoopRunner.*not dispatched by the custom-loop or a generic graph executor/,
+    /does not certify the nodes and edges as an exact execution-order contract/,
   );
 
   await app.elements.loopSettingsButton.click();
@@ -69,6 +69,395 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("retention stays lazy and performs only an explicit policy-permitted bounded cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let postureReads = 0;
+  server.on("GET", "/api/loops/receipt-retention", () => {
+    postureReads++;
+    return {
+      status: 200,
+      body: createRetentionPosture(),
+    };
+  });
+  server.on("POST", "/api/loops/receipt-retention/cleanup", (call) => ({
+    status: 409,
+    body: {
+      status: "Degraded",
+      health: "Degraded",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "AmbiguousEvidence",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "Evidence is ambiguous, so no raw receipt was removed.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  assert.equal(postureReads, 0);
+  await app.elements.retentionTab.click();
+
+  assert.equal(postureReads, 1);
+  assert.match(app.elements.retentionContent.textContent, /healthy/i);
+  assert.match(
+    app.elements.retentionContent.textContent,
+    /Exact replay horizon/,
+  );
+  const cleanup = findByTag(app.elements.retentionContent, "button").find(
+    (button) => /Clean eligible expired evidence/.test(button.textContent),
+  );
+  await cleanup.click();
+
+  const cleanupCall = server.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loops/receipt-retention/cleanup",
+  );
+  assert.equal(cleanupCall.body.maximumArtifactCount, 64);
+  assert.equal(cleanupCall.body.maximumArtifactUtf8Bytes, 4 * 1024 * 1024);
+  assert.match(app.window.confirmations.at(-1), /explicit request/i);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /no raw receipt was removed/i,
+  );
+  assert.equal(postureReads, 2);
+});
+
+test("retention cleanup retains its operation identity when an ambiguous transport failure is retried", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  let cleanupAttempts = 0;
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => {
+    cleanupAttempts++;
+    if (cleanupAttempts === 1)
+      throw new Error("Connection dropped before a response.");
+    return {
+      status: 200,
+      body: {
+        status: "NothingEligible",
+        health: "Healthy",
+        isCommitted: false,
+        exhaustionReason: "None",
+        cleanupBlockReason: "None",
+        compactedArtifactCount: 0,
+        compactedArtifactUtf8Bytes: 0,
+        detail: "No evidence is eligible for cleanup.",
+      },
+    };
+  });
+  const first = await loadLoopBuilder({ server, localStorage });
+  await first.elements.retentionTab.click();
+  const firstCleanup = findByTag(
+    first.elements.retentionContent,
+    "button",
+  ).find((button) =>
+    /Clean eligible expired evidence/.test(button.textContent),
+  );
+
+  await firstCleanup.click();
+  const storageKey = `embodysense.pending-receipt-cleanup.v1.${encodeURIComponent("C:/workspace")}`;
+  assert.ok(localStorage.getItem(storageKey));
+
+  const second = await loadLoopBuilder({ server, localStorage });
+  await second.elements.retentionTab.click();
+  const secondCleanup = findByTag(
+    second.elements.retentionContent,
+    "button",
+  ).find((button) =>
+    /Clean eligible expired evidence/.test(button.textContent),
+  );
+  await secondCleanup.click();
+
+  const cleanupCalls = server.calls.filter(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loops/receipt-retention/cleanup",
+  );
+  assert.equal(cleanupCalls.length, 2);
+  assert.equal(
+    cleanupCalls[0].body.operationId,
+    cleanupCalls[1].body.operationId,
+  );
+  assert.equal(localStorage.getItem(storageKey), null);
+});
+
+test("retention cleanup remains disabled when Web Locks cannot coordinate its shared identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  const app = await loadLoopBuilder({ server, locks: {} });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+
+  assert.equal(cleanup.disabled, true);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /cannot durably coordinate/i,
+  );
+  await cleanup.click();
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ),
+    false,
+  );
+});
+
+test("retention cleanup remains disabled when its shared identity cannot be persisted", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  localStorage.setItem = () => {
+    throw new Error("Storage quota exceeded.");
+  };
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+
+  assert.equal(cleanup.disabled, true);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /cannot durably coordinate/i,
+  );
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ),
+    false,
+  );
+});
+
+test("an authoritative cleanup outcome remains visible when its shared identity cannot be retired", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  const storageKey = `embodysense.pending-receipt-cleanup.v1.${scope}`;
+  const removeItem = localStorage.removeItem.bind(localStorage);
+  localStorage.removeItem = (key) => {
+    if (key === storageKey) throw new Error("Storage cleanup failed.");
+    removeItem(key);
+  };
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => ({
+    status: 200,
+    body: {
+      status: "NothingEligible",
+      health: "Healthy",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "No evidence is eligible for cleanup.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  await cleanup.click();
+
+  assert.match(app.elements.retentionNotice.textContent, /nothing eligible/i);
+  assert.match(app.elements.retentionNotice.textContent, /remains reserved/i);
+  assert.equal(
+    findByClass(app.elements.retentionContent, "retention-cleanup-button")[0]
+      .disabled,
+    true,
+  );
+  assert.ok(localStorage.getItem(storageKey));
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ).length,
+    1,
+  );
+});
+
+test("a superseded retention read cannot replace a newer blocked posture or re-enable cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const pendingReads = [];
+  server.on(
+    "GET",
+    "/api/loops/receipt-retention",
+    () => new Promise((resolve) => pendingReads.push(resolve)),
+  );
+  const app = await loadLoopBuilder({ server });
+
+  const firstRead = app.elements.retentionTab.click();
+  await flushAsyncWork();
+  const secondRead = app.elements.retentionTab.click();
+  await flushAsyncWork();
+  assert.equal(pendingReads.length, 2);
+
+  pendingReads[1]({
+    status: 200,
+    body: createRetentionPosture({
+      health: "corrupt",
+      cleanupBlockReason: "CorruptEvidence",
+    }),
+  });
+  await secondRead;
+  pendingReads[0]({ status: 200, body: createRetentionPosture() });
+  await firstRead;
+
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  assert.match(app.elements.retentionContent.textContent, /corrupt/i);
+  assert.equal(cleanup.disabled, true);
+  assert.equal(app.elements.refreshRetentionButton.disabled, false);
+});
+
+test("retention posture failure remains visible with its actionable server detail", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 503,
+    body: {
+      detail:
+        "The retention audit sink is unavailable; retry after audit recovery.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.retentionTab.click();
+
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /retention audit sink is unavailable/i,
+  );
+  assert.doesNotMatch(
+    app.elements.retentionNotice.textContent,
+    /Read the current bounded retention posture/i,
+  );
+  assert.match(
+    app.elements.retentionContent.textContent,
+    /Select Refresh posture to retry/i,
+  );
+});
+
+for (const [health, blockReason, exhaustionReason, cleanupEnabled, label] of [
+  ["healthy", "None", "None", true, "Healthy"],
+  ["exhausted", "None", "ArtifactCountLimit", true, "Exhausted"],
+  ["corrupt", "CorruptEvidence", "None", false, "Corrupt"],
+  ["audit-unavailable", "AuditUnavailable", "None", false, "Audit Unavailable"],
+  [
+    "ownership-conflict",
+    "OwnershipUnresolved",
+    "None",
+    false,
+    "Ownership Conflict",
+  ],
+  ["degraded", "PendingEvidence", "None", false, "Degraded"],
+  [
+    "recovery-pending",
+    "OwnershipUnresolved",
+    "None",
+    false,
+    "Recovery Pending",
+  ],
+]) {
+  test(`retention renders ${health} and enables cleanup only when posture permits it`, async () => {
+    const server = new FakeFetchServer(createCatalog());
+    server.on("GET", "/api/loops/receipt-retention", () => ({
+      status: 200,
+      body: createRetentionPosture({
+        health,
+        cleanupBlockReason: blockReason,
+        exhaustionReason,
+        cleanupRecoveryAvailableAtUtc:
+          health === "recovery-pending" ? "2999-08-01T12:00:00Z" : null,
+      }),
+    }));
+    const app = await loadLoopBuilder({ server });
+
+    await app.elements.retentionTab.click();
+
+    const cleanup = findByClass(
+      app.elements.retentionContent,
+      "retention-cleanup-button",
+    )[0];
+    assert.match(
+      app.elements.retentionContent.textContent,
+      new RegExp(label, "i"),
+    );
+    assert.equal(cleanup.disabled, !cleanupEnabled);
+  });
+}
+
+test("retention exposes an explicit recovery retry after the ownership window", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture({
+      health: "recovery-pending",
+      cleanupBlockReason: "OwnershipUnresolved",
+      cleanupRecoveryAvailableAtUtc: "2020-08-01T12:00:00Z",
+    }),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => ({
+    status: 200,
+    body: {
+      status: "NothingEligible",
+      health: "Healthy",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "The stale cleanup journal recovered without removing evidence.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.retentionTab.click();
+  const retry = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  assert.equal(retry.disabled, false);
+  assert.match(retry.textContent, /Retry cleanup recovery/i);
+  await retry.click();
+
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ).length,
+    1,
+  );
 });
 
 test("a rejected system runner contract is shown as invalid throughout the graph", async () => {
@@ -2390,6 +2779,188 @@ test("Runs projects durable timeline and context evidence from the authenticated
   assert.doesNotMatch(
     app.elements.inspectorContent.textContent,
     /chain-of-thought/i,
+  );
+});
+
+test("conversation publication disposition is table-driven, definite, and phase-aware", async (t) => {
+  const publicationId = "publication-operation";
+  const event = (sequence, kind, publishedToInvokingConversation = null) => ({
+    sequence,
+    eventId: `publication-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: 1,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: publicationId,
+  });
+  const cases = [
+    {
+      name: "no publication requested",
+      dispositions: [],
+      events: [],
+      expected: "No conversation publication requested",
+    },
+    {
+      name: "omitted without a bound conversation",
+      dispositions: [
+        publicationDisposition("OmittedNoInvokingConversation", true),
+      ],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Omitted No Invoking Conversation",
+    },
+    {
+      name: "intent is pending",
+      dispositions: [publicationDisposition("Pending", false)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+      ],
+      expected: "Pending",
+      phase: "intent committed",
+    },
+    {
+      name: "publication succeeds once",
+      dispositions: [publicationDisposition("Published", true)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+        event(5, "ConversationPublished", true),
+      ],
+      expected: "Published",
+      phase: "terminal outcome recorded",
+    },
+    {
+      name: "a prior commit is reconciled",
+      dispositions: [publicationDisposition("AlreadyPublished", true)],
+      events: [event(5, "ConversationPublished", true)],
+      expected: "Already Published",
+    },
+    {
+      name: "a definite failure remains distinct",
+      dispositions: [publicationDisposition("DefinitelyFailed", true)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Definitely Failed",
+    },
+    {
+      name: "an uncertain outcome requires review",
+      dispositions: [publicationDisposition("Uncertain", false)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Uncertain",
+    },
+    {
+      name: "duplicate terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("DuplicateTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", true),
+      ],
+      expected: "Integrity warning: Duplicate Terminal Outcomes",
+    },
+    {
+      name: "conflicting terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("ConflictingTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", false),
+      ],
+      expected: "Integrity warning: Conflicting Terminal Outcomes",
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const server = new FakeFetchServer(createCatalog());
+      const run = createRunSnapshot();
+      run.events = scenario.events;
+      run.conversationPublicationDispositions = scenario.dispositions;
+      server.runs = [runSummary(run)];
+      server.runDetails.set(run.id, run);
+      const app = await loadLoopBuilder({ server });
+      await selectCustomLoop(app);
+
+      await app.elements.runsTab.click();
+      await flushAsyncWork();
+
+      assert.match(
+        app.elements.inspectorContent.textContent,
+        new RegExp(scenario.expected),
+      );
+      assert.doesNotMatch(
+        app.elements.inspectorContent.textContent,
+        /not published/i,
+      );
+      if (scenario.phase)
+        assert.match(
+          app.elements.runTimeline.textContent,
+          new RegExp(scenario.phase),
+        );
+    });
+  }
+});
+
+test("multiple conversation publication operations keep canonical grouping and durable order", async () => {
+  const event = (
+    sequence,
+    operationId,
+    kind,
+    publishedToInvokingConversation = null,
+  ) => ({
+    sequence,
+    eventId: `${operationId}-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: operationId === "publication-first" ? 1 : 2,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: operationId,
+  });
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.events = [
+    event(2, "publication-first", "ExitDecisionCompleted", true),
+    event(3, "publication-first", "ConversationPublicationStarted"),
+    event(4, "publication-first", "ConversationPublished", true),
+    event(5, "publication-second", "ExitDecisionCompleted", true),
+    event(6, "publication-second", "ConversationPublicationStarted"),
+    event(7, "publication-second", "ConversationPublished", true),
+  ];
+  run.conversationPublicationDispositions = [
+    publicationDisposition("Published", true, false, "publication-first"),
+    publicationDisposition("Published", true, false, "publication-second"),
+  ];
+  server.runs = [runSummary(run)];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  const inspector = app.elements.inspectorContent.textContent;
+  assert.ok(
+    inspector.indexOf("publication-first") <
+      inspector.indexOf("publication-second"),
+  );
+  assert.equal(inspector.match(/publication-first/g)?.length, 1);
+  assert.equal(inspector.match(/publication-second/g)?.length, 1);
+  assert.equal(inspector.match(/Published · definite/g)?.length, 2);
+  assert.equal(
+    app.elements.runTimeline.textContent.match(/terminal outcome recorded/g)
+      ?.length,
+    2,
   );
 });
 
@@ -8365,10 +8936,10 @@ function createCatalog() {
       },
       executionContract: {
         runner: "DefaultConversationLoopRunner",
-        graphSemantics: "validated-runner-contract",
+        graphSemantics: "authority-topology-only",
         usesGenericGraphDispatcher: false,
         detail:
-          "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor.",
+          "The dedicated runner accepts this system-owned graph as its authority topology, but it does not certify the nodes and edges as an exact execution-order contract.",
       },
     },
     customDefinitions: [createCustomDefinition()],
@@ -8452,7 +9023,7 @@ function createSystemNode(id, displayName, kind, capabilityIds, description) {
     kind,
     editMode: "system-locked",
     capabilityIds,
-    executionSemantics: "validated-runner-contract",
+    executionSemantics: "authority-topology-only",
   };
 }
 
@@ -8463,7 +9034,7 @@ function createSystemEdge(id, fromNodeId, toNodeId, condition, description) {
     toNodeId,
     condition,
     description,
-    executionSemantics: "validated-runner-contract",
+    executionSemantics: "authority-topology-only",
   };
 }
 
@@ -8524,6 +9095,39 @@ function createContextPolicy(overrides = {}) {
       publishToInvokingConversation:
         overrides.publishToInvokingConversation ?? false,
     },
+  };
+}
+
+function publicationDisposition(
+  disposition,
+  isDefinite,
+  hasIntegrityWarning = false,
+  operationId = "publication-operation",
+) {
+  return {
+    operationId,
+    disposition,
+    detail:
+      "Canonical publication disposition supplied by the public runtime projection.",
+    isDefinite,
+    hasIntegrityWarning,
+    eventSequences: [],
+  };
+}
+
+function runSummary(run) {
+  return {
+    id: run.id,
+    loopId: run.loopId,
+    definitionVersion: run.admittedDefinition.definitionVersion,
+    status: run.status,
+    createdAtUtc: run.createdAtUtc,
+    updatedAtUtc: run.updatedAtUtc,
+    completedAtUtc: run.completedAtUtc,
+    iteration: run.checkpoint.iteration,
+    nextStepIndex: run.checkpoint.nextStepIndex,
+    failureCode: run.failureCode,
+    isDeleted: false,
   };
 }
 
@@ -8795,6 +9399,54 @@ function authoringResponse(status, definition) {
     validationErrors: [],
     conflict: null,
     detail: null,
+  };
+}
+
+function createRetentionPosture({
+  health = "healthy",
+  cleanupBlockReason = "None",
+  exhaustionReason = "None",
+  cleanupRecoveryAvailableAtUtc = null,
+} = {}) {
+  return {
+    generatedAtUtc: "2026-08-01T12:00:00Z",
+    health,
+    classes: [
+      {
+        artifactClass: "DefinitionMutationReceipt",
+        health,
+        artifactCount: 2,
+        artifactUtf8Bytes: 2048,
+        maximumArtifactCount: 10000,
+        maximumArtifactUtf8Bytes: 134217728,
+        reservedArtifactCount: 64,
+        reservedArtifactUtf8Bytes: 41943040,
+        proofCount: 1,
+        proofUtf8Bytes: 512,
+        maximumProofCount: 100000,
+        maximumProofUtf8Bytes: 33554432,
+        activeCleanupJournalUtf8Bytes: 0,
+        cleanupRecoveryAvailableAtUtc,
+        completedCleanupOperationCount: 0,
+        completedCleanupHistoryUtf8Bytes: 0,
+        oldestExactReplayExpiresAtUtc: "2026-08-30T12:00:00Z",
+        newestExactReplayExpiresAtUtc: "2026-08-31T12:00:00Z",
+        exhaustionReason,
+        cleanupBlockReason,
+        categories: [
+          { category: "Live", artifactCount: 2, utf8Bytes: 2048 },
+          { category: "ExpiredIdempotency", artifactCount: 1, utf8Bytes: 512 },
+        ],
+        detail: "Retention evidence requires review before cleanup.",
+      },
+    ],
+    activeCleanupJournalUtf8Bytes: 0,
+    accountedWorkspaceUtf8Bytes: 2560,
+    maximumWorkspaceUtf8Bytes: 536870912,
+    availableWorkspaceUtf8Bytes: 536868352,
+    exhaustionReason,
+    cleanupBlockReason,
+    detail: "Retention evidence requires review; cleanup stays explicit.",
   };
 }
 

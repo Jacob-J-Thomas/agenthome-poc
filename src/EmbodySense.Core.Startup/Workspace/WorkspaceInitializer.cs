@@ -1,5 +1,7 @@
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Workspace;
+using EmbodySense.Core.Startup.Capabilities;
 
 namespace EmbodySense.Core.Startup.Workspace;
 
@@ -8,12 +10,14 @@ namespace EmbodySense.Core.Startup.Workspace;
 /// </summary>
 /// <remarks>
 /// The initializer attributes its completion audit event to the configured interface actor.
-/// Scaffolding is ordered but non-transactional: existing protected seeds are preserved, while
-/// cancellation, I/O, and audit failures propagate after any earlier changes remain in place.
+/// Root preparation, built-in catalog seeding, and scaffolding are ordered but non-transactional: existing protected state
+/// is preserved, while cancellation, catalog, I/O, and audit failures propagate after any earlier changes remain in place.
+/// Successful initialization is audited only after catalog seeding and the remaining scaffold both complete.
 /// </remarks>
 public sealed class WorkspaceInitializer : IWorkspaceInitializer
 {
     private readonly WorkspaceScaffolder _scaffolder;
+    private readonly BuiltInCapabilityCatalogSeeder _capabilitySeeder;
     private readonly string _actor;
 
     /// <summary>
@@ -36,12 +40,22 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
     /// </summary>
     /// <param name="scaffolder">The persistence component that performs ordered scaffold writes.</param>
     /// <param name="actor">The nonblank actor recorded for successful initialization.</param>
-    public WorkspaceInitializer(WorkspaceScaffolder scaffolder, string actor = WorkspaceActors.Web)
+    public WorkspaceInitializer(WorkspaceScaffolder scaffolder, string actor = WorkspaceActors.Web) : this(scaffolder, new BuiltInCapabilityCatalogSeeder(), actor)
+    {
+    }
+
+    /// <summary>Creates an initializer over explicit persistence and capability-seeding components.</summary>
+    /// <param name="scaffolder">The persistence component that performs ordered scaffold writes.</param>
+    /// <param name="capabilitySeeder">The Startup-owned built-in capability seeder.</param>
+    /// <param name="actor">The nonblank actor recorded for successful initialization.</param>
+    public WorkspaceInitializer(WorkspaceScaffolder scaffolder, BuiltInCapabilityCatalogSeeder capabilitySeeder, string actor = WorkspaceActors.Web)
     {
         ArgumentNullException.ThrowIfNull(scaffolder);
+        ArgumentNullException.ThrowIfNull(capabilitySeeder);
         ArgumentException.ThrowIfNullOrWhiteSpace(actor);
 
         _scaffolder = scaffolder;
+        _capabilitySeeder = capabilitySeeder;
         _actor = actor;
     }
 
@@ -63,6 +77,17 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
         return new WorkspaceInitializer(WorkspaceActors.Web);
     }
 
+    /// <summary>Creates an initializer over one explicit server-owned file trust root.</summary>
+    /// <param name="trustRootPath">The server-owned root kept outside mutable workspace storage.</param>
+    /// <param name="actor">The nonblank actor recorded for successful initialization.</param>
+    /// <returns>An initializer whose capability seeder uses only the supplied trust root.</returns>
+    public static WorkspaceInitializer ForFileCapabilityTrustRoot(string trustRootPath, string actor = WorkspaceActors.Web)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(trustRootPath);
+        var seeder = new BuiltInCapabilityCatalogSeeder(new FileCapabilityCatalogTrustProvider(trustRootPath));
+        return new WorkspaceInitializer(new WorkspaceScaffolder(), seeder, actor);
+    }
+
     /// <summary>
     /// Applies the canonical directories and seed documents, then records successful completion.
     /// </summary>
@@ -72,10 +97,13 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
     public async Task InitializeAsync(string rootPath, CancellationToken cancellationToken = default)
     {
         var paths = new WorkspacePaths(rootPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        Directory.CreateDirectory(paths.RootPath);
         if (Directory.Exists(paths.AgentPath))
         {
             File.Delete(paths.WorkspaceInitializationMarkerPath);
         }
+        await _capabilitySeeder.SeedAsync(paths, cancellationToken);
         await _scaffolder.ApplyAsync(paths, WorkspaceDefaults.GetDirectories(paths), WorkspaceDefaults.GetSeedFiles(paths), _actor, cancellationToken);
         await WorkspaceInitializationCompletion.WriteAsync(paths.WorkspaceInitializationMarkerPath, cancellationToken);
     }

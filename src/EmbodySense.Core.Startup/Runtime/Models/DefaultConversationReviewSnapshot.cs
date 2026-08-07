@@ -1,3 +1,5 @@
+using EmbodySense.Core.Application.Loops.Models;
+
 namespace EmbodySense.Core.Startup.Runtime.Models;
 
 /// <summary>
@@ -10,4 +12,6 @@ public sealed record DefaultConversationReviewSnapshot(
     int LifecycleVersion,
     string ProviderAttemptId,
     string ProviderCorrelationId,
-    string Detail);
+    string Detail,
+    DefaultConversationTurnReviewClassification Classification,
+    string AllowedAction);
