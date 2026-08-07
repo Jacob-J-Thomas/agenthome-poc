@@ -34,7 +34,8 @@ internal static class CapabilityCatalogNativeFileSystem
     private const ushort UnixFileTypeMask = 0xF000;
     private const ushort UnixRegularFile = 0x8000;
     private const uint StatxMode = 0x2;
-    private const uint StatxInode = 0x100;
+    private const uint AttributeVolumeCapabilities = 0x00020000;
+    private const uint AttributeVolumeInfo = 0x80000000;
 
     public static SafeFileHandle? OpenDirectory(string fullPath, SafeFileHandle? parent, string? name, bool create, ICapabilityCatalogDurabilityBarrier durabilityBarrier, out bool created)
     {
@@ -169,28 +170,24 @@ internal static class CapabilityCatalogNativeFileSystem
             return $"windows:{information.VolumeSerialNumber:x16}:{Convert.ToHexString(information.FileId.ToByteArray()).ToLowerInvariant()}";
         }
 
-        // TODO(#271): Review the Linux/macOS device/inode physical identity lifetime.
         if (OperatingSystem.IsLinux())
         {
-            if (statx(directory, string.Empty, AtEmptyPath, StatxInode, out var information) != 0 || (information.Mask & StatxInode) == 0)
-            {
-                throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
-            }
-
-            return $"linux:{information.DeviceMajor:x8}:{information.DeviceMinor:x8}:{information.Inode:x16}";
+            throw new PlatformNotSupportedException(CapabilityCatalogWorkspaceIdentity.LinuxUnsupportedMessage);
         }
 
         if (OperatingSystem.IsMacOS())
         {
-            if (fstat(directory, out CapabilityCatalogMacStat information) != 0)
-            {
-                throw NativeIOException("The capability catalog workspace physical identity could not be read", Marshal.GetLastPInvokeError());
-            }
-
-            return $"macos:{information.Device:x8}:{information.Inode:x16}";
+            CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(fstat(directory, out CapabilityCatalogMacStat information), Marshal.GetLastPInvokeError());
+            return CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", information.Device, 0, information.Inode, information.Generation, information.BirthTime.Seconds, information.BirthTime.Nanoseconds, information.Generation == 0 && MacVolumeUsesNonRecycledObjectIds(directory));
         }
 
-        throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows, Linux, and macOS.");
+        throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows and macOS.");
+    }
+
+    private static bool MacVolumeUsesNonRecycledObjectIds(SafeFileHandle directory)
+    {
+        var attributes = new CapabilityCatalogMacAttributeList { BitmapCount = 5, VolumeAttributes = AttributeVolumeInfo | AttributeVolumeCapabilities };
+        return CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(fgetattrlist(directory, ref attributes, out CapabilityCatalogMacVolumeCapabilitiesBuffer capabilities, (nuint)Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>(), 0), Marshal.GetLastPInvokeError(), capabilities.Length, (uint)Marshal.SizeOf<CapabilityCatalogMacVolumeCapabilitiesBuffer>(), capabilities.ValidFormatCapabilities, capabilities.FormatCapabilities);
     }
 
     public static string GetDirectoryEnumerationPath(SafeFileHandle directory)
@@ -542,7 +539,7 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
-    private static IOException NativeIOException(string message, int error)
+    internal static IOException NativeIOException(string message, int error)
     {
         return new IOException($"{message}: {new Win32Exception(error).Message}", unchecked((int)(0x80070000U | (uint)error)));
     }
@@ -615,6 +612,9 @@ internal static class CapabilityCatalogNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fchmod(SafeFileHandle file, int mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fgetattrlist(SafeFileHandle file, ref CapabilityCatalogMacAttributeList attributeList, out CapabilityCatalogMacVolumeCapabilitiesBuffer attributeBuffer, nuint attributeBufferSize, uint options);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int statx(SafeFileHandle directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out CapabilityCatalogLinuxStatx information);
