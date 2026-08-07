@@ -5,6 +5,8 @@ namespace EmbodySense.Core.Persistence.Tests.Capabilities;
 
 internal sealed class FailingCapabilityCatalogTrustProvider(ICapabilityCatalogTrustProvider inner) : ICapabilityCatalogTrustProvider
 {
+    public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
+
     public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
 
     public bool FailAfterNextInitialization { get; set; }

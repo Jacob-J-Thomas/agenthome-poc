@@ -46,6 +46,7 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
+        trustProvider.RequireDisjointWorkspace(paths.RootPath);
         if (trustProvider.MaximumAuthenticationTagUtf8Bytes < 1 || trustProvider.MaximumAuthenticationTagUtf8Bytes > CapabilityCatalogLimits.MaximumArtifactUtf8Bytes)
         {
             throw new ArgumentOutOfRangeException(nameof(trustProvider), "The trust provider must declare a positive bounded authentication-tag size.");

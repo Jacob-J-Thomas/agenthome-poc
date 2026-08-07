@@ -614,6 +614,8 @@ public sealed class CredentialRegistryStoreTests
         public int InitializeCount { get; private set; }
         public int AuthenticateCount { get; private set; }
 
+        public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
+
         public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default) => inner.ReadAsync(workspaceIdentity, cancellationToken);
 
         public async Task<CapabilityCatalogTrustState> InitializeAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default)
@@ -635,6 +637,7 @@ public sealed class CredentialRegistryStoreTests
     private sealed class InvalidAuthenticationTagTrustProvider(ICapabilityCatalogTrustProvider inner, string authenticationTag) : ICapabilityCatalogTrustProvider
     {
         public int MaximumAuthenticationTagUtf8Bytes => 64;
+        public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
         public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default) => inner.ReadAsync(workspaceIdentity, cancellationToken);
         public Task<CapabilityCatalogTrustState> InitializeAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default) => inner.InitializeAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
         public Task<string> AuthenticateArtifactAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default) => Task.FromResult(authenticationTag);
