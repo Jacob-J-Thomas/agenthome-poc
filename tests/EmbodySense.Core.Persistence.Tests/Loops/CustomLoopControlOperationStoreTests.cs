@@ -193,6 +193,26 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.DoesNotContain("nesting depth", malformed.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("D800")]
+    [InlineData("DC00")]
+    public async Task Persisted_control_operation_with_malformed_actor_fails_through_canonical_format_validation(string codeUnit)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var pending = Pending("malformed-control-actor", AuditSchema.Actors.Web);
+        var store = new CustomLoopControlOperationStore(paths);
+
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var path = Path.Combine(paths.CustomLoopControlOperationsPath, pending.OperationId + ".json");
+        var persisted = await File.ReadAllTextAsync(path);
+        var malformed = persisted.Replace(AuditSchema.Actors.Web, "\\u" + codeUnit, StringComparison.Ordinal);
+        Assert.NotEqual(persisted, malformed);
+        await File.WriteAllTextAsync(path, malformed);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
+    }
+
     [Fact]
     public async Task Cleanup_compacts_only_expired_audited_receipts_and_retains_an_explicit_expiry_fingerprint()
     {

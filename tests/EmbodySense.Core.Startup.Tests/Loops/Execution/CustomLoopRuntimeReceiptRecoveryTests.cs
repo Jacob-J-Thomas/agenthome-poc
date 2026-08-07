@@ -31,7 +31,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
     public async Task Pending_receipt_with_an_already_admitted_run_is_bound_and_reconciled_before_a_new_busy_owner()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var runtime = await CreateRuntimeFactory(workspace).CreateAsync(
@@ -135,7 +135,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
     public async Task Pending_captured_receipt_terminalizes_and_replays_busy_without_losing_its_context_binding()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var runtime = await CreateRuntimeFactory(workspace).CreateAsync(
@@ -218,7 +218,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
     public async Task Receipt_completion_failure_after_admission_parks_the_run_and_a_later_replay_completes_without_dispatch()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var runtime = await CreateRuntimeFactory(workspace).CreateAsync(
@@ -262,7 +262,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
     public async Task Unreadable_invocation_receipt_is_reported_as_non_definitive()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         const string OperationId = "invoke-unreadable-receipt";

@@ -19,7 +19,8 @@ public sealed class LoopAuthoringFacadeTests
         var facade = new LoopAuthoringFacade(workspace.RootPath);
 
         var initialCatalog = await facade.GetCatalogAsync();
-        var created = await facade.CreateAsync("create-facade-loop");
+        var firstSaveInput = initialCatalog.DraftTemplate.Definition with { DisplayName = "Explicit facade loop", Description = "First durable version." };
+        var created = await facade.CreateAsync("create-facade-loop", firstSaveInput);
         var createdDefinition = Assert.IsType<LoopDefinitionSnapshot>(created.Definition);
         var hostileText = "Review </script><script>alert(\"owned\")</script> & keep it as data.";
         var updateInput = CreateInput(createdDefinition, hostileText);
@@ -37,6 +38,10 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal("default-assistant", initialCatalog.RoleId);
         Assert.Equal("default-conversation", initialCatalog.SystemDefault.Id);
         Assert.Empty(initialCatalog.CustomDefinitions);
+        Assert.Equal(initialCatalog.RoleId, initialCatalog.DraftTemplate.RoleId);
+        Assert.Equal("Untitled loop", initialCatalog.DraftTemplate.Definition.DisplayName);
+        Assert.Null(Assert.Single(initialCatalog.DraftTemplate.Definition.InferenceSteps).Id);
+        Assert.Equal(LoopContextPolicyMode.Inherit, initialCatalog.DraftTemplate.Definition.InferenceSteps.Single().ContextPolicy.Mode);
         Assert.Equal(50, initialCatalog.Limits.MaxDefinitionsPerWorkspace);
         Assert.Equal(1, initialCatalog.Limits.MinInferenceSteps);
         Assert.Equal(5, initialCatalog.Limits.MaxInferenceSteps);
@@ -52,6 +57,10 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal(LoopCustomToolAuthorityCeiling.WorkspaceReadOnly, initialCatalog.Tools.CustomAuthorityCeiling);
         Assert.Equal("Created", created.Status);
         Assert.True(created.IsCommitted);
+        Assert.Equal("Explicit facade loop", createdDefinition.DisplayName);
+        Assert.Equal("First durable version.", createdDefinition.Description);
+        Assert.Equal(1, createdDefinition.DefinitionVersion);
+        Assert.NotNull(Assert.Single(createdDefinition.InferenceSteps).Id);
         Assert.Equal(initialCatalog.RoleId, createdDefinition.RoleId);
         Assert.Equal("Updated", updated.Status);
         Assert.Equal(2, updatedDefinition.DefinitionVersion);
@@ -112,7 +121,7 @@ public sealed class LoopAuthoringFacadeTests
             Assert.Equal(expected.Kind, actual.Kind);
             Assert.Equal(expected.EditMode, actual.EditMode);
             Assert.Equal(expected.CapabilityIds, actual.CapabilityIds);
-            Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, actual.ExecutionSemantics);
+            Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, actual.ExecutionSemantics);
         }
 
         Assert.Equal(canonical.Graph.Edges.Length, projection.Graph.Edges.Count);
@@ -125,13 +134,14 @@ public sealed class LoopAuthoringFacadeTests
             Assert.Equal(expected.ToNodeId, actual.ToNodeId);
             Assert.Equal(expected.Condition, actual.Condition);
             Assert.Equal(expected.Description, actual.Description);
-            Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, actual.ExecutionSemantics);
+            Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, actual.ExecutionSemantics);
         }
 
         Assert.Equal("DefaultConversationLoopRunner", projection.ExecutionContract.Runner);
-        Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, projection.ExecutionContract.GraphSemantics);
+        Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, projection.ExecutionContract.GraphSemantics);
         Assert.False(projection.ExecutionContract.UsesGenericGraphDispatcher);
-        Assert.Contains("not dispatched independently", projection.ExecutionContract.Detail, StringComparison.Ordinal);
+        Assert.Contains("does not certify", projection.ExecutionContract.Detail, StringComparison.Ordinal);
+        Assert.Contains("assembles context before durable user acceptance", projection.ExecutionContract.Detail, StringComparison.Ordinal);
         Assert.DoesNotContain(projection.Graph.Nodes, node => node.Id is "trigger" or "exit");
     }
 
@@ -139,7 +149,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Structurally_valid_noncanonical_system_graph_is_not_labeled_runner_compatible()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var canonical = LoopDefinition.CreateDefaultConversation();
         const string AlternateEntryNodeId = "alternate-entry";
@@ -181,7 +191,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Missing_system_authority_in_initialized_workspace_fails_closed()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         File.Delete(new WorkspacePaths(workspace.RootPath).DefaultConversationLoopDefinitionPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath);
 
@@ -196,7 +206,7 @@ public sealed class LoopAuthoringFacadeTests
     public async Task Substituted_system_authority_identity_fails_closed()
     {
         using var workspace = new TestWorkspace();
-        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var path = new WorkspacePaths(workspace.RootPath).DefaultConversationLoopDefinitionPath;
         var root = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
         root["id"] = "substituted-authority";

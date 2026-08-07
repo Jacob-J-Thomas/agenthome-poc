@@ -27,7 +27,7 @@ public sealed class CliCommandTests
     public async Task StatusCommand_reports_initialized_workspace_and_policy_summary()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
 
         var result = Capture(() => StatusCommand.Run(new CliArguments(["status", workspace.RootPath])));
 

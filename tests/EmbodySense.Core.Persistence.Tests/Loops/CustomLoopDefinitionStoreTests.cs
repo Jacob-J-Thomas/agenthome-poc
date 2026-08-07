@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -648,6 +649,36 @@ public sealed class CustomLoopDefinitionStoreTests
         Assert.Contains("canonical role-bound request", exception.Message, StringComparison.Ordinal);
         Assert.Null(await store.GetAsync(definition.Id));
         Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(mutation.OperationId)).Status);
+    }
+
+    [Fact]
+    public async Task Durable_Create_accepts_and_reloads_a_complete_first_save_request_hash()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var definition = CreateDefinition("loop-first-save");
+        var input = new CustomLoopDefinitionInput(
+            definition.DisplayName,
+            definition.Description,
+            definition.TriggerPolicy,
+            definition.InferenceSteps.Select(step => new CustomLoopInferenceStepInput(null, step.Name, step.Instruction, step.ContextPolicy)).ToArray(),
+            definition.ToolAssignments,
+            definition.ExitPolicy);
+        var canonicalRequest = new { SchemaVersion = 1, Kind = CustomLoopDefinitionMutationKind.Create, LoopId = string.Empty, RoleId = definition.RoleId.Normalize(System.Text.NormalizationForm.FormC), ExpectedDefinitionVersion = 0, Input = input };
+        var requestHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(canonicalRequest))).ToLowerInvariant();
+        var mutation = new CustomLoopDefinitionMutationRequest(CustomLoopDefinitionMutationKind.Create, definition.LastMutationOperationId, requestHash, definition.Id, definition.RoleId, null, definition, null, definition.CreatedAtUtc);
+
+        var created = await new CustomLoopDefinitionStore(paths).CreateAsync(definition, mutation);
+        var auditStatus = await new CustomLoopDefinitionStore(paths).MarkOperationOutcomeAuditedAsync(mutation.OperationId);
+        var restarted = new CustomLoopDefinitionStore(paths);
+        var operation = await restarted.GetMutationOperationAsync(mutation.OperationId);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, created.Status);
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, auditStatus);
+        AssertDefinition(definition, await restarted.GetAsync(definition.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, operation.Status);
+        Assert.Equal(requestHash, operation.Operation!.RequestHash);
+        AssertDefinition(definition, operation.Operation.PlannedDefinition);
     }
 
     [Fact]

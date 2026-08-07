@@ -33,9 +33,9 @@ public sealed class LoopApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var rejected = await client.GetAsync("/api/loops");
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var uninitializedCatalog = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
-            var uninitializedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-before-init" });
+            var uninitializedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-before-init", definition = CreateFirstSaveDefinition() });
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
             var catalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
             var catalog = (await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions))!;
@@ -56,6 +56,11 @@ public sealed class LoopApiControllerTests
             Assert.True(catalogResponse.Headers.CacheControl?.NoStore == true);
             Assert.Equal("default-conversation", catalog.SystemDefault.Id);
             Assert.Empty(catalog.CustomDefinitions);
+            Assert.Equal(1, catalog.DraftTemplate.SchemaVersion);
+            Assert.Equal(catalog.RoleId, catalog.DraftTemplate.RoleId);
+            Assert.Equal("Untitled loop", catalog.DraftTemplate.Definition.DisplayName);
+            Assert.Null(Assert.Single(catalog.DraftTemplate.Definition.InferenceSteps).Id);
+            Assert.Equal(LoopContextPolicyMode.Inherit, catalog.DraftTemplate.Definition.InferenceSteps.Single().ContextPolicy.Mode);
             Assert.Equal(
                 [LoopCapabilityIds.ConversationTurn, LoopCapabilityIds.ConversationHistory, LoopCapabilityIds.AgentContext, LoopCapabilityIds.ProviderInference, LoopCapabilityIds.WorkspaceCommand, LoopCapabilityIds.ApprovalRequest, LoopCapabilityIds.AuditWrite],
                 catalog.SystemDefault.CapabilityIds);
@@ -94,8 +99,10 @@ public sealed class LoopApiControllerTests
                 Assert.Equal(expected.Condition, actual.Condition);
                 Assert.Equal(expected.Description, actual.Description);
             }
-            Assert.All(systemDefinition.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, node.ExecutionSemantics));
-            Assert.All(systemDefinition.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.ValidatedRunnerContract, edge.ExecutionSemantics));
+            Assert.All(systemDefinition.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, node.ExecutionSemantics));
+            Assert.All(systemDefinition.Graph.Edges, edge => Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, edge.ExecutionSemantics));
+            Assert.Equal(SystemLoopExecutionSemantics.AuthorityTopologyOnly, systemDefinition.ExecutionContract.GraphSemantics);
+            Assert.Contains("does not certify", systemDefinition.ExecutionContract.Detail, StringComparison.Ordinal);
             Assert.False(systemDefinition.ExecutionContract.UsesGenericGraphDispatcher);
             Assert.DoesNotContain("\"inferenceSteps\"", systemJson, StringComparison.Ordinal);
             Assert.DoesNotContain("\"triggerPolicy\"", systemJson, StringComparison.Ordinal);
@@ -115,6 +122,45 @@ public sealed class LoopApiControllerTests
     }
 
     [Fact]
+    public async Task Loop_create_rejects_missing_or_null_first_save_definitions_as_invalid_requests()
+    {
+        using var workspace = new TestWorkspace();
+        await using var app = CreateApp(workspace.RootPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { })).StatusCode);
+
+            var missingDefinition = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "missing-definition" });
+            var nullDefinition = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "null-definition", definition = (LoopDefinitionInput?)null });
+            var missingBody = (await missingDefinition.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!;
+            var nullBody = (await nullDefinition.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!;
+            var catalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
+            var catalog = (await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions))!;
+
+            Assert.Equal(HttpStatusCode.BadRequest, missingDefinition.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, nullDefinition.StatusCode);
+            foreach (var response in new[] { missingBody, nullBody })
+            {
+                Assert.Equal("Invalid", response.Status);
+                Assert.False(response.IsCommitted);
+                var error = Assert.Single(response.ValidationErrors);
+                Assert.Equal("definition_required", error.Code);
+                Assert.Equal("definition", error.Field);
+            }
+
+            Assert.Empty(catalog.CustomDefinitions);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Receipt_retention_api_is_authenticated_no_store_and_explicitly_bounded()
     {
         using var workspace = new TestWorkspace();
@@ -125,7 +171,7 @@ public sealed class LoopApiControllerTests
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var rejected = await client.GetAsync("/api/loops/receipt-retention");
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var uninitialized = await SendAsync(client, HttpMethod.Get, "/api/loops/receipt-retention", token);
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { })).StatusCode);
 
@@ -185,7 +231,7 @@ public sealed class LoopApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var response = await SendAsync(client, HttpMethod.Get, "/api/loops/receipt-retention", token);
             var posture = await response.Content.ReadFromJsonAsync<LoopReceiptRetentionPostureSnapshot>(_jsonOptions);
 
@@ -210,14 +256,19 @@ public sealed class LoopApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { })).StatusCode);
+            var initialCatalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
+            var initialCatalog = (await initialCatalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions))!;
+            var firstSaveDefinition = initialCatalog.DraftTemplate.Definition with { DisplayName = "First saved loop", Description = "Created only at explicit Save." };
+            var firstSaveBody = new { operationId = "create-api-loop", definition = firstSaveDefinition };
 
-            var unknownMember = await SendRawJsonAsync(client, HttpMethod.Post, "/api/loops", token, """{"operationId":"unknown-field","unexpected":true}""");
-            var createResponse = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-api-loop" });
+            var unknownMember = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "unknown-field", definition = firstSaveDefinition, unexpected = true });
+            var createResponse = await SendAsync(client, HttpMethod.Post, "/api/loops", token, firstSaveBody);
             var created = await createResponse.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions);
             var createdDefinition = Assert.IsType<LoopDefinitionSnapshot>(created!.Definition);
-            var replayedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-api-loop" });
+            var replayedCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, firstSaveBody);
+            var conflictingCreate = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-api-loop", definition = firstSaveDefinition with { Description = "Different first save." } });
             var hostileText = "</textarea><script>globalThis.pwned=true</script><!-- & «quoted»";
             var updateBody = CreateUpdateBody(createdDefinition, "update-api-loop", hostileText);
             var invalid = await SendAsync(client, HttpMethod.Put, $"/api/loops/{createdDefinition.Id}", token, CreateUpdateBody(createdDefinition, "invalid-api-loop", " "));
@@ -245,8 +296,15 @@ public sealed class LoopApiControllerTests
             Assert.Equal(HttpStatusCode.BadRequest, unknownMember.StatusCode);
             Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
             Assert.Equal("Created", created.Status);
+            Assert.Equal("First saved loop", createdDefinition.DisplayName);
+            Assert.Equal("Created only at explicit Save.", createdDefinition.Description);
+            Assert.Equal(1, createdDefinition.DefinitionVersion);
+            Assert.NotNull(Assert.Single(createdDefinition.InferenceSteps).Id);
+            Assert.Equal("create-api-loop", createdDefinition.LastMutationOperationId);
             Assert.Equal(HttpStatusCode.OK, replayedCreate.StatusCode);
             Assert.Equal("Replayed", (await replayedCreate.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!.Status);
+            Assert.Equal(HttpStatusCode.Conflict, conflictingCreate.StatusCode);
+            Assert.Equal("Conflict", (await conflictingCreate.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!.Status);
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
             Assert.Equal("Invalid", (await invalid.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!.Status);
             Assert.Equal(HttpStatusCode.BadRequest, writeTool.StatusCode);
@@ -323,6 +381,18 @@ public sealed class LoopApiControllerTests
                 }
             }
         };
+    }
+
+    private static LoopDefinitionInput CreateFirstSaveDefinition()
+    {
+        var inherited = new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null);
+        return new LoopDefinitionInput(
+            "Untitled loop",
+            string.Empty,
+            new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, false),
+            [new LoopInferenceStep(null, "First step", "Complete the requested work.", inherited)],
+            [],
+            new LoopExitPolicy(0, "Complete when the requested work is done.", inherited));
     }
 
     private static async Task<HttpResponseMessage> SendAsync(HttpClient client, HttpMethod method, string path, string token, object? body = null)

@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Application.Governance.Audit;
@@ -914,6 +915,25 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalRequest))).ToLowerInvariant();
     }
 
+    private static string ComputeExplicitCreateRequestHash(CustomLoopDefinition definition)
+    {
+        var input = new CustomLoopDefinitionInput(
+            definition.DisplayName,
+            definition.Description,
+            definition.TriggerPolicy,
+            definition.InferenceSteps.Select(step => new CustomLoopInferenceStepInput(null, step.Name, step.Instruction, step.ContextPolicy)).ToArray(),
+            definition.ToolAssignments,
+            definition.ExitPolicy);
+        var request = new CanonicalMutationRequest(1, CustomLoopDefinitionMutationKind.Create, string.Empty, definition.RoleId.Normalize(NormalizationForm.FormC), 0, input);
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(request))).ToLowerInvariant();
+    }
+
+    private static bool IsCanonicalCreateRequestHash(CustomLoopDefinitionMutationOperationRecord operation)
+    {
+        return string.Equals(operation.RequestHash, ComputeCreateRequestHash(operation.RoleId), StringComparison.Ordinal)
+            || operation.OriginalDefinition is not null && string.Equals(operation.RequestHash, ComputeExplicitCreateRequestHash(operation.OriginalDefinition), StringComparison.Ordinal);
+    }
+
     private static string ComputeCompatibilityDeleteRequestHash(string loopId, string roleId, int expectedDefinitionVersion)
     {
         var canonicalRequest = $"custom-loop-delete-compat\0{loopId.Normalize(NormalizationForm.FormC)}\0{roleId.Normalize(NormalizationForm.FormC)}\0{expectedDefinitionVersion}";
@@ -1209,9 +1229,11 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
         CustomLoopArtifactIdentifier.Require(mutation.LoopId, nameof(mutation.LoopId));
         CustomLoopArtifactIdentifier.Require(mutation.RoleId, nameof(mutation.RoleId));
         ValidateSha256(mutation.RequestHash, "Definition mutation request hash");
-        if (expectedKind == CustomLoopDefinitionMutationKind.Create && !string.Equals(mutation.RequestHash, ComputeCreateRequestHash(roleId), StringComparison.Ordinal))
+        if (expectedKind == CustomLoopDefinitionMutationKind.Create
+            && !string.Equals(mutation.RequestHash, ComputeCreateRequestHash(roleId), StringComparison.Ordinal)
+            && (plannedDefinition is null || !string.Equals(mutation.RequestHash, ComputeExplicitCreateRequestHash(plannedDefinition), StringComparison.Ordinal)))
         {
-            throw new ArgumentException("Create mutation request hash does not match the canonical role-bound request.", nameof(mutation));
+            throw new ArgumentException("Create mutation request hash does not match the canonical role-bound request or complete first-save definition.", nameof(mutation));
         }
 
         if (!string.Equals(mutation.LoopId, loopId, StringComparison.Ordinal)
@@ -1310,7 +1332,7 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
                 || !string.Equals(operation.OperationId, operation.OriginalDefinition.LastMutationOperationId, StringComparison.Ordinal)
                 || !string.Equals(operation.LoopId, operation.OriginalDefinition.Id, StringComparison.Ordinal)
                 || !string.Equals(operation.RoleId, operation.OriginalDefinition.RoleId, StringComparison.Ordinal)
-                || !string.Equals(operation.RequestHash, ComputeCreateRequestHash(operation.RoleId), StringComparison.Ordinal)
+                || !IsCanonicalCreateRequestHash(operation)
                 || operation.RecordedAtUtc != operation.OriginalDefinition.CreatedAtUtc)
             {
                 throw new FormatException("Custom loop Create operation metadata does not match its original canonical definition or request.");
@@ -1584,6 +1606,14 @@ public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionSto
             }
         }
     }
+
+    private sealed record CanonicalMutationRequest(
+        int SchemaVersion,
+        CustomLoopDefinitionMutationKind Kind,
+        string LoopId,
+        string RoleId,
+        int ExpectedDefinitionVersion,
+        CustomLoopDefinitionInput? Input);
 
     private sealed record WorkspaceState(
         IReadOnlyList<CustomLoopDefinition> Definitions,

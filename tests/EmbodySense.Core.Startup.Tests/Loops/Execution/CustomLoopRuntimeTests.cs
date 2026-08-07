@@ -40,7 +40,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Context_capture_truncates_role_and_conversation_sources_only_at_valid_utf16_boundaries()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var roleLabel = $"[EmbodySense role instruction source: .agent/ROLE.md]{Environment.NewLine}";
         var roleMarker = $"{Environment.NewLine}[source truncated to fit the 12000-character admitted source limit]";
         var rolePrefixCharacters = 12_000 - roleLabel.Length - roleMarker.Length;
@@ -76,7 +76,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Public_runtime_rejects_malformed_invocations_and_durably_replays_a_missing_loop_outcome()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var validHash = new string('a', CustomLoopLimits.Sha256HexCharacters);
         var invalidInputs = new[]
@@ -121,7 +121,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Public_runtime_preserves_unsupported_discovery_index_cleanup_guidance_during_admission()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-unsupported-index", "update-unsupported-index");
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -146,7 +146,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Public_runtime_translates_unsupported_discovery_index_schema_for_run_list_reads()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         const string UnsupportedIndex = "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}";
@@ -166,7 +166,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Invocation_quota_pressure_prunes_expired_completed_receipts_before_accepting_a_new_operation()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await WriteExpiredInvocationReceiptQuotaAsync(paths);
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
@@ -187,7 +187,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Completed_invocation_receipt_cannot_replay_after_the_logical_conversation_is_replaced()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-cross-conversation", "private prompt");
 
@@ -208,7 +208,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Bound_invocation_replay_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var input = new LoopRunInvocationInput("loop-missing", 1, new string('a', CustomLoopLimits.Sha256HexCharacters), "invoke-unreadable-conversation", "private prompt");
         Assert.Equal("NotFound", (await runtime.InvokeCustomLoopAsync(input)).AdmissionStatus);
@@ -226,7 +226,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task New_terminal_binding_returns_a_structured_failure_when_conversation_identity_cannot_be_read()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         await File.WriteAllTextAsync(paths.CurrentConversationPath + ".identity.json", "{ malformed");
@@ -246,7 +246,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Rejected_invocation_replay_preserves_structured_validation_errors()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-validation-replay", "update-validation-replay");
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, new string('0', CustomLoopLimits.Sha256HexCharacters), "invoke-validation-replay", "validate replay");
@@ -264,7 +264,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Audit_unavailable_receipt_replays_a_valid_nonterminal_run_relationship()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-audit-relation-replay", "update-audit-relation-replay");
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -286,7 +286,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Audit_unavailable_receipt_replays_a_valid_operation_conflict_run_relationship()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var requestedDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-audit-conflict-request", "update-audit-conflict-request");
         var conflictingDefinitionSnapshot = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-audit-conflict-run", "update-audit-conflict-run");
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
@@ -310,7 +310,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Rejected_receipt_replays_against_its_intentionally_deleted_run_tombstone()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-deleted-rejection-replay", "update-deleted-rejection-replay");
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -340,7 +340,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Definition_read_failure_is_bound_and_replayed_without_repeating_the_failed_read()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-invalid-definition-replay", "update-invalid-definition-replay");
         var paths = new WorkspacePaths(workspace.RootPath);
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"), "{ malformed");
@@ -363,7 +363,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Captured_receipt_retains_its_context_binding_when_a_retried_definition_read_fails()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-captured-definition-failure", "update-captured-definition-failure");
         await using var runtime = await CreateRuntimeWithoutProviderAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -395,7 +395,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Pending_workspace_busy_binding_completes_its_selected_outcome_after_the_workspace_becomes_free()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-pending-busy-replay", "update-pending-busy-replay");
         var paths = new WorkspacePaths(workspace.RootPath);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-pending-busy-replay", "must not dispatch");
@@ -428,7 +428,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Context_capture_bounds_selected_conversation_entries_and_aggregates_all_omissions_once()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-entry-cap", "update-runtime-entry-cap");
         await using var runtime = await CreateRuntimeAsync(workspace);
         for (var index = 0; index < (CustomLoopLimits.MaxInvokingConversationEntries / 2) + 1; index++)
@@ -450,7 +450,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Public_runtime_admits_executes_publishes_and_exposes_inspectable_artifacts_without_changing_default_turns()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File(".agent", "ROLE.md"), "role context evidence");
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-success", "update-runtime-success");
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -488,6 +488,11 @@ public sealed class CustomLoopRuntimeTests
         Assert.Empty(startedAttempt.ToolAuthority.EffectiveAssignments);
         Assert.Null(startedAttempt.ToolEvidence);
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == true);
+        var publishedDisposition = Assert.Single(response.Run.ConversationPublicationDispositions);
+        Assert.Equal("Published", publishedDisposition.Disposition);
+        Assert.True(publishedDisposition.IsDefinite);
+        Assert.False(publishedDisposition.HasIntegrityWarning);
+        Assert.True(publishedDisposition.EventSequences.Count >= 3);
         Assert.NotNull(response.Run.FinalOutput);
         AssertInspectableProjection(response.Run, Assert.Single(listed, summary => summary.Id == response.Run.Id));
         Assert.Equal(response.Run.Id, fetched!.Id);
@@ -511,7 +516,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Public_runtime_refreshes_durable_conversation_before_custom_loop_context_capture()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-peer-conversation", "update-runtime-peer-conversation");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var conversationMemory = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
@@ -532,7 +537,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Context_capture_rejects_local_and_durable_conversation_divergence_without_overwriting_local_state()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-divergent-context", "update-runtime-divergent-context");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var conversationMemory = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
@@ -555,7 +560,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Conversation_publication_rejects_a_replaced_durable_conversation_with_the_same_transcript()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-conversation-identity", "update-runtime-conversation-identity");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var conversationMemory = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
@@ -579,7 +584,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Runtime_publishes_multiple_node_and_Exit_outputs_against_the_admission_prefix_plus_the_exact_durable_run_suffix()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-sequential-publication")).Definition);
         var publishInference = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Inference.ContextIn, new LoopContextOutputPolicy(true, true)));
@@ -604,6 +609,16 @@ public sealed class CustomLoopRuntimeTests
 
         Assert.Equal("Completed", response.ExecutionStatus);
         Assert.Equal(3, publications.Length);
+        var dispositions = response.Run.ConversationPublicationDispositions;
+        Assert.Equal(3, dispositions.Count);
+        Assert.Equal(publications.Select(item => item.ConversationPublicationId), dispositions.Select(item => item.OperationId));
+        Assert.All(dispositions, disposition =>
+        {
+            Assert.Equal("Published", disposition.Disposition);
+            Assert.True(disposition.IsDefinite);
+            Assert.False(disposition.HasIntegrityWarning);
+        });
+        Assert.Equal(dispositions.Select(item => item.EventSequences[0]).Order(), dispositions.Select(item => item.EventSequences[0]));
         Assert.Equal(3, persistedConversation.Count);
         Assert.Equal(publications.Select(item => item.CanonicalOutput), persistedConversation.Select(item => item.Content));
     }
@@ -612,7 +627,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Runtime_notifies_each_verified_conversation_publication_in_durable_order()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-publication-observer")).Definition);
         var publishInference = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Inference.ContextIn, new LoopContextOutputPolicy(true, true)));
@@ -644,7 +659,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Admission_captures_bounded_labeled_role_sources_and_a_versioned_newest_conversation_snapshot()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var roleSource = new string('R', 12_050);
         await File.WriteAllTextAsync(workspace.File(".agent", "ROLE.md"), roleSource);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: true, "create-runtime-context", "update-runtime-context");
@@ -707,7 +722,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Replay_of_a_valid_historical_run_without_an_invoking_conversation_reaches_admission_without_throwing_or_dispatching()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definitionSnapshot = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-null-conversation", "update-runtime-null-conversation");
         var paths = new WorkspacePaths(workspace.RootPath);
         var definition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(definitionSnapshot.Id));
@@ -800,7 +815,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Conversation_publication_recognizes_the_exact_expected_prefix_plus_one_output_as_already_published()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-idempotent-publish", "update-runtime-idempotent-publish");
         const string Prompt = "delayed idempotent task";
         var expectedOutput = "fake response: [EmbodySense untrusted trigger prompt data]" + Environment.NewLine + Prompt;
@@ -819,6 +834,9 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("Completed", response.ExecutionStatus);
         Assert.Equal(expectedOutput, response.Run!.FinalOutput);
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.Detail.Contains("already committed", StringComparison.Ordinal));
+        var disposition = Assert.Single(response.Run.ConversationPublicationDispositions);
+        Assert.Equal("AlreadyPublished", disposition.Disposition);
+        Assert.True(disposition.IsDefinite);
         Assert.Collection(persistedConversation, message => Assert.Equal(expectedOutput, message.Content));
     }
 
@@ -826,7 +844,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Conversation_publication_definitely_fails_when_the_logical_conversation_changes_after_admission()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-publication-conflict", "update-runtime-publication-conflict");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var invocation = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-publication-conflict", "delayed custom task"));
@@ -840,13 +858,16 @@ public sealed class CustomLoopRuntimeTests
         Assert.Equal("Failed", response.Run!.Status);
         Assert.Equal("conversation_publication_failed", response.Run.FailureCode);
         Assert.Contains(response.Run.Events, runEvent => runEvent.Kind == "ConversationPublished" && runEvent.PublishedToInvokingConversation == false);
+        var disposition = Assert.Single(response.Run.ConversationPublicationDispositions);
+        Assert.Equal("DefinitelyFailed", disposition.Disposition);
+        Assert.True(disposition.IsDefinite);
     }
 
     [Fact]
     public async Task Conversation_append_exception_is_reconciled_as_definitely_failed_when_no_append_occurred()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-append-failure", "update-runtime-append-failure");
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -874,7 +895,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Concurrent_different_loop_is_durably_rejected_as_workspace_busy_without_context_capture_or_hidden_queueing()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var firstDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-no-queue-1", "update-runtime-no-queue-1");
         var secondDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-no-queue-2", "update-runtime-no-queue-2");
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -910,7 +931,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Concurrent_same_operation_has_one_owner_and_replays_its_admitted_run_without_redispatch()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var definition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-same-operation", "update-runtime-same-operation");
         await using var runtime = await CreateRuntimeAsync(workspace);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-same-operation", "delayed same operation owner");
@@ -936,7 +957,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Paused_run_releases_workspace_ownership_and_resume_busy_is_replayed_without_mutation_or_dispatch()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var pausedDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-paused-owner", "update-runtime-paused-owner");
         var competingDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-resume-busy", "update-runtime-resume-busy");
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -997,7 +1018,7 @@ public sealed class CustomLoopRuntimeTests
     public async Task Restart_preserves_the_current_conversation_bound_to_a_paused_run_before_explicit_resume()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-restart-conversation")).Definition);
         var input = new LoopDefinitionInput(
