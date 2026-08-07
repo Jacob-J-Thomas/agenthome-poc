@@ -412,8 +412,73 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
                 return false;
             }
 
-            await AppendMessageAsync(stream, message, currentEntries, cancellationToken);
+            _ = await AppendMessageAsync(stream, message, currentEntries, CreateMessageId(), CreatePublicationId(), cancellationToken);
             return true;
+        }
+        finally
+        {
+            _currentConversationGate.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<ConversationPublicationAppendResult> TryPublishMessageAsync(
+        string expectedConversationId,
+        string expectedConversationVersion,
+        IReadOnlyList<LlmMessage> expectedPrefix,
+        ConversationMessagePublication publication,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedConversationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedConversationVersion);
+        ArgumentNullException.ThrowIfNull(expectedPrefix);
+        ArgumentNullException.ThrowIfNull(publication);
+        ArgumentException.ThrowIfNullOrWhiteSpace(publication.MessageId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(publication.PublicationId);
+        ArgumentNullException.ThrowIfNull(publication.Message);
+
+        await _currentConversationGate.WaitAsync(cancellationToken);
+        try
+        {
+            Directory.CreateDirectory(_paths.ConversationMemoryPath);
+            await using var lease = await AcquireCurrentConversationLeaseAsync(cancellationToken);
+            await using var stream = OpenCurrentConversationForAtomicAppend();
+            var currentEntries = await LoadEntriesAsync(stream, _paths.CurrentConversationPath, cancellationToken);
+            var identity = await LoadOrCreateCurrentConversationIdentityAsync(cancellationToken);
+            var currentMessages = currentEntries.Select(ToMessage).ToArray();
+            var identityMatches = string.Equals(identity.ConversationId, expectedConversationId, StringComparison.Ordinal)
+                && string.Equals(identity.Version, expectedConversationVersion, StringComparison.Ordinal);
+            var prefixMatches = currentMessages.Length >= expectedPrefix.Count
+                && currentMessages.Take(expectedPrefix.Count).Zip(expectedPrefix).All(pair => MessagesEqual(pair.First, pair.Second));
+            if (!identityMatches || !prefixMatches)
+            {
+                return Result(ConversationPublicationAppendStatus.Conflict, identity, currentMessages);
+            }
+
+            if (currentEntries.Take(expectedPrefix.Count).Any(entry => string.Equals(entry.MessageId, publication.MessageId, StringComparison.Ordinal)
+                || string.Equals(entry.PublicationId, publication.PublicationId, StringComparison.Ordinal)))
+            {
+                return Result(ConversationPublicationAppendStatus.Conflict, identity, currentMessages);
+            }
+
+            if (currentMessages.Length == expectedPrefix.Count)
+            {
+                _ = await AppendMessageAsync(stream, publication.Message, currentEntries, publication.MessageId, publication.PublicationId, cancellationToken);
+                return Result(ConversationPublicationAppendStatus.Appended, identity, [.. currentMessages, publication.Message]);
+            }
+
+            if (currentMessages.Length == expectedPrefix.Count + 1)
+            {
+                var existing = currentEntries[expectedPrefix.Count];
+                if (string.Equals(existing.MessageId, publication.MessageId, StringComparison.Ordinal)
+                    && string.Equals(existing.PublicationId, publication.PublicationId, StringComparison.Ordinal)
+                    && MessagesEqual(currentMessages[^1], publication.Message))
+                {
+                    return Result(ConversationPublicationAppendStatus.AlreadyPresent, identity, currentMessages);
+                }
+            }
+
+            return Result(ConversationPublicationAppendStatus.Conflict, identity, currentMessages);
         }
         finally
         {
@@ -426,7 +491,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         _ = await LoadOrCreateCurrentConversationIdentityAsync(cancellationToken);
         await using var stream = OpenCurrentConversationForAtomicAppend();
         var entries = await LoadEntriesAsync(stream, _paths.CurrentConversationPath, cancellationToken);
-        await AppendMessageAsync(stream, message, entries, cancellationToken);
+        _ = await AppendMessageAsync(stream, message, entries, CreateMessageId(), CreatePublicationId(), cancellationToken);
     }
 
     private FileStream OpenCurrentConversationForAtomicAppend()
@@ -451,7 +516,13 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
     }
 
-    private static async Task AppendMessageAsync(FileStream stream, LlmMessage message, IReadOnlyList<ConversationMemoryEntry> entries, CancellationToken cancellationToken)
+    private static async Task<ConversationMemoryEntry> AppendMessageAsync(
+        FileStream stream,
+        LlmMessage message,
+        IReadOnlyList<ConversationMemoryEntry> entries,
+        string messageId,
+        string publicationId,
+        CancellationToken cancellationToken)
     {
         var sequence = entries.Count == 0 ? 1 : entries.Max(entry => entry.Sequence) + 1;
         var entry = new ConversationMemoryEntry(
@@ -459,6 +530,8 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             CurrentConversationId,
             sequence,
             DateTimeOffset.UtcNow,
+            messageId,
+            publicationId,
             message.Role.ToString().ToLowerInvariant(),
             message.Content);
         var line = JsonSerializer.Serialize(entry, _jsonOptions) + Environment.NewLine;
@@ -484,6 +557,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             }
 
             stream.Flush(flushToDisk: true);
+            return entry;
         }
         catch
         {
@@ -492,6 +566,26 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
             stream.Flush(flushToDisk: true);
             throw;
         }
+    }
+
+    private static ConversationPublicationAppendResult Result(ConversationPublicationAppendStatus status, CurrentConversationIdentity identity, IReadOnlyList<LlmMessage> messages)
+    {
+        return new ConversationPublicationAppendResult(status, new ConversationMemorySnapshot(identity.ConversationId, identity.Version, messages));
+    }
+
+    private static bool MessagesEqual(LlmMessage left, LlmMessage right)
+    {
+        return left.Role == right.Role && string.Equals(left.Content, right.Content, StringComparison.Ordinal);
+    }
+
+    private static string CreateMessageId()
+    {
+        return "message-" + Guid.NewGuid().ToString("N");
+    }
+
+    private static string CreatePublicationId()
+    {
+        return "publication-" + Guid.NewGuid().ToString("N");
     }
 
     /// <summary>
@@ -710,7 +804,13 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
 
             var entry = JsonSerializer.Deserialize<ConversationMemoryEntry>(line, _jsonOptions)
                 ?? throw new FormatException($"Conversation memory entry in `{path}` was empty.");
-            ValidateEntry(entry);
+            ValidateEntry(entry, path);
+            if (entries.Any(existing => string.Equals(existing.MessageId, entry.MessageId, StringComparison.Ordinal)
+                || string.Equals(existing.PublicationId, entry.PublicationId, StringComparison.Ordinal)))
+            {
+                throw new FormatException($"Conversation memory entry in `{path}` reused a message or publication identity.");
+            }
+
             entries.Add(entry);
         }
 
@@ -855,7 +955,7 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         return new LlmMessage(ParseRole(entry.Role), entry.Content);
     }
 
-    private static void ValidateEntry(ConversationMemoryEntry entry)
+    private static void ValidateEntry(ConversationMemoryEntry entry, string path)
     {
         if (entry.SchemaVersion != SchemaVersion)
         {
@@ -863,6 +963,11 @@ public sealed class ConversationMemoryStore : IConversationMemoryStore
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.ConversationId);
+        if (string.IsNullOrWhiteSpace(entry.MessageId) || string.IsNullOrWhiteSpace(entry.PublicationId))
+        {
+            throw new ConversationTranscriptCleanupRequiredException(path);
+        }
+
         _ = ParseRole(entry.Role);
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.Content);
     }

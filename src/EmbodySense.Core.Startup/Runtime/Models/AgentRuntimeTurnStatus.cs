@@ -22,6 +22,10 @@ public enum AgentRuntimeTurnStatus
     /// </summary>
     MessageFailed,
     /// <summary>
+    /// A model turn has an externally ambiguous outcome that requires explicit human review.
+    /// </summary>
+    MessageNeedsReview,
+    /// <summary>
     /// A model turn ended through cancellation.
     /// </summary>
     MessageCancelled,

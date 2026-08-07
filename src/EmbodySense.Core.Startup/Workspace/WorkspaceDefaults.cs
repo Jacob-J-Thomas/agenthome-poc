@@ -40,6 +40,7 @@ internal static class WorkspaceDefaults
             paths.SkillsPath,
             paths.HooksPath,
             paths.RecipesPath,
+            paths.CapabilityCatalogPath,
             paths.WorkspacePrivatePath,
             paths.WorkspaceSharedPath,
             paths.WorkspaceGeneratedPath,

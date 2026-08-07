@@ -6,8 +6,14 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Persistence.Audit;
+using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Common.Loops.Custom.Retention;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
@@ -20,7 +26,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// unambiguous lineage. Unknown fields, unsupported versions, corrupt JSON, duplicate identities, or incomplete transitions
 /// throw <see cref="FormatException"/> and require explicit cleanup; no automatic migration or compatibility fallback exists.
 /// </remarks>
-public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
+public sealed partial class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 {
     private const int DefinitionMutationOperationSchemaVersion = 1;
     private const long MaxDefinitionArtifactBytes = 512 * 1024;
@@ -38,18 +44,32 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     private readonly WorkspacePaths _paths;
     private readonly CustomLoopArtifactPathGuard _pathGuard;
     private readonly SemaphoreSlim _mutationGate;
+    private readonly IAuditLog _auditLog;
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopDefinitionStore"/> type.
     /// </summary>
     /// <param name="paths">The paths.</param>
-    public CustomLoopDefinitionStore(WorkspacePaths paths)
+    public CustomLoopDefinitionStore(WorkspacePaths paths) : this(paths, null, null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a store with the audit and time dependencies used by governed receipt cleanup.
+    /// </summary>
+    /// <param name="paths">The canonical workspace paths.</param>
+    /// <param name="auditLog">The audit sink, or <see langword="null"/> to use the workspace audit log.</param>
+    /// <param name="timeProvider">The cleanup ownership clock, or <see langword="null"/> to use system time.</param>
+    public CustomLoopDefinitionStore(WorkspacePaths paths, IAuditLog? auditLog, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
         _paths = paths;
         _pathGuard = new CustomLoopArtifactPathGuard(paths.RootPath);
         _mutationGate = _mutationGates.GetOrAdd(Path.GetFullPath(paths.CustomLoopDefinitionsPath), _ => new SemaphoreSlim(1, 1));
+        _auditLog = auditLog ?? new AuditLog(paths);
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -110,6 +130,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operationId = mutation.OperationId;
             var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, operationId, StringComparison.Ordinal));
@@ -168,15 +189,26 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 recoveredOperation = CompleteOperation(recoveredOperation, recoveredResult, orphaned.CreatedAtUtc);
                 var recoveredState = state with { Operations = [.. state.Operations, recoveredOperation] };
                 ValidateWorkspaceState(recoveredState, allowedPendingOperationId: operationId);
-                await WriteOperationAsync(recoveredOperation, cancellationToken);
+                await WriteOperationAsync(recoveredOperation, cancellationToken, integrityPreservingCompletion: true);
                 return CustomLoopDefinitionStoreResult.AlreadyCreated(orphaned, CustomLoopOperationIntegrity.PendingOutcomeAudit);
             }
 
             ValidateWorkspaceState(state);
+            if (HasExpiredMutationProof(state, operationId))
+            {
+                return CustomLoopDefinitionStoreResult.OperationConflict();
+            }
+
             var tombstone = state.Tombstones.SingleOrDefault(candidate => string.Equals(candidate.LoopId, definition.Id, StringComparison.Ordinal));
             if (tombstone is not null)
             {
                 return CustomLoopDefinitionStoreResult.TombstoneConflict(tombstone, expectedDefinitionVersion: 0);
+            }
+
+            var compactLineage = GetCompactedTombstone(state, definition.Id);
+            if (compactLineage is not null)
+            {
+                return CustomLoopDefinitionStoreResult.TombstoneConflict(compactLineage, expectedDefinitionVersion: 0);
             }
 
             var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, definition.Id, StringComparison.Ordinal));
@@ -188,6 +220,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             if (state.Definitions.Count >= CustomLoopLimits.MaxDefinitionsPerWorkspace)
             {
                 return CustomLoopDefinitionStoreResult.LimitExceeded();
+            }
+
+            var retentionExhaustion = await GetNewOperationAdmissionExhaustionAsync(mutation, cancellationToken);
+            if (retentionExhaustion != CustomLoopReceiptQuotaExhaustionReason.None)
+            {
+                return CustomLoopDefinitionStoreResult.LimitExceeded(retentionExhaustion);
             }
 
             return await ExecuteNewOperationAsync(
@@ -216,6 +254,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null || operation.Kind != CustomLoopDefinitionMutationKind.Create)
@@ -254,6 +293,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null)
@@ -300,6 +340,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.SingleOrDefault(definition => string.Equals(definition.Id, safeLoopId, StringComparison.Ordinal));
@@ -321,6 +362,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
             return state.Definitions.OrderBy(definition => definition.Id, StringComparer.Ordinal).ToArray();
@@ -351,8 +393,14 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             ValidateWorkspaceState(state);
+            if (HasExpiredMutationProof(state, definition.LastMutationOperationId))
+            {
+                return CustomLoopDefinitionStoreResult.OperationConflict();
+            }
+
             return await ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken);
         }
         finally
@@ -384,6 +432,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, mutation.OperationId, StringComparison.Ordinal));
             if (existingOperation is not null)
@@ -407,9 +456,20 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             }
 
             ValidateWorkspaceState(state);
+            if (HasExpiredMutationProof(state, mutation.OperationId))
+            {
+                return CustomLoopDefinitionStoreResult.OperationConflict();
+            }
+
             var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, definition.Id, StringComparison.Ordinal));
             ValidateUpdateImmutableLineage(current, definition);
             ValidateMutationPriorSnapshot(current, mutation);
+            var retentionExhaustion = await GetNewOperationAdmissionExhaustionAsync(mutation, cancellationToken);
+            if (retentionExhaustion != CustomLoopReceiptQuotaExhaustionReason.None)
+            {
+                return CustomLoopDefinitionStoreResult.LimitExceeded(retentionExhaustion);
+            }
+
             return await ExecuteNewOperationAsync(mutation, definition.UpdatedAtUtc, () => ExecuteUpdateAsync(state, definition, expectedDefinitionVersion, cancellationToken), cancellationToken);
         }
         finally
@@ -419,8 +479,12 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
     }
 
     /// <summary>
-    /// Replaces a live definition with its version-bound tombstone.
+    /// Replaces a live definition with its version-bound tombstone and a compatibility delete receipt.
     /// </summary>
+    /// <remarks>
+    /// The compatibility shape does not carry an audit actor or event payload. Its completed receipt remains retained but
+    /// cannot be compacted until the caller records the durable outcome audit through <see cref="MarkOperationOutcomeAuditedAsync"/>.
+    /// </remarks>
     /// <param name="loopId">The loop ID.</param>
     /// <param name="expectedDefinitionVersion">The currently expected durable definition version.</param>
     /// <param name="mutationOperationId">The identifier recorded in the tombstone for idempotent deletion.</param>
@@ -446,15 +510,57 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
+            var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, safeOperationId, StringComparison.Ordinal));
+            if (existingOperation is not null)
+            {
+                ValidateWorkspaceState(state, allowedPendingOperationId: safeOperationId);
+                if (existingOperation.Kind == CustomLoopDefinitionMutationKind.Delete
+                    && string.Equals(existingOperation.LoopId, safeLoopId, StringComparison.Ordinal)
+                    && existingOperation.ExpectedDefinitionVersion != expectedDefinitionVersion)
+                {
+                    var existingTombstone = state.Tombstones.SingleOrDefault(candidate => string.Equals(candidate.LoopId, safeLoopId, StringComparison.Ordinal));
+                    return existingTombstone is null
+                        ? CustomLoopDefinitionStoreResult.OperationConflict()
+                        : CustomLoopDefinitionStoreResult.TombstoneConflict(existingTombstone, expectedDefinitionVersion);
+                }
+
+                if (existingOperation.Kind != CustomLoopDefinitionMutationKind.Delete
+                    || !string.Equals(existingOperation.LoopId, safeLoopId, StringComparison.Ordinal)
+                    || existingOperation.ExpectedDefinitionVersion != expectedDefinitionVersion
+                    || !string.Equals(existingOperation.RequestHash, ComputeCompatibilityDeleteRequestHash(safeLoopId, existingOperation.RoleId, expectedDefinitionVersion), StringComparison.Ordinal))
+                {
+                    return CustomLoopDefinitionStoreResult.OperationConflict();
+                }
+
+                if (existingOperation.State == CustomLoopDefinitionMutationState.PendingMutation)
+                {
+                    var recovered = await RecoverPendingDeleteAsync(state, existingOperation, safeLoopId, expectedDefinitionVersion, safeOperationId, existingOperation.UpdatedAtUtc, cancellationToken);
+                    existingOperation = await CompleteAndWriteOperationAsync(existingOperation, recovered, existingOperation.UpdatedAtUtc, cancellationToken);
+                    return existingOperation.ToPublic().ToStoreResult();
+                }
+
+                var replay = existingOperation.ToPublic().ToStoreResult();
+                return replay.Status == CustomLoopDefinitionStoreStatus.Deleted
+                    ? CustomLoopDefinitionStoreResult.AlreadyDeleted(replay.Tombstone!)
+                    : replay;
+            }
+
             ValidateWorkspaceState(state);
+            if (HasExpiredMutationProof(state, safeOperationId))
+            {
+                return CustomLoopDefinitionStoreResult.OperationConflict();
+            }
+
             var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, safeLoopId, StringComparison.Ordinal));
             if (current is null)
             {
                 var existingTombstone = state.Tombstones.SingleOrDefault(candidate => string.Equals(candidate.LoopId, safeLoopId, StringComparison.Ordinal));
                 if (existingTombstone is null)
                 {
-                    return CustomLoopDefinitionStoreResult.NotFound();
+                    var compactLineage = GetCompactedTombstone(state, safeLoopId);
+                    return compactLineage is null ? CustomLoopDefinitionStoreResult.NotFound() : CustomLoopDefinitionStoreResult.TombstoneConflict(compactLineage, expectedDefinitionVersion);
                 }
 
                 return existingTombstone.LastDefinitionVersion == expectedDefinitionVersion && string.Equals(existingTombstone.MutationOperationId, safeOperationId, StringComparison.Ordinal)
@@ -467,16 +573,23 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 return CustomLoopDefinitionStoreResult.VersionConflict(current, expectedDefinitionVersion);
             }
 
-            var tombstone = new CustomLoopDefinitionTombstone(
-                CustomLoopDefinitionTombstone.CurrentSchemaVersion,
-                safeLoopId,
-                current.DefinitionVersion,
-                current.ContentHash,
+            var mutation = new CustomLoopDefinitionMutationRequest(
+                CustomLoopDefinitionMutationKind.Delete,
                 safeOperationId,
+                ComputeCompatibilityDeleteRequestHash(safeLoopId, current.RoleId, expectedDefinitionVersion),
+                safeLoopId,
+                current.RoleId,
+                expectedDefinitionVersion,
+                null,
+                current,
                 deletedAtUtc);
-            await WriteJsonAsync(_paths.CustomLoopDefinitionTombstonesPath, GetTombstonePath(safeLoopId), tombstone, cancellationToken);
-            _pathGuard.DeleteFile(_paths.CustomLoopDefinitionsPath, GetDefinitionPath(safeLoopId));
-            return CustomLoopDefinitionStoreResult.Deleted(current, tombstone);
+            var retentionExhaustion = await GetNewOperationAdmissionExhaustionAsync(mutation, cancellationToken);
+            if (retentionExhaustion != CustomLoopReceiptQuotaExhaustionReason.None)
+            {
+                return CustomLoopDefinitionStoreResult.LimitExceeded(retentionExhaustion);
+            }
+
+            return await ExecuteNewOperationAsync(mutation, deletedAtUtc, () => ExecuteDeleteAsync(state, safeLoopId, expectedDefinitionVersion, safeOperationId, deletedAtUtc, cancellationToken), cancellationToken);
         }
         finally
         {
@@ -520,6 +633,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var existingOperation = state.Operations.SingleOrDefault(operation => string.Equals(operation.OperationId, safeOperationId, StringComparison.Ordinal));
             if (existingOperation is not null)
@@ -540,8 +654,19 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             }
 
             ValidateWorkspaceState(state);
+            if (HasExpiredMutationProof(state, safeOperationId))
+            {
+                return CustomLoopDefinitionStoreResult.OperationConflict();
+            }
+
             var current = state.Definitions.SingleOrDefault(candidate => string.Equals(candidate.Id, safeLoopId, StringComparison.Ordinal));
             ValidateMutationPriorSnapshot(current, mutation);
+            var retentionExhaustion = await GetNewOperationAdmissionExhaustionAsync(mutation, cancellationToken);
+            if (retentionExhaustion != CustomLoopReceiptQuotaExhaustionReason.None)
+            {
+                return CustomLoopDefinitionStoreResult.LimitExceeded(retentionExhaustion);
+            }
+
             return await ExecuteNewOperationAsync(mutation, deletedAtUtc, () => ExecuteDeleteAsync(state, safeLoopId, expectedDefinitionVersion, safeOperationId, deletedAtUtc, cancellationToken), cancellationToken);
         }
         finally
@@ -563,6 +688,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         try
         {
             using var workspaceLock = _pathGuard.AcquireExclusiveMutationLock(_paths.LoopDefinitionsPath);
+            using var retentionLock = _pathGuard.AcquireExclusiveMutationLock(_paths.CustomLoopReceiptRetentionPath);
             var state = await ReadWorkspaceStateAsync(cancellationToken);
             var operation = state.Operations.SingleOrDefault(candidate => string.Equals(candidate.OperationId, safeOperationId, StringComparison.Ordinal));
             if (operation is null)
@@ -604,7 +730,10 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         var definitions = await ReadDefinitionsAsync(cancellationToken);
         var tombstones = await ReadTombstonesAsync(cancellationToken);
         var operations = await ReadMutationOperationsAsync(cancellationToken);
-        return new WorkspaceState(definitions, tombstones, operations);
+        var proofLedger = await ReadProofLedgerAsync(cancellationToken);
+        var state = new WorkspaceState(definitions, tombstones, operations, proofLedger);
+        await ValidateRetainedDeleteProofsAgainstExactReceiptsAsync(state, cancellationToken);
+        return state;
     }
 
     private async Task<IReadOnlyList<CustomLoopDefinition>> ReadDefinitionsAsync(CancellationToken cancellationToken)
@@ -614,8 +743,15 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             return [];
         }
 
+        ReclaimRetentionAtomicWriteTempsUnderWorkspaceOwnership(_paths.CustomLoopDefinitionsPath, CustomLoopLimits.MaxArtifactIdCharacters, CustomLoopLimits.MaxDefinitionsPerWorkspace, "Custom loop definition storage");
         var definitions = new List<CustomLoopDefinition>();
-        foreach (var path in Directory.EnumerateFiles(_paths.CustomLoopDefinitionsPath, "*.json", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        var paths = Directory.EnumerateFiles(_paths.CustomLoopDefinitionsPath, "*.json", SearchOption.TopDirectoryOnly).Take(CustomLoopLimits.MaxDefinitionsPerWorkspace + 1).ToArray();
+        if (paths.Length > CustomLoopLimits.MaxDefinitionsPerWorkspace)
+        {
+            throw new FormatException("Custom loop definitions exceed their bounded workspace count.");
+        }
+
+        foreach (var path in paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var expectedId = Path.GetFileNameWithoutExtension(path);
@@ -632,6 +768,31 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         return definitions;
     }
 
+    private async Task ValidateRetainedDeleteProofsAgainstExactReceiptsAsync(WorkspaceState state, CancellationToken cancellationToken)
+    {
+        if (state.ProofLedger is null || state.ProofLedger.DefinitionLineage.Length == 0)
+        {
+            return;
+        }
+
+        var rawOperations = await ReadRetentionArtifactsAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, cancellationToken);
+        foreach (var artifact in rawOperations.Where(item => item.Operation is { Kind: CustomLoopDefinitionMutationKind.Delete, Outcome: CustomLoopDefinitionStoreStatus.Deleted }))
+        {
+            var operation = artifact.Operation!;
+            var lineage = state.ProofLedger.DefinitionLineage.SingleOrDefault(item => string.Equals(item.LastMutationOperationId, operation.OperationId, StringComparison.Ordinal));
+            if (lineage is null)
+            {
+                continue;
+            }
+
+            var proof = state.ProofLedger.ExpiredOperations.SingleOrDefault(item => item.ArtifactClass == CustomLoopReceiptArtifactClass.DefinitionMutationReceipt && string.Equals(item.OperationId, operation.OperationId, StringComparison.Ordinal));
+            if (proof is null || !ProofMatchesOperation(proof, artifact, lineage))
+            {
+                throw new FormatException($"Definition mutation receipt `{operation.OperationId}` conflicts with its retained compact proof.");
+            }
+        }
+    }
+
     private async Task<IReadOnlyList<CustomLoopDefinitionTombstone>> ReadTombstonesAsync(CancellationToken cancellationToken)
     {
         if (!_pathGuard.DirectoryExists(_paths.CustomLoopDefinitionTombstonesPath))
@@ -639,10 +800,24 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             return [];
         }
 
+        var budget = CustomLoopReceiptRetentionPolicy.GetBudget(CustomLoopReceiptArtifactClass.DefinitionTombstone);
+        ReclaimRetentionAtomicWriteTempsUnderWorkspaceOwnership(_paths.CustomLoopDefinitionTombstonesPath, CustomLoopLimits.MaxArtifactIdCharacters, budget.MaximumArtifactCount, "Custom loop definition tombstone storage");
         var tombstones = new List<CustomLoopDefinitionTombstone>();
-        foreach (var path in Directory.EnumerateFiles(_paths.CustomLoopDefinitionTombstonesPath, "*.json", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        var paths = Directory.EnumerateFiles(_paths.CustomLoopDefinitionTombstonesPath, "*.json", SearchOption.TopDirectoryOnly).Take(budget.MaximumArtifactCount + 1).ToArray();
+        if (paths.Length > budget.MaximumArtifactCount)
+        {
+            throw new FormatException("Custom loop definition tombstones exceed their bounded workspace count.");
+        }
+
+        long aggregateBytes = 0;
+        foreach (var path in paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            aggregateBytes = checked(aggregateBytes + new FileInfo(path).Length);
+            if (aggregateBytes > budget.MaximumArtifactUtf8Bytes)
+            {
+                throw new FormatException("Custom loop definition tombstones exceed their aggregate UTF-8 byte quota.");
+            }
             var expectedId = Path.GetFileNameWithoutExtension(path);
             var tombstone = await ReadStrictJsonAsync<CustomLoopDefinitionTombstone>(_paths.CustomLoopDefinitionTombstonesPath, path, MaxTombstoneArtifactBytes, "Custom loop definition tombstone", cancellationToken);
             ValidateTombstone(tombstone);
@@ -664,10 +839,24 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             return [];
         }
 
+        var budget = CustomLoopReceiptRetentionPolicy.GetBudget(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+        ReclaimRetentionAtomicWriteTempsUnderWorkspaceOwnership(_paths.CustomLoopDefinitionOperationsPath, CustomLoopLimits.MaxMutationOperationIdCharacters, budget.MaximumArtifactCount, "Custom loop definition mutation receipt storage");
         var operations = new List<CustomLoopDefinitionMutationOperationRecord>();
-        foreach (var path in Directory.EnumerateFiles(_paths.CustomLoopDefinitionOperationsPath, "*.json", SearchOption.TopDirectoryOnly).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        var paths = Directory.EnumerateFiles(_paths.CustomLoopDefinitionOperationsPath, "*.json", SearchOption.TopDirectoryOnly).Take(budget.MaximumArtifactCount + 1).ToArray();
+        if (paths.Length > budget.MaximumArtifactCount)
+        {
+            throw new FormatException("Custom loop definition mutation receipts exceed their bounded workspace count.");
+        }
+
+        long aggregateBytes = 0;
+        foreach (var path in paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            aggregateBytes = checked(aggregateBytes + new FileInfo(path).Length);
+            if (aggregateBytes > budget.MaximumArtifactUtf8Bytes)
+            {
+                throw new FormatException("Custom loop definition mutation receipts exceed their aggregate UTF-8 byte quota.");
+            }
             var expectedId = Path.GetFileNameWithoutExtension(path);
             var operation = await ReadStrictJsonAsync<CustomLoopDefinitionMutationOperationRecord>(_paths.CustomLoopDefinitionOperationsPath, path, MaxDefinitionMutationOperationArtifactBytes, "Custom loop definition mutation operation", cancellationToken);
             ValidateMutationOperation(operation);
@@ -726,8 +915,38 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalRequest))).ToLowerInvariant();
     }
 
-    private async Task WriteOperationAsync(CustomLoopDefinitionMutationOperationRecord operation, CancellationToken cancellationToken)
+    private static string ComputeExplicitCreateRequestHash(CustomLoopDefinition definition)
     {
+        var input = new CustomLoopDefinitionInput(
+            definition.DisplayName,
+            definition.Description,
+            definition.TriggerPolicy,
+            definition.InferenceSteps.Select(step => new CustomLoopInferenceStepInput(null, step.Name, step.Instruction, step.ContextPolicy)).ToArray(),
+            definition.ToolAssignments,
+            definition.ExitPolicy);
+        var request = new CanonicalMutationRequest(1, CustomLoopDefinitionMutationKind.Create, string.Empty, definition.RoleId.Normalize(NormalizationForm.FormC), 0, input);
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(request))).ToLowerInvariant();
+    }
+
+    private static bool IsCanonicalCreateRequestHash(CustomLoopDefinitionMutationOperationRecord operation)
+    {
+        return string.Equals(operation.RequestHash, ComputeCreateRequestHash(operation.RoleId), StringComparison.Ordinal)
+            || operation.OriginalDefinition is not null && string.Equals(operation.RequestHash, ComputeExplicitCreateRequestHash(operation.OriginalDefinition), StringComparison.Ordinal);
+    }
+
+    private static string ComputeCompatibilityDeleteRequestHash(string loopId, string roleId, int expectedDefinitionVersion)
+    {
+        var canonicalRequest = $"custom-loop-delete-compat\0{loopId.Normalize(NormalizationForm.FormC)}\0{roleId.Normalize(NormalizationForm.FormC)}\0{expectedDefinitionVersion}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalRequest))).ToLowerInvariant();
+    }
+
+    private async Task WriteOperationAsync(CustomLoopDefinitionMutationOperationRecord operation, CancellationToken cancellationToken, bool integrityPreservingCompletion = false)
+    {
+        if (!await CanWriteOperationAsync(operation, cancellationToken, integrityPreservingCompletion))
+        {
+            throw new IOException("Definition mutation receipt quota is exhausted; the write failed before replacing durable evidence.");
+        }
+
         await WriteJsonAsync(_paths.CustomLoopDefinitionOperationsPath, GetOperationPath(operation.OperationId), operation, cancellationToken);
     }
 
@@ -880,7 +1099,13 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
 
         foreach (var tombstone in state.Tombstones)
         {
-            if (!createOperationsByLoop.ContainsKey(tombstone.LoopId))
+            var compactLineage = state.ProofLedger?.DefinitionLineage.SingleOrDefault(item => string.Equals(item.LoopId, tombstone.LoopId, StringComparison.Ordinal));
+            if (compactLineage is not null && !LineageMatchesTombstone(compactLineage, tombstone))
+            {
+                throw new FormatException($"Custom loop tombstone `{tombstone.LoopId}` conflicts with its retained compact lineage.");
+            }
+
+            if (!createOperationsByLoop.ContainsKey(tombstone.LoopId) && compactLineage is null)
             {
                 throw new FormatException($"Custom loop tombstone `{tombstone.LoopId}` is missing its durable Create operation record.");
             }
@@ -893,7 +1118,8 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 definitions.TryGetValue(operation.LoopId, out var current);
                 tombstones.TryGetValue(operation.LoopId, out var tombstone);
                 var ownsLineage = OwnsCreateLineage(state, operation);
-                if (ownsLineage && current is null && tombstone is null
+                var compactLineage = state.ProofLedger?.DefinitionLineage.Any(item => string.Equals(item.LoopId, operation.LoopId, StringComparison.Ordinal)) == true;
+                if (ownsLineage && current is null && tombstone is null && !compactLineage
                     && (!string.Equals(operation.OperationId, allowedPendingOperationId, StringComparison.Ordinal) || operation.OutcomeAuditRecorded))
                 {
                     throw new FormatException($"Create operation `{operation.OperationId}` has no committed definition or deletion tombstone.");
@@ -912,7 +1138,8 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             }
 
             if ((operation.State == CustomLoopDefinitionMutationState.PendingMutation || !operation.OutcomeAuditRecorded)
-                && !string.Equals(operation.OperationId, allowedPendingOperationId, StringComparison.Ordinal))
+                && !string.Equals(operation.OperationId, allowedPendingOperationId, StringComparison.Ordinal)
+                && !IsCompatibilityDeleteAwaitingOutcomeAudit(operation))
             {
                 throw new FormatException($"Definition mutation operation `{operation.OperationId}` has pending mutation or outcome-audit integrity and requires recovery.");
             }
@@ -959,6 +1186,20 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             && tombstone.DeletedAtUtc == operation.UpdatedAtUtc;
     }
 
+    private static bool IsCompatibilityDeleteAwaitingOutcomeAudit(CustomLoopDefinitionMutationOperationRecord operation)
+    {
+        // The legacy-shaped store method has no actor or audit payload. Its durable receipt remains visible but is not
+        // cleanup-eligible until its caller records the outcome audit through MarkOperationOutcomeAuditedAsync.
+        return operation.Kind == CustomLoopDefinitionMutationKind.Delete
+            && operation.State == CustomLoopDefinitionMutationState.OutcomeCommitted
+            && operation.Outcome == CustomLoopDefinitionStoreStatus.Deleted
+            && !operation.OutcomeAuditRecorded
+            && operation.PriorDefinition is not null
+            && operation.ResultTombstone is not null
+            && operation.ExpectedDefinitionVersion is { } expectedDefinitionVersion
+            && string.Equals(operation.RequestHash, ComputeCompatibilityDeleteRequestHash(operation.LoopId, operation.RoleId, expectedDefinitionVersion), StringComparison.Ordinal);
+    }
+
     private static void ValidateMutationRequest(
         CustomLoopDefinitionMutationRequest mutation,
         CustomLoopDefinitionMutationKind expectedKind,
@@ -988,9 +1229,11 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         CustomLoopArtifactIdentifier.Require(mutation.LoopId, nameof(mutation.LoopId));
         CustomLoopArtifactIdentifier.Require(mutation.RoleId, nameof(mutation.RoleId));
         ValidateSha256(mutation.RequestHash, "Definition mutation request hash");
-        if (expectedKind == CustomLoopDefinitionMutationKind.Create && !string.Equals(mutation.RequestHash, ComputeCreateRequestHash(roleId), StringComparison.Ordinal))
+        if (expectedKind == CustomLoopDefinitionMutationKind.Create
+            && !string.Equals(mutation.RequestHash, ComputeCreateRequestHash(roleId), StringComparison.Ordinal)
+            && (plannedDefinition is null || !string.Equals(mutation.RequestHash, ComputeExplicitCreateRequestHash(plannedDefinition), StringComparison.Ordinal)))
         {
-            throw new ArgumentException("Create mutation request hash does not match the canonical role-bound request.", nameof(mutation));
+            throw new ArgumentException("Create mutation request hash does not match the canonical role-bound request or complete first-save definition.", nameof(mutation));
         }
 
         if (!string.Equals(mutation.LoopId, loopId, StringComparison.Ordinal)
@@ -1089,7 +1332,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
                 || !string.Equals(operation.OperationId, operation.OriginalDefinition.LastMutationOperationId, StringComparison.Ordinal)
                 || !string.Equals(operation.LoopId, operation.OriginalDefinition.Id, StringComparison.Ordinal)
                 || !string.Equals(operation.RoleId, operation.OriginalDefinition.RoleId, StringComparison.Ordinal)
-                || !string.Equals(operation.RequestHash, ComputeCreateRequestHash(operation.RoleId), StringComparison.Ordinal)
+                || !IsCanonicalCreateRequestHash(operation)
                 || operation.RecordedAtUtc != operation.OriginalDefinition.CreatedAtUtc)
             {
                 throw new FormatException("Custom loop Create operation metadata does not match its original canonical definition or request.");
@@ -1254,7 +1497,7 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
             current.ContentHash,
             operationId,
             deletedAtUtc);
-        await WriteJsonAsync(_paths.CustomLoopDefinitionTombstonesPath, GetTombstonePath(loopId), tombstone, cancellationToken);
+        await WriteTombstoneAsync(tombstone, integrityPreservingCompletion: true, cancellationToken);
         _pathGuard.DeleteFile(_paths.CustomLoopDefinitionsPath, GetDefinitionPath(loopId));
         return CustomLoopDefinitionStoreResult.Deleted(current, tombstone);
     }
@@ -1364,8 +1607,17 @@ public sealed class CustomLoopDefinitionStore : ICustomLoopDefinitionStore
         }
     }
 
+    private sealed record CanonicalMutationRequest(
+        int SchemaVersion,
+        CustomLoopDefinitionMutationKind Kind,
+        string LoopId,
+        string RoleId,
+        int ExpectedDefinitionVersion,
+        CustomLoopDefinitionInput? Input);
+
     private sealed record WorkspaceState(
         IReadOnlyList<CustomLoopDefinition> Definitions,
         IReadOnlyList<CustomLoopDefinitionTombstone> Tombstones,
-        IReadOnlyList<CustomLoopDefinitionMutationOperationRecord> Operations);
+        IReadOnlyList<CustomLoopDefinitionMutationOperationRecord> Operations,
+        CustomLoopReceiptProofLedger? ProofLedger);
 }

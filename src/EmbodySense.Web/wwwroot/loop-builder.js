@@ -1,4 +1,3 @@
-let sessionToken = "";
 let catalog = null;
 let currentDefinition = null;
 let draft = null;
@@ -10,9 +9,22 @@ let loopBuilderActivated = false;
 let loopBuilderEventsBound = false;
 let loopBuilderSurfaceActive = false;
 let loopBuilderRefresh = null;
+let loopBuilderRefreshAbortController = null;
 let loopBuilderRefreshQueued = false;
+let loopBuilderRecoveryQueued = false;
+let loopBuilderSessionAvailable =
+  window.embodySenseSession?.getState?.().connected ?? true;
+let loopBuilderSessionAbortController = new AbortController();
 let dirty = false;
 let currentView = "builder";
+let retentionPosture = null;
+let retentionPostureFailure = null;
+let retentionCleanupOutcome = null;
+let retentionCleanupInFlight = false;
+let retentionCleanupRegistryFailure = null;
+let retentionPostureRequestGeneration = 0;
+let retentionRecoveryRenderTimer = null;
+const retentionCleanupOperationIds = new Map();
 let recentRuns = [];
 let runContinuationCursor = null;
 let runPaginationLoopId = null;
@@ -40,7 +52,17 @@ let selectedRunRefreshTimer = null;
 let selectedRunRefreshInFlight = false;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
-let pendingCreateOperationId = null;
+let newLoopDraftOperationId = null;
+let newLoopDraftCommitState = null;
+let newLoopDraftFailureDetail = null;
+let pendingCreateRequest = null;
+const newLoopDraftStorageKeyPrefix = "embodysense.unsaved-loop-draft.v1";
+const supportedCustomToolAssignments = Object.freeze([
+  "list",
+  "read",
+  "search",
+]);
+let newLoopDraftStorageKey = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
@@ -57,6 +79,12 @@ const maximumPendingLifecycleRequests = 100;
 const maximumConcurrentLifecycleReceiptReads = 8;
 const pendingLifecycleReconciliationDeadlineMilliseconds = 2000;
 const pendingLifecycleRequests = new Map();
+const retentionCleanupStorageKeyPrefix =
+  "embodysense.pending-receipt-cleanup.v1";
+const retentionCleanupRegistryLockNamePrefix =
+  "embodysense.pending-receipt-cleanup";
+let retentionCleanupStorageKey = null;
+let retentionCleanupRegistryLockName = null;
 const pendingInvocationStorageKeyPrefix =
   "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix =
@@ -111,6 +139,11 @@ const elements = {
   loopSettingsButton: document.getElementById("loopSettingsButton"),
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
+  refreshRetentionButton: document.getElementById("refreshRetentionButton"),
+  retentionContent: document.getElementById("retentionContent"),
+  retentionNotice: document.getElementById("retentionNotice"),
+  retentionTab: document.getElementById("retentionTab"),
+  retentionView: document.getElementById("retentionView"),
   roleId: document.getElementById("roleId"),
   rolePath: document.getElementById("rolePath"),
   loadMoreRunsButton: document.getElementById("loadMoreRunsButton"),
@@ -140,6 +173,7 @@ const elements = {
 
 function activate() {
   loopBuilderSurfaceActive = true;
+  if (!loopBuilderSessionAvailable) return Promise.resolve(false);
   if (loopBuilderRefresh) return loopBuilderRefresh;
   if (loopBuilderActivated) {
     scheduleSelectedRunRefresh();
@@ -158,20 +192,37 @@ function deactivate() {
   scheduleSelectedRunRefresh();
 }
 
-function beginLoopBuilderRefresh(operation) {
-  const refresh = drainLoopBuilderRefresh(operation).finally(() => {
+function beginLoopBuilderRefresh(operation, externalSignal = null) {
+  const abortController = new AbortController();
+  loopBuilderRefreshAbortController = abortController;
+  const relayAbort = () => abortController.abort(externalSignal.reason);
+  if (externalSignal?.aborted) relayAbort();
+  else externalSignal?.addEventListener("abort", relayAbort, { once: true });
+  const refresh = drainLoopBuilderRefresh(
+    operation,
+    abortController.signal,
+  ).finally(() => {
+    externalSignal?.removeEventListener("abort", relayAbort);
+    if (loopBuilderRefreshAbortController === abortController)
+      loopBuilderRefreshAbortController = null;
     if (loopBuilderRefresh === refresh) loopBuilderRefresh = null;
   });
   loopBuilderRefresh = refresh;
   return refresh;
 }
 
-async function drainLoopBuilderRefresh(operation) {
-  let refreshed = await operation();
+async function drainLoopBuilderRefresh(operation, signal) {
+  let refreshed = await operation(signal);
   applyLoopBuilderRefreshOutcome(refreshed);
   while (loopBuilderRefreshQueued) {
+    const recoveryRefresh = loopBuilderRecoveryQueued;
     loopBuilderRefreshQueued = false;
-    refreshed = await refreshWorkspaceCore(Boolean(catalog));
+    loopBuilderRecoveryQueued = false;
+    refreshed = await refreshWorkspaceCore(
+      recoveryRefresh ? false : Boolean(catalog),
+      recoveryRefresh,
+      { signal, suppressRecovery: recoveryRefresh },
+    );
     applyLoopBuilderRefreshOutcome(refreshed);
   }
   return refreshed;
@@ -182,13 +233,16 @@ function applyLoopBuilderRefreshOutcome(refreshed) {
   if (!loopBuilderActivated) appendActivationRetry();
 }
 
-async function startLoopBuilder() {
+async function startLoopBuilder(signal) {
   try {
-    if (!sessionToken) {
-      const session = await requestJson("/api/session");
-      sessionToken = session.token;
-    }
-    return await refreshWorkspaceCore(Boolean(catalog));
+    if (window.embodySenseSession)
+      await waitForLoopBuilderOperation(
+        window.embodySenseSession.getHub(),
+        signal,
+      );
+    else await requestJson("/api/session", { signal });
+    if (signal.aborted) return false;
+    return await refreshWorkspaceCore(Boolean(catalog), false, { signal });
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
@@ -203,12 +257,57 @@ function refreshWorkspace() {
   }
   if (!loopBuilderActivated)
     return loopBuilderSurfaceActive ? activate() : Promise.resolve();
-  return beginLoopBuilderRefresh(refreshWorkspaceCore);
+  return beginLoopBuilderRefresh((signal) =>
+    refreshWorkspaceCore(false, false, { signal }),
+  );
 }
 
-async function refreshWorkspaceCore(reuseCatalog = false) {
+async function rehydrateSession({
+  approvals = [],
+  signal = null,
+  workspaceRoot = null,
+} = {}) {
+  renderLoopApprovals(approvals);
+  if (!loopBuilderEventsBound) return { refreshed: false, skipped: true };
+  if (loopBuilderRefresh) {
+    await loopBuilderRefresh;
+    if (signal?.aborted) return { refreshed: false };
+    return await rehydrateSession({ approvals, signal, workspaceRoot });
+  }
+  if (
+    workspaceRoot &&
+    elements.workspaceRoot.textContent &&
+    elements.workspaceRoot.textContent !== "Workspace loading" &&
+    elements.workspaceRoot.textContent !== workspaceRoot &&
+    dirty
+  ) {
+    showBanner(
+      "The host workspace changed. This unsaved loop draft remains loaded and was not applied to the new workspace.",
+    );
+    setInteractive(false);
+    return { requiresManualAction: true };
+  }
+  const refreshed = await beginLoopBuilderRefresh(
+    (refreshSignal) =>
+      refreshWorkspaceCore(false, true, {
+        propagateFailure: true,
+        signal: refreshSignal,
+        suppressRecovery: true,
+      }),
+    signal,
+  );
+  return { refreshed };
+}
+
+async function refreshWorkspaceCore(
+  reuseCatalog = false,
+  preserveUnsavedDraft = false,
+  { propagateFailure = false, signal = null, suppressRecovery = false } = {},
+) {
   try {
-    const status = await requestJson("/api/status");
+    const requestOptions = { signal, suppressRecovery };
+    const status = await requestJson("/api/status", requestOptions);
+    if (signal?.aborted) return false;
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
     } catch {
@@ -227,6 +326,17 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
       reconciledPendingLifecycleStorageKey = null;
       pendingLifecycleRequests.clear();
     }
+    try {
+      configureRetentionCleanupRegistry(status.workspaceRoot);
+      retentionCleanupRegistryFailure = null;
+    } catch {
+      retentionCleanupStorageKey = null;
+      retentionCleanupRegistryLockName = null;
+      retentionCleanupOperationIds.clear();
+      retentionCleanupRegistryFailure =
+        "Receipt cleanup is unavailable because this browser cannot durably coordinate its workspace cleanup identity.";
+    }
+    configureNewLoopDraftStorage(status.workspaceRoot);
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized
@@ -241,14 +351,17 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
       return true;
     }
 
-    if (!reuseCatalog || !catalog) await loadCatalog();
-    const runsLoaded = await loadRuns();
+    if (!reuseCatalog || !catalog)
+      await loadCatalog(undefined, preserveUnsavedDraft, requestOptions);
+    if (signal?.aborted) return false;
+    const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded === false) return false;
     renderAll();
     return true;
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
+    if (propagateFailure) throw error;
     return false;
   }
 }
@@ -257,6 +370,12 @@ function bindStaticEvents() {
   elements.createLoopButton.addEventListener("click", createLoop);
   elements.builderTab.addEventListener("click", () => switchView("builder"));
   elements.runsTab.addEventListener("click", () => switchView("runs"));
+  elements.retentionTab.addEventListener("click", () =>
+    switchView("retention"),
+  );
+  elements.refreshRetentionButton.addEventListener("click", () =>
+    loadRetentionPosture(),
+  );
   elements.invokeButton.addEventListener("click", openInvokeModal);
   elements.closeInvokeButton.addEventListener("click", cancelInvokeModal);
   elements.cancelInvokeButton.addEventListener("click", cancelInvokeModal);
@@ -279,8 +398,21 @@ function bindStaticEvents() {
     renderInspector();
     renderToolbar();
   });
-  bindTabKeyboard(elements.builderTab, [elements.builderTab, elements.runsTab]);
-  bindTabKeyboard(elements.runsTab, [elements.builderTab, elements.runsTab]);
+  bindTabKeyboard(elements.builderTab, [
+    elements.builderTab,
+    elements.runsTab,
+    elements.retentionTab,
+  ]);
+  bindTabKeyboard(elements.runsTab, [
+    elements.builderTab,
+    elements.runsTab,
+    elements.retentionTab,
+  ]);
+  bindTabKeyboard(elements.retentionTab, [
+    elements.builderTab,
+    elements.runsTab,
+    elements.retentionTab,
+  ]);
   bindTabKeyboard(elements.selectedNodeButton, [
     elements.selectedNodeButton,
     elements.loopSettingsButton,
@@ -339,6 +471,20 @@ function bindStaticEvents() {
         // Retain the last verified in-memory view and fail closed on the next lifecycle request.
       }
     }
+    if (
+      retentionCleanupStorageKey &&
+      event.key === retentionCleanupStorageKey
+    ) {
+      try {
+        synchronizeRetentionCleanupOperationIdsFromStorage();
+        retentionCleanupRegistryFailure = null;
+        if (currentView === "retention") renderRetention();
+      } catch {
+        retentionCleanupRegistryFailure =
+          "Receipt cleanup is unavailable because the shared workspace cleanup registry could not be validated.";
+        if (currentView === "retention") renderRetention();
+      }
+    }
   });
 }
 
@@ -390,11 +536,21 @@ function moveLoopOptionFocus(event, currentOption) {
 }
 
 async function requestJson(url, options = {}) {
-  const headers = { ...(options.headers ?? {}) };
-  if (sessionToken) headers["X-EmbodySense-Session"] = sessionToken;
-  if (options.body && !headers["Content-Type"])
+  const { suppressRecovery = false, ...fetchOptions } = options;
+  const signal =
+    fetchOptions.signal ?? loopBuilderSessionAbortController.signal;
+  const headers = { ...(fetchOptions.headers ?? {}) };
+  if (fetchOptions.body && !headers["Content-Type"])
     headers["Content-Type"] = "application/json";
-  const response = await fetch(url, { ...options, headers });
+  const response = await waitForLoopBuilderOperation(
+    fetch(url, {
+      ...fetchOptions,
+      credentials: "same-origin",
+      headers,
+      signal,
+    }),
+    signal,
+  );
   const text = await response.text();
   let payload = null;
   if (text) {
@@ -411,9 +567,15 @@ async function requestJson(url, options = {}) {
         : (payload?.detail ??
           payload?.title ??
           `Request failed (${response.status})`);
-    const error = new Error(detail);
+    const error = new Error(
+      response.status === 401 && url !== "/api/session"
+        ? "The local session changed. Recovery started, and the prior request was not replayed."
+        : detail,
+    );
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401 && url !== "/api/session" && !suppressRecovery)
+      beginSessionRecovery();
     throw error;
   }
   return payload;
@@ -421,12 +583,16 @@ async function requestJson(url, options = {}) {
 
 async function requestRunMonitor(runId) {
   const headers = {};
-  if (sessionToken) headers["X-EmbodySense-Session"] = sessionToken;
   if (selectedRunMonitorId === runId && selectedRunMonitorEtag)
     headers["If-None-Match"] = selectedRunMonitorEtag;
-  const response = await fetch(
-    `/api/loop-runs/${encodeURIComponent(runId)}/monitor`,
-    { headers },
+  const signal = loopBuilderSessionAbortController.signal;
+  const response = await waitForLoopBuilderOperation(
+    fetch(`/api/loop-runs/${encodeURIComponent(runId)}/monitor`, {
+      credentials: "same-origin",
+      headers,
+      signal,
+    }),
+    signal,
   );
   const etag = response.headers?.get?.("ETag") ?? selectedRunMonitorEtag;
   if (response.status === 304)
@@ -450,14 +616,41 @@ async function requestRunMonitor(runId) {
     const error = new Error(detail);
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401) beginSessionRecovery();
     throw error;
   }
   return { notModified: false, summary: payload, etag };
 }
 
-async function loadCatalog(preferredLoopId) {
-  catalog = await requestJson("/api/loops");
+async function loadCatalog(
+  preferredLoopId,
+  preserveUnsavedDraft = false,
+  requestOptions = {},
+) {
+  const nextCatalog = await requestJson("/api/loops", requestOptions);
+  const shouldPreserveDraft = preserveUnsavedDraft && dirty && draft;
+  catalog = nextCatalog;
   elements.roleId.textContent = catalog.roleId;
+  if (isNewLoopDraft()) {
+    const committed = reconcileNewLoopDraftFromCatalog();
+    if (committed) {
+      applyDefinition(committed);
+      return;
+    }
+
+    renderList();
+    return;
+  }
+  if (shouldPreserveDraft) {
+    renderList();
+    return;
+  }
+  if (restoreNewLoopDraft()) {
+    const committed = reconcileNewLoopDraftFromCatalog();
+    if (committed) applyDefinition(committed);
+    else renderAll();
+    return;
+  }
   const definitions = allDefinitions();
   const requested = preferredLoopId ?? currentDefinition?.id;
   const next =
@@ -466,6 +659,293 @@ async function loadCatalog(preferredLoopId) {
     null;
   applyDefinition(next);
   renderList();
+}
+
+async function loadRetentionPosture(preserveOutcome = false) {
+  if (retentionCleanupInFlight) return;
+  const requestGeneration = ++retentionPostureRequestGeneration;
+  elements.refreshRetentionButton.disabled = true;
+  try {
+    const posture = await requestJson("/api/loops/receipt-retention");
+    if (requestGeneration !== retentionPostureRequestGeneration) return;
+    retentionPosture = posture;
+    retentionPostureFailure = null;
+    if (!preserveOutcome) retentionCleanupOutcome = null;
+    if (currentView === "retention") renderRetention();
+  } catch (error) {
+    if (requestGeneration !== retentionPostureRequestGeneration) return;
+    if (currentView === "retention") {
+      retentionPosture = null;
+      retentionPostureFailure = `Retention posture is unavailable: ${error.message}`;
+      renderRetention();
+    }
+  } finally {
+    if (requestGeneration === retentionPostureRequestGeneration)
+      elements.refreshRetentionButton.disabled = false;
+  }
+}
+
+async function cleanupRetention(artifactClass) {
+  if (retentionCleanupInFlight) return;
+  const label = formatStatus(artifactClass);
+  if (
+    !window.confirm(
+      `Clean up eligible expired ${label} evidence? This explicit request can compact at most 64 artifacts and 4 MiB, with a durable audit trail.`,
+    )
+  )
+    return;
+
+  retentionCleanupInFlight = true;
+  let operationId = null;
+  renderTabs();
+  renderRetention();
+  try {
+    operationId = await getOrCreateRetentionCleanupOperationId(artifactClass);
+    const response = await requestJson("/api/loops/receipt-retention/cleanup", {
+      method: "POST",
+      body: JSON.stringify({
+        artifactClass,
+        operationId,
+        maximumArtifactCount: 64,
+        maximumArtifactUtf8Bytes: 4 * 1024 * 1024,
+      }),
+    });
+    retentionCleanupOutcome = response;
+    try {
+      await forgetRetentionCleanupOperationId(artifactClass, operationId);
+    } catch {
+      retentionCleanupRegistryFailure =
+        "The completed cleanup operation identity remains reserved because it could not be retired safely.";
+      retentionCleanupOutcome = {
+        ...response,
+        detail: `${response.detail} ${retentionCleanupRegistryFailure}`,
+      };
+    }
+  } catch (error) {
+    if (!operationId && !error.payload) {
+      retentionCleanupRegistryFailure =
+        "Receipt cleanup is unavailable because this browser could not durably reserve a shared operation identity.";
+    }
+    retentionCleanupOutcome = error.payload ?? {
+      status: "Unavailable",
+      health: "Degraded",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail:
+        retentionCleanupRegistryFailure ??
+        "Receipt cleanup is unavailable before a safe server outcome could be obtained.",
+    };
+    if (
+      error.payload &&
+      error.payload.status !== "OperationInProgress" &&
+      error.payload.status !== "AuditUnavailable"
+    ) {
+      try {
+        await forgetRetentionCleanupOperationId(artifactClass, operationId);
+      } catch {
+        retentionCleanupRegistryFailure =
+          "The terminal cleanup operation identity remains reserved because it could not be retired safely.";
+        retentionCleanupOutcome = {
+          ...retentionCleanupOutcome,
+          detail: `${retentionCleanupOutcome.detail} ${retentionCleanupRegistryFailure}`,
+        };
+      }
+    }
+  } finally {
+    retentionCleanupInFlight = false;
+    await loadRetentionPosture(true);
+    renderTabs();
+    renderRetention();
+  }
+}
+
+function renderRetention() {
+  clearRetentionRecoveryRenderTimer();
+  elements.retentionContent.replaceChildren();
+  elements.retentionNotice.textContent = retentionCleanupOutcome
+    ? `${formatStatus(retentionCleanupOutcome.status)}: ${retentionCleanupOutcome.detail}`
+    : (retentionCleanupRegistryFailure ??
+      retentionPostureFailure ??
+      retentionPosture?.detail ??
+      "Read the current bounded retention posture before requesting cleanup.");
+  if (!retentionPosture) {
+    elements.retentionContent.append(
+      node(
+        "p",
+        "empty-state",
+        "Retention posture has not been loaded. Select Refresh posture to retry.",
+      ),
+    );
+    return;
+  }
+
+  const workspace = node("section", "retention-workspace");
+  const workspaceTitle = node("div", "retention-workspace-title");
+  workspaceTitle.append(
+    node(
+      "strong",
+      `retention-health ${statusClass(retentionPosture.health)}`,
+      formatStatus(retentionPosture.health),
+    ),
+    node(
+      "span",
+      "",
+      `${formatBytes(retentionPosture.accountedWorkspaceUtf8Bytes)} of ${formatBytes(retentionPosture.maximumWorkspaceUtf8Bytes)} accounted`,
+    ),
+  );
+  workspace.append(
+    workspaceTitle,
+    retentionMetric(
+      "Available workspace",
+      formatBytes(retentionPosture.availableWorkspaceUtf8Bytes),
+    ),
+    retentionMetric(
+      "Active cleanup journals",
+      formatBytes(retentionPosture.activeCleanupJournalUtf8Bytes),
+    ),
+    retentionMetric(
+      "Workspace block",
+      formatStatus(retentionPosture.cleanupBlockReason),
+    ),
+  );
+  elements.retentionContent.append(workspace);
+
+  const classList = node("div", "retention-class-list");
+  for (const posture of retentionPosture.classes ?? []) {
+    const card = node("section", "retention-class-card");
+    const heading = node("div", "retention-class-heading");
+    heading.append(
+      node("h3", "", formatStatus(posture.artifactClass)),
+      node(
+        "span",
+        `retention-health ${statusClass(posture.health)}`,
+        formatStatus(posture.health),
+      ),
+    );
+    card.append(heading, node("p", "retention-detail", posture.detail));
+
+    const metrics = node("dl", "retention-metrics");
+    metrics.append(
+      retentionMetric(
+        "Raw evidence",
+        `${posture.artifactCount} / ${posture.maximumArtifactCount} · ${formatBytes(posture.artifactUtf8Bytes)} / ${formatBytes(posture.maximumArtifactUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Reserved completion",
+        `${posture.reservedArtifactCount} slots · ${formatBytes(posture.reservedArtifactUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Compact proof",
+        `${posture.proofCount} / ${posture.maximumProofCount} · ${formatBytes(posture.proofUtf8Bytes)} / ${formatBytes(posture.maximumProofUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Active cleanup journal",
+        formatBytes(posture.activeCleanupJournalUtf8Bytes),
+      ),
+      retentionMetric(
+        "Recovery available",
+        formatTimestamp(posture.cleanupRecoveryAvailableAtUtc),
+      ),
+      retentionMetric(
+        "Cleanup history",
+        `${posture.completedCleanupOperationCount} operations · ${formatBytes(posture.completedCleanupHistoryUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Exact replay horizon",
+        `${formatTimestamp(posture.oldestExactReplayExpiresAtUtc)} to ${formatTimestamp(posture.newestExactReplayExpiresAtUtc)}`,
+      ),
+      retentionMetric(
+        "Block / exhaustion",
+        `${formatStatus(posture.cleanupBlockReason)} / ${formatStatus(posture.exhaustionReason)}`,
+      ),
+    );
+    card.append(metrics);
+
+    const categories = node("ul", "retention-categories");
+    for (const category of posture.categories ?? []) {
+      categories.append(
+        node(
+          "li",
+          "",
+          `${formatStatus(category.category)}: ${category.artifactCount} · ${formatBytes(category.utf8Bytes)}`,
+        ),
+      );
+    }
+    card.append(categories);
+    const cleanupHealth = statusClass(posture.health);
+    const recoveryAvailableAt = Date.parse(
+      posture.cleanupRecoveryAvailableAtUtc,
+    );
+    const recoveryPending =
+      cleanupHealth === "recoverypending" &&
+      posture.cleanupBlockReason === "OwnershipUnresolved";
+    const recoveryReady =
+      recoveryPending &&
+      Number.isFinite(recoveryAvailableAt) &&
+      recoveryAvailableAt <= Date.now();
+    const normalCleanupAllowed =
+      posture.cleanupBlockReason === "None" &&
+      (cleanupHealth === "healthy" || cleanupHealth === "exhausted");
+    const cleanup = actionButton(
+      retentionCleanupInFlight
+        ? "Cleanup in progress"
+        : recoveryPending
+          ? recoveryReady
+            ? "Retry cleanup recovery"
+            : `Recovery available ${formatTimestamp(posture.cleanupRecoveryAvailableAtUtc)}`
+          : "Clean eligible expired evidence",
+      () => cleanupRetention(posture.artifactClass),
+      retentionCleanupInFlight ||
+        Boolean(retentionCleanupRegistryFailure) ||
+        (!normalCleanupAllowed && !recoveryReady),
+      "secondary-button retention-cleanup-button",
+    );
+    cleanup.setAttribute(
+      "aria-label",
+      `Clean eligible expired ${formatStatus(posture.artifactClass)} evidence`,
+    );
+    card.append(cleanup);
+    classList.append(card);
+  }
+  elements.retentionContent.append(classList);
+  scheduleRetentionRecoveryRender();
+}
+
+function clearRetentionRecoveryRenderTimer() {
+  if (retentionRecoveryRenderTimer === null) return;
+  window.clearTimeout(retentionRecoveryRenderTimer);
+  retentionRecoveryRenderTimer = null;
+}
+
+function scheduleRetentionRecoveryRender() {
+  if (currentView !== "retention" || !retentionPosture) return;
+  const now = Date.now();
+  const nextRecoveryAt = (retentionPosture.classes ?? [])
+    .filter(
+      (posture) =>
+        statusClass(posture.health) === "recoverypending" &&
+        posture.cleanupBlockReason === "OwnershipUnresolved",
+    )
+    .map((posture) => Date.parse(posture.cleanupRecoveryAvailableAtUtc))
+    .filter((value) => Number.isFinite(value) && value > now)
+    .sort((left, right) => left - right)[0];
+  if (!nextRecoveryAt) return;
+  retentionRecoveryRenderTimer = window.setTimeout(
+    () => {
+      retentionRecoveryRenderTimer = null;
+      if (currentView === "retention") renderRetention();
+    },
+    Math.min(nextRecoveryAt - now + 25, 2_147_483_647),
+  );
+}
+
+function retentionMetric(label, value) {
+  const metric = node("div", "retention-metric");
+  metric.append(node("dt", "", label), node("dd", "", value));
+  return metric;
 }
 
 function allDefinitions() {
@@ -478,12 +958,336 @@ function applyDefinition(definition) {
   historicalLoopId = null;
   currentDefinition = definition;
   draft = definition ? clone(definition) : null;
-  selectedNodeId = "trigger";
-  lastSelectedNodeId = "trigger";
+  const initialNodeId = definition?.graph?.entryNodeId ?? "trigger";
+  selectedNodeId = initialNodeId;
+  lastSelectedNodeId = initialNodeId;
   dirty = false;
   elements.name.value = draft?.displayName ?? "";
   elements.description.value = draft?.description ?? "";
   renderAll();
+}
+
+function configureNewLoopDraftStorage(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  const nextKey = `${newLoopDraftStorageKeyPrefix}.${scope}`;
+  if (newLoopDraftStorageKey && newLoopDraftStorageKey !== nextKey) {
+    currentDefinition = null;
+    draft = null;
+    resetNewLoopDraftState(false);
+  }
+  newLoopDraftStorageKey = nextKey;
+}
+
+function startNewLoopDraft() {
+  const template = catalog?.draftTemplate;
+  if (!template)
+    throw new Error("The server did not provide a draft template.");
+  runEvidenceRequestGeneration++;
+  historicalLoopId = null;
+  currentView = "builder";
+  currentDefinition = null;
+  draft = {
+    schemaVersion: template.schemaVersion,
+    id: null,
+    definitionVersion: null,
+    contentHash: null,
+    createdAtUtc: null,
+    updatedAtUtc: null,
+    displayName: template.definition.displayName,
+    description: template.definition.description,
+    roleId: template.roleId,
+    triggerPolicy: clone(template.definition.triggerPolicy),
+    contextDefaults: clone(template.contextDefaults),
+    inferenceSteps: template.definition.inferenceSteps.map((step, index) => ({
+      ...clone(step),
+      id: `local-draft-${index + 1}-${newOperationId()}`,
+    })),
+    toolAssignments: [...template.definition.toolAssignments],
+    exitPolicy: clone(template.definition.exitPolicy),
+    lastMutationOperationId: null,
+  };
+  newLoopDraftOperationId = newOperationId();
+  newLoopDraftCommitState = "editing";
+  newLoopDraftFailureDetail = null;
+  pendingCreateRequest = null;
+  selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
+  dirty = true;
+  elements.name.value = draft.displayName;
+  elements.description.value = draft.description;
+  tryPersistNewLoopDraft();
+  renderAll();
+}
+
+function isNewLoopDraft() {
+  return (
+    currentDefinition === null &&
+    !historicalLoopId &&
+    draft?.id === null &&
+    typeof newLoopDraftOperationId === "string"
+  );
+}
+
+function isUncertainNewLoopDraft() {
+  return isNewLoopDraft() && newLoopDraftCommitState === "uncertain";
+}
+
+function canMutateDraft() {
+  return (
+    Boolean(draft) &&
+    !isSystemLoop() &&
+    !mutationInFlight &&
+    !isUncertainNewLoopDraft()
+  );
+}
+
+function persistNewLoopDraft() {
+  if (!isNewLoopDraft()) return;
+  if (!newLoopDraftStorageKey || !window.sessionStorage)
+    throw new Error("Tab-scoped draft storage is unavailable.");
+  window.sessionStorage.setItem(
+    newLoopDraftStorageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      roleId: draft.roleId,
+      operationId: newLoopDraftOperationId,
+      commitState:
+        newLoopDraftCommitState === "saving"
+          ? "uncertain"
+          : newLoopDraftCommitState,
+      failureDetail: newLoopDraftFailureDetail,
+      pendingCreateRequest,
+      draft,
+    }),
+  );
+}
+
+function restoreNewLoopDraft() {
+  if (!newLoopDraftStorageKey || !window.sessionStorage) return false;
+  const stored = window.sessionStorage.getItem(newLoopDraftStorageKey);
+  if (!stored) return false;
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    return false;
+  }
+  if (!isStoredNewLoopDraft(payload)) {
+    window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    return false;
+  }
+
+  currentDefinition = null;
+  historicalLoopId = null;
+  draft = clone(payload.draft);
+  newLoopDraftOperationId = payload.operationId;
+  newLoopDraftCommitState = payload.commitState;
+  newLoopDraftFailureDetail = payload.failureDetail;
+  pendingCreateRequest = payload.pendingCreateRequest
+    ? clone(payload.pendingCreateRequest)
+    : null;
+  selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
+  dirty = true;
+  elements.name.value = draft.displayName;
+  elements.description.value = draft.description;
+  return true;
+}
+
+function isStoredNewLoopDraft(payload) {
+  return (
+    payload?.schemaVersion === 1 &&
+    payload.roleId === catalog?.roleId &&
+    typeof payload.operationId === "string" &&
+    /^[a-z0-9-]{8,128}$/.test(payload.operationId) &&
+    ["editing", "failed", "conflict", "uncertain"].includes(
+      payload.commitState,
+    ) &&
+    (payload.failureDetail === null ||
+      (typeof payload.failureDetail === "string" &&
+        payload.failureDetail.length <= 4000)) &&
+    isStoredDraftShape(payload.draft, payload.roleId) &&
+    (payload.commitState !== "uncertain" ||
+      payload.pendingCreateRequest !== null) &&
+    isStoredPendingCreateRequest(
+      payload.pendingCreateRequest,
+      payload.operationId,
+    )
+  );
+}
+
+function isStoredDraftShape(candidate, roleId) {
+  return (
+    candidate?.schemaVersion === catalog?.draftTemplate?.schemaVersion &&
+    candidate.id === null &&
+    candidate.definitionVersion === null &&
+    candidate.roleId === roleId &&
+    typeof candidate.displayName === "string" &&
+    typeof candidate.description === "string" &&
+    isStoredTriggerPolicy(candidate.triggerPolicy) &&
+    isStoredContextDefaults(candidate.contextDefaults) &&
+    Array.isArray(candidate.inferenceSteps) &&
+    candidate.inferenceSteps.length >= 1 &&
+    candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
+    candidate.inferenceSteps.every(isStoredInferenceStep) &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
+    isStoredExitPolicy(candidate.exitPolicy)
+  );
+}
+
+function isStoredPendingCreateRequest(candidate, operationId) {
+  if (candidate === null) return true;
+  return (
+    candidate &&
+    typeof candidate.key === "string" &&
+    candidate.body?.operationId === operationId &&
+    candidate.key === JSON.stringify(candidate.body.definition) &&
+    isStoredDefinitionInput(candidate.body.definition)
+  );
+}
+
+function isStoredDefinitionInput(candidate) {
+  return (
+    candidate &&
+    typeof candidate.displayName === "string" &&
+    typeof candidate.description === "string" &&
+    isStoredTriggerPolicy(candidate.triggerPolicy) &&
+    Array.isArray(candidate.inferenceSteps) &&
+    candidate.inferenceSteps.length >= 1 &&
+    candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
+    candidate.inferenceSteps.every(isStoredInferenceStep) &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
+    isStoredExitPolicy(candidate.exitPolicy)
+  );
+}
+
+function isStoredTriggerPolicy(candidate) {
+  return (
+    candidate &&
+    ["invocation", "preset", "none"].includes(candidate.promptSource) &&
+    typeof candidate.presetPrompt === "string" &&
+    typeof candidate.includeInvokingConversation === "boolean"
+  );
+}
+
+function isStoredContextDefaults(candidate) {
+  return (
+    candidate &&
+    isStoredContextPolicy(candidate.inference) &&
+    isStoredContextPolicy(candidate.exit)
+  );
+}
+
+function isStoredContextPolicy(candidate) {
+  return (
+    candidate &&
+    candidate.contextIn &&
+    [
+      "includeRoleContext",
+      "includeTriggerPrompt",
+      "includeInvokingConversation",
+      "includeEarlierRetainedOutputs",
+      "includePreviousIterationResult",
+    ].every((key) => typeof candidate.contextIn[key] === "boolean") &&
+    candidate.contextOut &&
+    ["retainForLoopReasoning", "publishToInvokingConversation"].every(
+      (key) => typeof candidate.contextOut[key] === "boolean",
+    )
+  );
+}
+
+function isStoredNodeContextPolicy(candidate) {
+  return (
+    candidate &&
+    ["inherit", "custom"].includes(candidate.mode) &&
+    (candidate.mode === "inherit"
+      ? candidate.customPolicy === null
+      : isStoredContextPolicy(candidate.customPolicy))
+  );
+}
+
+function isStoredInferenceStep(candidate) {
+  return (
+    candidate &&
+    (candidate.id === null || typeof candidate.id === "string") &&
+    typeof candidate.name === "string" &&
+    typeof candidate.instruction === "string" &&
+    isStoredNodeContextPolicy(candidate.contextPolicy)
+  );
+}
+
+function isStoredExitPolicy(candidate) {
+  return (
+    candidate &&
+    Number.isInteger(candidate.maxAdditionalIterations) &&
+    typeof candidate.decisionInstruction === "string" &&
+    isStoredNodeContextPolicy(candidate.contextPolicy)
+  );
+}
+
+function isStoredToolAssignments(candidate) {
+  return (
+    Array.isArray(candidate) &&
+    candidate.length <= supportedCustomToolAssignments.length &&
+    candidate.every((value) =>
+      supportedCustomToolAssignments.includes(value),
+    ) &&
+    new Set(candidate).size === candidate.length
+  );
+}
+
+function reconcileNewLoopDraftFromCatalog() {
+  if (!isNewLoopDraft() || !pendingCreateRequest) return null;
+  const committed = catalog.customDefinitions.find(
+    (definition) =>
+      definition.lastMutationOperationId ===
+      pendingCreateRequest.body.operationId,
+  );
+  if (!committed) return null;
+  resetNewLoopDraftState(true);
+  showToast("The first save was already committed and has been restored.");
+  return committed;
+}
+
+function resetNewLoopDraftState(removeStored) {
+  if (removeStored && newLoopDraftStorageKey && window.sessionStorage) {
+    try {
+      window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    } catch {
+      // Clearing in-memory ownership remains safe; tab-scoped storage is discarded when the tab closes.
+    }
+  }
+  newLoopDraftOperationId = null;
+  newLoopDraftCommitState = null;
+  newLoopDraftFailureDetail = null;
+  pendingCreateRequest = null;
+}
+
+function discardNewLoopDraft() {
+  if (!isNewLoopDraft() || newLoopDraftCommitState === "uncertain") return;
+  resetNewLoopDraftState(true);
+  applyDefinition(
+    catalog.systemDefault ?? catalog.customDefinitions[0] ?? null,
+  );
+  showToast("Unsaved draft discarded. No durable loop was deleted.");
+}
+
+function tryPersistNewLoopDraft() {
+  try {
+    persistNewLoopDraft();
+    return true;
+  } catch (error) {
+    const outcomeMayBeUncertain = newLoopDraftCommitState === "uncertain";
+    newLoopDraftCommitState = outcomeMayBeUncertain ? "uncertain" : "failed";
+    const storageFailure = `This tab could not preserve the draft for reload: ${error.message}`;
+    newLoopDraftFailureDetail = newLoopDraftFailureDetail
+      ? `${newLoopDraftFailureDetail} ${storageFailure}`
+      : `The draft remains in memory, but ${storageFailure}`;
+    return false;
+  }
 }
 
 function renderAll() {
@@ -492,9 +1296,11 @@ function renderAll() {
   if (currentView === "builder") {
     renderCanvas();
     renderInspector();
-  } else {
+  } else if (currentView === "runs") {
     renderRuns();
     renderRunEvidence();
+  } else {
+    renderRetention();
   }
   renderToolbar();
   renderValidation();
@@ -503,16 +1309,25 @@ function renderAll() {
 
 function renderTabs() {
   const builderActive = currentView === "builder" && !historicalLoopId;
+  const runsActive =
+    currentView === "runs" ||
+    (currentView === "builder" && Boolean(historicalLoopId));
+  const retentionActive = currentView === "retention";
   elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
-  elements.runsTab.disabled = mutationInFlight;
+  elements.runsTab.disabled = mutationInFlight || isNewLoopDraft();
+  elements.retentionTab.disabled = mutationInFlight || retentionCleanupInFlight;
   elements.builderTab.classList.toggle("active", builderActive);
-  elements.runsTab.classList.toggle("active", !builderActive);
+  elements.runsTab.classList.toggle("active", runsActive);
+  elements.retentionTab.classList.toggle("active", retentionActive);
   elements.builderTab.setAttribute("aria-selected", String(builderActive));
-  elements.runsTab.setAttribute("aria-selected", String(!builderActive));
+  elements.runsTab.setAttribute("aria-selected", String(runsActive));
+  elements.retentionTab.setAttribute("aria-selected", String(retentionActive));
   elements.builderTab.tabIndex = builderActive ? 0 : -1;
-  elements.runsTab.tabIndex = builderActive ? -1 : 0;
+  elements.runsTab.tabIndex = runsActive ? 0 : -1;
+  elements.retentionTab.tabIndex = retentionActive ? 0 : -1;
   elements.builderView.hidden = !builderActive;
-  elements.runsView.hidden = builderActive;
+  elements.runsView.hidden = !runsActive;
+  elements.retentionView.hidden = !retentionActive;
   elements.inspectorTabs.hidden = !builderActive;
   elements.builderLayout.classList.toggle("runs-active", !builderActive);
   elements.inspectorContent.setAttribute(
@@ -532,12 +1347,18 @@ function renderTabs() {
 
 async function switchView(view) {
   if (mutationInFlight) return;
-  if (view !== "builder" && view !== "runs") return;
+  if (view !== "builder" && view !== "runs" && view !== "retention") return;
   if (view === "builder" && historicalLoopId) return;
+  if (view === "runs" && isNewLoopDraft()) return;
   currentView = view;
   if (view === "runs") {
     renderAll();
     await loadRuns();
+    return;
+  }
+  if (view === "retention") {
+    renderAll();
+    await loadRetentionPosture();
     return;
   }
   renderAll();
@@ -557,6 +1378,8 @@ async function loadRuns({
   preferredRunId = null,
   preferredAdmissionOperationId = null,
   preserveEmptySelection = false,
+  propagateFailure = false,
+  requestOptions = {},
 } = {}) {
   if (!catalog) return;
   const requestGeneration = ++runEvidenceRequestGeneration;
@@ -565,12 +1388,13 @@ async function loadRuns({
     const filteredPageRequest = loopId
       ? requestJson(
           `/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}`,
+          requestOptions,
         )
       : Promise.resolve(null);
     const [payload, filteredPayload, quotaPayload] = await Promise.all([
-      requestJson("/api/loop-runs?maximumCount=50"),
+      requestJson("/api/loop-runs?maximumCount=50", requestOptions),
       filteredPageRequest,
-      requestJson("/api/loop-runs/quota"),
+      requestJson("/api/loop-runs/quota", requestOptions),
     ]);
     if (
       requestGeneration !== runEvidenceRequestGeneration ||
@@ -617,7 +1441,11 @@ async function loadRuns({
     if (selectedRunId) {
       const requestedRunId = selectedRunId;
       const summary = visible.find((run) => run.id === requestedRunId);
-      const evidence = await loadSelectedRunEvidence(requestedRunId, summary);
+      const evidence = await loadSelectedRunEvidence(
+        requestedRunId,
+        summary,
+        requestOptions,
+      );
       if (evidence.trace?.isDeleted) {
         recentRuns = mergeRunSummaries(
           [tombstoneRunSummary(evidence.trace)],
@@ -661,6 +1489,7 @@ async function loadRuns({
       !silent
     )
       showBanner(`Run evidence unavailable: ${error.message}`);
+    if (propagateFailure) throw error;
     return false;
   }
 }
@@ -725,16 +1554,17 @@ async function loadMoreRuns() {
   }
 }
 
-async function loadSelectedRunEvidence(runId, summary) {
+async function loadSelectedRunEvidence(runId, summary, requestOptions = {}) {
   const traceRequest = requestJson(
     `/api/loop-runs/${encodeURIComponent(runId)}/trace`,
+    requestOptions,
   );
   if (summary?.isDeleted) {
     return { run: null, trace: await traceRequest };
   }
 
   const [runResult, traceResult] = await Promise.allSettled([
-    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
+    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`, requestOptions),
     traceRequest,
   ]);
   if (traceResult.status === "rejected") throw traceResult.reason;
@@ -1141,9 +1971,7 @@ function renderRunEvent(event) {
     event.retainedForLoopReasoning != null
       ? `loop reasoning ${event.retainedForLoopReasoning ? "retained" : "evidence only"}`
       : null,
-    event.publishedToInvokingConversation != null
-      ? `conversation ${event.publishedToInvokingConversation ? "published" : "not published"}${event.conversationPublicationId ? ` · ${event.conversationPublicationId}` : ""}`
-      : null,
+    publicationTimelineEvidence(event),
     event.exitDecision
       ? `Exit decision ${formatStatus(event.exitDecision)}`
       : null,
@@ -1468,20 +2296,14 @@ function renderRunEvidence() {
     }
   }
 
-  const publicationEvents = (selectedRun.events ?? []).filter(
-    (event) => event.conversationPublicationId,
-  );
+  const publicationDispositions =
+    selectedRun.conversationPublicationDispositions ?? [];
   appendEvidenceSection(
     "Output disposition",
     selectedRun.finalOutput ?? "No terminal output",
-    publicationEvents.length
-      ? publicationEvents
-          .map(
-            (event) =>
-              `${event.conversationPublicationId}: ${event.publishedToInvokingConversation ? "published" : "not published"}`,
-          )
-          .join("\n")
-      : "Evidence retained; no conversation publication correlation recorded.",
+    publicationDispositionLines(selectedRun, publicationDispositions).join(
+      "\n",
+    ),
   );
   if (selectedRun.failureCode || selectedRun.failureDetail)
     appendEvidenceSection(
@@ -1490,6 +2312,65 @@ function renderRunEvidence() {
       selectedRun.failureDetail ??
         "Inspect the ordered timeline for the persisted boundary.",
     );
+}
+
+function publicationDispositionLines(run, dispositions) {
+  if (dispositions.length === 0)
+    return [
+      "No conversation publication requested; no durable publication operation was recorded.",
+    ];
+
+  return dispositions.flatMap((disposition) => {
+    const phases = (run.events ?? [])
+      .filter(
+        (event) => event.conversationPublicationId === disposition.operationId,
+      )
+      .map(
+        (event) => `event ${event.sequence} · ${publicationPhaseLabel(event)}`,
+      );
+    return [
+      `${disposition.operationId}: ${formatPublicationDisposition(disposition)}${disposition.isDefinite ? " · definite" : " · review required"}`,
+      `  ${disposition.detail}`,
+      ...phases.map((phase) => `  ${phase}`),
+    ];
+  });
+}
+
+function formatPublicationDisposition(disposition) {
+  const label = formatStatus(disposition.disposition);
+  return disposition.hasIntegrityWarning
+    ? `Integrity warning: ${label}`
+    : label;
+}
+
+function publicationPhaseLabel(event) {
+  switch (event.kind) {
+    case "NodeOutcomeObserved":
+    case "ExitDecisionCompleted":
+      return "output policy selected";
+    case "ConversationPublicationStarted":
+      return "intent committed";
+    case "ConversationPublished":
+      return "terminal outcome recorded";
+    default:
+      return `${formatStatus(event.kind)} correlated evidence`;
+  }
+}
+
+function publicationTimelineEvidence(event) {
+  if (event.conversationPublicationId) {
+    const disposition = (
+      selectedRun?.conversationPublicationDispositions ?? []
+    ).find((item) => item.operationId === event.conversationPublicationId);
+    const terminal =
+      event.kind === "ConversationPublished" && disposition
+        ? ` · ${formatPublicationDisposition(disposition)}`
+        : "";
+    return `conversation publication ${publicationPhaseLabel(event)} · ${event.conversationPublicationId}${terminal}`;
+  }
+
+  if (event.publishedToInvokingConversation == null) return null;
+  return `conversation publication ${event.publishedToInvokingConversation ? "selected" : "not selected"}`;
 }
 
 function appendRunProgressEvidence(run, definition) {
@@ -1616,6 +2497,40 @@ function renderList() {
     catalog.systemDefault,
   ].filter(matchesSearch);
   let visibleGroup = null;
+  if (
+    isNewLoopDraft() &&
+    (!loopSearchQuery ||
+      [draft.displayName, draft.description, "unsaved draft"].some((value) =>
+        String(value ?? "")
+          .toLocaleLowerCase()
+          .includes(loopSearchQuery),
+      ))
+  ) {
+    elements.list.append(node("div", "loop-list-group", "Draft"));
+    visibleGroup = "Draft";
+    const button = node("button", "loop-list-item selected");
+    button.type = "button";
+    button.disabled = mutationInFlight;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "true");
+    button.tabIndex = 0;
+    button.dataset.loopOptionKey = "draft:new-loop";
+    button.append(node("span", "loop-icon custom", "D"));
+    const copy = node("span", "loop-list-copy");
+    copy.append(node("span", "loop-list-name", draft.displayName));
+    const meta = node("span", "loop-list-meta");
+    meta.append(
+      node("span", "version-chip", "Unsaved draft"),
+      node("span", "", "Not durable"),
+    );
+    copy.append(meta);
+    button.append(copy);
+    button.addEventListener("keydown", (event) =>
+      moveLoopOptionFocus(event, button),
+    );
+    elements.list.append(button);
+    listOptions.push(button);
+  }
   for (const definition of visibleDefinitions) {
     const projectedDefinition =
       draft?.id === definition.id ? draft : definition;
@@ -1666,9 +2581,11 @@ function renderList() {
       node(
         "span",
         "",
-        projectedDefinition.inferenceSteps.length === 1
-          ? "1 step"
-          : `${projectedDefinition.inferenceSteps.length} steps`,
+        definition.id === "default-conversation"
+          ? `${projectedDefinition.graph.nodes.length} nodes · ${projectedDefinition.graph.edges.length} edges`
+          : projectedDefinition.inferenceSteps.length === 1
+            ? "1 step"
+            : `${projectedDefinition.inferenceSteps.length} steps`,
       ),
     );
     copy.append(meta);
@@ -1739,7 +2656,14 @@ function renderList() {
 async function selectDefinition(definition) {
   if (mutationInFlight) return;
   if (definition.id === currentDefinition?.id && !historicalLoopId) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before leaving this draft.",
+    );
+    return;
+  }
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
   runSelectionGeneration++;
   applyDefinition(definition);
   if (currentView === "runs") await loadRuns({ silent: false });
@@ -1747,7 +2671,14 @@ async function selectDefinition(definition) {
 
 async function selectHistoricalLoop(loopId) {
   if (mutationInFlight) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before leaving this draft.",
+    );
+    return;
+  }
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
   runSelectionGeneration++;
   runEvidenceRequestGeneration++;
   historicalLoopId = loopId;
@@ -1770,6 +2701,12 @@ function renderCanvas() {
   elements.canvas.replaceChildren();
   if (!draft) {
     elements.canvas.append(node("p", "empty-state", "Create a loop to begin."));
+    applyCanvasZoom();
+    return;
+  }
+
+  if (isSystemLoop()) {
+    renderSystemCanvas();
     applyCanvasZoom();
     return;
   }
@@ -1828,6 +2765,121 @@ function renderCanvas() {
     elements.canvas.append(rail);
   }
   applyCanvasZoom();
+}
+
+function renderSystemCanvas() {
+  if (draft.executionContract?.graphSemantics !== "validated-runner-contract") {
+    draft.graph.nodes.forEach((graphNode, index) => {
+      elements.canvas.append(createSystemNodeCard(graphNode, index));
+      for (const edge of draft.graph.edges.filter(
+        (candidate) => candidate.fromNodeId === graphNode.id,
+      ))
+        appendSystemConnector(edge, true);
+    });
+    return;
+  }
+
+  const sequence = systemGraphSequence();
+  sequence.nodes.forEach((graphNode, index) => {
+    elements.canvas.append(createSystemNodeCard(graphNode, index));
+    const edge = sequence.edges[index];
+    if (edge) appendSystemConnector(edge);
+  });
+}
+
+function systemGraphSequence() {
+  const graph = draft.graph;
+  const nodesById = new Map(
+    graph.nodes.map((graphNode) => [graphNode.id, graphNode]),
+  );
+  const nodes = [];
+  const edges = [];
+  const visited = new Set();
+  let currentNodeId = graph.entryNodeId;
+  while (currentNodeId && !visited.has(currentNodeId)) {
+    const graphNode = nodesById.get(currentNodeId);
+    if (!graphNode) break;
+    visited.add(currentNodeId);
+    nodes.push(graphNode);
+    if (graph.terminalNodeIds.includes(currentNodeId)) break;
+    const edge = graph.edges.find(
+      (candidate) => candidate.fromNodeId === currentNodeId,
+    );
+    if (!edge) break;
+    edges.push(edge);
+    currentNodeId = edge.toNodeId;
+  }
+  return { nodes, edges };
+}
+
+function createSystemNodeCard(graphNode, index) {
+  const className =
+    graphNode.kind === "model-inference"
+      ? "inference"
+      : graphNode.kind === "run-finalization"
+        ? "exit"
+        : "system";
+  const button = node("button", `node-card ${className}`);
+  button.type = "button";
+  button.classList.toggle("selected", selectedNodeId === graphNode.id);
+  button.setAttribute(
+    "aria-pressed",
+    selectedNodeId === graphNode.id ? "true" : "false",
+  );
+  const header = node("span", "node-card-head");
+  const kindCopy = node("span", "node-kind-wrap");
+  kindCopy.append(
+    node("span", "node-kind-dot"),
+    node("span", "node-kind", capitalize(splitWords(graphNode.kind))),
+  );
+  header.append(
+    kindCopy,
+    node("span", "node-position", `Boundary ${index + 1}`),
+  );
+  button.append(
+    header,
+    node("span", "node-name", graphNode.displayName),
+    node("span", "node-summary", graphNode.description),
+  );
+  const chips = node("span", "node-card-chips");
+  chips.append(
+    node("span", "node-chip", graphNode.id),
+    node("span", "node-chip", "System locked"),
+    node(
+      "span",
+      "node-chip",
+      runnerContractLabel(graphNode.executionSemantics),
+    ),
+    node(
+      "span",
+      "node-chip",
+      `${graphNode.capabilityIds.length} ${graphNode.capabilityIds.length === 1 ? "capability" : "capabilities"}`,
+    ),
+  );
+  button.append(chips);
+  button.addEventListener("click", () => {
+    lastSelectedNodeId = graphNode.id;
+    selectedNodeId = graphNode.id;
+    renderCanvas();
+    renderInspector();
+    renderToolbar();
+  });
+  return button;
+}
+
+function appendSystemConnector(edge, includeEndpoints = false) {
+  const connector = node("span", "connector system-connector");
+  const endpoints = includeEndpoints
+    ? ` · ${edge.fromNodeId} → ${edge.toNodeId}`
+    : "";
+  const label = node(
+    "span",
+    "system-connector-label",
+    `${edge.id}${endpoints} · ${capitalize(splitWords(edge.condition))} · ${runnerContractLabel(edge.executionSemantics)}`,
+  );
+  label.title = edge.description;
+  connector.append(label);
+  elements.canvas.append(connector);
 }
 
 function createNodeCard(
@@ -1963,6 +3015,12 @@ function renderInspector() {
     return;
   }
 
+  if (isSystemLoop()) {
+    if (loopSettingsSelected) renderSystemLoopInspector();
+    else renderSystemNodeInspector();
+    return;
+  }
+
   if (selectedNodeId === "trigger") {
     renderTriggerInspector();
     return;
@@ -1978,6 +3036,119 @@ function renderInspector() {
     );
   if (step) renderInferenceInspector(step);
   else renderLoopInspector();
+}
+
+function renderSystemLoopInspector() {
+  elements.inspectorTitle.textContent = "System loop contract";
+  const policy = section("Actual role, trigger, and context policy");
+  policy.append(
+    systemFact("Role", draft.roleId),
+    systemFact("Trigger", capitalize(splitWords(draft.trigger))),
+    systemFact(
+      "Context and memory scope",
+      capitalize(splitWords(draft.memoryScope)),
+    ),
+    systemFact("Review policy", capitalize(splitWords(draft.reviewPolicy))),
+    systemFact("Failure policy", capitalize(splitWords(draft.failurePolicy))),
+    systemFact("State", capitalize(splitWords(draft.state))),
+    systemFact("Edit mode", capitalize(splitWords(draft.editMode))),
+  );
+  const authority = section("Loop-scoped capabilities");
+  authority.append(
+    node(
+      "p",
+      "field-hint",
+      "These are the canonical default-loop capabilities, not authored custom-loop tool assignments. Governed workspace commands still pass through permissions, approvals, and audit.",
+    ),
+    systemFact("Capability IDs", draft.capabilityIds.join(", ")),
+  );
+  const execution = section("Current executor support");
+  execution.append(
+    systemFact("Dedicated runner", draft.executionContract.runner),
+    systemFact(
+      "Graph semantics",
+      capitalize(splitWords(draft.executionContract.graphSemantics)),
+    ),
+    systemFact(
+      "Generic graph dispatch",
+      draft.executionContract.usesGenericGraphDispatcher
+        ? "Supported"
+        : "Not implemented",
+    ),
+    node("div", "context-note", draft.executionContract.detail),
+  );
+  const topology = section("Canonical topology");
+  topology.append(
+    systemFact("Entry node", draft.graph.entryNodeId),
+    systemFact("Terminal nodes", draft.graph.terminalNodeIds.join(", ")),
+    systemFact(
+      "Structure",
+      `${draft.graph.nodes.length} nodes · ${draft.graph.edges.length} edges`,
+    ),
+  );
+  elements.inspectorContent.append(policy, authority, execution, topology);
+}
+
+function renderSystemNodeInspector() {
+  const graphNode = draft.graph.nodes.find(
+    (item) => item.id === selectedNodeId,
+  );
+  if (!graphNode) {
+    renderSystemLoopInspector();
+    return;
+  }
+  elements.inspectorTitle.textContent = graphNode.displayName;
+  const boundary = section("Implemented boundary");
+  boundary.append(
+    node("div", "context-note", graphNode.description),
+    systemFact("Stable node ID", graphNode.id),
+    systemFact("Kind", capitalize(splitWords(graphNode.kind))),
+    systemFact("Edit mode", capitalize(splitWords(graphNode.editMode))),
+    systemFact("Capability IDs", graphNode.capabilityIds.join(", ") || "None"),
+  );
+  const execution = section("Execution semantics");
+  execution.append(
+    systemFact(
+      "Semantics",
+      capitalize(splitWords(graphNode.executionSemantics)),
+    ),
+    node("div", "context-note", draft.executionContract.detail),
+  );
+  const transitions = section("Canonical edges");
+  const incoming = draft.graph.edges.filter(
+    (edge) => edge.toNodeId === graphNode.id,
+  );
+  const outgoing = draft.graph.edges.filter(
+    (edge) => edge.fromNodeId === graphNode.id,
+  );
+  for (const edge of incoming)
+    transitions.append(
+      systemFact(
+        "Incoming",
+        `${edge.id} · ${capitalize(splitWords(edge.condition))} · from ${edge.fromNodeId}. ${edge.description}`,
+      ),
+    );
+  for (const edge of outgoing)
+    transitions.append(
+      systemFact(
+        "Outgoing",
+        `${edge.id} · ${capitalize(splitWords(edge.condition))} · to ${edge.toNodeId}. ${edge.description}`,
+      ),
+    );
+  if (incoming.length === 0)
+    transitions.append(systemFact("Incoming", "None · graph entry"));
+  if (outgoing.length === 0)
+    transitions.append(systemFact("Outgoing", "None · graph terminal"));
+  elements.inspectorContent.append(boundary, execution, transitions);
+}
+
+function systemFact(label, value) {
+  const fact = node("div", "context-note");
+  fact.append(
+    node("strong", "", `${label}: `),
+    document.createTextNode(String(value)),
+  );
+  return fact;
 }
 
 function renderLoopInspector() {
@@ -2006,19 +3177,31 @@ function renderLoopInspector() {
       "Assignments allow inference nodes to request governed capabilities. Permission, approval, and audit policy still decide whether each request may execute. Exit decisions are always tool-less.",
     ),
   );
-  for (const assignment of catalog.tools?.customAssignable ?? []) {
+  const assignableTools = catalog.tools?.customAssignable ?? [];
+  const staleAssignments = [
+    ...new Set(
+      draft.toolAssignments.filter(
+        (assignment) => !assignableTools.includes(assignment),
+      ),
+    ),
+  ];
+  for (const assignment of [...assignableTools, ...staleAssignments]) {
+    const isStaleAssignment = staleAssignments.includes(assignment);
     authority.append(
       checkboxRow(
         capitalize(assignment),
-        `Allow inference nodes to request the governed ${assignment} command.`,
+        isStaleAssignment
+          ? `This assignment is outside the current role authority. Uncheck it before saving the draft.`
+          : `Allow inference nodes to request the governed ${assignment} command.`,
         draft.toolAssignments.includes(assignment),
         (checked) => {
+          if (!canMutateDraft()) return;
           draft.toolAssignments = checked
             ? [...draft.toolAssignments, assignment]
             : draft.toolAssignments.filter((value) => value !== assignment);
           markDirty();
         },
-        isSystemLoop(),
+        !canMutateDraft(),
       ),
     );
   }
@@ -2054,8 +3237,9 @@ function renderTriggerInspector() {
     option.selected = trigger.promptSource === value;
     source.append(option);
   }
-  source.disabled = isSystemLoop();
+  source.disabled = !canMutateDraft();
   source.addEventListener("change", (event) => {
+    if (!canMutateDraft()) return;
     trigger.promptSource = event.target.value;
     if (trigger.promptSource !== "preset") trigger.presetPrompt = "";
     markDirty();
@@ -2073,8 +3257,9 @@ function renderTriggerInspector() {
     const preset = document.createElement("textarea");
     preset.maxLength = catalog.limits.maxTriggerPromptCharacters;
     preset.value = trigger.presetPrompt;
-    preset.disabled = isSystemLoop();
+    preset.disabled = !canMutateDraft();
     preset.addEventListener("input", (event) => {
+      if (!canMutateDraft()) return;
       trigger.presetPrompt = event.target.value;
       markDirty();
     });
@@ -2092,11 +3277,12 @@ function renderTriggerInspector() {
       "Admit a bounded snapshot of the logical user session when one exists. Provider-thread history is never used.",
       trigger.includeInvokingConversation,
       (checked) => {
+        if (!canMutateDraft()) return;
         trigger.includeInvokingConversation = checked;
         markDirty();
         renderCanvas();
       },
-      isSystemLoop(),
+      !canMutateDraft(),
     ),
   );
   purpose.append(
@@ -2123,8 +3309,9 @@ function renderInferenceInspector(step) {
   const name = document.createElement("input");
   name.maxLength = catalog.limits.maxNameCharacters;
   name.value = step.name;
-  name.disabled = isSystemLoop();
+  name.disabled = !canMutateDraft();
   name.addEventListener("input", (event) => {
+    if (!canMutateDraft()) return;
     step.name = event.target.value;
     markDirty();
     renderCanvas();
@@ -2132,8 +3319,9 @@ function renderInferenceInspector(step) {
   const prompt = document.createElement("textarea");
   prompt.maxLength = catalog.limits.maxInstructionCharacters;
   prompt.value = step.instruction;
-  prompt.disabled = isSystemLoop();
+  prompt.disabled = !canMutateDraft();
   prompt.addEventListener("input", (event) => {
+    if (!canMutateDraft()) return;
     step.instruction = event.target.value;
     markDirty();
     renderCanvas();
@@ -2151,17 +3339,17 @@ function renderInferenceInspector(step) {
     actionButton(
       "↑ Move earlier",
       () => moveStep(index, -1),
-      index === 0 || isSystemLoop(),
+      index === 0 || !canMutateDraft(),
     ),
     actionButton(
       "↓ Move later",
       () => moveStep(index, 1),
-      index === draft.inferenceSteps.length - 1 || isSystemLoop(),
+      index === draft.inferenceSteps.length - 1 || !canMutateDraft(),
     ),
     actionButton(
       "Remove",
       () => removeStep(index),
-      draft.inferenceSteps.length === 1 || isSystemLoop(),
+      draft.inferenceSteps.length === 1 || !canMutateDraft(),
       "danger-button",
     ),
   );
@@ -2218,20 +3406,22 @@ function renderExitInspector() {
       "Exit may ask to return to Step 1. The ceiling never causes a repeat by itself.",
       exit.maxAdditionalIterations > 0,
       (checked) => {
+        if (!canMutateDraft()) return;
         exit.maxAdditionalIterations = checked ? 1 : 0;
         markDirty();
         renderInspector();
         renderCanvas();
       },
-      isSystemLoop(),
+      !canMutateDraft(),
     ),
   );
   if (exit.maxAdditionalIterations > 0) {
     const decision = document.createElement("textarea");
     decision.maxLength = catalog.limits.maxInstructionCharacters;
     decision.value = exit.decisionInstruction;
-    decision.disabled = isSystemLoop();
+    decision.disabled = !canMutateDraft();
     decision.addEventListener("input", (event) => {
+      if (!canMutateDraft()) return;
       exit.decisionInstruction = event.target.value;
       markDirty();
     });
@@ -2240,8 +3430,9 @@ function renderExitInspector() {
     ceiling.min = "1";
     ceiling.max = String(catalog.limits.maxAdditionalIterations);
     ceiling.value = String(exit.maxAdditionalIterations);
-    ceiling.disabled = isSystemLoop();
+    ceiling.disabled = !canMutateDraft();
     ceiling.addEventListener("change", (event) => {
+      if (!canMutateDraft()) return;
       const value = Math.max(
         1,
         Math.min(
@@ -2290,8 +3481,9 @@ function contextEditor(owner, kind) {
     option.selected = owner.contextPolicy.mode === value;
     select.append(option);
   }
-  select.disabled = isSystemLoop();
+  select.disabled = !canMutateDraft();
   select.addEventListener("change", (event) => {
+    if (!canMutateDraft()) return;
     owner.contextPolicy =
       event.target.value === "custom"
         ? { mode: "custom", customPolicy: clone(draft.contextDefaults[kind]) }
@@ -2305,7 +3497,7 @@ function contextEditor(owner, kind) {
     owner.contextPolicy.mode === "custom"
       ? owner.contextPolicy.customPolicy
       : draft.contextDefaults[kind];
-  const disabled = isSystemLoop() || owner.contextPolicy.mode !== "custom";
+  const disabled = !canMutateDraft() || owner.contextPolicy.mode !== "custom";
   container.append(node("h3", "section-heading", "Context in"));
   const inputOptions = [
     [
@@ -2342,6 +3534,7 @@ function contextEditor(owner, kind) {
         hint,
         policy.contextIn[key],
         (checked) => {
+          if (!canMutateDraft()) return;
           policy.contextIn[key] = checked;
           markDirty();
         },
@@ -2356,6 +3549,7 @@ function contextEditor(owner, kind) {
       "Makes this canonical output selectable at later model boundaries.",
       policy.contextOut.retainForLoopReasoning,
       (checked) => {
+        if (!canMutateDraft()) return;
         policy.contextOut.retainForLoopReasoning = checked;
         markDirty();
       },
@@ -2368,6 +3562,7 @@ function contextEditor(owner, kind) {
       "Appends idempotently only to the server-bound invoking conversation when one exists.",
       policy.contextOut.publishToInvokingConversation,
       (checked) => {
+        if (!canMutateDraft()) return;
         policy.contextOut.publishToInvokingConversation = checked;
         markDirty();
       },
@@ -2401,21 +3596,41 @@ function evidenceNote() {
 }
 
 function renderToolbar() {
-  const editable = Boolean(draft) && !isSystemLoop() && !mutationInFlight;
-  const stepCount = draft?.inferenceSteps.length ?? 0;
+  const newDraft = isNewLoopDraft();
+  const uncertainFirstSave =
+    newDraft && newLoopDraftCommitState === "uncertain";
+  const editable =
+    Boolean(draft) &&
+    !isSystemLoop() &&
+    !mutationInFlight &&
+    !uncertainFirstSave;
+  const stepCount = isSystemLoop() ? 0 : (draft?.inferenceSteps.length ?? 0);
+  const systemNodeCount = isSystemLoop() ? draft.graph.nodes.length : 0;
+  const systemEdgeCount = isSystemLoop() ? draft.graph.edges.length : 0;
   const hasValidationErrors = validateDraft().length > 0;
   elements.name.disabled = !editable;
   elements.description.disabled = !editable;
-  elements.saveButton.disabled = !editable || !dirty || hasValidationErrors;
-  elements.reloadButton.disabled = mutationInFlight || !draft || !dirty;
-  elements.deleteButton.disabled = !editable;
-  elements.invokeButton.disabled = !editable || dirty;
+  elements.saveButton.disabled =
+    mutationInFlight ||
+    !draft ||
+    isSystemLoop() ||
+    (!dirty && !uncertainFirstSave) ||
+    hasValidationErrors;
+  elements.saveButton.textContent = uncertainFirstSave ? "Retry save" : "Save";
+  elements.reloadButton.disabled =
+    mutationInFlight || !draft || (!newDraft && !dirty) || uncertainFirstSave;
+  elements.reloadButton.textContent = newDraft
+    ? "Discard draft"
+    : "Reload saved version";
+  elements.deleteButton.disabled = !editable || newDraft;
+  elements.invokeButton.disabled = !editable || dirty || newDraft;
   elements.addStepButton.disabled =
     !editable || stepCount >= catalog.limits.maxInferenceSteps;
   elements.loopSettingsButton.disabled = mutationInFlight || !draft;
   elements.selectedNodeButton.disabled = mutationInFlight || !draft;
   elements.createLoopButton.disabled =
     mutationInFlight ||
+    uncertainFirstSave ||
     !catalog ||
     catalog.customDefinitions.length >=
       catalog.limits.maxDefinitionsPerWorkspace;
@@ -2429,23 +3644,45 @@ function renderToolbar() {
       ? "No loop selected"
       : isSystemLoop()
         ? "System managed"
-        : dirty
-          ? "Unsaved changes"
-          : hasValidationErrors
-            ? `Saved · v${draft.definitionVersion} · needs attention`
-            : `Saved · v${draft.definitionVersion}`;
-  elements.canvasStepCount.textContent = `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+        : newDraft
+          ? newLoopDraftCommitState === "uncertain"
+            ? "First save uncertain · retry required"
+            : newLoopDraftCommitState === "conflict"
+              ? "First save conflict"
+              : newLoopDraftCommitState === "failed"
+                ? "First save failed"
+                : "Unsaved draft · this tab only"
+          : dirty
+            ? "Unsaved changes"
+            : hasValidationErrors
+              ? `Saved · v${draft.definitionVersion} · needs attention`
+              : `Saved · v${draft.definitionVersion}`;
+  elements.canvasStepCount.textContent = isSystemLoop()
+    ? `${systemNodeCount} system nodes · ${systemEdgeCount} edges`
+    : `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
   elements.loopHeaderMeta.textContent = !draft
     ? "No loop selected"
-    : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+    : isSystemLoop()
+      ? `${draft.roleId} · Schema v${draft.schemaVersion} · ${systemNodeCount} nodes · ${systemEdgeCount} edges`
+      : newDraft
+        ? `${draft.roleId} · Unsaved client draft · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`
+        : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
   elements.canvasAuthority.replaceChildren();
   if (draft) {
-    elements.canvasAuthority.append(
-      node("strong", "", `Authority: ${draft.roleId}`),
-      document.createTextNode(
-        ` · ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "no model-facing tools assigned"} · all inference steps inherit this scope`,
-      ),
-    );
+    if (isSystemLoop())
+      elements.canvasAuthority.append(
+        node("strong", "", `Authority: ${draft.roleId}`),
+        document.createTextNode(
+          ` · ${capitalize(splitWords(draft.trigger))} trigger · ${capitalize(splitWords(draft.memoryScope))} · ${draft.capabilityIds.join(", ")}`,
+        ),
+      );
+    else
+      elements.canvasAuthority.append(
+        node("strong", "", `Authority: ${draft.roleId}`),
+        document.createTextNode(
+          ` · ${draft.toolAssignments.length ? draft.toolAssignments.join(", ") : "no model-facing tools assigned"} · all inference steps inherit this scope`,
+        ),
+      );
   }
 }
 
@@ -2457,18 +3694,43 @@ function renderValidation() {
     elements.validationBanner.className = "validation-banner";
     return;
   }
+  if (
+    isNewLoopDraft() &&
+    ["uncertain", "conflict", "failed"].includes(newLoopDraftCommitState)
+  ) {
+    const stateLabel =
+      newLoopDraftCommitState === "uncertain"
+        ? "First save outcome is uncertain"
+        : newLoopDraftCommitState === "conflict"
+          ? "First save operation conflicted"
+          : "First save failed";
+    const detail =
+      newLoopDraftFailureDetail ??
+      "The draft remains local and has not been treated as a runnable definition.";
+    elements.validationBanner.textContent = `${stateLabel}. ${detail}`;
+    elements.validationBanner.setAttribute(
+      "aria-label",
+      `${stateLabel}: ${detail}`,
+    );
+    elements.validationBanner.className = "validation-banner visible error";
+    return;
+  }
   if (errors.length === 0) {
     const copy = node("span", "validation-copy");
     const title = isSystemLoop()
       ? "System definition is valid and read-only"
-      : dirty
-        ? "Draft is valid and ready to save"
-        : `Definition v${draft.definitionVersion} is valid and runnable`;
+      : isNewLoopDraft()
+        ? "Unsaved draft is valid and ready for first save"
+        : dirty
+          ? "Draft is valid and ready to save"
+          : `Definition v${draft.definitionVersion} is valid and runnable`;
     const detail = isSystemLoop()
-      ? "The system-managed default remains inspectable but cannot be edited here."
-      : dirty
-        ? "Save this definition before starting a run."
-        : "The server will validate again before saving or admitting a run.";
+      ? draft.executionContract.detail
+      : isNewLoopDraft()
+        ? "Save deliberately creates the first durable definition. This tab keeps the draft across navigation, reload, and reconnect; closing the tab or choosing Discard draft removes it."
+        : dirty
+          ? "Save this definition before starting a run."
+          : "The server will validate again before saving or admitting a run.";
     copy.append(node("strong", "", title));
     copy.append(node("span", "", detail));
     elements.validationBanner.append(
@@ -2487,7 +3749,14 @@ function renderValidation() {
 }
 
 function validateDraft() {
-  if (!draft || isSystemLoop()) return [];
+  if (!draft) return [];
+  if (isSystemLoop()) {
+    if (draft.executionContract?.graphSemantics !== "unknown") return [];
+    return [
+      draft.executionContract?.detail?.trim() ||
+        "The dedicated runner did not validate this system definition.",
+    ];
+  }
   const errors = [];
   if (!draft.displayName.trim()) errors.push("Loop name is required.");
   if (
@@ -2523,41 +3792,168 @@ function validateDraft() {
   return errors;
 }
 
+function runnerContractLabel(executionSemantics) {
+  return executionSemantics === "validated-runner-contract"
+    ? "Validated runner contract"
+    : executionSemantics === "authority-topology-only"
+      ? "Authority topology only"
+      : "Runner contract not validated";
+}
+
 function markDirty() {
-  if (isSystemLoop()) return;
+  if (!canMutateDraft()) return;
   dirty = true;
+  if (isNewLoopDraft()) {
+    if (pendingCreateRequest) {
+      newLoopDraftOperationId = newOperationId();
+      pendingCreateRequest = null;
+    }
+    newLoopDraftCommitState = "editing";
+    newLoopDraftFailureDetail = null;
+    tryPersistNewLoopDraft();
+  }
   renderList();
   renderToolbar();
   renderValidation();
 }
 
 function updateDraftValue(fieldName, value) {
-  if (mutationInFlight || !draft || isSystemLoop()) return;
+  if (!canMutateDraft()) return;
   draft[fieldName] = value;
   markDirty();
 }
 
 async function createLoop() {
   if (mutationInFlight) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before starting another draft.",
+    );
+    return;
+  }
   if (
     dirty &&
     !window.confirm("Discard unsaved loop edits and create a new loop?")
   )
     return;
-  pendingCreateOperationId ??= newOperationId();
-  setBusy(true, "Creating");
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
+  try {
+    startNewLoopDraft();
+    showToast("Draft started. Nothing has been saved yet.");
+  } catch (error) {
+    showBanner(`Draft unavailable: ${error.message}`);
+  }
+}
+
+function definitionInputFromDraft() {
+  return {
+    displayName: draft.displayName,
+    description: draft.description,
+    triggerPolicy: clone(draft.triggerPolicy),
+    inferenceSteps: draft.inferenceSteps.map((step) => ({
+      id: step.id?.startsWith("local-") ? null : step.id,
+      name: step.name,
+      instruction: step.instruction,
+      contextPolicy: clone(step.contextPolicy),
+    })),
+    toolAssignments: [...draft.toolAssignments],
+    exitPolicy: clone(draft.exitPolicy),
+  };
+}
+
+async function saveNewLoopDraft(definition) {
+  const requestKey = JSON.stringify(definition);
+  if (pendingCreateRequest?.key !== requestKey) {
+    pendingCreateRequest = {
+      key: requestKey,
+      body: {
+        operationId: newLoopDraftOperationId ?? newOperationId(),
+        definition,
+      },
+    };
+    newLoopDraftOperationId = pendingCreateRequest.body.operationId;
+  }
+
+  newLoopDraftCommitState = "saving";
+  newLoopDraftFailureDetail = null;
+  if (!tryPersistNewLoopDraft()) {
+    renderToolbar();
+    renderValidation();
+    return;
+  }
+
+  let catalogRefreshFailure = null;
+  setBusy(true, "Saving draft");
   try {
     const response = await requestJson("/api/loops", {
       method: "POST",
-      body: JSON.stringify({ operationId: pendingCreateOperationId }),
+      body: JSON.stringify(pendingCreateRequest.body),
     });
-    await loadCatalog(response.definition.id);
-    pendingCreateOperationId = null;
-    showToast("Loop created. Add instructions, review context, then Save.");
+    const committed = response.definition;
+    if (
+      response.isCommitted !== true ||
+      !["Created", "Replayed", "CommittedWithAuditWarning"].includes(
+        response.status,
+      ) ||
+      typeof committed?.id !== "string" ||
+      committed.definitionVersion !== 1 ||
+      committed.roleId !== catalog.roleId ||
+      committed.lastMutationOperationId !==
+        pendingCreateRequest.body.operationId
+    ) {
+      throw new Error(
+        "The server returned an invalid first-save receipt, so the commit outcome remains uncertain.",
+      );
+    }
+    resetNewLoopDraftState(true);
+    catalog.customDefinitions = [
+      ...catalog.customDefinitions.filter(
+        (definition) => definition.id !== committed.id,
+      ),
+      committed,
+    ];
+    applyDefinition(committed);
+    try {
+      await loadCatalog(committed.id);
+    } catch (error) {
+      catalogRefreshFailure = error;
+    }
+    showToast(
+      response.status === "CommittedWithAuditWarning"
+        ? response.detail
+        : "Loop saved for the first time.",
+    );
   } catch (error) {
-    showResponseError(error);
+    const responseStatus =
+      typeof error.payload?.status === "string" ? error.payload.status : null;
+    if (error.status === 409 && responseStatus === "Conflict") {
+      newLoopDraftCommitState = "conflict";
+      newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved for an explicit retry.`;
+      pendingCreateRequest = null;
+      newLoopDraftOperationId = newOperationId();
+    } else if (error.status === 409 && responseStatus === "LimitExceeded") {
+      newLoopDraftCommitState = "failed";
+      newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved so Save can retry after capacity is available.`;
+      pendingCreateRequest = null;
+      newLoopDraftOperationId = newOperationId();
+    } else if (
+      typeof error.status !== "number" ||
+      (error.status >= 500 && responseStatus === null)
+    ) {
+      newLoopDraftCommitState = "uncertain";
+      newLoopDraftFailureDetail = `${error.message} The server may have committed the definition. Retry Save to send the exact same request, or reload after reconnect to reconcile the catalog without another mutation.`;
+    } else {
+      newLoopDraftCommitState = "failed";
+      newLoopDraftFailureDetail = error.message;
+    }
+    tryPersistNewLoopDraft();
   } finally {
     setBusy(false);
+    if (catalogRefreshFailure)
+      showBanner(
+        `Loop saved, but the catalog could not be refreshed: ${catalogRefreshFailure.message}`,
+      );
+    else renderValidation();
   }
 }
 
@@ -2568,21 +3964,13 @@ async function saveLoop() {
     showBanner(errors[0]);
     return;
   }
+  const definition = definitionInputFromDraft();
+  if (isNewLoopDraft()) {
+    await saveNewLoopDraft(definition);
+    return;
+  }
   setBusy(true, "Saving");
   try {
-    const definition = {
-      displayName: draft.displayName,
-      description: draft.description,
-      triggerPolicy: clone(draft.triggerPolicy),
-      inferenceSteps: draft.inferenceSteps.map((step) => ({
-        id: step.id?.startsWith("local-") ? null : step.id,
-        name: step.name,
-        instruction: step.instruction,
-        contextPolicy: clone(step.contextPolicy),
-      })),
-      toolAssignments: [...draft.toolAssignments],
-      exitPolicy: clone(draft.exitPolicy),
-    };
     const requestKey = JSON.stringify({
       loopId: draft.id,
       expectedDefinitionVersion: currentDefinition.definitionVersion,
@@ -2620,6 +4008,7 @@ async function deleteLoop() {
   if (mutationInFlight) return;
   if (
     !draft ||
+    isNewLoopDraft() ||
     isSystemLoop() ||
     !window.confirm(
       `Delete “${draft.displayName}”? Historical run evidence will remain available.`,
@@ -2662,7 +4051,14 @@ async function deleteLoop() {
 }
 
 function openInvokeModal() {
-  if (!draft || isSystemLoop() || dirty || invocationInFlight) return;
+  if (
+    !draft ||
+    isSystemLoop() ||
+    isNewLoopDraft() ||
+    dirty ||
+    invocationInFlight
+  )
+    return;
   invokeReturnFocus = document.activeElement ?? elements.invokeButton;
   const trigger = draft.triggerPolicy;
   const promptRequired = trigger.promptSource === "invocation";
@@ -2757,7 +4153,14 @@ function trapInvokeModalFocus(event) {
 }
 
 async function startRun() {
-  if (!draft || dirty || isSystemLoop() || invocationInFlight) return;
+  if (
+    !draft ||
+    dirty ||
+    isSystemLoop() ||
+    isNewLoopDraft() ||
+    invocationInFlight
+  )
+    return;
   clearInvokeError();
   const invocationPrompt =
     draft.triggerPolicy.promptSource === "invocation"
@@ -3500,6 +4903,147 @@ function commitPendingLifecycleRequests(next) {
     pendingLifecycleRequests.set(requestKey, request);
 }
 
+function configureRetentionCleanupRegistry(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  retentionCleanupStorageKey = `${retentionCleanupStorageKeyPrefix}.${scope}`;
+  retentionCleanupRegistryLockName = `${retentionCleanupRegistryLockNamePrefix}.${scope}`;
+  assertRetentionCleanupRegistryAvailable();
+  synchronizeRetentionCleanupOperationIdsFromStorage();
+}
+
+function assertRetentionCleanupRegistryAvailable() {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request || !retentionCleanupStorageKey || !window.localStorage)
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  const probeKey = `${retentionCleanupStorageKey}.availability-probe`;
+  try {
+    window.localStorage.setItem(probeKey, "available");
+    if (window.localStorage.getItem(probeKey) !== "available")
+      throw new Error("The workspace receipt-cleanup registry is unavailable.");
+    window.localStorage.removeItem(probeKey);
+  } catch {
+    try {
+      window.localStorage.removeItem(probeKey);
+    } catch {
+      // The registry remains disabled; never dispatch cleanup with an in-memory fallback.
+    }
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  }
+}
+
+function synchronizeRetentionCleanupOperationIdsFromStorage() {
+  const stored = restoreRetentionCleanupOperationIds();
+  retentionCleanupOperationIds.clear();
+  for (const [artifactClass, operationId] of stored)
+    retentionCleanupOperationIds.set(artifactClass, operationId);
+}
+
+function restoreRetentionCleanupOperationIds() {
+  if (!retentionCleanupStorageKey || !window.localStorage)
+    throw new Error("Shared receipt-cleanup storage is unavailable.");
+  const stored = window.localStorage.getItem(retentionCleanupStorageKey);
+  if (!stored) return new Map();
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    throw new Error("The shared receipt-cleanup registry is corrupt.");
+  }
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.operations))
+    throw new Error(
+      "The shared receipt-cleanup registry schema is unsupported.",
+    );
+  const operations = new Map();
+  for (const operation of payload.operations) {
+    if (!isStoredRetentionCleanupOperation(operation))
+      throw new Error(
+        "The shared receipt-cleanup registry contains invalid entries.",
+      );
+    if (operations.has(operation.artifactClass))
+      throw new Error(
+        "The shared receipt-cleanup registry contains duplicate entries.",
+      );
+    operations.set(operation.artifactClass, operation.operationId);
+  }
+  return operations;
+}
+
+function isStoredRetentionCleanupOperation(operation) {
+  return (
+    operation &&
+    [
+      "DefinitionMutationReceipt",
+      "DefinitionTombstone",
+      "LifecycleControlReceipt",
+    ].includes(operation.artifactClass) &&
+    typeof operation.operationId === "string" &&
+    /^[a-z0-9-]{8,128}$/.test(operation.operationId)
+  );
+}
+
+function persistRetentionCleanupOperationIds(operations) {
+  if (!retentionCleanupStorageKey || !window.localStorage)
+    throw new Error("Shared receipt-cleanup storage is unavailable.");
+  if (!operations.size) {
+    window.localStorage.removeItem(retentionCleanupStorageKey);
+    return;
+  }
+  window.localStorage.setItem(
+    retentionCleanupStorageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      operations: [...operations].map(([artifactClass, operationId]) => ({
+        artifactClass,
+        operationId,
+      })),
+    }),
+  );
+}
+
+function commitRetentionCleanupOperationIds(next) {
+  persistRetentionCleanupOperationIds(next);
+  retentionCleanupOperationIds.clear();
+  for (const [artifactClass, operationId] of next)
+    retentionCleanupOperationIds.set(artifactClass, operationId);
+}
+
+async function withRetentionCleanupRegistryLock(callback) {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request || !retentionCleanupRegistryLockName)
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  return locks.request(
+    retentionCleanupRegistryLockName,
+    { mode: "exclusive" },
+    callback,
+  );
+}
+
+async function getOrCreateRetentionCleanupOperationId(artifactClass) {
+  return withRetentionCleanupRegistryLock(async () => {
+    synchronizeRetentionCleanupOperationIdsFromStorage();
+    const existing = retentionCleanupOperationIds.get(artifactClass);
+    if (existing) return existing;
+    const operationId = newOperationId();
+    const next = new Map(retentionCleanupOperationIds);
+    next.set(artifactClass, operationId);
+    commitRetentionCleanupOperationIds(next);
+    return operationId;
+  });
+}
+
+async function forgetRetentionCleanupOperationId(artifactClass, operationId) {
+  if (!operationId) return;
+  await withRetentionCleanupRegistryLock(async () => {
+    synchronizeRetentionCleanupOperationIdsFromStorage();
+    if (retentionCleanupOperationIds.get(artifactClass) !== operationId) return;
+    const next = new Map(retentionCleanupOperationIds);
+    next.delete(artifactClass);
+    commitRetentionCleanupOperationIds(next);
+  });
+}
+
 async function configurePendingInvocationRegistry(workspaceRoot) {
   if (typeof workspaceRoot !== "string" || !workspaceRoot)
     throw new Error("The workspace identity is unavailable.");
@@ -4170,6 +5714,7 @@ function scheduleSelectedRunRefresh() {
   }
   if (
     !loopBuilderSurfaceActive ||
+    !loopBuilderSessionAvailable ||
     selectedRunRefreshInFlight ||
     activeRunOperationMonitors > 0 ||
     currentView !== "runs" ||
@@ -4182,6 +5727,7 @@ function scheduleSelectedRunRefresh() {
     selectedRunRefreshTimer = null;
     if (
       !loopBuilderSurfaceActive ||
+      !loopBuilderSessionAvailable ||
       currentView !== "runs" ||
       selectedRun?.id !== runId
     )
@@ -4195,6 +5741,64 @@ function scheduleSelectedRunRefresh() {
       scheduleSelectedRunRefresh();
     }
   }, 1000);
+}
+
+function beginSessionRecovery() {
+  suspendSession();
+  void window.embodySenseSession?.recover();
+}
+
+function waitForLoopBuilderOperation(operation, signal) {
+  if (!signal) return Promise.resolve(operation);
+  if (signal.aborted)
+    return Promise.reject(
+      signal.reason ?? new Error("The browser session is unavailable."),
+    );
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () =>
+      finish(
+        reject,
+        signal.reason ?? new Error("The browser session is unavailable."),
+      );
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(operation).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+function suspendSession() {
+  loopBuilderSessionAvailable = false;
+  runEvidenceRequestGeneration++;
+  if (selectedRunRefreshTimer != null) {
+    window.clearTimeout(selectedRunRefreshTimer);
+    selectedRunRefreshTimer = null;
+  }
+  if (!loopBuilderRefreshAbortController?.signal.aborted)
+    loopBuilderRefreshAbortController?.abort(
+      new Error("The browser session is being recovered."),
+    );
+  if (!loopBuilderSessionAbortController.signal.aborted)
+    loopBuilderSessionAbortController.abort(
+      new Error("The browser session is being recovered."),
+    );
+  setInteractive(false);
+}
+
+function resumeSession() {
+  if (loopBuilderSessionAbortController.signal.aborted)
+    loopBuilderSessionAbortController = new AbortController();
+  loopBuilderSessionAvailable = true;
+  if (loopBuilderSurfaceActive && !loopBuilderEventsBound) void activate();
+  else scheduleSelectedRunRefresh();
 }
 
 function isNonterminalRun(run) {
@@ -4314,6 +5918,16 @@ async function deleteSelectedTrace() {
 }
 
 async function getHub() {
+  if (window.embodySenseSession) {
+    const sharedConnection = await window.embodySenseSession.getHub();
+    if (hub !== sharedConnection) {
+      hub = sharedConnection;
+      sharedConnection.on("ApprovalsChanged", (approvals) => {
+        if (hub === sharedConnection) renderLoopApprovals(approvals);
+      });
+    }
+    return sharedConnection;
+  }
   if (hub?.connected) return hub;
   const connection = new JsonSignalRConnection(createHubUrl());
   hub = connection;
@@ -4409,7 +6023,6 @@ async function decideLoopApproval(requestId, approved, button) {
 function createHubUrl() {
   const url = new URL("/hubs/session", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("access_token", sessionToken);
   return url.toString();
 }
 
@@ -4428,7 +6041,23 @@ function promptSourceLabel(value) {
 }
 
 async function reloadCurrent() {
-  if (mutationInFlight || !currentDefinition) return;
+  if (mutationInFlight) return;
+  if (isNewLoopDraft()) {
+    if (newLoopDraftCommitState === "uncertain") {
+      showBanner(
+        "The draft cannot be discarded while its first-save outcome is uncertain. Retry Save to resolve the exact operation first.",
+      );
+      return;
+    }
+    if (
+      window.confirm(
+        "Discard this unsaved draft? No durable loop will be deleted.",
+      )
+    )
+      discardNewLoopDraft();
+    return;
+  }
+  if (!currentDefinition) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   const loopId = currentDefinition.id;
   setBusy(true, "Reloading");
@@ -4448,8 +6077,7 @@ function addInferenceStep() {
 
 function insertInferenceStep(index) {
   if (
-    !draft ||
-    isSystemLoop() ||
+    !canMutateDraft() ||
     draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps
   )
     return;
@@ -4494,6 +6122,7 @@ function fitCanvas() {
 }
 
 function moveStep(index, delta) {
+  if (!canMutateDraft()) return;
   const next = index + delta;
   if (next < 0 || next >= draft.inferenceSteps.length) return;
   const [step] = draft.inferenceSteps.splice(index, 1);
@@ -4504,6 +6133,7 @@ function moveStep(index, delta) {
 }
 
 function removeStep(index) {
+  if (!canMutateDraft()) return;
   if (draft.inferenceSteps.length <= 1) return;
   draft.inferenceSteps.splice(index, 1);
   selectedNodeId =
@@ -4520,6 +6150,7 @@ function setBusy(busy, label) {
     elements.list,
     elements.builderView,
     elements.runsView,
+    elements.retentionView,
   ]) {
     region.inert = busy;
     region.setAttribute("aria-busy", String(busy));
@@ -4544,6 +6175,8 @@ function setInteractive(enabled) {
     elements.invokeButton,
     elements.builderTab,
     elements.runsTab,
+    elements.retentionTab,
+    elements.refreshRetentionButton,
     elements.selectedNodeButton,
     elements.loopSettingsButton,
     elements.zoomOutButton,
@@ -4877,6 +6510,9 @@ class JsonSignalRConnection {
 window.embodySenseLoopBuilder = Object.freeze({
   activate,
   deactivate,
+  rehydrateSession,
   refreshWorkspace,
+  resumeSession,
+  suspendSession,
 });
 if (!elements.loopsView.hidden) void activate();

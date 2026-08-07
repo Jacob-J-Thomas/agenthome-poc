@@ -26,7 +26,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_reads_allowed_file_and_records_audit_events()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var target = workspace.File("shared", "note.txt");
         await File.WriteAllTextAsync(target, "hello from shared");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
@@ -47,7 +47,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_bounds_an_untrusted_correlation_before_actuation_and_retention()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "bounded");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
@@ -65,7 +65,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_finishes_mutation_evidence_after_the_caller_is_cancelled_post_actuation()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         using var cancellation = new CancellationTokenSource();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -87,7 +87,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_returns_the_completed_mutation_when_full_response_retention_times_out()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), retentionStore: new BlockingRetentionStore(), postActuationIntegrityTimeout: TimeSpan.FromMilliseconds(25));
 
@@ -105,7 +105,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_returns_the_retained_mutation_with_an_explicit_audit_gap_when_retention_audit_times_out()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         var paths = new WorkspacePaths(workspace.RootPath);
         var audit = new BlockingRetentionAuditLog(new AuditLog(paths));
@@ -125,7 +125,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_retains_a_complete_long_response_before_model_facing_truncation()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var fullOutput = "private-result-marker-" + new string('x', ToolResultFormatter.MaxFormattedCharacters + 20_000);
         await File.WriteAllTextAsync(workspace.File("shared", "long.txt"), fullOutput);
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
@@ -158,7 +158,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_retains_a_utf16_safe_response_when_read_truncation_meets_a_surrogate_pair()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "surrogate-boundary.txt"), new string('a', 119_999) + "\U0001F600" + "tail");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
@@ -174,7 +174,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_reports_a_retention_failure_before_truncated_content_without_claiming_an_artifact()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "long.txt"), new string('x', ToolResultFormatter.MaxFormattedCharacters + 20_000));
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), retentionStore: new ThrowingRetentionStore());
 
@@ -193,7 +193,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_denies_explicitly_denied_file_without_prompting()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var target = workspace.File("private", "secret.txt");
         await File.WriteAllTextAsync(target, "private");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
@@ -211,7 +211,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_prompts_and_runs_approval_required_write()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var prompt = new FixedApprovalPrompt(ToolApprovalResponse.Approve("test", "approved in test"));
         var broker = CreateBroker(workspace, prompt);
 
@@ -231,7 +231,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_rejected_approval_does_not_write_file()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var prompt = new FixedApprovalPrompt(ToolApprovalResponse.Reject("test", "rejected in test"));
         var broker = CreateBroker(workspace, prompt);
 
@@ -248,7 +248,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_searches_readable_workspace_content()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "one.txt"), "alpha" + Environment.NewLine + "beta");
         await File.WriteAllTextAsync(workspace.File("shared", "two.txt"), "gamma");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
@@ -264,7 +264,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_lists_directories_before_files()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         Directory.CreateDirectory(workspace.File("shared", "folder"));
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "note");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
@@ -279,7 +279,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_appends_to_allowed_existing_file()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "first");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
@@ -294,7 +294,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_returns_failed_result_for_missing_allowed_read()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
         var result = await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, "shared/missing.txt"));
@@ -309,7 +309,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_deletes_directory_after_approval()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         Directory.CreateDirectory(workspace.File("shared", "delete-me"));
         await File.WriteAllTextAsync(workspace.File("shared", "delete-me", "note.txt"), "temporary");
         var prompt = new FixedApprovalPrompt(ToolApprovalResponse.Approve("test", "approved delete in test"));
@@ -325,7 +325,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_deletes_only_after_default_approval()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "delete-me.txt"), "temporary");
         var prompt = new FixedApprovalPrompt(ToolApprovalResponse.Approve("test", "approved delete in test"));
         var broker = CreateBroker(workspace, prompt);
@@ -341,7 +341,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_denies_paths_outside_workspace_root()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var outsidePath = Path.Combine(Path.GetTempPath(), "embodysense-outside.txt");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
 
@@ -355,7 +355,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_filters_commands_not_granted_by_active_loop_before_permissions()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "unchanged");
         var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)] };
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
@@ -375,7 +375,7 @@ public sealed class ToolBrokerTests
     public async Task ExecuteAsync_records_loop_authority_for_granted_command()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "hello from shared");
         var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)] };
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
@@ -398,7 +398,7 @@ public sealed class ToolBrokerTests
     public async Task Constructor_requires_explicit_loop_authority()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
 

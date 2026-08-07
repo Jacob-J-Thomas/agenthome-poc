@@ -55,10 +55,139 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
+    public async Task GenerateAsync_classifies_a_failed_completion_as_a_conclusive_terminal_provider_outcome()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"provider rejected the turn"},"items":[]}}"""));
+        var client = CreateClient(transport);
+        var dispatchStarted = false;
+
+        var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("fail conclusively"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ =>
+            {
+                dispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.True(dispatchStarted);
+        Assert.Equal("turn-1", exception.ProviderResponseId);
+        Assert.Contains("provider rejected the turn", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_classifies_a_turn_start_rejection_as_a_conclusive_terminal_provider_outcome()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            """{"id":3,"error":{"code":-32602,"message":"turn request rejected","data":{"turnId":"turn-rejected"}}}""");
+        var client = CreateClient(transport);
+        var dispatchStarted = false;
+
+        var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("reject conclusively"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ =>
+            {
+                dispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.True(dispatchStarted);
+        Assert.Equal("turn-rejected", exception.ProviderResponseId);
+        Assert.Contains("turn request rejected", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_preserves_an_observed_success_when_completion_audit_fails()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"observed answer","phase":"final_answer"}]}}"""));
+        var client = CreateClient(transport, workingDirectory: workspace.RootPath);
+        FileStream? auditLock = null;
+
+        try
+        {
+            var exception = await Assert.ThrowsAsync<LlmInferenceObservedResponseException>(() => client.GenerateAsync(
+                LlmInferenceRequest.FromUserText("observe success"),
+                responseChunkHandler: null,
+                CancellationToken.None,
+                _ =>
+                {
+                    auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
+                    return Task.CompletedTask;
+                }));
+
+            Assert.Equal("observed answer", exception.Response.OutputText);
+            Assert.Equal("turn-1", exception.Response.ProviderResponseId);
+            Assert.Contains("must not be redispatched", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (auditLock is not null)
+            {
+                await auditLock.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsync_preserves_a_conclusive_failure_when_completion_audit_also_fails()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""),
+            Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
+            Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"provider rejected the turn"},"items":[]}}"""));
+        var client = CreateClient(transport, workingDirectory: workspace.RootPath);
+        FileStream? auditLock = null;
+
+        try
+        {
+            var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(
+                LlmInferenceRequest.FromUserText("observe failure"),
+                responseChunkHandler: null,
+                CancellationToken.None,
+                _ =>
+                {
+                    auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
+                    return Task.CompletedTask;
+                }));
+
+            Assert.Equal("turn-1", exception.ProviderResponseId);
+            Assert.Contains("provider rejected the turn", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("completion audit could not be persisted", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (auditLock is not null)
+            {
+                await auditLock.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
     public async Task GenerateAsync_routes_dynamic_tool_calls_through_tool_broker()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(workspace.File("shared", "note.txt"), "tool-visible note");
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
         var transport = new ScriptedAppServerTransport(
@@ -69,10 +198,26 @@ public sealed class CodexAppServerInferenceTests
             Notification("item/agentMessage/delta", """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"The note says tool-visible note."}"""),
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"The note says tool-visible note.","phase":"final_answer"}]}}"""));
         var client = CreateClient(transport, broker, workspace.RootPath);
+        var correlation = new LlmInferenceCorrelation(
+            "provider-attempt-1",
+            "provider-correlation-1",
+            new ToolAuditCorrelation("run-1", BuiltInLoopIds.DefaultConversation, "default-assistant", 1, new string('a', 64), 1, "provider-adapter", 1, "provider-correlation-1", "read,write", "read,write", "read,write"));
+        var request = new LlmInferenceRequest([LlmMessage.User("read the note")], correlation: correlation);
+        var durableBoundaryObserved = false;
 
-        var response = await client.GenerateAsync(LlmInferenceRequest.FromUserText("read the note"), (_, _) => Task.CompletedTask);
+        var response = await client.GenerateAsync(
+            request,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None,
+            _ =>
+            {
+                durableBoundaryObserved = true;
+                Assert.DoesNotContain(transport.Writes, IsTurnStart);
+                return Task.CompletedTask;
+            });
 
         Assert.Equal("The note says tool-visible note.", response.OutputText);
+        Assert.True(durableBoundaryObserved);
         var toolResponse = Assert.Single(transport.Writes, line => line.Contains("\"id\":99", StringComparison.Ordinal));
         Assert.Contains("\"success\":true", toolResponse, StringComparison.Ordinal);
         Assert.Contains("tool-visible note", toolResponse, StringComparison.Ordinal);
@@ -89,11 +234,21 @@ public sealed class CodexAppServerInferenceTests
         Assert.Contains("llm.appserver.request", auditText, StringComparison.Ordinal);
         Assert.Contains("tool.execute", auditText, StringComparison.Ordinal);
         var events = await ReadAuditEventsAsync(workspace);
+        var inferenceStart = Assert.Single(events, auditEvent => auditEvent.Action == "llm.inference.start");
+        Assert.Equal("provider-attempt-1", GetMetadataString(inferenceStart, "request_id"));
+        Assert.Equal("provider-attempt-1", GetMetadataString(inferenceStart, "provider_attempt_id"));
+        Assert.Equal("provider-correlation-1", GetMetadataString(inferenceStart, "provider_correlation_id"));
+        Assert.Equal("run-1", GetMetadataString(inferenceStart, "run_id"));
         var appServerToolCall = Assert.Single(events, auditEvent => auditEvent.Action == "llm.appserver.request" && GetMetadataString(auditEvent, "call_id") == "call-1");
         Assert.Equal("call-1", GetMetadataString(appServerToolCall, "tool_request_correlation_id"));
+        Assert.Equal("provider-attempt-1", GetMetadataString(appServerToolCall, "provider_attempt_id"));
+        Assert.Equal("provider-correlation-1", GetMetadataString(appServerToolCall, "provider_correlation_id"));
+        Assert.Equal("run-1", GetMetadataString(appServerToolCall, "run_id"));
         Assert.All(events.Where(auditEvent => auditEvent.Action.StartsWith("tool.", StringComparison.Ordinal)), auditEvent =>
         {
             Assert.Equal("call-1", GetMetadataString(auditEvent, "tool_request_correlation_id"));
+            Assert.Equal("run-1", GetMetadataString(auditEvent, "run_id"));
+            Assert.Equal("provider-correlation-1", GetMetadataString(auditEvent, "attempt_correlation_id"));
         });
     }
 
@@ -101,7 +256,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_advertises_only_loop_assigned_workspace_commands()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.WorkspaceCommandFor(ToolCommand.Read)] };
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
         var transport = new ScriptedAppServerTransport(
@@ -126,7 +281,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_omits_dynamic_tools_and_denies_stale_tool_calls_when_loop_grants_no_workspace_commands()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var loop = LoopDefinition.CreateDefaultConversation() with { CapabilityIds = [LoopCapabilityIds.ProviderInference] };
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt(), loop);
         var transport = new ScriptedAppServerTransport(
@@ -156,7 +311,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_rejects_old_per_command_dynamic_tool_names()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var broker = CreateBroker(workspace, new ThrowingApprovalPrompt());
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
@@ -185,7 +340,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_declines_native_app_server_approval_requests()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
@@ -216,7 +371,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_declines_other_native_app_server_requests(string method, string parameters, string expectedResponseFragment)
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
@@ -239,7 +394,7 @@ public sealed class CodexAppServerInferenceTests
     public async Task GenerateAsync_rejects_unsupported_app_server_requests_with_json_rpc_error()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
             Response(2, """{"thread":{"id":"thread-1"}}"""),
@@ -378,7 +533,33 @@ public sealed class CodexAppServerInferenceTests
     }
 
     [Fact]
-    public async Task GenerateAsync_conservatively_reports_dispatch_when_the_turn_write_fails()
+    public async Task GenerateAsync_marks_durable_dispatch_when_the_turn_transport_write_fails()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            WriteFailure = line => line.Contains("\"method\":\"turn/start\"", StringComparison.Ordinal) ? new IOException("turn write failed") : null
+        };
+        var durableDispatchStarted = false;
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ =>
+            {
+                durableDispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.Equal("turn write failed", exception.Message);
+        Assert.True(durableDispatchStarted);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_preserves_legacy_dispatch_notification_when_the_turn_write_fails()
     {
         var transport = new ScriptedAppServerTransport(
             Response(1, """{"serverInfo":{}}"""),
@@ -393,6 +574,57 @@ public sealed class CodexAppServerInferenceTests
 
         Assert.Equal("turn write failed", exception.Message);
         Assert.True(providerRequestStarted);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_does_not_mark_durable_dispatch_when_cancelled_before_the_turn_transport_write()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""))
+        {
+            AfterWrite = line =>
+            {
+                if (IsThreadStart(line))
+                {
+                    cancellation.Cancel();
+                }
+            }
+        };
+        var client = CreateClient(transport);
+        var durableDispatchStarted = false;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            cancellation.Token,
+            _ =>
+            {
+                durableDispatchStarted = true;
+                return Task.CompletedTask;
+            }));
+
+        Assert.False(durableDispatchStarted);
+        Assert.DoesNotContain(transport.Writes, IsTurnStart);
+    }
+
+    [Fact]
+    public async Task GenerateAsync_does_not_write_the_turn_when_the_durable_boundary_callback_fails()
+    {
+        var transport = new ScriptedAppServerTransport(
+            Response(1, """{"serverInfo":{}}"""),
+            Response(2, """{"thread":{"id":"thread-1"}}"""));
+        var client = CreateClient(transport);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => client.GenerateAsync(
+            LlmInferenceRequest.FromUserText("hello"),
+            responseChunkHandler: null,
+            CancellationToken.None,
+            _ => Task.FromException(new IOException("durable checkpoint unavailable"))));
+
+        Assert.Equal("durable checkpoint unavailable", exception.Message);
+        Assert.DoesNotContain(transport.Writes, IsTurnStart);
     }
 
     [Fact]
@@ -418,9 +650,10 @@ public sealed class CodexAppServerInferenceTests
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"model refused"},"items":[]}}"""));
         var client = CreateClient(transport);
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
+        var exception = await Assert.ThrowsAsync<LlmInferenceTerminalFailureException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("hello")));
 
         Assert.Contains("model refused", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("turn-1", exception.ProviderResponseId);
     }
 
     [Fact]
@@ -464,6 +697,20 @@ public sealed class CodexAppServerInferenceTests
         await client.DisposeAsync();
 
         Assert.True(transport.Disposed);
+    }
+
+    [Fact]
+    public async Task QuarantineAsync_disposes_and_permanently_rejects_reuse_of_an_ambiguous_injected_transport()
+    {
+        var transport = new ScriptedAppServerTransport();
+        var client = CreateClient(transport);
+
+        await client.QuarantineAsync();
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GenerateAsync(LlmInferenceRequest.FromUserText("must not reuse")));
+
+        Assert.True(transport.Disposed);
+        Assert.Contains("quarantined", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(transport.Writes);
     }
 
     private static LlmInferenceClient CreateClient(
@@ -552,6 +799,8 @@ public sealed class CodexAppServerInferenceTests
 
         public Func<string, Exception?>? WriteFailure { get; init; }
 
+        public Action<string>? AfterWrite { get; init; }
+
         public bool Disposed { get; private set; }
 
         public ValueTask DisposeAsync()
@@ -573,6 +822,7 @@ public sealed class CodexAppServerInferenceTests
             }
 
             Writes.Add(line);
+            AfterWrite?.Invoke(line);
             return Task.CompletedTask;
         }
     }

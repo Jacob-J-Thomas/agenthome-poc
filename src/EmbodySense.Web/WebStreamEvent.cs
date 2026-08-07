@@ -93,4 +93,9 @@ public sealed record WebStreamEvent
     /// <param name="error">The client-safe failure explanation.</param>
     /// <returns>An <c>error</c> event.</returns>
     public static WebStreamEvent Failure(string error) => new("error", error: error);
+
+    /// <summary>
+    /// Creates an actionable review-required event.
+    /// </summary>
+    public static WebStreamEvent NeedsReview(string text) => new("needs_review", text: text);
 }

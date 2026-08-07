@@ -52,4 +52,11 @@ public sealed record LoopRunSnapshot(
     IReadOnlyList<LoopRunEventSnapshot> Events,
     string? FinalOutput,
     string? FailureCode,
-    string? FailureDetail);
+    string? FailureDetail)
+{
+    /// <summary>
+    /// Gets the canonical disposition for each correlated conversation-publication operation.
+    /// The projection is derived from the ordered durable protocol events; raw events remain available through <see cref="Events"/>.
+    /// </summary>
+    public IReadOnlyList<LoopRunConversationPublicationDispositionSnapshot> ConversationPublicationDispositions { get; init; } = [];
+}

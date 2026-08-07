@@ -19,4 +19,21 @@ public interface ILlmInferenceClient
         LlmInferenceRequest request,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Generates one response after invoking a durable callback at the provider's irreversible request boundary.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="responseChunkHandler">An optional callback invoked for each ordered response delta.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <param name="providerRequestStarting">The durable callback invoked immediately before the irreversible provider transport write. Implementations that cannot identify that boundary must reject this overload before sending a request.</param>
+    /// <returns>The completed response and provider metadata.</returns>
+    Task<LlmInferenceResponse> GenerateAsync(
+        LlmInferenceRequest request,
+        Func<string, CancellationToken, Task>? responseChunkHandler,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task> providerRequestStarting)
+    {
+        throw new NotSupportedException("This inference client does not expose an irreversible provider transport-write boundary.");
+    }
 }

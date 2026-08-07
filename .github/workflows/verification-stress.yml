@@ -1,0 +1,44 @@
+name: Verification Stress
+
+on:
+  schedule:
+    - cron: "17 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-stress
+  cancel-in-progress: false
+
+jobs:
+  maximum-contract-stress:
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Test bounded verifier contracts
+        shell: pwsh
+        run: ./tests/scripts/verify-bounded-phases.tests.ps1
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Run both owned stress contracts
+        shell: pwsh
+        run: ./scripts/verify.ps1 -Configuration Release -VerificationTier Stress
+
+      - name: Upload stress timing and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-stress-diagnostics
+          if-no-files-found: error
+          retention-days: 30
+          path: tests/EmbodySense.Core.Persistence.Tests/TestResults/VerificationStress/**
