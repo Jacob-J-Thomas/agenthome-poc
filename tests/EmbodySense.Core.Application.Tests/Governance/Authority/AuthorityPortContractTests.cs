@@ -65,6 +65,22 @@ public sealed class AuthorityPortContractTests
         Assert.Contains(projectionValidation.Errors, error => error.Code == AuthorityContractErrorCode.Required && error.Field == AuthorityContractField.Contract);
     }
 
+    [Fact]
+    public void Persistence_port_keeps_authority_evidence_bounded_and_application_independent_of_persistence()
+    {
+        var persistencePortType = typeof(IAuthorityProfileStore);
+        var forbiddenReferences = persistencePortType.Assembly.GetReferencedAssemblies().Where(reference => reference.Name?.Contains("Persistence", StringComparison.OrdinalIgnoreCase) == true).ToArray();
+        IAuthorityProfileStore persistencePort = new CompileTimeAuthorityProfileStore();
+        Func<string, CancellationToken, Task<AuthorityProfileReadResult>> read = persistencePort.ReadAsync;
+        Func<AuthorityProfileMutation, CancellationToken, Task<AuthorityProfileMutationResult>> mutate = persistencePort.MutateAsync;
+
+        Assert.Empty(forbiddenReferences);
+        Assert.NotNull(read);
+        Assert.NotNull(mutate);
+        Assert.DoesNotContain(typeof(AuthorityProfileMutation).GetProperties(), property => property.Name.Contains("Grant", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Binding", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Delegat", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Target", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Prompt", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Secret", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Credential", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(typeof(AuthorityProfileOperationReceipt).GetProperties(), property => property.Name.Contains("Target", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Prompt", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Secret", StringComparison.OrdinalIgnoreCase) || property.Name.Contains("Credential", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static readonly DateTimeOffset _issuedAtUtc = new(2026, 7, 31, 18, 30, 0, TimeSpan.Zero);
 
     private static AuthorityProfile Profile()
@@ -110,5 +126,12 @@ public sealed class AuthorityPortContractTests
         {
             return projection;
         }
+    }
+
+    private sealed class CompileTimeAuthorityProfileStore : IAuthorityProfileStore
+    {
+        public Task<AuthorityProfileReadResult> ReadAsync(string profileId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<AuthorityProfileMutationResult> MutateAsync(AuthorityProfileMutation mutation, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }
