@@ -1,4 +1,5 @@
 using System.Text;
+using System.Buffers;
 using EmbodySense.Core.Persistence.Loops.Models;
 
 namespace EmbodySense.Core.Persistence.Loops;
@@ -30,8 +31,8 @@ internal sealed class ContentRegistry
                 throw new FormatException("The content table ids are not the canonical contiguous first-use base-36 sequence.");
             }
 
-            if ((_byId.TryGetValue(entry.Id, out var sameId) && !sameId.Bytes.AsSpan().SequenceEqual(entry.Bytes))
-                || (_byHash.TryGetValue(entry.Hash, out var sameHash) && !sameHash.Bytes.AsSpan().SequenceEqual(entry.Bytes)))
+            if ((_byId.TryGetValue(entry.Id, out var sameId) && !string.Equals(sameId.Text, entry.Text, StringComparison.Ordinal))
+                || (_byHash.TryGetValue(entry.Hash, out var sameHash) && !string.Equals(sameHash.Text, entry.Text, StringComparison.Ordinal)))
             {
                 throw new FormatException("The content table reuses an id or SHA-256 for different exact bytes.");
             }
@@ -64,41 +65,52 @@ internal sealed class ContentRegistry
     /// <returns>The canonical compact content identifier.</returns>
     public string Reference(string text)
     {
-        byte[] bytes;
+        if (_byText.TryGetValue(text, out var existingText))
+        {
+            _referencedIds.Add(existingText.Id);
+            return existingText.Id;
+        }
+
+        var byteCount = 0;
+        byte[]? rented = null;
         try
         {
-            bytes = CustomLoopRunArtifactCodec.StrictUtf8.GetBytes(text);
+            byteCount = CustomLoopRunArtifactCodec.StrictUtf8.GetByteCount(text);
+            rented = ArrayPool<byte>.Shared.Rent(Math.Max(1, byteCount));
+            var written = CustomLoopRunArtifactCodec.StrictUtf8.GetBytes(text.AsSpan(), rented);
+            var bytes = rented.AsSpan(0, written);
+            var hash = CustomLoopRunArtifactCodec.Hash(bytes);
+            if (_byHash.TryGetValue(hash, out var existing))
+            {
+                if (!string.Equals(existing.Text, text, StringComparison.Ordinal))
+                {
+                    throw new FormatException("A content hash collision did not compare byte-for-byte equal.");
+                }
+
+                _referencedIds.Add(existing.Id);
+                return existing.Id;
+            }
+
+            var id = CustomLoopRunArtifactCodec.IndexedId("c", _entries.Count);
+            var entry = new ContentEntry(id, hash, text.Length, written, Convert.ToBase64String(bytes), text);
+            _entries.Add(entry);
+            _byId.Add(id, entry);
+            _byHash.Add(hash, entry);
+            _byText.Add(text, entry);
+            _referencedIds.Add(id);
+            return id;
         }
         catch (EncoderFallbackException exception)
         {
             throw new FormatException("Content-bearing run text is not strict UTF-8.", exception);
         }
-
-        var hash = CustomLoopRunArtifactCodec.Hash(bytes);
-        if (_byHash.TryGetValue(hash, out var existing))
+        finally
         {
-            if (!existing.Bytes.AsSpan().SequenceEqual(bytes))
+            if (rented is not null)
             {
-                throw new FormatException("A content hash collision did not compare byte-for-byte equal.");
+                ArrayPool<byte>.Shared.Return(rented, clearArray: true);
             }
-
-            _referencedIds.Add(existing.Id);
-            return existing.Id;
         }
-
-        if (_byText.TryGetValue(text, out var duplicate))
-        {
-            throw new FormatException($"The exact same content would be assigned inconsistently after `{duplicate.Id}`.");
-        }
-
-        var id = CustomLoopRunArtifactCodec.IndexedId("c", _entries.Count);
-        var entry = new ContentEntry(id, hash, text.Length, bytes.Length, Convert.ToBase64String(bytes), text, bytes);
-        _entries.Add(entry);
-        _byId.Add(id, entry);
-        _byHash.Add(hash, entry);
-        _byText.Add(text, entry);
-        _referencedIds.Add(id);
-        return id;
     }
 
     /// <summary>

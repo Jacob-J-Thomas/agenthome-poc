@@ -9,6 +9,94 @@ namespace EmbodySense.Core.Common.Loops.Custom;
 public static class CustomLoopLimits
 {
     /// <summary>
+    /// Maximum nodes in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphNodes = 128;
+    /// <summary>
+    /// Maximum control-flow edges in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphControlEdges = 512;
+    /// <summary>
+    /// Maximum typed bindings in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphBindings = 1_024;
+    /// <summary>
+    /// Maximum ports declared by one node.
+    /// </summary>
+    public const int MaxGraphPortsPerNode = 64;
+    /// <summary>
+    /// Maximum value schemas in a canonical governed graph.
+    /// </summary>
+    public const int MaxGraphValueSchemas = 128;
+    /// <summary>
+    /// Maximum declared loop outputs.
+    /// </summary>
+    public const int MaxGraphOutputs = 64;
+    /// <summary>
+    /// Maximum executable descriptor parameters on one node.
+    /// </summary>
+    public const int MaxGraphDescriptorParameters = 64;
+    /// <summary>
+    /// Maximum authority capabilities in one ceiling.
+    /// </summary>
+    public const int MaxGraphAuthorityCapabilities = 128;
+    /// <summary>
+    /// Maximum characters in a descriptor parameter value.
+    /// </summary>
+    public const int MaxGraphParameterValueCharacters = 8_192;
+    /// <summary>
+    /// Maximum absolute canvas coordinate accepted as display-only metadata.
+    /// </summary>
+    public const int MaxGraphCanvasCoordinate = 1_000_000;
+    /// <summary>
+    /// Maximum control-flow fan-out from one graph node.
+    /// </summary>
+    public const int MaxGraphControlFanOut = 16;
+    /// <summary>
+    /// Maximum depth of the acyclic control-flow graph after cycles are condensed.
+    /// </summary>
+    public const int MaxGraphControlDepth = 64;
+    /// <summary>
+    /// Maximum structured errors returned by graph normalization and validation.
+    /// </summary>
+    public const int MaxGraphValidationErrors = 128;
+    /// <summary>
+    /// Maximum characters in a graph validation error code.
+    /// </summary>
+    public const int MaxGraphValidationErrorCodeCharacters = 64;
+    /// <summary>
+    /// Maximum characters in a graph validation element path.
+    /// </summary>
+    public const int MaxGraphValidationErrorPathCharacters = 256;
+    /// <summary>
+    /// Maximum characters in a graph validation error message.
+    /// </summary>
+    public const int MaxGraphValidationErrorMessageCharacters = 512;
+    /// <summary>
+    /// Maximum explicit iterations permitted for one cyclic node descriptor.
+    /// </summary>
+    public const int MaxGraphCycleIterations = 10_000;
+    /// <summary>
+    /// Maximum explicit wall-clock budget permitted for one cyclic node descriptor.
+    /// </summary>
+    public const long MaxGraphCycleMilliseconds = 24L * 60 * 60 * 1_000;
+    /// <summary>
+    /// Maximum model or actuator attempts declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodeAttempts = MaxModelAttemptsPerRun;
+    /// <summary>
+    /// Maximum payload characters declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodePayloadCharacters = MaxLogicalProviderRequestCharacters;
+    /// <summary>
+    /// Maximum evidence items declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodeEvidenceItems = MaxGovernedToolRequestsPerRun;
+    /// <summary>
+    /// Maximum abstract resource units declared by one node descriptor.
+    /// </summary>
+    public const int MaxGraphNodeResourceUnits = 100_000;
+    /// <summary>
     /// Maximum definitions per workspace.
     /// </summary>
     public const int MaxDefinitionsPerWorkspace = 50;

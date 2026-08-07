@@ -1,0 +1,598 @@
+using System.Buffers;
+using System.Globalization;
+using System.Text;
+using System.Text.Json;
+using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Triggers.Models;
+
+namespace EmbodySense.Core.Common.Triggers;
+
+/// <summary>
+/// Serializes and parses only the exact canonical schema-version-1 trigger-delivery JSON form.
+/// </summary>
+public static class TriggerDeliveryJson
+{
+    private static readonly string[] _rootProperties = ["actorContext", "adapter", "authority", "deduplicationId", "deliveryId", "invokingConversation", "kind", "loop", "payload", "publicationRequested", "redelivery", "schemaVersion", "temporal", "visibleReason", "visibleStatus"];
+    private static readonly string[] _actorProperties = ["actorId", "roleId", "surfaceId", "workspaceId"];
+    private static readonly string[] _adapterProperties = ["capability", "implementation"];
+    private static readonly string[] _capabilityProperties = ["hash", "id", "version"];
+    private static readonly string[] _implementationProperties = ["implementationId", "providerId"];
+    private static readonly string[] _authorityProperties = ["boundaryReceipt", "profile"];
+    private static readonly string[] _profileProperties = ["profileId", "revision"];
+    private static readonly string[] _receiptProperties = ["conditions", "decision", "evaluatedAtUtc", "profiles", "schemaVersion"];
+    private static readonly string[] _conditionProperties = ["decision", "reason"];
+    private static readonly string[] _conversationProperties = ["capturedAtUtc", "capturedVersion", "conversationId"];
+    private static readonly string[] _loopProperties = ["contentHash", "definitionVersion", "loopId"];
+    private static readonly string[] _payloadProperties = ["contentHash", "governedReference", "inlineBase64"];
+    private static readonly string[] _redeliveryProperties = ["attempt", "count", "originalDeliveryId"];
+    private static readonly string[] _temporalProperties = ["admittedAtUtc", "createdAtUtc", "deadlineUtc", "expiresAtUtc", "notBeforeUtc", "observedAtUtc", "receivedAtUtc"];
+
+    /// <summary>
+    /// Serializes a valid envelope into bounded deterministic UTF-8 JSON.
+    /// </summary>
+    /// <param name="envelope">The envelope to validate and serialize.</param>
+    /// <param name="json">The canonical JSON when successful.</param>
+    /// <param name="validation">The structured validation result.</param>
+    /// <returns><see langword="true"/> when serialization succeeds; otherwise, <see langword="false"/>.</returns>
+    public static bool TrySerialize(TriggerDeliveryEnvelope? envelope, out string? json, out TriggerContractValidationResult validation)
+    {
+        validation = TriggerDeliveryValidator.Validate(envelope);
+        if (!validation.IsValid)
+        {
+            json = null;
+            return false;
+        }
+
+        if (!TrySerializeKnownValid(envelope!, out json, out var error))
+        {
+            validation = new TriggerContractValidationResult([error!]);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Parses only byte-for-byte canonical, duplicate-free schema-version-1 JSON.
+    /// </summary>
+    /// <param name="json">The candidate JSON.</param>
+    /// <param name="envelope">The parsed envelope when successful.</param>
+    /// <param name="validation">The structured parse or validation result.</param>
+    /// <returns><see langword="true"/> when parsing succeeds; otherwise, <see langword="false"/>.</returns>
+    public static bool TryDeserialize(string? json, out TriggerDeliveryEnvelope? envelope, out TriggerContractValidationResult validation)
+    {
+        envelope = null;
+        if (!TriggerTextRules.IsSafeNormalized(json, TriggerDeliveryLimits.MaxCanonicalDocumentUtf8Bytes) || Encoding.UTF8.GetByteCount(json!) > TriggerDeliveryLimits.MaxCanonicalDocumentUtf8Bytes)
+        {
+            validation = Failure("invalid_json", "$");
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json!, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 12 });
+            var root = document.RootElement;
+            if (!IsExactObject(root, _rootProperties)
+                || !TryInteger(root, "schemaVersion", out var schemaVersion)
+                || !TryString(root, "deliveryId", out var deliveryText)
+                || !TriggerDeliveryId.TryParse(deliveryText, out var deliveryId)
+                || !TryString(root, "deduplicationId", out var deduplicationText)
+                || !TriggerDeduplicationId.TryParse(deduplicationText, out var deduplicationId)
+                || !TryString(root, "kind", out var kindText)
+                || !TriggerVocabulary.TryParseKind(kindText, out var kind)
+                || !TryAdapter(root.GetProperty("adapter"), out var adapter)
+                || !TryLoop(root.GetProperty("loop"), out var loop)
+                || !TryActor(root.GetProperty("actorContext"), out var actorContext)
+                || !TryAuthority(root.GetProperty("authority"), out var authority)
+                || !TryTemporal(root.GetProperty("temporal"), out var temporal)
+                || !TryPayload(root.GetProperty("payload"), out var payload)
+                || !TryRedelivery(root.GetProperty("redelivery"), out var redelivery)
+                || !TryBoolean(root, "publicationRequested", out var publicationRequested)
+                || !TryConversation(root.GetProperty("invokingConversation"), out var conversation)
+                || !TryString(root, "visibleStatus", out var statusText)
+                || !TriggerVocabulary.TryParseStatus(statusText, out var visibleStatus)
+                || !TryString(root, "visibleReason", out var reasonText)
+                || !TriggerVocabulary.TryParseReason(reasonText, out var visibleReason))
+            {
+                validation = Failure("invalid_json_shape", "$");
+                return false;
+            }
+
+            if (!TriggerDeliveryFactory.TryCreateEnvelope(schemaVersion, deliveryId, deduplicationId, kind, adapter, loop, actorContext, authority, temporal, payload, redelivery, publicationRequested, conversation, visibleStatus, visibleReason, out envelope, out validation))
+            {
+                return false;
+            }
+
+            if (!TrySerializeKnownValid(envelope!, out var canonical, out _) || !string.Equals(json, canonical, StringComparison.Ordinal))
+            {
+                envelope = null;
+                validation = Failure("noncanonical_json", "$");
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception exception) when (exception is JsonException or FormatException or OverflowException)
+        {
+            validation = Failure("invalid_json", "$");
+            return false;
+        }
+    }
+
+    internal static bool TrySerializeKnownValid(TriggerDeliveryEnvelope envelope, out string? json, out TriggerContractError? error)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer))
+        {
+            WriteEnvelope(writer, envelope);
+        }
+
+        if (buffer.WrittenCount > TriggerDeliveryLimits.MaxCanonicalDocumentUtf8Bytes)
+        {
+            json = null;
+            error = new TriggerContractError("canonical_document_too_large", "$");
+            return false;
+        }
+
+        json = Encoding.UTF8.GetString(buffer.WrittenSpan);
+        error = null;
+        return true;
+    }
+
+    private static void WriteEnvelope(Utf8JsonWriter writer, TriggerDeliveryEnvelope envelope)
+    {
+        writer.WriteStartObject();
+        WriteActor(writer, envelope.ActorContext);
+        WriteAdapter(writer, envelope.Adapter);
+        WriteAuthority(writer, envelope.Authority);
+        writer.WriteString("deduplicationId", envelope.DeduplicationId.Value);
+        writer.WriteString("deliveryId", envelope.DeliveryId.Value);
+        WriteConversation(writer, envelope.InvokingConversation);
+        writer.WriteString("kind", TriggerVocabulary.ToCanonical(envelope.Kind));
+        WriteLoop(writer, envelope.Loop);
+        WritePayload(writer, envelope.Payload);
+        writer.WriteBoolean("publicationRequested", envelope.PublicationRequested);
+        WriteRedelivery(writer, envelope.Redelivery);
+        writer.WriteNumber("schemaVersion", envelope.SchemaVersion);
+        WriteTemporal(writer, envelope.Temporal);
+        writer.WriteString("visibleReason", TriggerVocabulary.ToCanonical(envelope.VisibleReason));
+        writer.WriteString("visibleStatus", TriggerVocabulary.ToCanonical(envelope.VisibleStatus));
+        writer.WriteEndObject();
+        writer.Flush();
+    }
+
+    private static void WriteActor(Utf8JsonWriter writer, TriggerActorContext actor)
+    {
+        writer.WritePropertyName("actorContext");
+        writer.WriteStartObject();
+        writer.WriteString("actorId", actor.ActorId.Value);
+        writer.WriteString("roleId", actor.RoleId);
+        writer.WriteString("surfaceId", actor.SurfaceId);
+        writer.WriteString("workspaceId", actor.WorkspaceId);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteAdapter(Utf8JsonWriter writer, TriggerAdapterReference adapter)
+    {
+        writer.WritePropertyName("adapter");
+        writer.WriteStartObject();
+        writer.WritePropertyName("capability");
+        writer.WriteStartObject();
+        writer.WriteString("hash", adapter.Capability.Hash.Value);
+        writer.WriteString("id", adapter.Capability.Id.Value);
+        writer.WriteString("version", adapter.Capability.Version.Value);
+        writer.WriteEndObject();
+        writer.WritePropertyName("implementation");
+        writer.WriteStartObject();
+        writer.WriteString("implementationId", adapter.Implementation.ImplementationId);
+        writer.WriteString("providerId", adapter.Implementation.ProviderId.Value);
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+    }
+
+    private static void WriteAuthority(Utf8JsonWriter writer, TriggerAuthorityEvidence authority)
+    {
+        writer.WritePropertyName("authority");
+        writer.WriteStartObject();
+        writer.WritePropertyName("boundaryReceipt");
+        writer.WriteStartObject();
+        writer.WritePropertyName("conditions");
+        writer.WriteStartArray();
+        foreach (var condition in authority.BoundaryReceipt.Conditions)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("decision", AuthorityContractVocabulary.ToCanonical(condition.Decision));
+            writer.WriteString("reason", AuthorityContractVocabulary.ToCanonical(condition.Reason));
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WriteString("decision", AuthorityContractVocabulary.ToCanonical(authority.BoundaryReceipt.Decision));
+        WriteTimestamp(writer, "evaluatedAtUtc", authority.BoundaryReceipt.EvaluatedAtUtc);
+        writer.WritePropertyName("profiles");
+        writer.WriteStartArray();
+        foreach (var profile in authority.BoundaryReceipt.Profiles)
+        {
+            WriteProfile(writer, profile);
+        }
+
+        writer.WriteEndArray();
+        writer.WriteNumber("schemaVersion", authority.BoundaryReceipt.SchemaVersion);
+        writer.WriteEndObject();
+        writer.WritePropertyName("profile");
+        WriteProfile(writer, authority.Profile);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteProfile(Utf8JsonWriter writer, AuthorityProfileReference profile)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("profileId", profile.ProfileId.Value);
+        writer.WriteNumber("revision", profile.Revision.Value);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteConversation(Utf8JsonWriter writer, CustomLoopConversationReference? conversation)
+    {
+        writer.WritePropertyName("invokingConversation");
+        if (conversation is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        WriteTimestamp(writer, "capturedAtUtc", conversation.CapturedAtUtc);
+        writer.WriteString("capturedVersion", conversation.CapturedVersion);
+        writer.WriteString("conversationId", conversation.ConversationId);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteLoop(Utf8JsonWriter writer, TriggerLoopReference loop)
+    {
+        writer.WritePropertyName("loop");
+        writer.WriteStartObject();
+        writer.WriteString("contentHash", loop.ContentHash);
+        writer.WriteNumber("definitionVersion", loop.DefinitionVersion);
+        writer.WriteString("loopId", loop.LoopId);
+        writer.WriteEndObject();
+    }
+
+    private static void WritePayload(Utf8JsonWriter writer, TriggerPayloadEvidence payload)
+    {
+        writer.WritePropertyName("payload");
+        writer.WriteStartObject();
+        writer.WriteString("contentHash", payload.ContentHash.Value);
+        if (payload.GovernedReference is null)
+        {
+            writer.WriteNull("governedReference");
+        }
+        else
+        {
+            writer.WriteString("governedReference", payload.GovernedReference);
+        }
+
+        var bytes = payload.GetInlinePayload();
+        if (bytes is null)
+        {
+            writer.WriteNull("inlineBase64");
+        }
+        else
+        {
+            writer.WriteBase64String("inlineBase64", bytes);
+        }
+
+        writer.WriteEndObject();
+    }
+
+    private static void WriteRedelivery(Utf8JsonWriter writer, TriggerRedeliveryEvidence redelivery)
+    {
+        writer.WritePropertyName("redelivery");
+        writer.WriteStartObject();
+        writer.WriteNumber("attempt", redelivery.Attempt);
+        writer.WriteNumber("count", redelivery.Count);
+        writer.WriteString("originalDeliveryId", redelivery.OriginalDeliveryId.Value);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteTemporal(Utf8JsonWriter writer, TriggerTemporalEvidence temporal)
+    {
+        writer.WritePropertyName("temporal");
+        writer.WriteStartObject();
+        WriteNullableTimestamp(writer, "admittedAtUtc", temporal.AdmittedAtUtc);
+        WriteTimestamp(writer, "createdAtUtc", temporal.CreatedAtUtc);
+        WriteNullableTimestamp(writer, "deadlineUtc", temporal.DeadlineUtc);
+        WriteNullableTimestamp(writer, "expiresAtUtc", temporal.ExpiresAtUtc);
+        WriteNullableTimestamp(writer, "notBeforeUtc", temporal.NotBeforeUtc);
+        WriteTimestamp(writer, "observedAtUtc", temporal.ObservedAtUtc);
+        WriteTimestamp(writer, "receivedAtUtc", temporal.ReceivedAtUtc);
+        writer.WriteEndObject();
+    }
+
+    private static bool TryAdapter(JsonElement element, out TriggerAdapterReference? adapter)
+    {
+        adapter = null;
+        if (!IsExactObject(element, _adapterProperties))
+        {
+            return false;
+        }
+
+        var capabilityElement = element.GetProperty("capability");
+        var implementationElement = element.GetProperty("implementation");
+        if (!IsExactObject(capabilityElement, _capabilityProperties)
+            || !IsExactObject(implementationElement, _implementationProperties)
+            || !TryString(capabilityElement, "id", out var idText)
+            || !CapabilityId.TryParse(idText, out var id, out _)
+            || !TryString(capabilityElement, "version", out var versionText)
+            || !CapabilityVersion.TryParse(versionText, out var version, out _)
+            || !TryString(capabilityElement, "hash", out var hashText)
+            || !CapabilityDescriptorHash.TryParse(hashText, out var hash, out _)
+            || !TryString(implementationElement, "providerId", out var providerText)
+            || !CapabilityProviderId.TryParse(providerText, out var provider, out _)
+            || !TryString(implementationElement, "implementationId", out var implementationId))
+        {
+            return false;
+        }
+
+        adapter = new TriggerAdapterReference(new CapabilityDescriptorIdentity(id!, version!, hash!), new CapabilityImplementationIdentity(provider!, implementationId!));
+        return true;
+    }
+
+    private static bool TryLoop(JsonElement element, out TriggerLoopReference? loop)
+    {
+        loop = null;
+        return IsExactObject(element, _loopProperties)
+            && TryString(element, "loopId", out var loopId)
+            && TryInteger(element, "definitionVersion", out var version)
+            && TryString(element, "contentHash", out var hash)
+            && TriggerDeliveryFactory.TryCreateLoopReference(loopId, version, hash, out loop, out _);
+    }
+
+    private static bool TryActor(JsonElement element, out TriggerActorContext? context)
+    {
+        context = null;
+        return IsExactObject(element, _actorProperties)
+            && TryString(element, "actorId", out var actorText)
+            && AuthorityActorId.TryParse(actorText, out var actor, out _)
+            && TryString(element, "surfaceId", out var surface)
+            && TryString(element, "workspaceId", out var workspace)
+            && TryString(element, "roleId", out var role)
+            && TriggerDeliveryFactory.TryCreateActorContext(actor, surface, workspace, role, out context, out _);
+    }
+
+    private static bool TryAuthority(JsonElement element, out TriggerAuthorityEvidence? authority)
+    {
+        authority = null;
+        if (!IsExactObject(element, _authorityProperties)
+            || !TryProfile(element.GetProperty("profile"), out var profile)
+            || !TryReceipt(element.GetProperty("boundaryReceipt"), out var receipt))
+        {
+            return false;
+        }
+
+        return TriggerDeliveryFactory.TryCreateAuthorityEvidence(profile, receipt, out authority);
+    }
+
+    private static bool TryReceipt(JsonElement element, out AuthorityBoundaryReceipt? receipt)
+    {
+        receipt = null;
+        if (!IsExactObject(element, _receiptProperties)
+            || !TryInteger(element, "schemaVersion", out var schemaVersion)
+            || !TryString(element, "decision", out var decisionText)
+            || !AuthorityContractVocabulary.TryParseDecision(decisionText, out var decision)
+            || !TryTimestamp(element, "evaluatedAtUtc", out var evaluatedAtUtc))
+        {
+            return false;
+        }
+
+        var conditionsElement = element.GetProperty("conditions");
+        var profilesElement = element.GetProperty("profiles");
+        if (conditionsElement.ValueKind != JsonValueKind.Array || profilesElement.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        var conditions = new List<AuthorityBoundaryCondition>();
+        foreach (var conditionElement in conditionsElement.EnumerateArray())
+        {
+            if (!IsExactObject(conditionElement, _conditionProperties)
+                || !TryString(conditionElement, "decision", out var conditionDecisionText)
+                || !AuthorityContractVocabulary.TryParseDecision(conditionDecisionText, out var conditionDecision)
+                || !TryString(conditionElement, "reason", out var reasonText)
+                || !AuthorityContractVocabulary.TryParseReason(reasonText, out var reason))
+            {
+                return false;
+            }
+
+            conditions.Add(new AuthorityBoundaryCondition(conditionDecision, reason));
+        }
+
+        var profiles = new List<AuthorityProfileReference>();
+        foreach (var profileElement in profilesElement.EnumerateArray())
+        {
+            if (!TryProfile(profileElement, out var profile))
+            {
+                return false;
+            }
+
+            profiles.Add(profile!);
+        }
+
+        return AuthorityBoundaryReceiptFactory.TryCreate(schemaVersion, decision, conditions, profiles, evaluatedAtUtc, out receipt, out _);
+    }
+
+    private static bool TryProfile(JsonElement element, out AuthorityProfileReference? profile)
+    {
+        profile = null;
+        if (!IsExactObject(element, _profileProperties)
+            || !TryString(element, "profileId", out var profileText)
+            || !AuthorityProfileId.TryParse(profileText, out var profileId, out _)
+            || !TryInteger(element, "revision", out var revisionValue)
+            || !AuthorityProfileRevision.TryParse(revisionValue.ToString(CultureInfo.InvariantCulture), out var revision, out _))
+        {
+            return false;
+        }
+
+        profile = new AuthorityProfileReference(profileId!, revision!);
+        return true;
+    }
+
+    private static bool TryTemporal(JsonElement element, out TriggerTemporalEvidence? temporal)
+    {
+        temporal = null;
+        return IsExactObject(element, _temporalProperties)
+            && TryTimestamp(element, "createdAtUtc", out var created)
+            && TryTimestamp(element, "observedAtUtc", out var observed)
+            && TryTimestamp(element, "receivedAtUtc", out var received)
+            && TryNullableTimestamp(element, "admittedAtUtc", out var admitted)
+            && TryNullableTimestamp(element, "notBeforeUtc", out var notBefore)
+            && TryNullableTimestamp(element, "deadlineUtc", out var deadline)
+            && TryNullableTimestamp(element, "expiresAtUtc", out var expires)
+            && TriggerDeliveryFactory.TryCreateTemporalEvidence(observed, received, created, admitted, notBefore, deadline, expires, out temporal, out _);
+    }
+
+    private static bool TryPayload(JsonElement element, out TriggerPayloadEvidence? payload)
+    {
+        payload = null;
+        if (!IsExactObject(element, _payloadProperties)
+            || !TryString(element, "contentHash", out var hashText)
+            || !CapabilityIntegrityDigest.TryParse(hashText, out var hash, out _))
+        {
+            return false;
+        }
+
+        var inline = element.GetProperty("inlineBase64");
+        var reference = element.GetProperty("governedReference");
+        if (inline.ValueKind == JsonValueKind.String && reference.ValueKind == JsonValueKind.Null)
+        {
+            byte[] bytes;
+            try
+            {
+                bytes = inline.GetBytesFromBase64();
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+
+            return TriggerDeliveryFactory.TryCreateInlinePayload(bytes, out payload, out _) && payload!.ContentHash.FixedTimeEquals(hash);
+        }
+
+        return inline.ValueKind == JsonValueKind.Null
+            && reference.ValueKind == JsonValueKind.String
+            && TriggerDeliveryFactory.TryCreateReferencedPayload(reference.GetString(), hash, out payload, out _);
+    }
+
+    private static bool TryRedelivery(JsonElement element, out TriggerRedeliveryEvidence? redelivery)
+    {
+        redelivery = null;
+        return IsExactObject(element, _redeliveryProperties)
+            && TryInteger(element, "attempt", out var attempt)
+            && TryInteger(element, "count", out var count)
+            && TryString(element, "originalDeliveryId", out var originalText)
+            && TriggerDeliveryId.TryParse(originalText, out var original)
+            && TriggerDeliveryFactory.TryCreateRedeliveryEvidence(attempt, count, original, out redelivery, out _);
+    }
+
+    private static bool TryConversation(JsonElement element, out CustomLoopConversationReference? conversation)
+    {
+        conversation = null;
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return true;
+        }
+
+        if (!IsExactObject(element, _conversationProperties)
+            || !TryString(element, "conversationId", out var conversationId)
+            || !TryString(element, "capturedVersion", out var capturedVersion)
+            || !TryTimestamp(element, "capturedAtUtc", out var capturedAtUtc))
+        {
+            return false;
+        }
+
+        conversation = new CustomLoopConversationReference(conversationId!, capturedVersion!, capturedAtUtc);
+        return true;
+    }
+
+    private static bool IsExactObject(JsonElement element, IReadOnlyCollection<string> expected)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var properties = element.EnumerateObject().Select(property => property.Name).ToArray();
+        return properties.Length == expected.Count && properties.Distinct(StringComparer.Ordinal).Count() == expected.Count && properties.All(expected.Contains);
+    }
+
+    private static bool TryString(JsonElement parent, string name, out string? value)
+    {
+        var element = parent.GetProperty(name);
+        value = element.ValueKind == JsonValueKind.String ? element.GetString() : null;
+        return value is not null;
+    }
+
+    private static bool TryInteger(JsonElement parent, string name, out int value)
+    {
+        var element = parent.GetProperty(name);
+        value = default;
+        return element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out value) && string.Equals(element.GetRawText(), value.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+    }
+
+    private static bool TryBoolean(JsonElement parent, string name, out bool value)
+    {
+        var element = parent.GetProperty(name);
+        value = element.ValueKind == JsonValueKind.True;
+        return element.ValueKind is JsonValueKind.True or JsonValueKind.False;
+    }
+
+    private static bool TryTimestamp(JsonElement parent, string name, out DateTimeOffset value)
+    {
+        value = default;
+        return TryString(parent, name, out var text)
+            && DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out value)
+            && value.Offset == TimeSpan.Zero
+            && string.Equals(text, ToCanonicalUtc(value), StringComparison.Ordinal);
+    }
+
+    private static bool TryNullableTimestamp(JsonElement parent, string name, out DateTimeOffset? value)
+    {
+        var element = parent.GetProperty(name);
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            value = null;
+            return true;
+        }
+
+        if (TryTimestamp(parent, name, out var parsed))
+        {
+            value = parsed;
+            return true;
+        }
+
+        value = null;
+        return false;
+    }
+
+    private static void WriteTimestamp(Utf8JsonWriter writer, string name, DateTimeOffset value) => writer.WriteString(name, ToCanonicalUtc(value));
+
+    private static void WriteNullableTimestamp(Utf8JsonWriter writer, string name, DateTimeOffset? value)
+    {
+        if (value is null)
+        {
+            writer.WriteNull(name);
+        }
+        else
+        {
+            WriteTimestamp(writer, name, value.Value);
+        }
+    }
+
+    private static string ToCanonicalUtc(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private static TriggerContractValidationResult Failure(string code, string field) => new([new TriggerContractError(code, field)]);
+}

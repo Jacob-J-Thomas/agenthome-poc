@@ -1,10 +1,19 @@
-let sessionToken = "";
+let sessionGenerationId = null;
 let status = null;
 let configuration = null;
 let activeConfigTab = "overview";
 let activeAppView = "chat";
 let activeAgentMessage = null;
 let hub = null;
+let sessionRecoveryGeneration = 0;
+let sessionRecoveryAttempts = 0;
+let sessionRecoveryPromise = null;
+let sessionRecoveryTimer = null;
+let sessionRecoveryTerminal = false;
+let sessionWorkspaceRoot = null;
+let sessionRecoveryAbortController = null;
+let sessionRecoveryCandidate = null;
+let sessionPageHidden = false;
 let conversationSynchronization = Promise.resolve();
 const synchronizedConversationOperations = new Set();
 const synchronizedConversationOperationOrder = [];
@@ -13,6 +22,11 @@ const maxSynchronizedConversationOperations = 128;
 const maxConversationSynchronizationRetries = 40;
 const initialConversationSynchronizationRetryMilliseconds = 25;
 const maxConversationSynchronizationRetryMilliseconds = 1000;
+const maxSessionRecoveryAttempts = 6;
+const initialSessionRecoveryDelayMilliseconds = 250;
+const maxSessionRecoveryDelayMilliseconds = 8000;
+const sessionRecoveryAttemptTimeoutMilliseconds = 10000;
+const signalRStartTimeoutMilliseconds = 5000;
 
 const elements = {
   approvals: document.getElementById("approvals"),
@@ -36,6 +50,7 @@ const elements = {
   messageForm: document.getElementById("messageForm"),
   messageInput: document.getElementById("messageInput"),
   refreshConfigButton: document.getElementById("refreshConfigButton"),
+  retryConnectionButton: document.getElementById("retryConnectionButton"),
   sendButton: document.getElementById("sendButton"),
   surfaceTitle: document.getElementById("surfaceTitle"),
   transcript: document.getElementById("transcript"),
@@ -128,48 +143,54 @@ function selectAppView(view, sourceTab = null) {
 }
 
 async function boot() {
-  const session = await fetchJson("/api/session");
-  sessionToken = session.token;
-  await refreshStatus();
   await connectHub();
-  await refreshConfiguration();
 }
 
 async function fetchJson(url, options = {}) {
-  const request = { ...options, headers: { ...(options.headers ?? {}) } };
+  try {
+    return await fetchJsonWithoutRecovery(url, options);
+  } catch (error) {
+    if (error.status === 401 && url !== "/api/session") {
+      void startSessionRecovery("stale-auth", { newGeneration: true });
+      const sessionError = new Error(
+        "The local session changed. Recovery started, and the prior request was not replayed.",
+      );
+      sessionError.status = 401;
+      sessionError.cause = error;
+      throw sessionError;
+    }
+
+    throw error;
+  }
+}
+
+async function fetchJsonWithoutRecovery(url, options = {}) {
+  const request = {
+    ...options,
+    credentials: "same-origin",
+    headers: { ...(options.headers ?? {}) },
+  };
   const response = await fetch(url, request);
   if (!response.ok) {
-    throw new Error(await response.text());
+    const text = await response.text();
+    const error = new Error(text || `Request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
   }
 
   return await response.json();
 }
 
-function createSessionHeaders() {
-  return sessionToken ? { "X-EmbodySense-Session": sessionToken } : {};
-}
-
-async function refreshStatus() {
-  const nextStatus = await fetchJson("/api/status");
-  applyStatus(nextStatus);
-}
-
 async function refreshConfiguration() {
-  if (!sessionToken) {
-    return;
-  }
-
   elements.refreshConfigButton.disabled = true;
   renderConfigLoading();
   try {
-    configuration = await fetchJson("/api/configuration", {
-      headers: createSessionHeaders(),
-    });
+    configuration = await fetchJson("/api/configuration");
     renderConfiguration();
   } catch (error) {
     renderConfigError(error.message);
   } finally {
-    elements.refreshConfigButton.disabled = false;
+    elements.refreshConfigButton.disabled = !hub?.connected;
   }
 }
 
@@ -180,10 +201,11 @@ function applyStatus(nextStatus) {
   elements.workspaceStatus.textContent = status.initialized
     ? "Initialized"
     : "Needs initialization";
-  elements.connectionDot.classList.toggle("ready", status.initialized);
-  elements.clientStatus.textContent = hub?.connected
-    ? "Web primary"
-    : "Web reconnecting";
+  elements.connectionDot.classList.toggle(
+    "ready",
+    status.initialized && Boolean(hub?.connected),
+  );
+  if (hub?.connected) applyConnectedState();
   elements.clientRole.textContent = status.client;
   elements.cliRole.textContent = status.cliRole;
   elements.initButton.disabled = status.initialized || !hub?.connected;
@@ -195,20 +217,373 @@ function applyStatus(nextStatus) {
 }
 
 async function connectHub() {
-  hub = new JsonSignalRConnection(createHubUrl());
-  hub.on("StatusChanged", applyStatus);
-  hub.on("ApprovalsChanged", renderApprovals);
-  hub.on("ConversationChanged", queueConversationPublicationSynchronization);
-  hub.on("StreamEvent", handleStreamEvent);
-  hub.onclose = scheduleReconnect;
-  await hub.start();
-  try {
-    const currentTranscript = await hub.invoke("GetCurrentTranscript");
-    if (Array.isArray(currentTranscript)) replaceTranscript(currentTranscript);
-  } catch (error) {
-    appendMessage("error", `Transcript unavailable: ${error.message}`);
+  return await startSessionRecovery("explicit-connect", {
+    newGeneration: true,
+  });
+}
+
+async function startSessionRecovery(
+  reason,
+  { newGeneration = false, manual = false } = {},
+) {
+  let supersededGeneration = false;
+  if (sessionPageHidden) return false;
+  if (sessionRecoveryPromise) {
+    if (!manual) return await sessionRecoveryPromise;
+    const supersededRecovery = sessionRecoveryPromise;
+    sessionRecoveryGeneration++;
+    sessionRecoveryAttempts = 0;
+    supersededGeneration = true;
+    cancelActiveSessionRecovery(
+      "Manual recovery superseded the pending attempt.",
+    );
+    await supersededRecovery;
+    if (sessionRecoveryPromise === supersededRecovery)
+      sessionRecoveryPromise = null;
   }
-  applyStatus(status);
+  if (sessionRecoveryTerminal && !manual) return false;
+  if (sessionRecoveryTimer != null && !manual) return false;
+  if (sessionRecoveryTimer != null) {
+    window.clearTimeout(sessionRecoveryTimer);
+    sessionRecoveryTimer = null;
+  }
+  if (
+    !supersededGeneration &&
+    (newGeneration || manual || sessionRecoveryGeneration === 0)
+  ) {
+    sessionRecoveryGeneration++;
+    sessionRecoveryAttempts = 0;
+  }
+  sessionRecoveryTerminal = false;
+  const generation = sessionRecoveryGeneration;
+  applyDisconnectedState(reason === "stale-auth" ? "renewing" : "retrying");
+  const recovery = runSessionRecoveryAttempt(generation);
+  sessionRecoveryPromise = recovery;
+  try {
+    return await recovery;
+  } finally {
+    if (sessionRecoveryPromise === recovery) sessionRecoveryPromise = null;
+  }
+}
+
+async function runSessionRecoveryAttempt(generation) {
+  sessionRecoveryAttempts++;
+  let candidate = null;
+  let candidateEvents = null;
+  let candidateInstalled = false;
+  const abortController = new AbortController();
+  sessionRecoveryAbortController = abortController;
+  const timeoutId = window.setTimeout(() => {
+    abortController.abort(
+      createRecoveryError(
+        "transient",
+        "Session recovery exceeded its bounded attempt deadline.",
+      ),
+    );
+  }, sessionRecoveryAttemptTimeoutMilliseconds);
+  try {
+    const session = await waitForRecoveryOperation(
+      fetchJsonWithoutRecovery("/api/session", {
+        signal: abortController.signal,
+      }),
+      abortController.signal,
+    );
+    requireSessionGeneration(session);
+    if (generation !== sessionRecoveryGeneration) return false;
+
+    candidate = new JsonSignalRConnection(createHubUrl());
+    sessionRecoveryCandidate = candidate;
+    candidateEvents = bindHubEvents(candidate, generation, (error) => {
+      if (!abortController.signal.aborted) abortController.abort(error);
+    });
+    await waitForRecoveryOperation(
+      candidate.start({ signal: abortController.signal }),
+      abortController.signal,
+    );
+    const nextStatus = await waitForRecoveryOperation(
+      fetchJsonWithoutRecovery("/api/status", {
+        signal: abortController.signal,
+      }),
+      abortController.signal,
+    );
+    ensureWorkspaceDidNotChange(nextStatus.workspaceRoot);
+    if (hub === null && sessionWorkspaceRoot === null) {
+      hub = candidate;
+      sessionGenerationId = session.generationId;
+      sessionWorkspaceRoot = nextStatus.workspaceRoot;
+      applyStatus(nextStatus);
+      candidateInstalled = true;
+    }
+
+    let transcriptHydrationError = null;
+    const [nextConfiguration, currentTranscript, pendingApprovals] =
+      await Promise.all([
+        waitForRecoveryOperation(
+          fetchJsonWithoutRecovery("/api/configuration", {
+            signal: abortController.signal,
+          }),
+          abortController.signal,
+        ),
+        waitForRecoveryOperation(
+          candidate.invoke("GetCurrentTranscript"),
+          abortController.signal,
+        ).catch((error) => {
+          if (abortController.signal.aborted) throw error;
+          transcriptHydrationError = error;
+          return null;
+        }),
+        waitForRecoveryOperation(
+          candidate.invoke("GetPendingApprovals"),
+          abortController.signal,
+        ),
+      ]);
+    if (generation !== sessionRecoveryGeneration) {
+      candidate.stop();
+      return false;
+    }
+
+    const loopRefresh = await waitForRecoveryOperation(
+      window.embodySenseLoopBuilder?.rehydrateSession?.({
+        approvals: pendingApprovals,
+        signal: abortController.signal,
+        workspaceRoot: nextStatus.workspaceRoot,
+      }),
+      abortController.signal,
+    );
+    if (loopRefresh?.requiresManualAction) {
+      throw createRecoveryError(
+        "workspace-changed",
+        "The workspace changed while an unsaved loop draft was open.",
+      );
+    }
+    if (loopRefresh && !loopRefresh.skipped && loopRefresh.refreshed !== true) {
+      throw createRecoveryError(
+        "transient",
+        "Loop evidence could not be authoritatively rehydrated.",
+      );
+    }
+    if (
+      generation !== sessionRecoveryGeneration ||
+      !candidate.connected ||
+      candidateEvents.closed
+    ) {
+      throw createRecoveryError(
+        "transient",
+        "The replacement connection closed before recovery was promoted.",
+      );
+    }
+
+    if (!candidateInstalled) {
+      const previousHub = hub;
+      previousHub?.stop();
+      hub = candidate;
+      sessionGenerationId = session.generationId;
+      sessionWorkspaceRoot = nextStatus.workspaceRoot;
+      applyStatus(nextStatus);
+    }
+    configuration = nextConfiguration;
+    renderConfiguration();
+    if (Array.isArray(currentTranscript)) replaceTranscript(currentTranscript);
+    if (transcriptHydrationError)
+      appendMessage(
+        "error",
+        `Transcript unavailable: ${transcriptHydrationError.message}`,
+      );
+    renderApprovals(pendingApprovals);
+    candidateEvents.promote();
+    sessionRecoveryAttempts = 0;
+    applyConnectedState();
+    elements.refreshConfigButton.disabled = false;
+    window.embodySenseLoopBuilder?.resumeSession?.();
+    return true;
+  } catch (caughtError) {
+    const error = abortController.signal.aborted
+      ? (abortController.signal.reason ?? caughtError)
+      : caughtError;
+    if (candidate) candidate.stop();
+    if (hub === candidate) hub = null;
+    if (generation !== sessionRecoveryGeneration) return false;
+    if (error?.status === 401) {
+      if (sessionRecoveryAttempts >= maxSessionRecoveryAttempts) {
+        enterTerminalRecoveryState("terminal", error);
+        return false;
+      }
+      const replacementGeneration = ++sessionRecoveryGeneration;
+      scheduleSessionRecovery(replacementGeneration, error);
+      return false;
+    }
+    const kind = classifyRecoveryError(error);
+    if (
+      kind !== "transient" ||
+      sessionRecoveryAttempts >= maxSessionRecoveryAttempts
+    ) {
+      enterTerminalRecoveryState(kind, error);
+      return false;
+    }
+
+    scheduleSessionRecovery(generation, error);
+    return false;
+  } finally {
+    window.clearTimeout(timeoutId);
+    if (sessionRecoveryAbortController === abortController)
+      sessionRecoveryAbortController = null;
+    if (sessionRecoveryCandidate === candidate) sessionRecoveryCandidate = null;
+  }
+}
+
+function waitForRecoveryOperation(operation, signal) {
+  if (operation === undefined) return Promise.resolve(undefined);
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () => finish(reject, signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(operation).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+function cancelActiveSessionRecovery(message) {
+  const error = createRecoveryError("transient", message);
+  if (!sessionRecoveryAbortController?.signal.aborted)
+    sessionRecoveryAbortController?.abort(error);
+  sessionRecoveryCandidate?.stop();
+}
+
+function requireSessionGeneration(session) {
+  if (
+    !session ||
+    typeof session.generationId !== "string" ||
+    !session.generationId.trim()
+  ) {
+    throw createRecoveryError(
+      "terminal",
+      "The session endpoint returned an invalid process generation.",
+    );
+  }
+}
+
+function ensureWorkspaceDidNotChange(workspaceRoot) {
+  if (
+    sessionWorkspaceRoot &&
+    workspaceRoot &&
+    sessionWorkspaceRoot !== workspaceRoot
+  ) {
+    throw createRecoveryError(
+      "workspace-changed",
+      `The Web host now serves a different workspace (${workspaceRoot}).`,
+    );
+  }
+}
+
+function createRecoveryError(kind, message) {
+  const error = new Error(message);
+  error.recoveryKind = kind;
+  return error;
+}
+
+function classifyRecoveryError(error) {
+  if (error?.recoveryKind) return error.recoveryKind;
+  if (
+    Number.isInteger(error?.status) &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    ![408, 425, 429].includes(error.status)
+  ) {
+    return "terminal";
+  }
+  return "transient";
+}
+
+function bindHubEvents(connection, generation, closeCandidate) {
+  const bufferedEvents = [];
+  let promoted = false;
+  let closed = false;
+  const dispatch = (handler, ...args) => {
+    if (generation !== sessionRecoveryGeneration) return;
+    if (promoted && hub === connection) handler(...args);
+    else if (!promoted && !closed) bufferedEvents.push({ args, handler });
+  };
+  connection.on("StatusChanged", (nextStatus) => {
+    dispatch(applyStatus, nextStatus);
+  });
+  connection.on("ApprovalsChanged", (approvals) => {
+    dispatch(renderApprovals, approvals);
+  });
+  connection.on("ConversationChanged", (notification) => {
+    dispatch(queueConversationPublicationSynchronization, notification);
+  });
+  connection.on("StreamEvent", (event) => {
+    dispatch(handleStreamEvent, event);
+  });
+  connection.onclose = () => {
+    if (generation !== sessionRecoveryGeneration) return;
+    closed = true;
+    if (promoted && hub === connection) {
+      hub = null;
+      void startSessionRecovery("connection-lost", { newGeneration: true });
+      return;
+    }
+    closeCandidate(
+      createRecoveryError(
+        "transient",
+        "The replacement connection closed during recovery.",
+      ),
+    );
+  };
+  return {
+    get closed() {
+      return closed;
+    },
+    promote() {
+      if (closed) return;
+      promoted = true;
+      for (const event of bufferedEvents.splice(0))
+        event.handler(...event.args);
+    },
+  };
+}
+
+function scheduleSessionRecovery(generation, error, requestedDelay = null) {
+  if (sessionRecoveryTimer != null) return;
+  const delay = requestedDelay ?? sessionRecoveryDelay(sessionRecoveryAttempts);
+  applyDisconnectedState("retrying", delay);
+  sessionRecoveryTimer = window.setTimeout(() => {
+    sessionRecoveryTimer = null;
+    if (generation !== sessionRecoveryGeneration) return;
+    void startSessionRecovery("retry", { newGeneration: false });
+  }, delay);
+  if (error?.message) elements.clientStatus.title = error.message;
+}
+
+function sessionRecoveryDelay(attempt) {
+  const exponential = Math.min(
+    initialSessionRecoveryDelayMilliseconds * 2 ** Math.max(0, attempt - 1),
+    maxSessionRecoveryDelayMilliseconds,
+  );
+  return Math.max(1, Math.round(exponential * (0.75 + Math.random() * 0.25)));
+}
+
+function enterTerminalRecoveryState(kind, error) {
+  sessionRecoveryTerminal = true;
+  const posture = kind === "workspace-changed" ? kind : "terminal";
+  applyDisconnectedState(posture);
+  elements.retryConnectionButton.hidden = false;
+  elements.clientStatus.title = error?.message ?? "Session recovery stopped.";
+  appendMessage(
+    "error",
+    kind === "workspace-changed"
+      ? `${error.message} This page was left unchanged to preserve local drafts. Restore the original workspace and retry, or reload intentionally.`
+      : `Automatic session recovery stopped: ${error?.message ?? "unknown failure"} Retry when the local host is ready.`,
+  );
 }
 
 function queueConversationPublicationSynchronization(notification) {
@@ -317,28 +692,39 @@ function clearConversationSynchronizationRetry(operationId) {
 function createHubUrl() {
   const url = new URL("/hubs/session", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("access_token", sessionToken);
   return url.toString();
 }
 
-function scheduleReconnect() {
-  applyDisconnectedState();
-  window.setTimeout(async () => {
-    try {
-      await connectHub();
-    } catch (error) {
-      appendMessage("error", `Reconnect failed: ${error.message}`);
-      scheduleReconnect();
-    }
-  }, 1000);
+function applyConnectedState() {
+  elements.clientStatus.textContent = "Web primary";
+  elements.clientStatus.title = sessionGenerationId
+    ? `Connected to process generation ${sessionGenerationId}`
+    : "Connected";
+  elements.retryConnectionButton.hidden = true;
+  elements.connectionDot.classList.toggle(
+    "ready",
+    Boolean(status?.initialized),
+  );
 }
 
-function applyDisconnectedState() {
-  elements.clientStatus.textContent = "Web reconnecting";
+function applyDisconnectedState(kind = "retrying", delay = null) {
+  window.embodySenseLoopBuilder?.suspendSession?.();
+  elements.clientStatus.textContent =
+    kind === "workspace-changed"
+      ? "Web workspace changed"
+      : kind === "terminal"
+        ? "Web recovery stopped"
+        : kind === "renewing"
+          ? "Web renewing session"
+          : delay == null
+            ? "Web reconnecting"
+            : `Web retrying in ${Math.ceil(delay / 1000)}s`;
+  elements.connectionDot.classList.toggle("ready", false);
   elements.initButton.disabled = true;
   elements.sendButton.disabled = true;
   elements.cancelButton.disabled = true;
   elements.verboseToggle.disabled = true;
+  elements.refreshConfigButton.disabled = true;
 }
 
 function renderConfigLoading() {
@@ -980,6 +1366,17 @@ elements.initButton.addEventListener("click", async () => {
 });
 
 elements.refreshConfigButton.addEventListener("click", refreshConfiguration);
+elements.retryConnectionButton.addEventListener("click", async () => {
+  elements.retryConnectionButton.disabled = true;
+  try {
+    await startSessionRecovery("manual-retry", {
+      manual: true,
+      newGeneration: true,
+    });
+  } finally {
+    elements.retryConnectionButton.disabled = false;
+  }
+});
 
 elements.verboseToggle.addEventListener("change", async () => {
   const enabled = elements.verboseToggle.checked;
@@ -1051,6 +1448,7 @@ elements.messageForm.addEventListener("submit", async (event) => {
   elements.cancelButton.disabled = false;
 
   try {
+    // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/260): Retain this canonical message/request identity until a conclusive response or transcript reconciliation proves the outcome.
     const requestId =
       globalThis.crypto?.randomUUID?.() ??
       `request-${Date.now()}-${Math.random()}`;
@@ -1100,40 +1498,83 @@ class JsonSignalRConnection {
     this.handshake = null;
     this.handshakeReject = null;
     this.handshakeResolve = null;
+    this.startReject = null;
     this.onclose = null;
   }
 
   on(target, handler) {
-    this.handlers.set(target, handler);
+    const handlers = this.handlers.get(target) ?? new Set();
+    handlers.add(handler);
+    this.handlers.set(target, handlers);
+    return () => handlers.delete(handler);
   }
 
-  async start() {
+  async start({ signal = null } = {}) {
     this.closedByClient = false;
     this.isClosed = false;
     this.socket = new WebSocket(this.url);
     this.socket.onmessage = (event) => this.receive(event.data);
     this.socket.onclose = () => this.handleClose();
+    try {
+      await this.waitForOpen(signal);
+      this.socket.onerror = () => this.handleClose();
+      this.handshake = this.waitForHandshake(signal);
+      this.sendRaw({ protocol: "json", version: 1 });
+      await this.handshake;
+      this.connected = true;
+    } catch (error) {
+      this.stop();
+      throw error;
+    }
+  }
 
-    await new Promise((resolve, reject) => {
-      this.socket.onopen = () => {
-        resolve();
-      };
-      this.socket.onerror = () =>
-        reject(new Error("SignalR connection failed."));
-    });
-
-    this.handshake = new Promise((resolve, reject) => {
-      this.handshakeResolve = resolve;
-      this.handshakeReject = reject;
-      window.setTimeout(
-        () => this.handshakeReject?.(new Error("SignalR handshake timed out.")),
-        5000,
+  waitForOpen(signal) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timeoutId = window.setTimeout(
+        () => finish(reject, new Error("SignalR connection timed out.")),
+        signalRStartTimeoutMilliseconds,
       );
+      const abort = () => finish(reject, signal.reason);
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        signal?.removeEventListener("abort", abort);
+        if (this.startReject === fail) this.startReject = null;
+        callback(value);
+      };
+      const fail = (error) => finish(reject, error);
+      this.startReject = fail;
+      this.socket.onopen = () => finish(resolve);
+      this.socket.onerror = () => fail(new Error("SignalR connection failed."));
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
     });
-    this.socket.onerror = () => this.handleClose();
-    this.sendRaw({ protocol: "json", version: 1 });
-    await this.handshake;
-    this.connected = true;
+  }
+
+  waitForHandshake(signal) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timeoutId = window.setTimeout(
+        () => finish(reject, new Error("SignalR handshake timed out.")),
+        signalRStartTimeoutMilliseconds,
+      );
+      const abort = () => finish(reject, signal.reason);
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        signal?.removeEventListener("abort", abort);
+        this.handshakeResolve = null;
+        this.handshakeReject = null;
+        callback(value);
+      };
+      this.handshakeResolve = (value) => finish(resolve, value);
+      this.handshakeReject = (error) => finish(reject, error);
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+    });
   }
 
   async invoke(target, ...args) {
@@ -1185,10 +1626,8 @@ class JsonSignalRConnection {
 
   handleMessage(message) {
     if (message.type === 1) {
-      const handler = this.handlers.get(message.target);
-      if (handler) {
+      for (const handler of this.handlers.get(message.target) ?? [])
         handler(...(message.arguments ?? []));
-      }
     } else if (message.type === 3) {
       const invocation = this.invocations.get(message.invocationId);
       if (!invocation) {
@@ -1206,6 +1645,16 @@ class JsonSignalRConnection {
     }
   }
 
+  stop() {
+    this.closedByClient = true;
+    try {
+      this.socket?.close?.();
+    } catch {
+      // A failed or still-connecting socket can reject close; local state must still be released.
+    }
+    this.handleClose();
+  }
+
   handleClose() {
     if (this.isClosed) {
       return;
@@ -1213,6 +1662,7 @@ class JsonSignalRConnection {
 
     this.isClosed = true;
     this.connected = false;
+    this.startReject?.(new Error("SignalR connection closed."));
     this.handshakeReject?.(new Error("SignalR connection closed."));
     for (const invocation of this.invocations.values()) {
       invocation.reject(new Error("SignalR connection closed."));
@@ -1225,6 +1675,63 @@ class JsonSignalRConnection {
     }
   }
 }
+
+function stopSessionForPageHide() {
+  if (sessionPageHidden) return;
+  sessionPageHidden = true;
+  sessionRecoveryGeneration++;
+  if (sessionRecoveryTimer != null) {
+    window.clearTimeout(sessionRecoveryTimer);
+    sessionRecoveryTimer = null;
+  }
+  cancelActiveSessionRecovery("The page was hidden during session recovery.");
+  hub?.stop();
+  hub = null;
+  window.embodySenseLoopBuilder?.suspendSession?.();
+}
+
+function resumeSessionFromPageShow(event) {
+  if (!sessionPageHidden || event?.persisted !== true) return;
+  sessionPageHidden = false;
+  void startSessionRecovery("page-restored", { newGeneration: true });
+}
+
+window.addEventListener?.("pagehide", stopSessionForPageHide);
+window.addEventListener?.("pageshow", resumeSessionFromPageShow);
+
+window.embodySenseSession = Object.freeze({
+  async getHub() {
+    if (!hub?.connected) {
+      await startSessionRecovery("session-consumer", {
+        newGeneration: sessionRecoveryGeneration === 0,
+      });
+    }
+    if (!hub?.connected) {
+      throw new Error(
+        sessionRecoveryTerminal
+          ? "Session recovery requires manual attention."
+          : "Session recovery is still in progress.",
+      );
+    }
+    return hub;
+  },
+  getState() {
+    return Object.freeze({
+      attempts: sessionRecoveryAttempts,
+      connected: Boolean(hub?.connected),
+      generation: sessionRecoveryGeneration,
+      processGenerationId: sessionGenerationId,
+      terminal: sessionRecoveryTerminal,
+      workspaceRoot: sessionWorkspaceRoot,
+    });
+  },
+  recover() {
+    return startSessionRecovery("session-consumer", {
+      newGeneration: true,
+    });
+  },
+  requestJson: fetchJson,
+});
 
 elements.cancelButton.disabled = true;
 elements.refreshConfigButton.disabled = true;

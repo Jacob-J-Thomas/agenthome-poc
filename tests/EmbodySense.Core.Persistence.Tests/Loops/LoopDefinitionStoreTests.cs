@@ -167,7 +167,7 @@ public sealed class LoopDefinitionStoreTests
         var store = new LoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
         var definition = LoopDefinition.CreateDefaultConversation() with
         {
-            Graph = LoopGraphDefinition.CreateDefaultConversation() with { EntryNodeId = "missing-node" }
+            Graph = BuiltInLoopGraphDefinition.CreateDefaultConversation() with { EntryNodeId = "missing-node" }
         };
 
         var exception = await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(definition));
