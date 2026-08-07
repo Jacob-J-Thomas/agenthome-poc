@@ -12,6 +12,9 @@ public interface ICapabilityCatalogTrustProvider
     /// <exception cref="InvalidOperationException">Thrown when provider-owned trust state overlaps the governed workspace.</exception>
     void RequireDisjointWorkspace(string workspaceRootPath);
 
+    /// <summary>Gets the strict maximum UTF-8 byte count of any authentication tag returned by this provider.</summary>
+    int MaximumAuthenticationTagUtf8Bytes { get; }
+
     /// <summary>Reads the authenticated trust anchor, or <see langword="null"/> when this workspace has never been anchored.</summary>
     Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default);
 

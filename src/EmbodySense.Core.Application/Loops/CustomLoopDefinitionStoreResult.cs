@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 
 namespace EmbodySense.Core.Application.Loops;
 
@@ -12,12 +13,14 @@ namespace EmbodySense.Core.Application.Loops;
 /// <param name="Conflict">The conflict.</param>
 /// <param name="Tombstone">The tombstone.</param>
 /// <param name="OperationIntegrity">The operation integrity.</param>
+/// <param name="RetentionExhaustionReason">The exact receipt-retention boundary that rejected admission, or none for non-retention outcomes.</param>
 public sealed record CustomLoopDefinitionStoreResult(
     CustomLoopDefinitionStoreStatus Status,
     CustomLoopDefinition? Definition,
     CustomLoopDefinitionConflict? Conflict,
     CustomLoopDefinitionTombstone? Tombstone,
-    CustomLoopOperationIntegrity OperationIntegrity = CustomLoopOperationIntegrity.NotTracked)
+    CustomLoopOperationIntegrity OperationIntegrity = CustomLoopOperationIntegrity.NotTracked,
+    CustomLoopReceiptQuotaExhaustionReason RetentionExhaustionReason = CustomLoopReceiptQuotaExhaustionReason.None)
 {
     /// <summary>
     /// Creates a successful definition-creation result.
@@ -83,8 +86,9 @@ public sealed record CustomLoopDefinitionStoreResult(
     /// <summary>
     /// Creates a custom loop definition store result representing limit exceeded.
     /// </summary>
+    /// <param name="retentionExhaustionReason">The exact retention boundary, or none when the definition-count limit was reached.</param>
     /// <returns>The custom loop definition store result.</returns>
-    public static CustomLoopDefinitionStoreResult LimitExceeded() => new(CustomLoopDefinitionStoreStatus.LimitExceeded, null, null, null);
+    public static CustomLoopDefinitionStoreResult LimitExceeded(CustomLoopReceiptQuotaExhaustionReason retentionExhaustionReason = CustomLoopReceiptQuotaExhaustionReason.None) => new(CustomLoopDefinitionStoreStatus.LimitExceeded, null, null, null, RetentionExhaustionReason: retentionExhaustionReason);
 
     /// <summary>
     /// Creates a custom loop definition store result representing already deleted.

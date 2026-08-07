@@ -11,7 +11,10 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Tests.Verification;
+using EmbodySense.Core.Persistence.Tests.Verification.Models;
 using EmbodySense.Tests.Support;
+using Xunit.Abstractions;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
 
@@ -25,6 +28,12 @@ public sealed class CustomLoopTraceRetentionStoreTests
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
+    private readonly ITestOutputHelper _output;
+
+    public CustomLoopTraceRetentionStoreTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
 
     [Fact]
     public async Task Inspection_reports_exact_persisted_hash_and_size_and_deletion_releases_live_quota_after_restart()
@@ -221,16 +230,114 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
-    public async Task Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible()
+    public async Task Deletion_receipt_transitions_fail_closed_for_missing_conflicting_and_out_of_order_requests()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var missing = Mutation(Request("run-missing", new string('a', CustomLoopLimits.Sha256HexCharacters), "delete-missing"));
+        var warning = Event(2, "event-warning", CustomLoopRunEventKind.IntegrityWarning, _timestamp.AddMinutes(1));
+
+        Assert.Null(await store.GetMonitorAsync("run-missing"));
+        Assert.Equal(CustomLoopTraceDeletionLookupStatus.NotFound, (await store.GetTraceDeletionOperationAsync("not-found")).Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Unknown, (await store.CommitTraceDeletionAuditFailureAsync(missing)).Status);
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.NotFound, await store.MarkTraceDeletionOutcomeAsync("not-found", CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.MarkTraceDeletionOutcomeAsync("not-found", CustomLoopTraceDeletionIntegrity.Unknown));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.AppendTerminalIntegrityWarningAsync("run-missing", 0, warning));
+        Assert.Equal(CustomLoopRunStoreStatus.NotFound, (await store.AppendTerminalIntegrityWarningAsync("run-missing", 1, warning)).Status);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.HasSufficientTraceCapacityForDispatchAsync(CreateAdmittedRun(), 0));
+
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(missing)).Status);
+        var conflict = Mutation(missing.Request with { Actor = "actor-other" });
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.OperationConflict, (await store.ReserveTraceDeletionOperationAsync(conflict)).Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.OperationConflict, (await store.CommitTraceDeletionAuditFailureAsync(conflict)).Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.MarkTraceDeletionOutcomeAsync(missing.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        Assert.Null(await store.InspectTraceAsync("run-other"));
+
+        var directMissing = Mutation(Request("run-other", new string('a', CustomLoopLimits.Sha256HexCharacters), "delete-direct-missing"));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.NotFound, (await store.DeleteTerminalTraceAsync(directMissing)).Status);
+
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.AuditUnavailable, (await store.CommitTraceDeletionAuditFailureAsync(missing)).Status);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.MarkTraceDeletionOutcomeAsync(missing.Request.OperationId, CustomLoopTraceDeletionIntegrity.Complete));
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(missing.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.AlreadyMarked, await store.MarkTraceDeletionOutcomeAsync(missing.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(missing.Request.OperationId, CustomLoopTraceDeletionIntegrity.CommittedWithAuditWarning));
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.AlreadyMarked, await store.MarkTraceDeletionOutcomeAsync(missing.Request.OperationId, CustomLoopTraceDeletionIntegrity.Complete));
+    }
+
+    [Fact]
+    public async Task Deletion_mutation_and_operation_readers_reject_invalid_authenticated_structure()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var mutation = Mutation(Request("run-missing", new string('a', CustomLoopLimits.Sha256HexCharacters), "delete-invalid"));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ReserveTraceDeletionOperationAsync(mutation with { RequestHash = new string('b', CustomLoopLimits.Sha256HexCharacters) }));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ReserveTraceDeletionOperationAsync(Mutation(mutation.Request with { Actor = "invalid actor" })));
+        Assert.Equal(CustomLoopTraceDeletionReservationStatus.Reserved, (await store.ReserveTraceDeletionOperationAsync(mutation)).Status);
+        var pending = (await store.GetTraceDeletionOperationAsync(mutation.Request.OperationId)).Operation!;
+        var invalid = new[]
+        {
+            pending with { SchemaVersion = 2 },
+            pending with { OperationId = "delete-other" },
+            pending with { UpdatedAtUtc = pending.RequestedAtUtc.AddTicks(-1) },
+            pending with { Outcome = CustomLoopTraceDeletionStoreStatus.NotFound },
+            pending with { State = CustomLoopTraceDeletionOperationState.OutcomeCommitted },
+            pending with { State = CustomLoopTraceDeletionOperationState.OutcomeCommitted, Outcome = CustomLoopTraceDeletionStoreStatus.NotFound }
+        };
+
+        foreach (var candidate in invalid)
+        {
+            await WriteOperationAsync(paths, candidate, mutation.Request.OperationId);
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync(mutation.Request.OperationId));
+        }
+    }
+
+    [Fact]
+    public async Task Tombstone_reader_rejects_invalid_terminal_size_time_actor_and_audit_structure()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopRunStore(paths);
         var terminal = await CreateTerminalRunAsync(store);
         var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var request = Request(terminal.Id, inspection.PersistedArtifactHash);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(Mutation(request))).Status);
+        var operation = (await store.GetTraceDeletionOperationAsync(request.OperationId)).Operation!;
+        var tombstone = operation.Tombstone!;
+        var invalidTombstones = new[]
+        {
+            tombstone with { TerminalStatus = CustomLoopRunStatus.Running },
+            tombstone with { DefinitionVersion = 0 },
+            tombstone with { CompletedAtUtc = tombstone.CreatedAtUtc.AddTicks(-1) },
+            tombstone with { DeletionActor = "invalid actor" },
+            tombstone with { IntentAuditCorrelationId = "audit-other" }
+        };
+
+        foreach (var candidate in invalidTombstones)
+        {
+            await WriteOperationAsync(paths, operation with { Tombstone = candidate });
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync(request.OperationId));
+        }
+
+        await WriteOperationAsync(paths, operation with { Outcome = CustomLoopTraceDeletionStoreStatus.AuditUnavailable });
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync(request.OperationId));
+    }
+
+    [Fact]
+    [Trait(VerificationTier.TraitName, VerificationTier.Stress)]
+    public async Task Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible()
+    {
+        var probe = new VerificationPhaseProbe(_output, nameof(Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible), VerificationTier.Stress);
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await probe.RunAsync(Amplification("terminal trace fixture materialization", 5, 60), () => CreateTerminalRunAsync(store));
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await probe.RunAsync(Production("terminal trace inspection", 5, 60), () => store.InspectTraceAsync(terminal.Id)));
         var generalOperationCapacity = CustomLoopLimits.MaxRunTraceDeletionOperationsPerWorkspace - CustomLoopLimits.ReservedRunTraceDeletionOperationsForTombstones;
         Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
-        await Parallel.ForEachAsync(Enumerable.Range(0, generalOperationCapacity), new ParallelOptions { MaxDegreeOfParallelism = 32 }, async (index, cancellationToken) =>
+        await probe.RunAsync(Amplification("10,000-operation fixture materialization", 180, 600), () => Parallel.ForEachAsync(Enumerable.Range(0, generalOperationCapacity), new ParallelOptions { MaxDegreeOfParallelism = 32 }, async (index, cancellationToken) =>
         {
             var request = Request($"missing-{index:D5}", new string('a', CustomLoopLimits.Sha256HexCharacters), $"reject-{index:D5}");
             var mutation = Mutation(request);
@@ -241,14 +348,14 @@ public sealed class CustomLoopTraceRetentionStoreTests
                 Integrity = CustomLoopTraceDeletionIntegrity.Complete
             };
             await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, operation.OperationId + ".json"), JsonSerializer.Serialize(operation, _jsonOptions) + "\n", cancellationToken);
-        });
+        }));
 
-        var quotaBefore = await store.GetTraceQuotaAsync();
+        var quotaBefore = await probe.RunAsync(Production("10,000-operation quota enumeration", 30, 180), () => store.GetTraceQuotaAsync());
         var deletionRequest = Request(terminal.Id, inspection.PersistedArtifactHash, "delete-reserved-trace");
-        var deleted = await store.DeleteTerminalTraceAsync(Mutation(deletionRequest));
-        var blockedRejection = await store.DeleteTerminalTraceAsync(Mutation(Request("missing-after-capacity", new string('a', CustomLoopLimits.Sha256HexCharacters), "reject-after-capacity")));
-        var replay = await store.DeleteTerminalTraceAsync(Mutation(deletionRequest));
-        var quotaAfter = await store.GetTraceQuotaAsync();
+        var deleted = await probe.RunAsync(Production("reserved tombstone deletion at operation capacity", 30, 180), () => store.DeleteTerminalTraceAsync(Mutation(deletionRequest)));
+        var blockedRejection = await probe.RunAsync(Production("rejected deletion at operation capacity", 30, 180), () => store.DeleteTerminalTraceAsync(Mutation(Request("missing-after-capacity", new string('a', CustomLoopLimits.Sha256HexCharacters), "reject-after-capacity"))));
+        var replay = await probe.RunAsync(Production("tombstone deletion replay at operation capacity", 30, 180), () => store.DeleteTerminalTraceAsync(Mutation(deletionRequest)));
+        var quotaAfter = await probe.RunAsync(Production("post-deletion 10,001-operation quota enumeration", 30, 180), () => store.GetTraceQuotaAsync());
 
         Assert.Equal(generalOperationCapacity, quotaBefore.DeletionOperationCount);
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, deleted.Status);
@@ -538,10 +645,20 @@ public sealed class CustomLoopTraceRetentionStoreTests
 
     private static CustomLoopTraceDeletionOperation PendingOperation(CustomLoopTraceDeletionMutation mutation) => new(CustomLoopTraceDeletionOperation.CurrentSchemaVersion, mutation.Request.OperationId, mutation.RequestHash, mutation.Request, mutation.RequestedAtUtc, mutation.RequestedAtUtc, CustomLoopTraceDeletionOperationState.PendingMutation, CustomLoopTraceDeletionStoreStatus.Unknown, null, CustomLoopTraceDeletionIntegrity.Unknown);
 
-    private static async Task WriteOperationAsync(WorkspacePaths paths, CustomLoopTraceDeletionOperation operation)
+    private static VerificationPhaseBudget Production(string name, int proposedSeconds, int diagnosticSeconds)
+    {
+        return new VerificationPhaseBudget(name, VerificationPhaseClassification.ProductionBoundary, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds));
+    }
+
+    private static VerificationPhaseBudget Amplification(string name, int proposedSeconds, int diagnosticSeconds)
+    {
+        return new VerificationPhaseBudget(name, VerificationPhaseClassification.TestAmplification, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds));
+    }
+
+    private static async Task WriteOperationAsync(WorkspacePaths paths, CustomLoopTraceDeletionOperation operation, string? fileOperationId = null)
     {
         Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
-        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, operation.OperationId + ".json"), JsonSerializer.Serialize(operation, _jsonOptions) + "\n");
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, (fileOperationId ?? operation.OperationId) + ".json"), JsonSerializer.Serialize(operation, _jsonOptions) + "\n");
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset timestamp) : TimeProvider

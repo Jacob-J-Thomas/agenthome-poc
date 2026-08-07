@@ -216,6 +216,7 @@ internal static class CapabilityCatalogNativeFileSystem
             return $"windows:{information.VolumeSerialNumber:x16}:{Convert.ToHexString(information.FileId.ToByteArray()).ToLowerInvariant()}";
         }
 
+        // TODO(#271): Review the Linux/macOS device/inode physical identity lifetime.
         if (OperatingSystem.IsLinux())
         {
             if (statx(directory, string.Empty, AtEmptyPath, StatxInode, out var information) != 0 || (information.Mask & StatxInode) == 0)

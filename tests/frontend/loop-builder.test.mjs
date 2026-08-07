@@ -20,9 +20,10 @@ test("catalog loading is authenticated and projects the system loop as read-only
   const catalogRequest = app.server.calls.find(
     (call) => call.method === "GET" && call.url === "/api/loops",
   );
+  assert.equal(catalogRequest.options.credentials, "same-origin");
   assert.equal(
     catalogRequest.options.headers["X-EmbodySense-Session"],
-    "loop-test-token",
+    undefined,
   );
   assert.match(app.elements.loopList.textContent, /Default conversation/);
   assert.match(app.elements.loopList.textContent, /Research pass/);
@@ -68,6 +69,395 @@ test("catalog loading is authenticated and projects the system loop as read-only
   assert.equal(app.elements.deleteButton.disabled, false);
   assert.equal(app.elements.saveButton.disabled, true);
   assert.equal(app.elements.saveState.textContent, "Saved · v2");
+});
+
+test("retention stays lazy and performs only an explicit policy-permitted bounded cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let postureReads = 0;
+  server.on("GET", "/api/loops/receipt-retention", () => {
+    postureReads++;
+    return {
+      status: 200,
+      body: createRetentionPosture(),
+    };
+  });
+  server.on("POST", "/api/loops/receipt-retention/cleanup", (call) => ({
+    status: 409,
+    body: {
+      status: "Degraded",
+      health: "Degraded",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "AmbiguousEvidence",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "Evidence is ambiguous, so no raw receipt was removed.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  assert.equal(postureReads, 0);
+  await app.elements.retentionTab.click();
+
+  assert.equal(postureReads, 1);
+  assert.match(app.elements.retentionContent.textContent, /healthy/i);
+  assert.match(
+    app.elements.retentionContent.textContent,
+    /Exact replay horizon/,
+  );
+  const cleanup = findByTag(app.elements.retentionContent, "button").find(
+    (button) => /Clean eligible expired evidence/.test(button.textContent),
+  );
+  await cleanup.click();
+
+  const cleanupCall = server.calls.find(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loops/receipt-retention/cleanup",
+  );
+  assert.equal(cleanupCall.body.maximumArtifactCount, 64);
+  assert.equal(cleanupCall.body.maximumArtifactUtf8Bytes, 4 * 1024 * 1024);
+  assert.match(app.window.confirmations.at(-1), /explicit request/i);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /no raw receipt was removed/i,
+  );
+  assert.equal(postureReads, 2);
+});
+
+test("retention cleanup retains its operation identity when an ambiguous transport failure is retried", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  let cleanupAttempts = 0;
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => {
+    cleanupAttempts++;
+    if (cleanupAttempts === 1)
+      throw new Error("Connection dropped before a response.");
+    return {
+      status: 200,
+      body: {
+        status: "NothingEligible",
+        health: "Healthy",
+        isCommitted: false,
+        exhaustionReason: "None",
+        cleanupBlockReason: "None",
+        compactedArtifactCount: 0,
+        compactedArtifactUtf8Bytes: 0,
+        detail: "No evidence is eligible for cleanup.",
+      },
+    };
+  });
+  const first = await loadLoopBuilder({ server, localStorage });
+  await first.elements.retentionTab.click();
+  const firstCleanup = findByTag(
+    first.elements.retentionContent,
+    "button",
+  ).find((button) =>
+    /Clean eligible expired evidence/.test(button.textContent),
+  );
+
+  await firstCleanup.click();
+  const storageKey = `embodysense.pending-receipt-cleanup.v1.${encodeURIComponent("C:/workspace")}`;
+  assert.ok(localStorage.getItem(storageKey));
+
+  const second = await loadLoopBuilder({ server, localStorage });
+  await second.elements.retentionTab.click();
+  const secondCleanup = findByTag(
+    second.elements.retentionContent,
+    "button",
+  ).find((button) =>
+    /Clean eligible expired evidence/.test(button.textContent),
+  );
+  await secondCleanup.click();
+
+  const cleanupCalls = server.calls.filter(
+    (call) =>
+      call.method === "POST" &&
+      call.url === "/api/loops/receipt-retention/cleanup",
+  );
+  assert.equal(cleanupCalls.length, 2);
+  assert.equal(
+    cleanupCalls[0].body.operationId,
+    cleanupCalls[1].body.operationId,
+  );
+  assert.equal(localStorage.getItem(storageKey), null);
+});
+
+test("retention cleanup remains disabled when Web Locks cannot coordinate its shared identity", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  const app = await loadLoopBuilder({ server, locks: {} });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+
+  assert.equal(cleanup.disabled, true);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /cannot durably coordinate/i,
+  );
+  await cleanup.click();
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ),
+    false,
+  );
+});
+
+test("retention cleanup remains disabled when its shared identity cannot be persisted", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  localStorage.setItem = () => {
+    throw new Error("Storage quota exceeded.");
+  };
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+
+  assert.equal(cleanup.disabled, true);
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /cannot durably coordinate/i,
+  );
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ),
+    false,
+  );
+});
+
+test("an authoritative cleanup outcome remains visible when its shared identity cannot be retired", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const localStorage = new FakeStorage();
+  const scope = encodeURIComponent("C:/workspace".normalize("NFC"));
+  const storageKey = `embodysense.pending-receipt-cleanup.v1.${scope}`;
+  const removeItem = localStorage.removeItem.bind(localStorage);
+  localStorage.removeItem = (key) => {
+    if (key === storageKey) throw new Error("Storage cleanup failed.");
+    removeItem(key);
+  };
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture(),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => ({
+    status: 200,
+    body: {
+      status: "NothingEligible",
+      health: "Healthy",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "No evidence is eligible for cleanup.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server, localStorage });
+
+  await app.elements.retentionTab.click();
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  await cleanup.click();
+
+  assert.match(app.elements.retentionNotice.textContent, /nothing eligible/i);
+  assert.match(app.elements.retentionNotice.textContent, /remains reserved/i);
+  assert.equal(
+    findByClass(app.elements.retentionContent, "retention-cleanup-button")[0]
+      .disabled,
+    true,
+  );
+  assert.ok(localStorage.getItem(storageKey));
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ).length,
+    1,
+  );
+});
+
+test("a superseded retention read cannot replace a newer blocked posture or re-enable cleanup", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const pendingReads = [];
+  server.on(
+    "GET",
+    "/api/loops/receipt-retention",
+    () => new Promise((resolve) => pendingReads.push(resolve)),
+  );
+  const app = await loadLoopBuilder({ server });
+
+  const firstRead = app.elements.retentionTab.click();
+  await flushAsyncWork();
+  const secondRead = app.elements.retentionTab.click();
+  await flushAsyncWork();
+  assert.equal(pendingReads.length, 2);
+
+  pendingReads[1]({
+    status: 200,
+    body: createRetentionPosture({
+      health: "corrupt",
+      cleanupBlockReason: "CorruptEvidence",
+    }),
+  });
+  await secondRead;
+  pendingReads[0]({ status: 200, body: createRetentionPosture() });
+  await firstRead;
+
+  const cleanup = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  assert.match(app.elements.retentionContent.textContent, /corrupt/i);
+  assert.equal(cleanup.disabled, true);
+  assert.equal(app.elements.refreshRetentionButton.disabled, false);
+});
+
+test("retention posture failure remains visible with its actionable server detail", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 503,
+    body: {
+      detail:
+        "The retention audit sink is unavailable; retry after audit recovery.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.retentionTab.click();
+
+  assert.match(
+    app.elements.retentionNotice.textContent,
+    /retention audit sink is unavailable/i,
+  );
+  assert.doesNotMatch(
+    app.elements.retentionNotice.textContent,
+    /Read the current bounded retention posture/i,
+  );
+  assert.match(
+    app.elements.retentionContent.textContent,
+    /Select Refresh posture to retry/i,
+  );
+});
+
+for (const [health, blockReason, exhaustionReason, cleanupEnabled, label] of [
+  ["healthy", "None", "None", true, "Healthy"],
+  ["exhausted", "None", "ArtifactCountLimit", true, "Exhausted"],
+  ["corrupt", "CorruptEvidence", "None", false, "Corrupt"],
+  ["audit-unavailable", "AuditUnavailable", "None", false, "Audit Unavailable"],
+  [
+    "ownership-conflict",
+    "OwnershipUnresolved",
+    "None",
+    false,
+    "Ownership Conflict",
+  ],
+  ["degraded", "PendingEvidence", "None", false, "Degraded"],
+  [
+    "recovery-pending",
+    "OwnershipUnresolved",
+    "None",
+    false,
+    "Recovery Pending",
+  ],
+]) {
+  test(`retention renders ${health} and enables cleanup only when posture permits it`, async () => {
+    const server = new FakeFetchServer(createCatalog());
+    server.on("GET", "/api/loops/receipt-retention", () => ({
+      status: 200,
+      body: createRetentionPosture({
+        health,
+        cleanupBlockReason: blockReason,
+        exhaustionReason,
+        cleanupRecoveryAvailableAtUtc:
+          health === "recovery-pending" ? "2999-08-01T12:00:00Z" : null,
+      }),
+    }));
+    const app = await loadLoopBuilder({ server });
+
+    await app.elements.retentionTab.click();
+
+    const cleanup = findByClass(
+      app.elements.retentionContent,
+      "retention-cleanup-button",
+    )[0];
+    assert.match(
+      app.elements.retentionContent.textContent,
+      new RegExp(label, "i"),
+    );
+    assert.equal(cleanup.disabled, !cleanupEnabled);
+  });
+}
+
+test("retention exposes an explicit recovery retry after the ownership window", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/loops/receipt-retention", () => ({
+    status: 200,
+    body: createRetentionPosture({
+      health: "recovery-pending",
+      cleanupBlockReason: "OwnershipUnresolved",
+      cleanupRecoveryAvailableAtUtc: "2020-08-01T12:00:00Z",
+    }),
+  }));
+  server.on("POST", "/api/loops/receipt-retention/cleanup", () => ({
+    status: 200,
+    body: {
+      status: "NothingEligible",
+      health: "Healthy",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail: "The stale cleanup journal recovered without removing evidence.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.retentionTab.click();
+  const retry = findByClass(
+    app.elements.retentionContent,
+    "retention-cleanup-button",
+  )[0];
+  assert.equal(retry.disabled, false);
+  assert.match(retry.textContent, /Retry cleanup recovery/i);
+  await retry.click();
+
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.method === "POST" &&
+        call.url === "/api/loops/receipt-retention/cleanup",
+    ).length,
+    1,
+  );
 });
 
 test("a rejected system runner contract is shown as invalid throughout the graph", async () => {
@@ -203,6 +593,36 @@ test("hidden Loops defers catalog and evidence requests until first activation",
   );
 });
 
+test("a loop route loaded during session recovery waits for promotion before activation", async () => {
+  let hubReads = 0;
+  const sharedHub = { connected: true, on() {} };
+  const app = await loadLoopBuilder({
+    embodySenseSession: {
+      getState: () => ({ connected: false }),
+      getHub: async () => {
+        hubReads++;
+        return sharedHub;
+      },
+    },
+  });
+
+  assert.equal(hubReads, 0);
+  assert.equal(
+    app.server.calls.filter((call) => call.url === "/api/loops").length,
+    0,
+  );
+
+  app.window.embodySenseLoopBuilder.resumeSession();
+  await flushAsyncWork();
+
+  assert.equal(hubReads, 1);
+  assert.equal(
+    app.server.calls.filter((call) => call.url === "/api/loops").length,
+    1,
+  );
+  assert.equal(app.elements.roleId.textContent, app.server.catalog.roleId);
+});
+
 test("revisiting Loops preserves an unsaved draft without reloading the catalog", async () => {
   const server = new FakeFetchServer(createCatalog());
   const app = await loadLoopBuilder({ server, loopsViewHidden: true });
@@ -222,6 +642,99 @@ test("revisiting Loops preserves an unsaved draft without reloading the catalog"
     server.calls.filter((call) => call.url === "/api/loops").length,
     catalogRequests,
   );
+});
+
+test("session rehydration reloads authoritative loop evidence without overwriting an unsaved draft", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Unsaved recovery draft";
+  await app.elements.loopDescription.input();
+  const catalogRequests = server.calls.filter(
+    (call) => call.url === "/api/loops",
+  ).length;
+  const runRequests = server.calls.filter((call) =>
+    call.url.startsWith("/api/loop-runs"),
+  ).length;
+
+  const outcome = await app.window.embodySenseLoopBuilder.rehydrateSession({
+    approvals: [],
+    workspaceRoot: "C:/workspace",
+  });
+
+  assert.equal(outcome.refreshed, true);
+  assert.equal(app.elements.loopDescription.value, "Unsaved recovery draft");
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.equal(
+    server.calls.filter((call) => call.url === "/api/loops").length,
+    catalogRequests + 1,
+  );
+  assert.ok(
+    server.calls.filter((call) => call.url.startsWith("/api/loop-runs"))
+      .length > runRequests,
+  );
+});
+
+test("session rehydration waits for its authoritative refresh when another refresh is active", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let statusReads = 0;
+  let releaseActiveRefresh;
+  server.on("GET", "/api/status", () => {
+    statusReads++;
+    if (statusReads === 2) {
+      return new Promise((resolve) => {
+        releaseActiveRefresh = () =>
+          resolve({
+            status: 200,
+            body: { workspaceRoot: "C:/workspace", initialized: true },
+          });
+      });
+    }
+    return {
+      status: 200,
+      body: { workspaceRoot: "C:/workspace", initialized: true },
+    };
+  });
+  const app = await loadLoopBuilder({ server });
+  const activeRefresh = app.window.embodySenseLoopBuilder.refreshWorkspace();
+  for (let attempt = 0; attempt < 20 && !releaseActiveRefresh; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+  let recoveryFinished = false;
+  const recovery = app.window.embodySenseLoopBuilder
+    .rehydrateSession({ approvals: [], workspaceRoot: "C:/workspace" })
+    .then((outcome) => {
+      recoveryFinished = true;
+      return outcome;
+    });
+  await Promise.resolve();
+  assert.equal(recoveryFinished, false);
+
+  releaseActiveRefresh();
+  const [recoveryOutcome] = await Promise.all([recovery, activeRefresh]);
+
+  assert.equal(recoveryOutcome.refreshed, true);
+  assert.equal(statusReads, 3);
+});
+
+test("session rehydration stops on a changed workspace and retains the draft for manual recovery", async () => {
+  const app = await loadLoopBuilder();
+  await selectCustomLoop(app);
+  app.elements.loopDescription.value = "Draft scoped to the original workspace";
+  await app.elements.loopDescription.input();
+
+  const outcome = await app.window.embodySenseLoopBuilder.rehydrateSession({
+    approvals: [],
+    workspaceRoot: "C:/different-workspace",
+  });
+
+  assert.equal(outcome.requiresManualAction, true);
+  assert.equal(
+    app.elements.loopDescription.value,
+    "Draft scoped to the original workspace",
+  );
+  assert.equal(app.elements.loopDescription.disabled, true);
+  assert.match(app.elements.validationBanner.textContent, /workspace changed/i);
 });
 
 test("a transient first activation failure retries without rebinding events", async () => {
@@ -712,6 +1225,65 @@ test("loop settings expose inherited provider, model, tools, and context default
   );
 });
 
+test("a restored draft exposes stale tool assignments so reduced authority can be repaired", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+
+  await firstView.elements.createLoopButton.click();
+  await firstView.elements.loopSettingsButton.click();
+  const assignedSearch = findControlByLabel(
+    firstView.elements.inspectorContent,
+    "Search",
+    "input",
+  );
+  assignedSearch.checked = true;
+  await assignedSearch.change();
+
+  server.catalog.tools.customAssignable = ["read"];
+  const restoredView = await loadLoopBuilder({ server, sessionStorage });
+  await restoredView.elements.loopSettingsButton.click();
+  const staleSearch = findControlByLabel(
+    restoredView.elements.inspectorContent,
+    "Search",
+    "input",
+  );
+
+  assert.equal(staleSearch.checked, true);
+  assert.match(
+    restoredView.elements.inspectorContent.textContent,
+    /Search.*outside the current role authority.*Uncheck it before saving/s,
+  );
+
+  staleSearch.checked = false;
+  await staleSearch.change();
+
+  const storedDraft = JSON.parse([...sessionStorage.values.values()][0]);
+  assert.deepEqual(storedDraft.draft.toolAssignments, []);
+  assert.equal(restoredView.elements.saveButton.disabled, false);
+});
+
+test("a restored draft rejects duplicate tool assignments instead of rendering ambiguous authority controls", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+
+  await firstView.elements.createLoopButton.click();
+  const [storageKey, storedValue] = [...sessionStorage.values.entries()][0];
+  const storedDraft = JSON.parse(storedValue);
+  storedDraft.draft.toolAssignments = ["search", "search"];
+  sessionStorage.setItem(storageKey, JSON.stringify(storedDraft));
+
+  const restoredView = await loadLoopBuilder({ server, sessionStorage });
+
+  assert.equal(sessionStorage.values.size, 0);
+  assert.equal(restoredView.elements.saveState.textContent, "System managed");
+  assert.doesNotMatch(
+    restoredView.elements.loopList.textContent,
+    /Untitled loop/,
+  );
+});
+
 test("initial and user-requested run evidence failures remain visibly unavailable", async () => {
   const initialServer = new FakeFetchServer(createCatalog());
   initialServer.on("GET", "/api/loop-runs?maximumCount=50", () => ({
@@ -844,7 +1416,7 @@ test("SignalR transport identifies a disconnect before invocation dispatch and r
   assert.equal(connection.invocations.size, 0);
 });
 
-test("create and save send versioned server-owned definition shapes", async () => {
+test("a new loop remains local until explicit Save sends the complete version-one definition", async () => {
   const catalog = createCatalog();
   const created = createCustomDefinition({
     id: "loop-created",
@@ -854,24 +1426,29 @@ test("create and save send versioned server-owned definition shapes", async () =
   const server = new FakeFetchServer(catalog);
   server.on("POST", "/api/loops", ({ body }) => {
     assert.equal(typeof body.operationId, "string");
-    server.catalog.customDefinitions.push(clone(created));
-    return { status: 201, body: authoringResponse("Created", created) };
-  });
-  server.on("PUT", "/api/loops/loop-created", ({ body }) => {
-    const updated = {
+    const committed = {
       ...created,
       ...clone(body.definition),
-      definitionVersion: 2,
+      inferenceSteps: body.definition.inferenceSteps.map((step, index) => ({
+        ...clone(step),
+        id: `step-created-${index + 1}`,
+      })),
+      lastMutationOperationId: body.operationId,
     };
-    server.catalog.customDefinitions = server.catalog.customDefinitions.map(
-      (item) => (item.id === updated.id ? updated : item),
-    );
-    return { status: 200, body: authoringResponse("Updated", updated) };
+    server.catalog.customDefinitions.push(clone(committed));
+    return { status: 201, body: authoringResponse("Created", committed) };
   });
   const app = await loadLoopBuilder({ server });
 
   await app.elements.createLoopButton.click();
   assert.equal(app.elements.loopName.value, "Untitled loop");
+  assert.equal(
+    server.calls.some(
+      (call) => call.method === "POST" && call.url === "/api/loops",
+    ),
+    false,
+  );
+  assert.match(app.elements.loopList.textContent, /Draft.*Not durable/);
   app.elements.loopName.value = "Issue research";
   await app.elements.loopName.input();
 
@@ -938,14 +1515,13 @@ test("create and save send versioned server-owned definition shapes", async () =
 
   await app.elements.saveButton.click();
   const save = server.calls.find(
-    (call) => call.method === "PUT" && call.url === "/api/loops/loop-created",
+    (call) => call.method === "POST" && call.url === "/api/loops",
   );
-  assert.equal(
-    save.options.headers["X-EmbodySense-Session"],
-    "loop-test-token",
-  );
-  assert.equal(save.body.expectedDefinitionVersion, 1);
+  assert.equal(save.options.credentials, "same-origin");
+  assert.equal(save.options.headers["X-EmbodySense-Session"], undefined);
   assert.equal(typeof save.body.operationId, "string");
+  assert.equal(save.body.definition.displayName, "Issue research");
+  assert.equal(save.body.definition.inferenceSteps[0].id, null);
   assert.deepEqual(save.body.definition.triggerPolicy, {
     promptSource: "preset",
     presetPrompt: "Research the configured issue.",
@@ -966,22 +1542,19 @@ test("create and save send versioned server-owned definition shapes", async () =
     "Return Repeat only when another research pass is needed.",
   );
   assert.doesNotMatch(JSON.stringify(save.body), /additionalFixedContext/i);
-  assert.equal(app.elements.saveState.textContent, "Saved · v2");
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
 });
 
-test("create retries reuse the operation id after an ambiguous committed response", async () => {
+test("uncertain first-save retries reuse the exact request and operation id", async () => {
   const server = new FakeFetchServer(createCatalog());
-  const created = createCustomDefinition({
-    id: "loop-replayed",
-    definitionVersion: 1,
-    displayName: "Recovered loop",
-  });
+  let created = null;
   let committedOperationId = null;
   let attempts = 0;
   server.on("POST", "/api/loops", ({ body }) => {
     attempts++;
     if (attempts === 1) {
       committedOperationId = body.operationId;
+      created = createDefinitionFromFirstSave(body, "loop-replayed");
       server.catalog.customDefinitions.push(clone(created));
       throw new TypeError("Create response was lost.");
     }
@@ -992,12 +1565,17 @@ test("create retries reuse the operation id after an ambiguous committed respons
   const app = await loadLoopBuilder({ server });
 
   await app.elements.createLoopButton.click();
+  app.elements.loopName.value = "Recovered loop";
+  await app.elements.loopName.input();
+  await app.elements.saveButton.click();
   assert.match(
     app.elements.validationBanner.textContent,
-    /Create response was lost/,
+    /First save outcome is uncertain.*Create response was lost/,
   );
+  assert.equal(app.elements.saveButton.textContent, "Retry save");
+  assert.equal(app.elements.reloadButton.disabled, true);
 
-  await app.elements.createLoopButton.click();
+  await app.elements.saveButton.click();
 
   const createCalls = server.calls.filter(
     (call) => call.method === "POST" && call.url === "/api/loops",
@@ -1007,6 +1585,7 @@ test("create retries reuse the operation id after an ambiguous committed respons
     createCalls[0].body.operationId,
     createCalls[1].body.operationId,
   );
+  assert.deepEqual(createCalls[0].body, createCalls[1].body);
   assert.equal(
     server.catalog.customDefinitions.filter(
       (definition) => definition.id === created.id,
@@ -1016,8 +1595,394 @@ test("create retries reuse the operation id after an ambiguous committed respons
   assert.equal(app.elements.loopName.value, "Recovered loop");
   assert.equal(
     app.elements.toast.textContent,
-    "Loop created. Add instructions, review context, then Save.",
+    "Loop saved for the first time.",
   );
+});
+
+test("first Save exposes saving and conflict states before an explicit fresh-operation retry", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let releaseConflict;
+  let attempts = 0;
+  server.on("POST", "/api/loops", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      return new Promise((resolve) => {
+        releaseConflict = () =>
+          resolve({
+            status: 409,
+            body: {
+              status: "Conflict",
+              isCommitted: false,
+              definition: null,
+              validationErrors: [],
+              conflict: null,
+              detail: "The operation identity was already bound.",
+            },
+          });
+      });
+    }
+
+    const created = createDefinitionFromFirstSave(body, "loop-after-conflict");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await app.elements.createLoopButton.click();
+
+  const firstSave = app.elements.saveButton.click();
+  assert.equal(app.elements.saveState.textContent, "Saving draft");
+  assert.equal(app.elements.loopName.disabled, true);
+  assert.equal(app.elements.createLoopButton.disabled, true);
+  releaseConflict();
+  await firstSave;
+
+  assert.match(app.elements.saveState.textContent, /First save conflict/);
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /operation conflicted/i,
+  );
+  assert.equal(app.elements.loopName.disabled, false);
+  assert.equal(app.elements.saveButton.disabled, false);
+  const firstOperationId = server.calls.find(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  ).body.operationId;
+
+  await app.elements.saveButton.click();
+
+  const createCalls = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  );
+  assert.equal(createCalls.length, 2);
+  assert.notEqual(createCalls[1].body.operationId, firstOperationId);
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
+});
+
+test("a definitive audit-unavailable first save remains a local failed draft", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const durableDefinitionCount = server.catalog.customDefinitions.length;
+  server.on("POST", "/api/loops", () => ({
+    status: 503,
+    body: {
+      status: "AuditUnavailable",
+      isCommitted: false,
+      definition: null,
+      validationErrors: [],
+      conflict: null,
+      detail:
+        "The mutation was not attempted because its audit intent could not be recorded.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.createLoopButton.click();
+  await app.elements.saveButton.click();
+
+  assert.match(app.elements.saveState.textContent, /First save failed/);
+  assert.doesNotMatch(app.elements.saveState.textContent, /uncertain/i);
+  assert.equal(app.elements.reloadButton.disabled, false);
+  assert.equal(app.elements.saveButton.disabled, false);
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /audit intent could not be recorded/i,
+  );
+  assert.equal(server.catalog.customDefinitions.length, durableDefinitionCount);
+});
+
+test("a tab-scoped draft survives Loops navigation and reload, stays out of other tabs, and Discard performs no mutation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sameTabStorage = new FakeStorage();
+  const firstView = await loadLoopBuilder({
+    server,
+    sessionStorage: sameTabStorage,
+  });
+
+  await firstView.elements.createLoopButton.click();
+  firstView.elements.loopName.value = "Reload-safe local draft";
+  await firstView.elements.loopName.input();
+  firstView.elements.loopDescription.value = "Not durable yet.";
+  await firstView.elements.loopDescription.input();
+  await firstView.window.embodySenseLoopBuilder.activate();
+
+  assert.equal(firstView.elements.loopName.value, "Reload-safe local draft");
+  assert.equal(
+    server.calls.some((call) =>
+      ["POST", "PUT", "DELETE"].includes(call.method),
+    ),
+    false,
+  );
+
+  const reloadedView = await loadLoopBuilder({
+    server,
+    sessionStorage: sameTabStorage,
+  });
+  assert.equal(reloadedView.elements.loopName.value, "Reload-safe local draft");
+  assert.equal(reloadedView.elements.loopDescription.value, "Not durable yet.");
+  assert.match(reloadedView.elements.saveState.textContent, /Unsaved draft/);
+  const guardedClose = {
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    returnValue: null,
+  };
+  reloadedView.window.eventListeners.get("beforeunload")(guardedClose);
+  assert.equal(guardedClose.prevented, true);
+  assert.equal(guardedClose.returnValue, "");
+
+  const otherTab = await loadLoopBuilder({
+    server,
+    sessionStorage: new FakeStorage(),
+  });
+  assert.equal(otherTab.elements.saveState.textContent, "System managed");
+  assert.doesNotMatch(
+    otherTab.elements.loopList.textContent,
+    /Reload-safe local draft/,
+  );
+
+  await reloadedView.elements.reloadButton.click();
+  assert.equal(reloadedView.elements.saveState.textContent, "System managed");
+  assert.equal(sameTabStorage.values.size, 0);
+  const unguardedClose = {
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+    returnValue: null,
+  };
+  reloadedView.window.eventListeners.get("beforeunload")(unguardedClose);
+  assert.equal(unguardedClose.prevented, false);
+  assert.equal(unguardedClose.returnValue, null);
+  assert.equal(
+    server.calls.some((call) =>
+      ["POST", "PUT", "DELETE"].includes(call.method),
+    ),
+    false,
+  );
+});
+
+test("an uncertain first save survives reload and retries the exact request", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  let firstRequest = null;
+  let attempts = 0;
+  server.on("POST", "/api/loops", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      firstRequest = clone(body);
+      throw new TypeError("Connection closed after dispatch.");
+    }
+
+    assert.deepEqual(body, firstRequest);
+    const created = createDefinitionFromFirstSave(body, "loop-after-reload");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+  await firstView.elements.createLoopButton.click();
+  firstView.elements.loopName.value = "Retry after reload";
+  await firstView.elements.loopName.input();
+  await firstView.elements.saveButton.click();
+
+  const reloadedView = await loadLoopBuilder({ server, sessionStorage });
+  assert.equal(reloadedView.elements.loopName.value, "Retry after reload");
+  assert.equal(reloadedView.elements.saveButton.textContent, "Retry save");
+  assert.match(
+    reloadedView.elements.validationBanner.textContent,
+    /uncertain/i,
+  );
+  await reloadedView.elements.saveButton.click();
+
+  const requests = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  );
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0].body, requests[1].body);
+  assert.equal(reloadedView.elements.saveState.textContent, "Saved · v1");
+  assert.equal(sessionStorage.values.size, 0);
+});
+
+test("an uncertain first save rejects inspector mutations and retries the original request", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let firstRequest = null;
+  let committed = null;
+  let attempts = 0;
+  server.on("POST", "/api/loops", ({ body }) => {
+    attempts++;
+    if (attempts === 1) {
+      firstRequest = clone(body);
+      committed = createDefinitionFromFirstSave(body, "loop-uncertain-locked");
+      server.catalog.customDefinitions.push(clone(committed));
+      throw new TypeError("The committed response was lost.");
+    }
+
+    assert.deepEqual(body, firstRequest);
+    return { status: 200, body: authoringResponse("Replayed", committed) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await app.elements.createLoopButton.click();
+  await app.elements.saveButton.click();
+
+  assert.equal(app.elements.saveButton.textContent, "Retry save");
+  const inference = nodeCard(app, "inference");
+  await inference.click();
+  const instruction = findControlByLabel(
+    app.elements.inspectorContent,
+    "Prompt-visible instruction",
+    "textarea",
+  );
+  assert.equal(instruction.disabled, true);
+  instruction.value = "This edit must not replace the uncertain request.";
+  await instruction.input();
+
+  await app.elements.loopSettingsButton.click();
+  const readAssignment = findControlByLabel(
+    app.elements.inspectorContent,
+    "Read",
+    "input",
+  );
+  assert.equal(readAssignment.disabled, true);
+  readAssignment.checked = true;
+  await readAssignment.change();
+
+  await app.elements.saveButton.click();
+
+  const requests = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  );
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1].body, firstRequest);
+  assert.equal(server.catalog.customDefinitions.length, 2);
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
+});
+
+test("reload reconciles an uncertain committed first save from the read-only catalog without another mutation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const sessionStorage = new FakeStorage();
+  server.on("POST", "/api/loops", ({ body }) => {
+    const created = createDefinitionFromFirstSave(body, "loop-reconciled");
+    server.catalog.customDefinitions.push(clone(created));
+    throw new TypeError("The committed response was lost.");
+  });
+  const firstView = await loadLoopBuilder({ server, sessionStorage });
+  await firstView.elements.createLoopButton.click();
+  firstView.elements.loopName.value = "Catalog reconciled";
+  await firstView.elements.loopName.input();
+  await firstView.elements.saveButton.click();
+
+  const reloadedView = await loadLoopBuilder({ server, sessionStorage });
+
+  assert.equal(reloadedView.elements.loopName.value, "Catalog reconciled");
+  assert.equal(reloadedView.elements.saveState.textContent, "Saved · v1");
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/loops",
+    ).length,
+    1,
+  );
+  assert.equal(sessionStorage.values.size, 0);
+});
+
+test("a proved first-save response remains saved when the follow-up catalog refresh disconnects", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let catalogReads = 0;
+  server.on("GET", "/api/loops", () => {
+    catalogReads++;
+    return catalogReads === 1
+      ? { status: 200, body: clone(server.catalog) }
+      : { status: 503, body: { detail: "Catalog reconnect required." } };
+  });
+  server.on("POST", "/api/loops", ({ body }) => {
+    const created = createDefinitionFromFirstSave(body, "loop-proved-save");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const app = await loadLoopBuilder({ server });
+  await app.elements.createLoopButton.click();
+  app.elements.loopName.value = "Proved save";
+  await app.elements.loopName.input();
+
+  await app.elements.saveButton.click();
+
+  assert.equal(app.elements.saveState.textContent, "Saved · v1");
+  assert.equal(app.elements.saveButton.textContent, "Save");
+  assert.equal(app.elements.saveButton.disabled, true);
+  assert.match(
+    app.elements.validationBanner.textContent,
+    /saved.*could not be refreshed/i,
+  );
+  assert.equal(
+    server.calls.filter(
+      (call) => call.method === "POST" && call.url === "/api/loops",
+    ).length,
+    1,
+  );
+});
+
+test("independent tab drafts do not consume quota and a later quota rejection rotates the losing draft operation", async () => {
+  const catalog = createCatalog();
+  catalog.customDefinitions = [];
+  catalog.limits.maxDefinitionsPerWorkspace = 1;
+  const server = new FakeFetchServer(catalog);
+  server.on("POST", "/api/loops", ({ body }) => {
+    if (server.catalog.customDefinitions.length >= 1) {
+      return {
+        status: 409,
+        body: {
+          status: "LimitExceeded",
+          isCommitted: false,
+          definition: null,
+          validationErrors: [],
+          conflict: null,
+          detail:
+            "The workspace custom-loop definition limit has been reached.",
+        },
+      };
+    }
+
+    const created = createDefinitionFromFirstSave(body, "loop-quota-winner");
+    server.catalog.customDefinitions.push(clone(created));
+    return { status: 201, body: authoringResponse("Created", created) };
+  });
+  const firstTab = await loadLoopBuilder({
+    server,
+    sessionStorage: new FakeStorage(),
+  });
+  const secondTab = await loadLoopBuilder({
+    server,
+    sessionStorage: new FakeStorage(),
+  });
+
+  await firstTab.elements.createLoopButton.click();
+  await secondTab.elements.createLoopButton.click();
+  assert.equal(server.catalog.customDefinitions.length, 0);
+  assert.match(firstTab.elements.loopList.textContent, /Not durable/);
+  assert.match(secondTab.elements.loopList.textContent, /Not durable/);
+
+  await firstTab.elements.saveButton.click();
+  await secondTab.elements.saveButton.click();
+
+  assert.equal(server.catalog.customDefinitions.length, 1);
+  assert.match(secondTab.elements.saveState.textContent, /First save failed/);
+  assert.match(
+    secondTab.elements.validationBanner.textContent,
+    /definition limit has been reached/,
+  );
+  assert.equal(secondTab.elements.invokeButton.disabled, true);
+  assert.match(secondTab.elements.loopList.textContent, /Not durable/);
+
+  const deniedRequest = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  )[1].body;
+  server.catalog.customDefinitions = [];
+
+  await secondTab.elements.saveButton.click();
+
+  const retriedRequest = server.calls.filter(
+    (call) => call.method === "POST" && call.url === "/api/loops",
+  )[2].body;
+  assert.notEqual(retriedRequest.operationId, deniedRequest.operationId);
+  assert.equal(server.catalog.customDefinitions.length, 1);
+  assert.equal(secondTab.elements.saveState.textContent, "Saved · v1");
 });
 
 test("save retries reuse the exact request after an ambiguous committed response", async () => {
@@ -1454,6 +2419,188 @@ test("Runs projects durable timeline and context evidence from the authenticated
   );
 });
 
+test("conversation publication disposition is table-driven, definite, and phase-aware", async (t) => {
+  const publicationId = "publication-operation";
+  const event = (sequence, kind, publishedToInvokingConversation = null) => ({
+    sequence,
+    eventId: `publication-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: 1,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: publicationId,
+  });
+  const cases = [
+    {
+      name: "no publication requested",
+      dispositions: [],
+      events: [],
+      expected: "No conversation publication requested",
+    },
+    {
+      name: "omitted without a bound conversation",
+      dispositions: [
+        publicationDisposition("OmittedNoInvokingConversation", true),
+      ],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Omitted No Invoking Conversation",
+    },
+    {
+      name: "intent is pending",
+      dispositions: [publicationDisposition("Pending", false)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+      ],
+      expected: "Pending",
+      phase: "intent committed",
+    },
+    {
+      name: "publication succeeds once",
+      dispositions: [publicationDisposition("Published", true)],
+      events: [
+        event(3, "ExitDecisionCompleted", true),
+        event(4, "ConversationPublicationStarted"),
+        event(5, "ConversationPublished", true),
+      ],
+      expected: "Published",
+      phase: "terminal outcome recorded",
+    },
+    {
+      name: "a prior commit is reconciled",
+      dispositions: [publicationDisposition("AlreadyPublished", true)],
+      events: [event(5, "ConversationPublished", true)],
+      expected: "Already Published",
+    },
+    {
+      name: "a definite failure remains distinct",
+      dispositions: [publicationDisposition("DefinitelyFailed", true)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Definitely Failed",
+    },
+    {
+      name: "an uncertain outcome requires review",
+      dispositions: [publicationDisposition("Uncertain", false)],
+      events: [event(5, "ConversationPublished", false)],
+      expected: "Uncertain",
+    },
+    {
+      name: "duplicate terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("DuplicateTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", true),
+      ],
+      expected: "Integrity warning: Duplicate Terminal Outcomes",
+    },
+    {
+      name: "conflicting terminal evidence is an integrity warning",
+      dispositions: [
+        publicationDisposition("ConflictingTerminalOutcomes", false, true),
+      ],
+      events: [
+        event(5, "ConversationPublished", true),
+        event(6, "ConversationPublished", false),
+      ],
+      expected: "Integrity warning: Conflicting Terminal Outcomes",
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const server = new FakeFetchServer(createCatalog());
+      const run = createRunSnapshot();
+      run.events = scenario.events;
+      run.conversationPublicationDispositions = scenario.dispositions;
+      server.runs = [runSummary(run)];
+      server.runDetails.set(run.id, run);
+      const app = await loadLoopBuilder({ server });
+      await selectCustomLoop(app);
+
+      await app.elements.runsTab.click();
+      await flushAsyncWork();
+
+      assert.match(
+        app.elements.inspectorContent.textContent,
+        new RegExp(scenario.expected),
+      );
+      assert.doesNotMatch(
+        app.elements.inspectorContent.textContent,
+        /not published/i,
+      );
+      if (scenario.phase)
+        assert.match(
+          app.elements.runTimeline.textContent,
+          new RegExp(scenario.phase),
+        );
+    });
+  }
+});
+
+test("multiple conversation publication operations keep canonical grouping and durable order", async () => {
+  const event = (
+    sequence,
+    operationId,
+    kind,
+    publishedToInvokingConversation = null,
+  ) => ({
+    sequence,
+    eventId: `${operationId}-${sequence}`,
+    timestampUtc: `2026-07-16T12:00:0${sequence}Z`,
+    kind,
+    iteration: operationId === "publication-first" ? 1 : 2,
+    stepId: "exit",
+    attempt: 1,
+    detail: "Publication protocol evidence.",
+    contextBlocks: [],
+    canonicalOutput: null,
+    publishedToInvokingConversation,
+    conversationPublicationId: operationId,
+  });
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.events = [
+    event(2, "publication-first", "ExitDecisionCompleted", true),
+    event(3, "publication-first", "ConversationPublicationStarted"),
+    event(4, "publication-first", "ConversationPublished", true),
+    event(5, "publication-second", "ExitDecisionCompleted", true),
+    event(6, "publication-second", "ConversationPublicationStarted"),
+    event(7, "publication-second", "ConversationPublished", true),
+  ];
+  run.conversationPublicationDispositions = [
+    publicationDisposition("Published", true, false, "publication-first"),
+    publicationDisposition("Published", true, false, "publication-second"),
+  ];
+  server.runs = [runSummary(run)];
+  server.runDetails.set(run.id, run);
+  const app = await loadLoopBuilder({ server });
+  await selectCustomLoop(app);
+
+  await app.elements.runsTab.click();
+  await flushAsyncWork();
+
+  const inspector = app.elements.inspectorContent.textContent;
+  assert.ok(
+    inspector.indexOf("publication-first") <
+      inspector.indexOf("publication-second"),
+  );
+  assert.equal(inspector.match(/publication-first/g)?.length, 1);
+  assert.equal(inspector.match(/publication-second/g)?.length, 1);
+  assert.equal(inspector.match(/Published · definite/g)?.length, 2);
+  assert.equal(
+    app.elements.runTimeline.textContent.match(/terminal outcome recorded/g)
+      ?.length,
+    2,
+  );
+});
+
 test("standalone integrity evidence reports governance as intentionally not evaluated", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();
@@ -1570,10 +2717,8 @@ test("run discovery progressively loads cursor pages without losing the selected
   const pageCall = server.calls.find((call) =>
     call.url.includes("cursor=cursor-one"),
   );
-  assert.equal(
-    pageCall.options.headers["X-EmbodySense-Session"],
-    "loop-test-token",
-  );
+  assert.equal(pageCall.options.credentials, "same-origin");
+  assert.equal(pageCall.options.headers["X-EmbodySense-Session"], undefined);
 });
 
 test("refreshing a selected continuation-page run recovers an externally deleted trace as a tombstone", async () => {
@@ -5812,6 +6957,88 @@ test("run monitoring stops while Loops is hidden and resumes when it returns", a
   );
 });
 
+test("an unauthorized run monitor suspends polling and delegates one shared recovery", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const run = createRunSnapshot();
+  run.status = "Running";
+  run.completedAtUtc = null;
+  server.runs = [
+    {
+      id: run.id,
+      loopId: run.loopId,
+      admissionOperationId: run.admissionOperationId,
+      definitionVersion: 2,
+      lifecycleVersion: run.lifecycleVersion,
+      status: run.status,
+      createdAtUtc: run.createdAtUtc,
+      updatedAtUtc: run.updatedAtUtc,
+      completedAtUtc: null,
+      iteration: 1,
+      nextStepIndex: 1,
+      failureCode: null,
+      isDeleted: false,
+    },
+  ];
+  server.runDetails.set(run.id, run);
+  server.on("GET", `/api/loop-runs/${run.id}/monitor`, () => ({
+    status: 401,
+    body: { detail: "The host restarted." },
+  }));
+  let recoveries = 0;
+  const sharedHub = { connected: true, on() {} };
+  const app = await loadLoopBuilder({
+    server,
+    embodySenseSession: {
+      getHub: async () => sharedHub,
+      recover() {
+        recoveries++;
+      },
+    },
+  });
+  await selectCustomLoop(app);
+  await app.elements.runsTab.click();
+  const refresh = app.window.delayedHandlers.find(
+    (item) => item.delay === 1000 && !item.cancelled,
+  );
+  assert.ok(refresh);
+
+  refresh.cancelled = true;
+  await refresh.handler();
+
+  assert.equal(recoveries, 1);
+  assert.equal(
+    app.window.delayedHandlers.filter(
+      (item) => item.delay === 1000 && !item.cancelled,
+    ).length,
+    0,
+  );
+});
+
+test("recovery rehydration propagates a 401 without recursively starting recovery", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const app = await loadLoopBuilder({ server });
+  let recoveries = 0;
+  app.window.embodySenseSession = {
+    recover() {
+      recoveries++;
+    },
+  };
+  server.on("GET", "/api/status", () => ({
+    status: 401,
+    body: { detail: "The host restarted during rehydration." },
+  }));
+
+  await assert.rejects(
+    app.window.embodySenseLoopBuilder.rehydrateSession({
+      approvals: [],
+      workspaceRoot: "C:/workspace",
+    }),
+    (error) => error.status === 401,
+  );
+
+  assert.equal(recoveries, 0);
+});
+
 test("rapidly leaving and returning during an in-flight run poll keeps one monitoring chain", async () => {
   const server = new FakeFetchServer(createCatalog());
   const run = createRunSnapshot();
@@ -7073,14 +8300,19 @@ async function loadLoopBuilder(options = {}) {
   const localStorage = options.localStorage ?? new FakeStorage();
   const locks = options.locks ?? new FakeLockManager();
   let operation = 0;
+  const eventListeners = new Map();
   const window = {
     confirmations: [],
     delayedHandlers: [],
+    eventListeners,
     intervalHandlers: [],
     location: { href: "http://127.0.0.1:4378/loops.html" },
     localStorage,
     sessionStorage,
-    addEventListener() {},
+    embodySenseSession: options.embodySenseSession,
+    addEventListener(name, handler) {
+      this.eventListeners.set(name, handler);
+    },
     confirm(message) {
       this.confirmations.push(message);
       return true;
@@ -7348,6 +8580,7 @@ function createCatalog() {
       },
     },
     customDefinitions: [createCustomDefinition()],
+    draftTemplate: createDraftTemplate(),
     limits: {
       maxDefinitionsPerWorkspace: 50,
       minInferenceSteps: 1,
@@ -7372,6 +8605,49 @@ function createCatalog() {
       maxLifecycleControlDetailCharacters: 1024,
       maxRunTraceUtf8Bytes: 16777216,
       maxRunExecutionMilliseconds: 1800000,
+    },
+  };
+}
+
+function createDraftTemplate() {
+  return {
+    schemaVersion: 1,
+    roleId: "default",
+    definition: {
+      displayName: "Untitled loop",
+      description: "",
+      triggerPolicy: {
+        promptSource: "invocation",
+        presetPrompt: "",
+        includeInvokingConversation: false,
+      },
+      inferenceSteps: [
+        {
+          id: null,
+          name: "First step",
+          instruction:
+            "Use the invocation input to complete the user's requested task within this loop's governed authority.",
+          contextPolicy: { mode: "inherit", customPolicy: null },
+        },
+      ],
+      toolAssignments: [],
+      exitPolicy: {
+        maxAdditionalIterations: 0,
+        decisionInstruction:
+          "Request another iteration only when the latest result still has a concrete, recoverable gap. Otherwise complete.",
+        contextPolicy: { mode: "inherit", customPolicy: null },
+      },
+    },
+    contextDefaults: {
+      inference: createContextPolicy({
+        includePreviousIterationResult: true,
+        publishToInvokingConversation: false,
+      }),
+      exit: createContextPolicy({
+        includePreviousIterationResult: true,
+        retainForLoopReasoning: false,
+        publishToInvokingConversation: true,
+      }),
     },
   };
 }
@@ -7456,6 +8732,39 @@ function createContextPolicy(overrides = {}) {
       publishToInvokingConversation:
         overrides.publishToInvokingConversation ?? false,
     },
+  };
+}
+
+function publicationDisposition(
+  disposition,
+  isDefinite,
+  hasIntegrityWarning = false,
+  operationId = "publication-operation",
+) {
+  return {
+    operationId,
+    disposition,
+    detail:
+      "Canonical publication disposition supplied by the public runtime projection.",
+    isDefinite,
+    hasIntegrityWarning,
+    eventSequences: [],
+  };
+}
+
+function runSummary(run) {
+  return {
+    id: run.id,
+    loopId: run.loopId,
+    definitionVersion: run.admittedDefinition.definitionVersion,
+    status: run.status,
+    createdAtUtc: run.createdAtUtc,
+    updatedAtUtc: run.updatedAtUtc,
+    completedAtUtc: run.completedAtUtc,
+    iteration: run.checkpoint.iteration,
+    nextStepIndex: run.checkpoint.nextStepIndex,
+    failureCode: run.failureCode,
+    isDeleted: false,
   };
 }
 
@@ -7730,6 +9039,67 @@ function authoringResponse(status, definition) {
   };
 }
 
+function createRetentionPosture({
+  health = "healthy",
+  cleanupBlockReason = "None",
+  exhaustionReason = "None",
+  cleanupRecoveryAvailableAtUtc = null,
+} = {}) {
+  return {
+    generatedAtUtc: "2026-08-01T12:00:00Z",
+    health,
+    classes: [
+      {
+        artifactClass: "DefinitionMutationReceipt",
+        health,
+        artifactCount: 2,
+        artifactUtf8Bytes: 2048,
+        maximumArtifactCount: 10000,
+        maximumArtifactUtf8Bytes: 134217728,
+        reservedArtifactCount: 64,
+        reservedArtifactUtf8Bytes: 41943040,
+        proofCount: 1,
+        proofUtf8Bytes: 512,
+        maximumProofCount: 100000,
+        maximumProofUtf8Bytes: 33554432,
+        activeCleanupJournalUtf8Bytes: 0,
+        cleanupRecoveryAvailableAtUtc,
+        completedCleanupOperationCount: 0,
+        completedCleanupHistoryUtf8Bytes: 0,
+        oldestExactReplayExpiresAtUtc: "2026-08-30T12:00:00Z",
+        newestExactReplayExpiresAtUtc: "2026-08-31T12:00:00Z",
+        exhaustionReason,
+        cleanupBlockReason,
+        categories: [
+          { category: "Live", artifactCount: 2, utf8Bytes: 2048 },
+          { category: "ExpiredIdempotency", artifactCount: 1, utf8Bytes: 512 },
+        ],
+        detail: "Retention evidence requires review before cleanup.",
+      },
+    ],
+    activeCleanupJournalUtf8Bytes: 0,
+    accountedWorkspaceUtf8Bytes: 2560,
+    maximumWorkspaceUtf8Bytes: 536870912,
+    availableWorkspaceUtf8Bytes: 536868352,
+    exhaustionReason,
+    cleanupBlockReason,
+    detail: "Retention evidence requires review; cleanup stays explicit.",
+  };
+}
+
+function createDefinitionFromFirstSave(body, id) {
+  return createCustomDefinition({
+    ...clone(body.definition),
+    id,
+    definitionVersion: 1,
+    inferenceSteps: body.definition.inferenceSteps.map((step, index) => ({
+      ...clone(step),
+      id: `step-${id}-${index + 1}`,
+    })),
+    lastMutationOperationId: body.operationId,
+  });
+}
+
 class FakeFetchServer {
   constructor(catalog) {
     this.catalog = clone(catalog);
@@ -7760,7 +9130,10 @@ class FakeFetchServer {
     const custom = this.handlers.get(`${method} ${url}`);
     if (custom) return responseFrom(await custom(call));
     if (method === "GET" && url === "/api/session")
-      return responseFrom({ status: 200, body: { token: "loop-test-token" } });
+      return responseFrom({
+        status: 200,
+        body: { generationId: "loop-process-generation" },
+      });
     if (method === "GET" && url === "/api/status")
       return responseFrom({
         status: 200,
