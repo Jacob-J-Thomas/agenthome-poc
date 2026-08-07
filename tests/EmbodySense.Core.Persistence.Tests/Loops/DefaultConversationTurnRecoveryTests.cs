@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Application.Loops.Execution;
@@ -49,6 +51,20 @@ public sealed class DefaultConversationTurnRecoveryTests
         { DefaultConversationTurnBoundary.TerminalPrepared, LoopRunStatus.Completed, 2 },
         { DefaultConversationTurnBoundary.TerminalRunSaved, LoopRunStatus.Completed, 2 },
         { DefaultConversationTurnBoundary.TerminalCommitted, LoopRunStatus.Completed, 2 }
+    };
+
+    public static TheoryData<string, bool> UnmappedArtifactStates => new()
+    {
+        { "admitted", false },
+        { "admitted", true },
+        { "incomplete", false },
+        { "incomplete", true },
+        { "terminal", false },
+        { "terminal", true },
+        { "needs-review", false },
+        { "needs-review", true },
+        { "review-resolved", false },
+        { "review-resolved", true }
     };
 
     [Theory]
@@ -701,6 +717,223 @@ public sealed class DefaultConversationTurnRecoveryTests
         };
         await File.WriteAllTextAsync(artifactPath, JsonSerializer.Serialize(skipped, options));
         await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(admitted.TurnId));
+    }
+
+    [Theory]
+    [MemberData(nameof(UnmappedArtifactStates))]
+    public async Task Store_rejects_unmapped_root_and_nested_artifact_members_without_rewriting_or_recovering(string state, bool nested)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var fixture = CreateFixture(
+            workspace,
+            state is "needs-review" or "review-resolved" ? new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderDispatchStarted) : null);
+        var record = await CreateArtifactForStrictJsonTestAsync(state, fixture, paths);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var artifact = JsonNode.Parse(await File.ReadAllTextAsync(artifactPath))!.AsObject();
+        if (nested)
+        {
+            artifact["run"]!.AsObject().Add("unsupportedNestedEvidence", true);
+        }
+        else
+        {
+            artifact.Add("unsupportedRootEvidence", true);
+        }
+
+        var corruptedBytes = Encoding.UTF8.GetBytes(artifact.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
+        await File.WriteAllBytesAsync(artifactPath, corruptedBytes);
+        var dispatchCount = fixture.Client.GenerateCount;
+        var quarantineCount = fixture.Client.QuarantineCount;
+        var reviews = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+
+        await Assert.ThrowsAsync<FormatException>(() => fixture.Turns.LoadAsync(record.TurnId));
+        await AssertArtifactBytesEqualAsync(artifactPath, corruptedBytes);
+
+        await Assert.ThrowsAsync<FormatException>(() => fixture.Turns.UpdateAsync(record, record.LifecycleVersion));
+        await AssertArtifactBytesEqualAsync(artifactPath, corruptedBytes);
+
+        await Assert.ThrowsAsync<FormatException>(() => fixture.Recovery.RecoverAsync());
+        await AssertArtifactBytesEqualAsync(artifactPath, corruptedBytes);
+
+        await Assert.ThrowsAsync<FormatException>(() => reviews.ResolveAsync(record.TurnId));
+        await AssertArtifactBytesEqualAsync(artifactPath, corruptedBytes);
+        Assert.Equal(dispatchCount, fixture.Client.GenerateCount);
+        Assert.Equal(quarantineCount, fixture.Client.QuarantineCount);
+    }
+
+    [Fact]
+    public async Task Store_rejects_case_substituted_and_duplicate_artifact_members_without_rewriting()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var fixture = CreateFixture(workspace);
+        var record = await CreateArtifactForStrictJsonTestAsync("admitted", fixture, paths);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var canonical = await File.ReadAllTextAsync(artifactPath);
+
+        var caseSubstituted = canonical.Replace("\"schemaVersion\":", "\"SchemaVersion\":", StringComparison.Ordinal);
+        var caseSubstitutedBytes = Encoding.UTF8.GetBytes(caseSubstituted);
+        await File.WriteAllBytesAsync(artifactPath, caseSubstitutedBytes);
+        await Assert.ThrowsAsync<FormatException>(() => fixture.Turns.LoadAsync(record.TurnId));
+        await AssertArtifactBytesEqualAsync(artifactPath, caseSubstitutedBytes);
+
+        var duplicate = canonical.Replace("\"turnId\":", "\"turnId\": \"forged-turn\",\n  \"turnId\":", StringComparison.Ordinal);
+        var duplicateBytes = Encoding.UTF8.GetBytes(duplicate);
+        await File.WriteAllBytesAsync(artifactPath, duplicateBytes);
+        await Assert.ThrowsAsync<FormatException>(() => fixture.Turns.LoadAsync(record.TurnId));
+        await AssertArtifactBytesEqualAsync(artifactPath, duplicateBytes);
+    }
+
+    [Fact]
+    public async Task Store_rejects_duplicate_artifact_members_without_echoing_attacker_controlled_names()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var fixture = CreateFixture(workspace);
+        var record = await CreateArtifactForStrictJsonTestAsync("admitted", fixture, paths);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var canonical = await File.ReadAllTextAsync(artifactPath);
+        var sensitiveName = "sensitive-" + new string('x', 8_192);
+        var duplicate = canonical.Replace("\"schemaVersion\":", $"\"{sensitiveName}\": true,\n  \"{sensitiveName}\": false,\n  \"schemaVersion\":", StringComparison.Ordinal);
+        await File.WriteAllTextAsync(artifactPath, duplicate);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => fixture.Turns.LoadAsync(record.TurnId));
+
+        Assert.Equal("Default-conversation turn artifact contains duplicate JSON object members.", exception.Message);
+        Assert.DoesNotContain(sensitiveName, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Store_rejects_unmapped_artifact_members_without_exposing_attacker_controlled_json_paths(bool nested)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var fixture = CreateFixture(workspace);
+        var record = await CreateArtifactForStrictJsonTestAsync("admitted", fixture, paths);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var canary = "sensitive-" + new string('x', 8_192);
+        var artifact = JsonNode.Parse(await File.ReadAllTextAsync(artifactPath))!.AsObject();
+        if (nested)
+        {
+            artifact["run"]!.AsObject().Add(canary, true);
+        }
+        else
+        {
+            artifact.Add(canary, true);
+        }
+
+        var corruptedBytes = Encoding.UTF8.GetBytes(artifact.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
+        await File.WriteAllBytesAsync(artifactPath, corruptedBytes);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => fixture.Turns.LoadAsync(record.TurnId));
+
+        Assert.Null(exception.InnerException);
+        Assert.DoesNotContain(canary, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(canary, exception.ToString(), StringComparison.Ordinal);
+        await AssertArtifactBytesEqualAsync(artifactPath, corruptedBytes);
+    }
+
+    [Theory]
+    [InlineData("incomplete")]
+    [InlineData("needs-review")]
+    public async Task Renamed_turn_artifacts_are_rejected_from_discovery_without_duplicating_or_blocking_the_canonical_turn(string state)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var fixture = CreateFixture(workspace, state == "needs-review" ? new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderDispatchStarted) : null);
+        var record = await CreateArtifactForStrictJsonTestAsync(state, fixture, paths);
+        var canonicalPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var renamedPath = Path.Combine(paths.DefaultConversationTurnsPath, "renamed-" + record.TurnId + ".json");
+        var renamedBytes = await File.ReadAllBytesAsync(canonicalPath);
+        File.Copy(canonicalPath, renamedPath);
+
+        if (state == "incomplete")
+        {
+            Assert.Collection(await fixture.Turns.ListIncompleteAsync(), discovered => Assert.Equal(record.TurnId, discovered.TurnId));
+            var recovery = await fixture.Recovery.RecoverAsync();
+
+            Assert.Single(recovery.Results);
+            Assert.Empty(await fixture.Turns.ListIncompleteAsync());
+        }
+        else
+        {
+            Assert.Collection(await fixture.Turns.ListNeedsReviewAsync(), discovered => Assert.Equal(record.TurnId, discovered.TurnId));
+            var reviews = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+            Assert.NotNull(await reviews.ResolveAsync(record.TurnId));
+
+            Assert.Empty(await fixture.Turns.ListNeedsReviewAsync());
+            Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("later", requestId: "renamed-needs-review-later"))).Status);
+        }
+
+        Assert.Equal(renamedBytes, await File.ReadAllBytesAsync(renamedPath));
+        Assert.NotNull(await fixture.Turns.LoadAsync(record.TurnId));
+    }
+
+    [Fact]
+    public async Task Store_update_succeeds_while_a_compatible_reader_holds_the_prior_artifact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var fixture = CreateFixture(workspace);
+        var admitted = await CreateArtifactForStrictJsonTestAsync("admitted", fixture, paths);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, admitted.TurnId + ".json");
+        await using var heldReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var advanced = admitted.Advance(DefaultConversationTurnCheckpoint.RunStarted, admitted.Run.StartedAtUtc.AddSeconds(1), "Run started.");
+
+        var result = await fixture.Turns.UpdateAsync(advanced, admitted.LifecycleVersion);
+
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, result.Status);
+        var persisted = await fixture.Turns.LoadAsync(admitted.TurnId);
+        Assert.NotNull(persisted);
+        Assert.Equal(advanced.LifecycleVersion, persisted.LifecycleVersion);
+        Assert.Equal(advanced.Checkpoint, persisted.Checkpoint);
+        Assert.Equal(advanced.Transitions, persisted.Transitions);
+    }
+
+    private static async Task<DefaultConversationTurnRecord> CreateArtifactForStrictJsonTestAsync(string state, RecoveryFixture fixture, WorkspacePaths paths)
+    {
+        var requestId = "strict-json-" + state + "-" + Guid.NewGuid().ToString("N");
+        if (state is "admitted" or "incomplete")
+        {
+            var conversation = await fixture.Memory.LoadCurrentConversationSnapshotAsync();
+            var startedAtUtc = new DateTimeOffset(2026, 8, 1, 12, 0, 0, TimeSpan.Zero);
+            var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(requestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, startedAtUtc);
+            var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("strict JSON"), startedAtUtc.AddSeconds(1), requestId);
+            Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await fixture.Turns.CreateAsync(record)).Status);
+            if (state == "incomplete")
+            {
+                var incomplete = record.Advance(DefaultConversationTurnCheckpoint.RunStarted, startedAtUtc.AddSeconds(2), "Run started.");
+                Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await fixture.Turns.UpdateAsync(incomplete, record.LifecycleVersion)).Status);
+                return incomplete;
+            }
+
+            return record;
+        }
+
+        var request = new DefaultConversationLoopTurnRequest("strict JSON", requestId: requestId);
+        if (state == "terminal")
+        {
+            Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await fixture.Runner.RunTurnAsync(request)).Status);
+            return (await fixture.Turns.LoadAsync(DefaultConversationTurnProtocol.CreateTurnId(requestId)))!;
+        }
+
+        await Assert.ThrowsAsync<DefaultConversationTurnInterruptedException>(() => fixture.Runner.RunTurnAsync(request));
+        await fixture.Recovery.RecoverAsync();
+        var needsReview = (await fixture.Turns.LoadAsync(DefaultConversationTurnProtocol.CreateTurnId(requestId)))!;
+        if (state == "needs-review")
+        {
+            return needsReview;
+        }
+
+        var reviews = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+        return (await reviews.ResolveAsync(needsReview.TurnId))!;
+    }
+
+    private static async Task AssertArtifactBytesEqualAsync(string artifactPath, byte[] expected)
+    {
+        Assert.Equal(expected, await File.ReadAllBytesAsync(artifactPath));
     }
 
     private static RecoveryFixture CreateFixture(TestWorkspace workspace, InterruptingFailpoint? failpoint = null, RecordingInferenceClient? client = null)
