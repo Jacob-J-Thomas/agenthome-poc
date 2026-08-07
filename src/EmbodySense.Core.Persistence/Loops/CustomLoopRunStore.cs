@@ -32,7 +32,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
+    private const int MaximumAtomicMoveAttempts = 3;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
+    private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _processMutationGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
@@ -2519,7 +2521,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
             EnsureSafeDirectory(directory, create: false);
             EnsureSafeArtifactPath(root, temporaryPath, mustExist: true);
-            File.Move(temporaryPath, path, overwrite);
+            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, cancellationToken);
         }
         finally
         {
@@ -2564,7 +2566,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
             EnsureSafeDirectory(directory, create: false);
             EnsureSafeArtifactPath(temporaryPath, mustExist: true);
-            File.Move(temporaryPath, path, overwrite);
+            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, cancellationToken);
         }
         finally
         {
@@ -2573,6 +2575,45 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                 File.Delete(temporaryPath);
             }
         }
+    }
+
+    private static async Task MoveAtomicallyWithRetryAsync(string sourcePath, string destinationPath, bool overwrite, CancellationToken cancellationToken)
+    {
+        var attempt = 0;
+        while (true)
+        {
+            attempt++;
+            try
+            {
+                File.Move(sourcePath, destinationPath, overwrite);
+                return;
+            }
+            catch (Exception exception) when (attempt < MaximumAtomicMoveAttempts && IsTransientWindowsFileAccess(exception))
+            {
+                await Task.Delay(_atomicMoveRetryDelay, cancellationToken);
+            }
+        }
+    }
+
+    private static bool IsTransientWindowsFileAccess(Exception exception)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        if (exception is UnauthorizedAccessException)
+        {
+            return true;
+        }
+
+        if (exception is not IOException ioException)
+        {
+            return false;
+        }
+
+        var errorCode = ioException.HResult & 0xFFFF;
+        return errorCode is 5 or 32 or 33;
     }
 
     private string GetRunPath(string loopId, string runId)
