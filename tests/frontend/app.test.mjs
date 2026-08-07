@@ -387,6 +387,72 @@ test("assistant deltas update one active message and final text resets the activ
   assert.equal(messageContent(app.elements.transcript.children[1]), "Next");
 });
 
+test("needs review discards an unaccepted streamed assistant bubble and keeps review commands usable", async () => {
+  const app = await loadApp({
+    activeTranscript: [{ role: "user", content: "Canonical prompt" }],
+  });
+
+  app.socket.serverSendInvocation("StreamEvent", {
+    type: "assistant_delta",
+    text: "Unaccepted streamed response",
+  });
+  app.socket.serverSendInvocation("StreamEvent", {
+    type: "needs_review",
+    text: "Completion evidence requires review.",
+  });
+  app.socket.serverSendInvocation("ApprovalsChanged", [
+    {
+      requestId: "review-command",
+      command: "review",
+      operation: "turn",
+      targetPath: "current turn",
+      resolvedPath: "C:/workspace/current turn",
+      matchedPath: "review/**",
+      reason: "Resolve the retained turn evidence.",
+    },
+  ]);
+  await flushAsyncWork();
+
+  assert.equal(app.elements.transcript.children.length, 2);
+  assert.equal(
+    messageContent(app.elements.transcript.children[0]),
+    "Canonical prompt",
+  );
+  assert.equal(messageRole(app.elements.transcript.children[1]), "System");
+  assert.equal(
+    messageContent(app.elements.transcript.children[1]),
+    "Completion evidence requires review.",
+  );
+  assert.doesNotMatch(
+    app.elements.transcript.textContent,
+    /Unaccepted streamed response/,
+  );
+
+  const approve = findByTag(app.elements.approvals, "button").find(
+    (button) => button.textContent === "Approve",
+  );
+  await approve.click();
+  assert.deepEqual(app.socket.sentInvocations("DecideApproval")[0].arguments, [
+    "review-command",
+    { approved: true },
+  ]);
+
+  FakeWebSocket.currentTranscript = [
+    { role: "user", content: "Canonical prompt" },
+  ];
+  app.socket.serverSendInvocation("StreamEvent", {
+    type: "history_loaded",
+    messages: FakeWebSocket.currentTranscript,
+  });
+  await flushAsyncWork();
+
+  assert.equal(app.elements.transcript.children.length, 1);
+  assert.equal(
+    messageContent(app.elements.transcript.children[0]),
+    "Canonical prompt",
+  );
+});
+
 test("configuration overview reports Codex compatibility and tabs keep raw JSON inert", async () => {
   const rawJson = '{"note":"<script>bad()</script>"}';
   const app = await loadApp({

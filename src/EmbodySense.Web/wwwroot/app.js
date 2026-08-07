@@ -1347,6 +1347,17 @@ function finalizeAgentMessage(text) {
   activeAgentMessage = null;
 }
 
+function discardActiveAgentMessage() {
+  if (activeAgentMessage) {
+    elements.transcript.replaceChildren(
+      ...Array.from(elements.transcript.children).filter(
+        (message) => message !== activeAgentMessage,
+      ),
+    );
+  }
+  activeAgentMessage = null;
+}
+
 elements.initButton.addEventListener("click", async () => {
   elements.initButton.disabled = true;
   const nextStatus = await hub.invoke("InitializeWorkspace");
@@ -1463,12 +1474,11 @@ function handleStreamEvent(event) {
     appendMessage("error", event.text ?? "Message cancelled.");
     activeAgentMessage = null;
   } else if (event.type === "needs_review") {
+    discardActiveAgentMessage();
     appendMessage(
       "system",
       event.text ?? "This turn requires explicit review.",
     );
-    // TODO(#272): Reconcile the unaccepted streamed assistant bubble with the canonical transcript.
-    activeAgentMessage = null;
   } else if (event.type === "error") {
     appendMessage("error", event.error ?? "Request failed.");
   }
