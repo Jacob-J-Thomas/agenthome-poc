@@ -17,6 +17,14 @@ let loopBuilderSessionAvailable =
 let loopBuilderSessionAbortController = new AbortController();
 let dirty = false;
 let currentView = "builder";
+let retentionPosture = null;
+let retentionPostureFailure = null;
+let retentionCleanupOutcome = null;
+let retentionCleanupInFlight = false;
+let retentionCleanupRegistryFailure = null;
+let retentionPostureRequestGeneration = 0;
+let retentionRecoveryRenderTimer = null;
+const retentionCleanupOperationIds = new Map();
 let recentRuns = [];
 let runContinuationCursor = null;
 let runPaginationLoopId = null;
@@ -71,6 +79,12 @@ const maximumPendingLifecycleRequests = 100;
 const maximumConcurrentLifecycleReceiptReads = 8;
 const pendingLifecycleReconciliationDeadlineMilliseconds = 2000;
 const pendingLifecycleRequests = new Map();
+const retentionCleanupStorageKeyPrefix =
+  "embodysense.pending-receipt-cleanup.v1";
+const retentionCleanupRegistryLockNamePrefix =
+  "embodysense.pending-receipt-cleanup";
+let retentionCleanupStorageKey = null;
+let retentionCleanupRegistryLockName = null;
 const pendingInvocationStorageKeyPrefix =
   "embodysense.pending-loop-invocations.v1";
 const pendingInvocationRegistryLockNamePrefix =
@@ -125,6 +139,11 @@ const elements = {
   loopSettingsButton: document.getElementById("loopSettingsButton"),
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
+  refreshRetentionButton: document.getElementById("refreshRetentionButton"),
+  retentionContent: document.getElementById("retentionContent"),
+  retentionNotice: document.getElementById("retentionNotice"),
+  retentionTab: document.getElementById("retentionTab"),
+  retentionView: document.getElementById("retentionView"),
   roleId: document.getElementById("roleId"),
   rolePath: document.getElementById("rolePath"),
   loadMoreRunsButton: document.getElementById("loadMoreRunsButton"),
@@ -307,6 +326,16 @@ async function refreshWorkspaceCore(
       reconciledPendingLifecycleStorageKey = null;
       pendingLifecycleRequests.clear();
     }
+    try {
+      configureRetentionCleanupRegistry(status.workspaceRoot);
+      retentionCleanupRegistryFailure = null;
+    } catch {
+      retentionCleanupStorageKey = null;
+      retentionCleanupRegistryLockName = null;
+      retentionCleanupOperationIds.clear();
+      retentionCleanupRegistryFailure =
+        "Receipt cleanup is unavailable because this browser cannot durably coordinate its workspace cleanup identity.";
+    }
     configureNewLoopDraftStorage(status.workspaceRoot);
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
@@ -341,6 +370,12 @@ function bindStaticEvents() {
   elements.createLoopButton.addEventListener("click", createLoop);
   elements.builderTab.addEventListener("click", () => switchView("builder"));
   elements.runsTab.addEventListener("click", () => switchView("runs"));
+  elements.retentionTab.addEventListener("click", () =>
+    switchView("retention"),
+  );
+  elements.refreshRetentionButton.addEventListener("click", () =>
+    loadRetentionPosture(),
+  );
   elements.invokeButton.addEventListener("click", openInvokeModal);
   elements.closeInvokeButton.addEventListener("click", cancelInvokeModal);
   elements.cancelInvokeButton.addEventListener("click", cancelInvokeModal);
@@ -363,8 +398,21 @@ function bindStaticEvents() {
     renderInspector();
     renderToolbar();
   });
-  bindTabKeyboard(elements.builderTab, [elements.builderTab, elements.runsTab]);
-  bindTabKeyboard(elements.runsTab, [elements.builderTab, elements.runsTab]);
+  bindTabKeyboard(elements.builderTab, [
+    elements.builderTab,
+    elements.runsTab,
+    elements.retentionTab,
+  ]);
+  bindTabKeyboard(elements.runsTab, [
+    elements.builderTab,
+    elements.runsTab,
+    elements.retentionTab,
+  ]);
+  bindTabKeyboard(elements.retentionTab, [
+    elements.builderTab,
+    elements.runsTab,
+    elements.retentionTab,
+  ]);
   bindTabKeyboard(elements.selectedNodeButton, [
     elements.selectedNodeButton,
     elements.loopSettingsButton,
@@ -421,6 +469,20 @@ function bindStaticEvents() {
         synchronizePendingLifecycleRequestsFromStorage();
       } catch {
         // Retain the last verified in-memory view and fail closed on the next lifecycle request.
+      }
+    }
+    if (
+      retentionCleanupStorageKey &&
+      event.key === retentionCleanupStorageKey
+    ) {
+      try {
+        synchronizeRetentionCleanupOperationIdsFromStorage();
+        retentionCleanupRegistryFailure = null;
+        if (currentView === "retention") renderRetention();
+      } catch {
+        retentionCleanupRegistryFailure =
+          "Receipt cleanup is unavailable because the shared workspace cleanup registry could not be validated.";
+        if (currentView === "retention") renderRetention();
       }
     }
   });
@@ -597,6 +659,293 @@ async function loadCatalog(
     null;
   applyDefinition(next);
   renderList();
+}
+
+async function loadRetentionPosture(preserveOutcome = false) {
+  if (retentionCleanupInFlight) return;
+  const requestGeneration = ++retentionPostureRequestGeneration;
+  elements.refreshRetentionButton.disabled = true;
+  try {
+    const posture = await requestJson("/api/loops/receipt-retention");
+    if (requestGeneration !== retentionPostureRequestGeneration) return;
+    retentionPosture = posture;
+    retentionPostureFailure = null;
+    if (!preserveOutcome) retentionCleanupOutcome = null;
+    if (currentView === "retention") renderRetention();
+  } catch (error) {
+    if (requestGeneration !== retentionPostureRequestGeneration) return;
+    if (currentView === "retention") {
+      retentionPosture = null;
+      retentionPostureFailure = `Retention posture is unavailable: ${error.message}`;
+      renderRetention();
+    }
+  } finally {
+    if (requestGeneration === retentionPostureRequestGeneration)
+      elements.refreshRetentionButton.disabled = false;
+  }
+}
+
+async function cleanupRetention(artifactClass) {
+  if (retentionCleanupInFlight) return;
+  const label = formatStatus(artifactClass);
+  if (
+    !window.confirm(
+      `Clean up eligible expired ${label} evidence? This explicit request can compact at most 64 artifacts and 4 MiB, with a durable audit trail.`,
+    )
+  )
+    return;
+
+  retentionCleanupInFlight = true;
+  let operationId = null;
+  renderTabs();
+  renderRetention();
+  try {
+    operationId = await getOrCreateRetentionCleanupOperationId(artifactClass);
+    const response = await requestJson("/api/loops/receipt-retention/cleanup", {
+      method: "POST",
+      body: JSON.stringify({
+        artifactClass,
+        operationId,
+        maximumArtifactCount: 64,
+        maximumArtifactUtf8Bytes: 4 * 1024 * 1024,
+      }),
+    });
+    retentionCleanupOutcome = response;
+    try {
+      await forgetRetentionCleanupOperationId(artifactClass, operationId);
+    } catch {
+      retentionCleanupRegistryFailure =
+        "The completed cleanup operation identity remains reserved because it could not be retired safely.";
+      retentionCleanupOutcome = {
+        ...response,
+        detail: `${response.detail} ${retentionCleanupRegistryFailure}`,
+      };
+    }
+  } catch (error) {
+    if (!operationId && !error.payload) {
+      retentionCleanupRegistryFailure =
+        "Receipt cleanup is unavailable because this browser could not durably reserve a shared operation identity.";
+    }
+    retentionCleanupOutcome = error.payload ?? {
+      status: "Unavailable",
+      health: "Degraded",
+      isCommitted: false,
+      exhaustionReason: "None",
+      cleanupBlockReason: "None",
+      compactedArtifactCount: 0,
+      compactedArtifactUtf8Bytes: 0,
+      detail:
+        retentionCleanupRegistryFailure ??
+        "Receipt cleanup is unavailable before a safe server outcome could be obtained.",
+    };
+    if (
+      error.payload &&
+      error.payload.status !== "OperationInProgress" &&
+      error.payload.status !== "AuditUnavailable"
+    ) {
+      try {
+        await forgetRetentionCleanupOperationId(artifactClass, operationId);
+      } catch {
+        retentionCleanupRegistryFailure =
+          "The terminal cleanup operation identity remains reserved because it could not be retired safely.";
+        retentionCleanupOutcome = {
+          ...retentionCleanupOutcome,
+          detail: `${retentionCleanupOutcome.detail} ${retentionCleanupRegistryFailure}`,
+        };
+      }
+    }
+  } finally {
+    retentionCleanupInFlight = false;
+    await loadRetentionPosture(true);
+    renderTabs();
+    renderRetention();
+  }
+}
+
+function renderRetention() {
+  clearRetentionRecoveryRenderTimer();
+  elements.retentionContent.replaceChildren();
+  elements.retentionNotice.textContent = retentionCleanupOutcome
+    ? `${formatStatus(retentionCleanupOutcome.status)}: ${retentionCleanupOutcome.detail}`
+    : (retentionCleanupRegistryFailure ??
+      retentionPostureFailure ??
+      retentionPosture?.detail ??
+      "Read the current bounded retention posture before requesting cleanup.");
+  if (!retentionPosture) {
+    elements.retentionContent.append(
+      node(
+        "p",
+        "empty-state",
+        "Retention posture has not been loaded. Select Refresh posture to retry.",
+      ),
+    );
+    return;
+  }
+
+  const workspace = node("section", "retention-workspace");
+  const workspaceTitle = node("div", "retention-workspace-title");
+  workspaceTitle.append(
+    node(
+      "strong",
+      `retention-health ${statusClass(retentionPosture.health)}`,
+      formatStatus(retentionPosture.health),
+    ),
+    node(
+      "span",
+      "",
+      `${formatBytes(retentionPosture.accountedWorkspaceUtf8Bytes)} of ${formatBytes(retentionPosture.maximumWorkspaceUtf8Bytes)} accounted`,
+    ),
+  );
+  workspace.append(
+    workspaceTitle,
+    retentionMetric(
+      "Available workspace",
+      formatBytes(retentionPosture.availableWorkspaceUtf8Bytes),
+    ),
+    retentionMetric(
+      "Active cleanup journals",
+      formatBytes(retentionPosture.activeCleanupJournalUtf8Bytes),
+    ),
+    retentionMetric(
+      "Workspace block",
+      formatStatus(retentionPosture.cleanupBlockReason),
+    ),
+  );
+  elements.retentionContent.append(workspace);
+
+  const classList = node("div", "retention-class-list");
+  for (const posture of retentionPosture.classes ?? []) {
+    const card = node("section", "retention-class-card");
+    const heading = node("div", "retention-class-heading");
+    heading.append(
+      node("h3", "", formatStatus(posture.artifactClass)),
+      node(
+        "span",
+        `retention-health ${statusClass(posture.health)}`,
+        formatStatus(posture.health),
+      ),
+    );
+    card.append(heading, node("p", "retention-detail", posture.detail));
+
+    const metrics = node("dl", "retention-metrics");
+    metrics.append(
+      retentionMetric(
+        "Raw evidence",
+        `${posture.artifactCount} / ${posture.maximumArtifactCount} · ${formatBytes(posture.artifactUtf8Bytes)} / ${formatBytes(posture.maximumArtifactUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Reserved completion",
+        `${posture.reservedArtifactCount} slots · ${formatBytes(posture.reservedArtifactUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Compact proof",
+        `${posture.proofCount} / ${posture.maximumProofCount} · ${formatBytes(posture.proofUtf8Bytes)} / ${formatBytes(posture.maximumProofUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Active cleanup journal",
+        formatBytes(posture.activeCleanupJournalUtf8Bytes),
+      ),
+      retentionMetric(
+        "Recovery available",
+        formatTimestamp(posture.cleanupRecoveryAvailableAtUtc),
+      ),
+      retentionMetric(
+        "Cleanup history",
+        `${posture.completedCleanupOperationCount} operations · ${formatBytes(posture.completedCleanupHistoryUtf8Bytes)}`,
+      ),
+      retentionMetric(
+        "Exact replay horizon",
+        `${formatTimestamp(posture.oldestExactReplayExpiresAtUtc)} to ${formatTimestamp(posture.newestExactReplayExpiresAtUtc)}`,
+      ),
+      retentionMetric(
+        "Block / exhaustion",
+        `${formatStatus(posture.cleanupBlockReason)} / ${formatStatus(posture.exhaustionReason)}`,
+      ),
+    );
+    card.append(metrics);
+
+    const categories = node("ul", "retention-categories");
+    for (const category of posture.categories ?? []) {
+      categories.append(
+        node(
+          "li",
+          "",
+          `${formatStatus(category.category)}: ${category.artifactCount} · ${formatBytes(category.utf8Bytes)}`,
+        ),
+      );
+    }
+    card.append(categories);
+    const cleanupHealth = statusClass(posture.health);
+    const recoveryAvailableAt = Date.parse(
+      posture.cleanupRecoveryAvailableAtUtc,
+    );
+    const recoveryPending =
+      cleanupHealth === "recoverypending" &&
+      posture.cleanupBlockReason === "OwnershipUnresolved";
+    const recoveryReady =
+      recoveryPending &&
+      Number.isFinite(recoveryAvailableAt) &&
+      recoveryAvailableAt <= Date.now();
+    const normalCleanupAllowed =
+      posture.cleanupBlockReason === "None" &&
+      (cleanupHealth === "healthy" || cleanupHealth === "exhausted");
+    const cleanup = actionButton(
+      retentionCleanupInFlight
+        ? "Cleanup in progress"
+        : recoveryPending
+          ? recoveryReady
+            ? "Retry cleanup recovery"
+            : `Recovery available ${formatTimestamp(posture.cleanupRecoveryAvailableAtUtc)}`
+          : "Clean eligible expired evidence",
+      () => cleanupRetention(posture.artifactClass),
+      retentionCleanupInFlight ||
+        Boolean(retentionCleanupRegistryFailure) ||
+        (!normalCleanupAllowed && !recoveryReady),
+      "secondary-button retention-cleanup-button",
+    );
+    cleanup.setAttribute(
+      "aria-label",
+      `Clean eligible expired ${formatStatus(posture.artifactClass)} evidence`,
+    );
+    card.append(cleanup);
+    classList.append(card);
+  }
+  elements.retentionContent.append(classList);
+  scheduleRetentionRecoveryRender();
+}
+
+function clearRetentionRecoveryRenderTimer() {
+  if (retentionRecoveryRenderTimer === null) return;
+  window.clearTimeout(retentionRecoveryRenderTimer);
+  retentionRecoveryRenderTimer = null;
+}
+
+function scheduleRetentionRecoveryRender() {
+  if (currentView !== "retention" || !retentionPosture) return;
+  const now = Date.now();
+  const nextRecoveryAt = (retentionPosture.classes ?? [])
+    .filter(
+      (posture) =>
+        statusClass(posture.health) === "recoverypending" &&
+        posture.cleanupBlockReason === "OwnershipUnresolved",
+    )
+    .map((posture) => Date.parse(posture.cleanupRecoveryAvailableAtUtc))
+    .filter((value) => Number.isFinite(value) && value > now)
+    .sort((left, right) => left - right)[0];
+  if (!nextRecoveryAt) return;
+  retentionRecoveryRenderTimer = window.setTimeout(
+    () => {
+      retentionRecoveryRenderTimer = null;
+      if (currentView === "retention") renderRetention();
+    },
+    Math.min(nextRecoveryAt - now + 25, 2_147_483_647),
+  );
+}
+
+function retentionMetric(label, value) {
+  const metric = node("div", "retention-metric");
+  metric.append(node("dt", "", label), node("dd", "", value));
+  return metric;
 }
 
 function allDefinitions() {
@@ -947,9 +1296,11 @@ function renderAll() {
   if (currentView === "builder") {
     renderCanvas();
     renderInspector();
-  } else {
+  } else if (currentView === "runs") {
     renderRuns();
     renderRunEvidence();
+  } else {
+    renderRetention();
   }
   renderToolbar();
   renderValidation();
@@ -958,16 +1309,25 @@ function renderAll() {
 
 function renderTabs() {
   const builderActive = currentView === "builder" && !historicalLoopId;
+  const runsActive =
+    currentView === "runs" ||
+    (currentView === "builder" && Boolean(historicalLoopId));
+  const retentionActive = currentView === "retention";
   elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
   elements.runsTab.disabled = mutationInFlight || isNewLoopDraft();
+  elements.retentionTab.disabled = mutationInFlight || retentionCleanupInFlight;
   elements.builderTab.classList.toggle("active", builderActive);
-  elements.runsTab.classList.toggle("active", !builderActive);
+  elements.runsTab.classList.toggle("active", runsActive);
+  elements.retentionTab.classList.toggle("active", retentionActive);
   elements.builderTab.setAttribute("aria-selected", String(builderActive));
-  elements.runsTab.setAttribute("aria-selected", String(!builderActive));
+  elements.runsTab.setAttribute("aria-selected", String(runsActive));
+  elements.retentionTab.setAttribute("aria-selected", String(retentionActive));
   elements.builderTab.tabIndex = builderActive ? 0 : -1;
-  elements.runsTab.tabIndex = builderActive ? -1 : 0;
+  elements.runsTab.tabIndex = runsActive ? 0 : -1;
+  elements.retentionTab.tabIndex = retentionActive ? 0 : -1;
   elements.builderView.hidden = !builderActive;
-  elements.runsView.hidden = builderActive;
+  elements.runsView.hidden = !runsActive;
+  elements.retentionView.hidden = !retentionActive;
   elements.inspectorTabs.hidden = !builderActive;
   elements.builderLayout.classList.toggle("runs-active", !builderActive);
   elements.inspectorContent.setAttribute(
@@ -987,13 +1347,18 @@ function renderTabs() {
 
 async function switchView(view) {
   if (mutationInFlight) return;
-  if (view !== "builder" && view !== "runs") return;
+  if (view !== "builder" && view !== "runs" && view !== "retention") return;
   if (view === "builder" && historicalLoopId) return;
   if (view === "runs" && isNewLoopDraft()) return;
   currentView = view;
   if (view === "runs") {
     renderAll();
     await loadRuns();
+    return;
+  }
+  if (view === "retention") {
+    renderAll();
+    await loadRetentionPosture();
     return;
   }
   renderAll();
@@ -4538,6 +4903,147 @@ function commitPendingLifecycleRequests(next) {
     pendingLifecycleRequests.set(requestKey, request);
 }
 
+function configureRetentionCleanupRegistry(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  retentionCleanupStorageKey = `${retentionCleanupStorageKeyPrefix}.${scope}`;
+  retentionCleanupRegistryLockName = `${retentionCleanupRegistryLockNamePrefix}.${scope}`;
+  assertRetentionCleanupRegistryAvailable();
+  synchronizeRetentionCleanupOperationIdsFromStorage();
+}
+
+function assertRetentionCleanupRegistryAvailable() {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request || !retentionCleanupStorageKey || !window.localStorage)
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  const probeKey = `${retentionCleanupStorageKey}.availability-probe`;
+  try {
+    window.localStorage.setItem(probeKey, "available");
+    if (window.localStorage.getItem(probeKey) !== "available")
+      throw new Error("The workspace receipt-cleanup registry is unavailable.");
+    window.localStorage.removeItem(probeKey);
+  } catch {
+    try {
+      window.localStorage.removeItem(probeKey);
+    } catch {
+      // The registry remains disabled; never dispatch cleanup with an in-memory fallback.
+    }
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  }
+}
+
+function synchronizeRetentionCleanupOperationIdsFromStorage() {
+  const stored = restoreRetentionCleanupOperationIds();
+  retentionCleanupOperationIds.clear();
+  for (const [artifactClass, operationId] of stored)
+    retentionCleanupOperationIds.set(artifactClass, operationId);
+}
+
+function restoreRetentionCleanupOperationIds() {
+  if (!retentionCleanupStorageKey || !window.localStorage)
+    throw new Error("Shared receipt-cleanup storage is unavailable.");
+  const stored = window.localStorage.getItem(retentionCleanupStorageKey);
+  if (!stored) return new Map();
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    throw new Error("The shared receipt-cleanup registry is corrupt.");
+  }
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload.operations))
+    throw new Error(
+      "The shared receipt-cleanup registry schema is unsupported.",
+    );
+  const operations = new Map();
+  for (const operation of payload.operations) {
+    if (!isStoredRetentionCleanupOperation(operation))
+      throw new Error(
+        "The shared receipt-cleanup registry contains invalid entries.",
+      );
+    if (operations.has(operation.artifactClass))
+      throw new Error(
+        "The shared receipt-cleanup registry contains duplicate entries.",
+      );
+    operations.set(operation.artifactClass, operation.operationId);
+  }
+  return operations;
+}
+
+function isStoredRetentionCleanupOperation(operation) {
+  return (
+    operation &&
+    [
+      "DefinitionMutationReceipt",
+      "DefinitionTombstone",
+      "LifecycleControlReceipt",
+    ].includes(operation.artifactClass) &&
+    typeof operation.operationId === "string" &&
+    /^[a-z0-9-]{8,128}$/.test(operation.operationId)
+  );
+}
+
+function persistRetentionCleanupOperationIds(operations) {
+  if (!retentionCleanupStorageKey || !window.localStorage)
+    throw new Error("Shared receipt-cleanup storage is unavailable.");
+  if (!operations.size) {
+    window.localStorage.removeItem(retentionCleanupStorageKey);
+    return;
+  }
+  window.localStorage.setItem(
+    retentionCleanupStorageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      operations: [...operations].map(([artifactClass, operationId]) => ({
+        artifactClass,
+        operationId,
+      })),
+    }),
+  );
+}
+
+function commitRetentionCleanupOperationIds(next) {
+  persistRetentionCleanupOperationIds(next);
+  retentionCleanupOperationIds.clear();
+  for (const [artifactClass, operationId] of next)
+    retentionCleanupOperationIds.set(artifactClass, operationId);
+}
+
+async function withRetentionCleanupRegistryLock(callback) {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request || !retentionCleanupRegistryLockName)
+    throw new Error("The workspace receipt-cleanup registry is unavailable.");
+  return locks.request(
+    retentionCleanupRegistryLockName,
+    { mode: "exclusive" },
+    callback,
+  );
+}
+
+async function getOrCreateRetentionCleanupOperationId(artifactClass) {
+  return withRetentionCleanupRegistryLock(async () => {
+    synchronizeRetentionCleanupOperationIdsFromStorage();
+    const existing = retentionCleanupOperationIds.get(artifactClass);
+    if (existing) return existing;
+    const operationId = newOperationId();
+    const next = new Map(retentionCleanupOperationIds);
+    next.set(artifactClass, operationId);
+    commitRetentionCleanupOperationIds(next);
+    return operationId;
+  });
+}
+
+async function forgetRetentionCleanupOperationId(artifactClass, operationId) {
+  if (!operationId) return;
+  await withRetentionCleanupRegistryLock(async () => {
+    synchronizeRetentionCleanupOperationIdsFromStorage();
+    if (retentionCleanupOperationIds.get(artifactClass) !== operationId) return;
+    const next = new Map(retentionCleanupOperationIds);
+    next.delete(artifactClass);
+    commitRetentionCleanupOperationIds(next);
+  });
+}
+
 async function configurePendingInvocationRegistry(workspaceRoot) {
   if (typeof workspaceRoot !== "string" || !workspaceRoot)
     throw new Error("The workspace identity is unavailable.");
@@ -5644,6 +6150,7 @@ function setBusy(busy, label) {
     elements.list,
     elements.builderView,
     elements.runsView,
+    elements.retentionView,
   ]) {
     region.inert = busy;
     region.setAttribute("aria-busy", String(busy));
@@ -5668,6 +6175,8 @@ function setInteractive(enabled) {
     elements.invokeButton,
     elements.builderTab,
     elements.runsTab,
+    elements.retentionTab,
+    elements.refreshRetentionButton,
     elements.selectedNodeButton,
     elements.loopSettingsButton,
     elements.zoomOutButton,

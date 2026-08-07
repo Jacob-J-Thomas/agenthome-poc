@@ -1437,6 +1437,7 @@ elements.messageForm.addEventListener("submit", async (event) => {
   elements.cancelButton.disabled = false;
 
   try {
+    // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/260): Retain this canonical message/request identity until a conclusive response or transcript reconciliation proves the outcome.
     const requestId =
       globalThis.crypto?.randomUUID?.() ??
       `request-${Date.now()}-${Math.random()}`;

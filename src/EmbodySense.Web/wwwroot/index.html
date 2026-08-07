@@ -358,6 +358,16 @@
                   >
                     Runs <span id="runCount" class="tab-count">0</span>
                   </button>
+                  <button
+                    id="retentionTab"
+                    class="workspace-tab"
+                    role="tab"
+                    aria-selected="false"
+                    aria-controls="retentionView"
+                    type="button"
+                  >
+                    Retention
+                  </button>
                 </nav>
 
                 <div id="builderLayout" class="builder-layout">
@@ -473,6 +483,42 @@
                         <div id="runTimeline" class="timeline-scroll"></div>
                       </section>
                     </div>
+                    <section
+                      id="retentionView"
+                      class="retention-view"
+                      role="tabpanel"
+                      aria-labelledby="retentionTab"
+                      hidden
+                    >
+                      <header class="retention-header">
+                        <div>
+                          <p class="eyebrow">Inspectable governed evidence</p>
+                          <h2>Receipt retention</h2>
+                          <p>
+                            Exact replay evidence is retained for 30 days.
+                            Cleanup is explicit, bounded, audited, and never
+                            runs automatically.
+                          </p>
+                        </div>
+                        <button
+                          id="refreshRetentionButton"
+                          class="secondary-button compact-button"
+                          type="button"
+                        >
+                          Refresh posture
+                        </button>
+                      </header>
+                      <div
+                        id="retentionNotice"
+                        class="retention-notice"
+                        role="status"
+                        aria-live="polite"
+                      ></div>
+                      <div
+                        id="retentionContent"
+                        class="retention-content"
+                      ></div>
+                    </section>
                   </section>
 
                   <aside class="inspector" aria-label="Selected loop item">

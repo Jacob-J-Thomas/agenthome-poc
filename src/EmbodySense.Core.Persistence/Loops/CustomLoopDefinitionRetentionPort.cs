@@ -34,6 +34,9 @@ public sealed class CustomLoopDefinitionRetentionPort : ICustomLoopReceiptRetent
     public Task<CustomLoopReceiptClassPosture> InspectAsync(CancellationToken cancellationToken = default) => _store.InspectReceiptRetentionAsync(ArtifactClass, cancellationToken);
 
     /// <inheritdoc />
+    public Task<CustomLoopReceiptActiveCleanupJournalPosture> InspectActiveCleanupJournalAsync(CancellationToken cancellationToken = default) => _store.InspectActiveReceiptCleanupJournalAsync(ArtifactClass, cancellationToken);
+
+    /// <inheritdoc />
     public Task<CustomLoopReceiptOperationLookupResult> LookupOperationAsync(string operationId, CancellationToken cancellationToken = default) => _store.LookupReceiptOperationAsync(ArtifactClass, operationId, cancellationToken);
 
     /// <inheritdoc />

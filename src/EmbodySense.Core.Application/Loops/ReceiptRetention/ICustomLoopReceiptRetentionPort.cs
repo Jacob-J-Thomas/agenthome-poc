@@ -22,6 +22,13 @@ public interface ICustomLoopReceiptRetentionPort
     Task<CustomLoopReceiptClassPosture> InspectAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Inspects the safe accounting and durable state summary for the class's active cleanup journal.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel inspection.</param>
+    /// <returns>The journal byte count and durable stage/outcome without exposing journal identity or candidates.</returns>
+    Task<CustomLoopReceiptActiveCleanupJournalPosture> InspectActiveCleanupJournalAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Distinguishes an exact receipt, an expired compact proof, and a previously unseen operation identity.
     /// </summary>
     /// <param name="operationId">The operation identity.</param>

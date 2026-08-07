@@ -124,6 +124,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     /// <inheritdoc />
     public async Task<IReadOnlyList<DefaultConversationTurnRecord>> ListIncompleteAsync(CancellationToken cancellationToken = default)
     {
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/259): Replace full historical scans with a bounded active/review index while preserving immutable terminal evidence.
         return await ListAsync(record => record.Checkpoint < DefaultConversationTurnCheckpoint.Terminal, cancellationToken);
     }
 
