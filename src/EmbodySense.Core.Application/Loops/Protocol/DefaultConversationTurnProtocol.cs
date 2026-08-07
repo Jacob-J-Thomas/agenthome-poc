@@ -34,6 +34,7 @@ public static class DefaultConversationTurnProtocol
         requestId = requestId.Trim();
         var turnId = CreateTurnId(requestId);
         var transition = new DefaultConversationTurnTransition(1, CreateTransitionId(turnId, 1, DefaultConversationTurnCheckpoint.Admitted), DefaultConversationTurnCheckpoint.Admitted, admittedAtUtc, "Turn identity and canonical base transcript admitted.");
+        // TODO(#259): Bound active/review scans without deleting or rewriting this immutable transcript evidence. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/259
         return new DefaultConversationTurnRecord(
             DefaultConversationTurnRecord.CurrentSchemaVersion,
             1,

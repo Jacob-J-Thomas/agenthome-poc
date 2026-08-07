@@ -19,6 +19,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
+    // TODO(#268): Reject unmapped root and nested members instead of accepting an implicit compatibility shape. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/268
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
