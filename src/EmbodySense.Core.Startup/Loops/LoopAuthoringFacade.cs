@@ -1,9 +1,9 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Application.Loops.Authoring;
-using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
@@ -84,6 +84,7 @@ public sealed class LoopAuthoringFacade
             systemDefinition.RoleId,
             MapSystemDefinition(systemDefinition),
             definitions.Select(Map).ToArray(),
+            CreateDraftTemplate(systemDefinition.RoleId),
             CreateLimits(),
             CreateToolCatalog(systemDefinition));
     }
@@ -102,7 +103,7 @@ public sealed class LoopAuthoringFacade
     }
 
     /// <summary>
-    /// Creates a new server-owned custom-loop draft for the current role.
+    /// Creates a new server-owned custom-loop seed for the current role.
     /// </summary>
     /// <param name="operationId">The idempotency identity to reuse when the caller cannot determine whether a prior response committed.</param>
     /// <param name="cancellationToken">The token used to cancel the authoring operation.</param>
@@ -111,6 +112,23 @@ public sealed class LoopAuthoringFacade
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
         return Map(await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, cancellationToken));
+    }
+
+    /// <summary>
+    /// Validates and atomically creates the first durable version of a client-authored loop draft.
+    /// </summary>
+    /// <param name="operationId">The idempotency identity reused until an uncertain first-save outcome is resolved.</param>
+    /// <param name="input">The complete editable definition captured at the explicit first-save boundary.</param>
+    /// <param name="cancellationToken">The token used to cancel validation, persistence, and auditing.</param>
+    /// <returns>A task whose result reports commit, replay, validation, authority, quota, conflict, and audit-integrity status.</returns>
+    public async Task<LoopAuthoringResponse> CreateAsync(string operationId, LoopDefinitionInput input, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
+        var result = await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
+        return Map(result);
     }
 
     /// <summary>
@@ -127,15 +145,8 @@ public sealed class LoopAuthoringFacade
         ArgumentNullException.ThrowIfNull(input);
 
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
-        var applicationInput = new CustomLoopDefinitionInput(
-            input.DisplayName,
-            input.Description,
-            Map(input.TriggerPolicy)!,
-            input.InferenceSteps?.Select(step => step is null ? null! : new CustomLoopInferenceStepInput(step.Id, step.Name, step.Instruction, Map(step.ContextPolicy)!)).ToArray()!,
-            input.ToolAssignments?.Select(Map).ToArray()!,
-            Map(input.ExitPolicy)!);
         var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
-        var result = await _service.UpdateAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, applicationInput, currentRoleCeiling, cancellationToken);
+        var result = await _service.UpdateAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
         return Map(result);
     }
 
@@ -202,6 +213,31 @@ public sealed class LoopAuthoringFacade
             CustomLoopLimits.MaxRunExecutionMilliseconds);
     }
 
+    private static LoopDefinitionDraftTemplate CreateDraftTemplate(string roleId)
+    {
+        var seed = CustomLoopDefinition.CreateSeed("draft-template", roleId, "draft-template-step", "draft-template-operation", DateTimeOffset.UnixEpoch);
+        var definition = new LoopDefinitionInput(
+            seed.DisplayName,
+            seed.Description,
+            Map(seed.TriggerPolicy),
+            seed.InferenceSteps.Select(step => new LoopInferenceStep(null, step.Name, step.Instruction, Map(step.ContextPolicy))).ToArray(),
+            seed.ToolAssignments.Select(Map).ToArray(),
+            Map(seed.ExitPolicy));
+        var contextDefaults = new LoopContextDefaults(Map(seed.ContextDefaults.Inference), Map(seed.ContextDefaults.Exit));
+        return new LoopDefinitionDraftTemplate(seed.SchemaVersion, seed.RoleId, definition, contextDefaults);
+    }
+
+    private static CustomLoopDefinitionInput MapDefinitionInput(LoopDefinitionInput input)
+    {
+        return new CustomLoopDefinitionInput(
+            input.DisplayName,
+            input.Description,
+            Map(input.TriggerPolicy)!,
+            input.InferenceSteps?.Select(step => step is null ? null! : new CustomLoopInferenceStepInput(step.Id, step.Name, step.Instruction, Map(step.ContextPolicy)!)).ToArray()!,
+            input.ToolAssignments?.Select(Map).ToArray()!,
+            Map(input.ExitPolicy)!);
+    }
+
     private static LoopToolCatalog CreateToolCatalog(LoopDefinition systemDefinition)
     {
         var assignable = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition).Select(Map).ToArray();
@@ -241,29 +277,37 @@ public sealed class LoopAuthoringFacade
             definition.LastMutationOperationId);
     }
 
-    private static LoopDefinitionSnapshot MapSystemDefinition(LoopDefinition definition)
+    private static SystemLoopDefinitionSnapshot MapSystemDefinition(LoopDefinition definition)
     {
-        var defaults = CustomLoopContextDefaults.CreatePrototypeDefaults();
-        var toolAssignments = Enum.GetValues<ToolCommand>()
-            .Where(command => LoopCapabilityIds.AllowsWorkspaceCommand(definition.CapabilityIds, command))
-            .Select(Map)
-            .ToArray();
-        return new LoopDefinitionSnapshot(
+        var graph = definition.Graph;
+        var executionBlocker = DefaultConversationLoopGraphContract.GetExecutionBlocker(definition);
+        var executionSemantics = executionBlocker is null ? SystemLoopExecutionSemantics.AuthorityTopologyOnly : SystemLoopExecutionSemantics.Unknown;
+        var executionDetail = executionBlocker is null
+            ? "The dedicated runner accepts this system-owned graph as its authority topology, but it does not certify the nodes and edges as an exact execution-order contract. The hard-coded transaction assembles context before durable user acceptance, publishes the user message before provider inference, then observes and publishes the assistant message; nodes are not dispatched independently by a generic graph executor."
+            : $"The dedicated runner rejects this persisted graph contract: {executionBlocker}";
+        return new SystemLoopDefinitionSnapshot(
             definition.SchemaVersion,
             definition.Id,
-            1,
-            string.Empty,
-            DateTimeOffset.MinValue,
-            DateTimeOffset.MinValue,
             definition.DisplayName,
             definition.Description,
             definition.RoleId,
-            new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, true),
-            new LoopContextDefaults(Map(defaults.Inference), Map(defaults.Exit)),
-            [new LoopInferenceStep(DefaultConversationLoopGraphIds.DispatchInference, "Respond in role", "System-managed default conversation behavior.", new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(Map(defaults.Inference.ContextIn), new LoopContextOutputPolicy(true, true))))],
-            toolAssignments,
-            new LoopExitPolicy(0, string.Empty, new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)),
-            string.Empty);
+            definition.Trigger,
+            definition.MemoryScope,
+            definition.CapabilityIds.ToArray(),
+            definition.ReviewPolicy,
+            definition.FailurePolicy,
+            definition.State,
+            definition.EditMode,
+            new SystemLoopGraphSnapshot(
+                graph.EntryNodeId,
+                graph.TerminalNodeIds.ToArray(),
+                graph.Nodes.Select(node => new SystemLoopGraphNodeSnapshot(node.Id, node.DisplayName, node.Description, node.Kind, node.EditMode, node.CapabilityIds.ToArray(), executionSemantics)).ToArray(),
+                graph.Edges.Select(edge => new SystemLoopGraphEdgeSnapshot(edge.Id, edge.FromNodeId, edge.ToNodeId, edge.Condition, edge.Description, executionSemantics)).ToArray()),
+            new SystemLoopExecutionContractSnapshot(
+                nameof(DefaultConversationLoopRunner),
+                executionSemantics,
+                false,
+                executionDetail));
     }
 
     private static CustomLoopTriggerPolicy? Map(LoopTriggerPolicy? trigger) => trigger is null ? null : new((CustomLoopTriggerPromptSource)(int)trigger.PromptSource, trigger.PresetPrompt, trigger.IncludeInvokingConversation);
@@ -273,17 +317,6 @@ public sealed class LoopAuthoringFacade
     private static CustomLoopToolAssignment Map(LoopToolAssignment assignment) => (CustomLoopToolAssignment)(int)assignment;
 
     private static LoopToolAssignment Map(CustomLoopToolAssignment assignment) => (LoopToolAssignment)(int)assignment;
-
-    private static LoopToolAssignment Map(ToolCommand command) => command switch
-    {
-        ToolCommand.List => LoopToolAssignment.List,
-        ToolCommand.Read => LoopToolAssignment.Read,
-        ToolCommand.Search => LoopToolAssignment.Search,
-        ToolCommand.Append => LoopToolAssignment.Append,
-        ToolCommand.Write => LoopToolAssignment.Write,
-        ToolCommand.Delete => LoopToolAssignment.Delete,
-        _ => throw new ArgumentOutOfRangeException(nameof(command), command, "Unsupported governed workspace command.")
-    };
 
     private static CustomLoopExitPolicy? Map(LoopExitPolicy? exit) => exit is null ? null : new(exit.MaxAdditionalIterations, exit.DecisionInstruction, Map(exit.ContextPolicy)!);
 

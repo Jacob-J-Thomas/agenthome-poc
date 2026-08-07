@@ -3,6 +3,8 @@ using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Models;
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Commands;
 using EmbodySense.Core.Application.Runtime.Models;
@@ -32,6 +34,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly RuntimeCommandService _commandService;
     private readonly ConversationRuntimeState _conversationState;
     private readonly CustomLoopRuntimeFacade _customLoops;
+    private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
 
     internal AgentRuntime(
         WorkspacePaths paths,
@@ -42,6 +45,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IAsyncDisposable inferenceClient,
         IDefaultConversationLoopRunner loopRunner,
         CustomLoopRuntimeFacade customLoops,
+        DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -52,6 +56,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(inferenceClient);
         ArgumentNullException.ThrowIfNull(loopRunner);
         ArgumentNullException.ThrowIfNull(customLoops);
+        ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
         Paths = paths;
@@ -62,6 +67,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _inferenceClient = inferenceClient;
         _loopRunner = loopRunner;
         _customLoops = customLoops;
+        _defaultConversationReviews = defaultConversationReviews;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
         CodexRuntimeStatus = codexRuntimeStatus;
     }
@@ -113,13 +119,21 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <param name="responseChunkHandler">An optional callback for streamed assistant-message deltas.</param>
     /// <param name="verboseContextHandler">An optional callback for verbose context diagnostics when verbose mode is enabled.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <param name="requestId">An optional caller-owned idempotency identity for model turns.</param>
     /// <returns>A task whose result projects command output, transcript events, completion, cancellation, or failure.</returns>
     public async Task<AgentRuntimeTurnResult> RunTurnAsync(
         string input,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         Func<string, CancellationToken, Task>? verboseContextHandler = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? requestId = null)
     {
+        var reviewCommand = await TryHandleDefaultConversationReviewCommandAsync(input, cancellationToken);
+        if (reviewCommand is not null)
+        {
+            return reviewCommand;
+        }
+
         var commandResult = await _commandService.TryHandleAsync(input, _conversationState, _state, cancellationToken);
         if (commandResult.Handled)
         {
@@ -127,7 +141,77 @@ public sealed class AgentRuntime : IAsyncDisposable
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(input);
-        return await RunModelTurnAsync(input, responseChunkHandler, verboseContextHandler, cancellationToken);
+        return await RunModelTurnAsync(input, responseChunkHandler, verboseContextHandler, cancellationToken, requestId);
+    }
+
+    /// <summary>
+    /// Lists unresolved default-conversation review evidence for CLI and Web projections.
+    /// </summary>
+    public async Task<IReadOnlyList<DefaultConversationReviewSnapshot>> ListDefaultConversationReviewsAsync(CancellationToken cancellationToken = default)
+    {
+        var records = await _defaultConversationReviews.ListAsync(cancellationToken);
+        return records.Select(ToReviewSnapshot).ToArray();
+    }
+
+    /// <summary>
+    /// Explicitly abandons one inspected outcome-unknown attempt after quarantining provider transport.
+    /// </summary>
+    public async Task<DefaultConversationReviewSnapshot?> ResolveDefaultConversationReviewAsync(string turnId, CancellationToken cancellationToken = default)
+    {
+        var record = await _defaultConversationReviews.ResolveAsync(turnId, cancellationToken);
+        return record is null ? null : ToReviewSnapshot(record);
+    }
+
+    private async Task<AgentRuntimeTurnResult?> TryHandleDefaultConversationReviewCommandAsync(string input, CancellationToken cancellationToken)
+    {
+        if (string.Equals(input?.Trim(), "/review", StringComparison.OrdinalIgnoreCase))
+        {
+            var reviews = await ListDefaultConversationReviewsAsync(cancellationToken);
+            if (reviews.Count == 0)
+            {
+                return AgentRuntimeTurnResult.CommandOutput("No unresolved default-conversation reviews were found.");
+            }
+
+            var lines = reviews.Select(review => $"- {review.TurnId}: {review.Classification}; attempt `{review.ProviderAttemptId}`, correlation `{review.ProviderCorrelationId}` - {review.Detail} Allowed action: {review.AllowedAction}");
+            return AgentRuntimeTurnResult.CommandOutput("Unresolved default-conversation reviews:" + Environment.NewLine + string.Join(Environment.NewLine, lines));
+        }
+
+        const string ResolvePrefix = "/review resolve ";
+        if (input is null || !input.TrimStart().StartsWith(ResolvePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var turnId = input.Trim()[ResolvePrefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(turnId))
+        {
+            return AgentRuntimeTurnResult.CommandOutput("Usage: /review resolve <turn-id>");
+        }
+
+        var review = (await ListDefaultConversationReviewsAsync(cancellationToken)).SingleOrDefault(candidate => string.Equals(candidate.TurnId, turnId, StringComparison.Ordinal));
+        if (review is not null && review.Classification != DefaultConversationTurnReviewClassification.OutcomeUnknown)
+        {
+            return AgentRuntimeTurnResult.CommandOutput($"Default-conversation turn `{turnId}` is classified as {review.Classification} and cannot be abandoned. {review.AllowedAction}");
+        }
+
+        var resolved = await ResolveDefaultConversationReviewAsync(turnId, cancellationToken);
+        return resolved is null
+            ? AgentRuntimeTurnResult.CommandOutput($"Default-conversation turn `{turnId}` was not found.")
+            : AgentRuntimeTurnResult.CommandOutput($"Resolved `{turnId}` by explicitly abandoning its outcome-unknown provider attempt. No provider request or transcript publication was replayed.");
+    }
+
+    private static DefaultConversationReviewSnapshot ToReviewSnapshot(DefaultConversationTurnRecord record)
+    {
+        return new DefaultConversationReviewSnapshot(
+            record.TurnId,
+            record.RequestId,
+            record.Run.RunId,
+            record.LifecycleVersion,
+            record.ProviderAttemptId,
+            record.ProviderCorrelationId,
+            record.ReviewDetail ?? "No review detail was retained.",
+            DefaultConversationTurnProtocol.GetReviewClassification(record),
+            DefaultConversationTurnProtocol.GetReviewAction(record));
     }
 
     /// <summary>
@@ -248,7 +332,8 @@ public sealed class AgentRuntime : IAsyncDisposable
         string message,
         Func<string, CancellationToken, Task>? responseChunkHandler,
         Func<string, CancellationToken, Task>? verboseContextHandler,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requestId)
     {
         Func<RuntimeDiagnosticMessage, CancellationToken, Task>? diagnosticHandler = null;
         if (_state.Verbose && verboseContextHandler is not null)
@@ -261,7 +346,7 @@ public sealed class AgentRuntime : IAsyncDisposable
             };
         }
 
-        var request = new DefaultConversationLoopTurnRequest(message, responseChunkHandler, diagnosticHandler, cancellationToken);
+        var request = new DefaultConversationLoopTurnRequest(message, responseChunkHandler, diagnosticHandler, cancellationToken, requestId);
         var result = await _loopRunner.RunTurnAsync(request);
         _commandService.ClearPendingInput();
         if (result.UserMessageAccepted)

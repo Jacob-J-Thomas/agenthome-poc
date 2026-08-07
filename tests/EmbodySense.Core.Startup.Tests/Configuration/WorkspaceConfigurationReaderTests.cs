@@ -9,6 +9,8 @@ using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.Text;
+using System.Text.Json;
 
 namespace EmbodySense.Core.Startup.Tests.Configuration;
 
@@ -18,7 +20,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_returns_initialized_workspace_configuration_details()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await WriteTranscriptAsync(paths.CurrentConversationPath, "current", "current prompt", "current answer");
         Directory.CreateDirectory(paths.ArchivedConversationMemoryPath);
@@ -92,7 +94,7 @@ public sealed class WorkspaceConfigurationReaderTests
     public async Task ReadAsync_caps_sensitive_snapshot_content()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await File.WriteAllTextAsync(paths.PermissionsPath, """{"version":2,"scope":"test","access_token":"secret-value","approved":[],"denied":[]}""");
         await File.WriteAllTextAsync(paths.AgentFile("ROLE.md"), "api_key=secret-value" + Environment.NewLine + new string('a', 41_000));
@@ -118,10 +120,79 @@ public sealed class WorkspaceConfigurationReaderTests
     }
 
     [Fact]
-    public async Task ReadAsync_coordinates_a_consistent_snapshot_with_conversation_rotation()
+    public async Task ReadAsync_reads_audit_while_an_append_compatible_writer_handle_is_open()
     {
         using var workspace = new TestWorkspace();
         await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new AuditLog(paths).AppendAsync(AuditEvent.Create("test.actor", "test.concurrent-read", "target", "ok", "detail"));
+        await using var writer = new FileStream(paths.EventsLogPath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, FileOptions.Asynchronous);
+
+        var snapshot = await new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime()).WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.Contains(snapshot.Audit.Events, auditEvent => auditEvent.Action == "test.concurrent-read");
+        Assert.Empty(snapshot.Audit.ReadProblems);
+    }
+
+    [Fact]
+    public async Task ReadAsync_returns_a_bounded_snapshot_while_an_audit_writer_continues_appending()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await new AuditLog(paths).AppendAsync(AuditEvent.Create("test.actor", "test.snapshot", "target", "ok", "detail"));
+        using var writerCancellation = new CancellationTokenSource();
+        var writerStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var line = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(AuditEvent.Create("test.actor", "test.concurrent-append", "target", "ok", new string('a', 4_096))) + Environment.NewLine);
+        var writerTask = Task.Run(async () =>
+        {
+            try
+            {
+                await using var writer = new FileStream(paths.EventsLogPath, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 4096, FileOptions.Asynchronous);
+                while (!writerCancellation.Token.IsCancellationRequested)
+                {
+                    await writer.WriteAsync(line, writerCancellation.Token);
+                    await writer.FlushAsync(writerCancellation.Token);
+                    writerStarted.TrySetResult(true);
+                    await Task.Yield();
+                }
+            }
+            catch (OperationCanceledException) when (writerCancellation.IsCancellationRequested)
+            {
+            }
+        });
+
+        try
+        {
+            await writerStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var snapshot = await new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime()).WaitAsync(TimeSpan.FromSeconds(3));
+
+            Assert.Contains(snapshot.Audit.Events, auditEvent => auditEvent.Action == "test.concurrent-append");
+            Assert.False(writerTask.IsCompleted);
+        }
+        finally
+        {
+            await writerCancellation.CancelAsync();
+            await writerTask.WaitAsync(TimeSpan.FromSeconds(3));
+        }
+    }
+
+    [Fact]
+    public async Task ReadAsync_still_surfaces_a_persistent_exclusive_audit_lock()
+    {
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var exclusive = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None, bufferSize: 1, FileOptions.Asynchronous);
+
+        await Assert.ThrowsAsync<IOException>(() => new WorkspaceConfigurationReader().ReadAsync(workspace.RootPath, Runtime()));
+    }
+
+    [Fact]
+    public async Task ReadAsync_coordinates_a_consistent_snapshot_with_conversation_rotation()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("overlap prompt"));
@@ -168,8 +239,8 @@ public sealed class WorkspaceConfigurationReaderTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, $$"""
-            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","role":"user","content":"{{prompt}}"}
-            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","role":"assistant","content":"{{answer}}"}
+            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":1,"timestampUtc":"2026-06-01T00:01:00+00:00","messageId":"message-1","publicationId":"publication-1","role":"user","content":"{{prompt}}"}
+            {"schemaVersion":1,"conversationId":"{{conversationId}}","sequence":2,"timestampUtc":"2026-06-01T00:02:00+00:00","messageId":"message-2","publicationId":"publication-2","role":"assistant","content":"{{answer}}"}
             """);
     }
 
@@ -179,7 +250,7 @@ public sealed class WorkspaceConfigurationReaderTests
         var lines = Enumerable.Range(1, 205).Select(index =>
         {
             var role = index % 2 == 0 ? "assistant" : "user";
-            return $$"""{"schemaVersion":1,"conversationId":"current","sequence":{{index}},"timestampUtc":"2026-06-01T00:01:00+00:00","role":"{{role}}","content":"message {{index}}"}""";
+            return $$"""{"schemaVersion":1,"conversationId":"current","sequence":{{index}},"timestampUtc":"2026-06-01T00:01:00+00:00","messageId":"message-{{index}}","publicationId":"publication-{{index}}","role":"{{role}}","content":"message {{index}}"}""";
         });
         await File.WriteAllTextAsync(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
     }

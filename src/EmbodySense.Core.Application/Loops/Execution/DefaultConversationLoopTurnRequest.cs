@@ -18,15 +18,23 @@ public sealed record DefaultConversationLoopTurnRequest
     /// <param name="responseChunkHandler">The response chunk handler.</param>
     /// <param name="diagnosticHandler">The diagnostic handler.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <param name="requestId">An optional caller-owned idempotency identity; omitted values receive a fresh identity.</param>
     public DefaultConversationLoopTurnRequest(
         string input,
         Func<string, CancellationToken, Task>? responseChunkHandler = null,
         Func<RuntimeDiagnosticMessage, CancellationToken, Task>? diagnosticHandler = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? requestId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(input);
 
         Input = input;
+        RequestId = string.IsNullOrWhiteSpace(requestId) ? "request-" + Guid.NewGuid().ToString("N") : requestId.Trim();
+        if (RequestId.Length > 256)
+        {
+            throw new ArgumentException("Request id cannot exceed 256 characters.", nameof(requestId));
+        }
+
         ResponseChunkHandler = responseChunkHandler;
         DiagnosticHandler = diagnosticHandler;
         CancellationToken = cancellationToken;
@@ -37,6 +45,11 @@ public sealed record DefaultConversationLoopTurnRequest
     /// </summary>
     /// <value>The input.</value>
     public string Input { get; }
+
+    /// <summary>
+    /// Gets the caller-owned idempotency identity.
+    /// </summary>
+    public string RequestId { get; }
 
     /// <summary>
     /// Gets the response chunk handler func.
