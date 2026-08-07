@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Inference;
@@ -16,6 +18,7 @@ using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -29,6 +32,9 @@ public sealed class DefaultConversationTurnRecoveryTests
     private const string PublicationReadyVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_READY";
     private const string PublicationReleaseVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_RELEASE";
     private const string PublicationResultVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_PUBLICATION_RESULT";
+    private const string TurnLeaseWorkspaceVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_WORKSPACE";
+    private const string TurnLeaseReadyVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_READY";
+    private const string TurnLeaseReleaseVariable = "EMBODYSENSE_TEST_DEFAULT_TURN_LEASE_RELEASE";
 
     public static TheoryData<DefaultConversationTurnBoundary, LoopRunStatus, int> DurableBoundaries => new()
     {
@@ -593,6 +599,70 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
+    public async Task Cross_process_active_set_lease_contention_remains_cancellation_aware()
+    {
+        using var workspace = new TestWorkspace();
+        var readyPath = workspace.File("turn-lease-ready");
+        var releasePath = workspace.File("turn-lease-release");
+        using var process = StartSelfTest(
+            nameof(Cross_process_active_set_lease_worker_holds_until_released),
+            new Dictionary<string, string>
+            {
+                [TurnLeaseWorkspaceVariable] = workspace.RootPath,
+                [TurnLeaseReadyVariable] = readyPath,
+                [TurnLeaseReleaseVariable] = releasePath
+            });
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await WaitForFileAsync(readyPath, process, TimeSpan.FromSeconds(20));
+            using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+            var turns = new DefaultConversationTurnStore(new WorkspacePaths(workspace.RootPath));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => turns.ListIncompleteAsync(cancellation.Token));
+
+            await File.WriteAllTextAsync(releasePath, "release");
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+            var output = await outputTask;
+            var error = await errorTask;
+            Assert.True(process.ExitCode == 0, $"Turn-lease worker exited with `{process.ExitCode}`. stdout: {output} stderr: {error}");
+        }
+        finally
+        {
+            if (!File.Exists(releasePath))
+            {
+                await File.WriteAllTextAsync(releasePath, "release");
+            }
+
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Cross_process_active_set_lease_worker_holds_until_released()
+    {
+        var workspaceRoot = Environment.GetEnvironmentVariable(TurnLeaseWorkspaceVariable);
+        if (string.IsNullOrWhiteSpace(workspaceRoot))
+        {
+            return;
+        }
+
+        var readyPath = Environment.GetEnvironmentVariable(TurnLeaseReadyVariable) ?? throw new InvalidOperationException("The turn-lease ready path is required.");
+        var releasePath = Environment.GetEnvironmentVariable(TurnLeaseReleaseVariable) ?? throw new InvalidOperationException("The turn-lease release path is required.");
+        var coordination = new FileBlockingTurnStoreCoordination(readyPath, releasePath);
+        var paths = new WorkspacePaths(workspaceRoot);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var turns = new DefaultConversationTurnStore(paths, coordination);
+
+        _ = await turns.ListIncompleteAsync();
+    }
+
+    [Fact]
     public async Task Store_replays_exact_updates_and_rejects_mutated_append_only_history()
     {
         using var workspace = new TestWorkspace();
@@ -677,14 +747,10 @@ public sealed class DefaultConversationTurnRecoveryTests
         var startedAtUtc = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, startedAtUtc);
         var admitted = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), startedAtUtc.AddSeconds(1), RequestId);
-        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, admitted.TurnId + ".json");
-        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
-        {
-            WriteIndented = true,
-            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
-        };
+        var artifactPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var options = CreateTurnJsonOptions();
 
-        Directory.CreateDirectory(paths.DefaultConversationTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
         await File.WriteAllTextAsync(artifactPath, JsonSerializer.Serialize(admitted with { ProviderAttemptId = "provider-attempt-forged" }, options));
         await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(admitted.TurnId));
 
@@ -701,6 +767,554 @@ public sealed class DefaultConversationTurnRecoveryTests
         };
         await File.WriteAllTextAsync(artifactPath, JsonSerializer.Serialize(skipped, options));
         await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(admitted.TurnId));
+    }
+
+    [Fact]
+    public async Task Store_rejects_legacy_flat_artifacts_before_reading_active_or_history_storage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationTurnsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationTurnsPath, "legacy.json"), "{}");
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync("legacy"));
+
+        Assert.Contains("predates bounded active-turn discovery", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Active_discovery_fails_closed_before_materializing_corrupt_or_oversized_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, "corrupt.json"), "{}");
+        await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
+
+        File.Delete(Path.Combine(paths.DefaultConversationActiveTurnsPath, "corrupt.json"));
+        await File.WriteAllBytesAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, "oversized.json"), new byte[1024 * 1024 + 1]);
+        await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
+    }
+
+    [Fact]
+    public async Task Active_discovery_rejects_count_and_aggregate_bounds_before_json_deserialization()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        for (var index = 0; index < 129; index++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, $"turn-{index:D3}.json"), "{}");
+        }
+        await Assert.ThrowsAsync<IOException>(() => turns.ListIncompleteAsync());
+    }
+
+    [Fact]
+    public async Task Active_discovery_bounds_all_entries_and_fails_closed_on_interrupted_or_unrecognized_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var interruptedPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, ".turn.json.0123456789abcdef0123456789abcdef.tmp");
+        await File.WriteAllTextAsync(interruptedPath, "staged");
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
+        Assert.Equal("staged", await File.ReadAllTextAsync(interruptedPath));
+
+        File.Delete(interruptedPath);
+        for (var index = 0; index < 129; index++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, $"unexpected-{index:D3}.tmp"), "staged");
+        }
+
+        await Assert.ThrowsAsync<IOException>(() => turns.ListIncompleteAsync());
+    }
+
+    [Fact]
+    public async Task Active_discovery_enforces_aggregate_bytes_from_the_opened_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var conversation = await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync();
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        for (var index = 0; index < 9; index++)
+        {
+            var requestId = $"request-aggregate-{index:D2}";
+            var startedAtUtc = new DateTimeOffset(2026, 8, 1, 12, index, 0, TimeSpan.Zero);
+            var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(requestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, startedAtUtc);
+            var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), startedAtUtc.AddSeconds(1), requestId);
+            var json = JsonSerializer.Serialize(record, CreateTurnJsonOptions());
+            var padding = 1024 * 1024 - System.Text.Encoding.UTF8.GetByteCount(json);
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json"), json + new string(' ', padding));
+        }
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
+    }
+
+    [Fact]
+    public async Task Active_discovery_does_not_materialize_unrelated_terminal_history()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        for (var index = 0; index < 256; index++)
+        {
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationTurnHistoryPath, $"terminal-{index:D3}.json"), "{}");
+        }
+
+        var record = await CreateAdmittedRecordAsync(paths, "request-bounded-history");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
+
+        Assert.Equal(record.TurnId, Assert.Single(await turns.ListIncompleteAsync()).TurnId);
+    }
+
+    [Fact]
+    public async Task Normal_archival_and_arbitrary_loads_leave_only_the_single_active_set_lease_artifact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        for (var index = 0; index < 140; index++)
+        {
+            var admitted = await CreateAdmittedRecordAsync(paths, $"request-normal-history-{index:D3}");
+            var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+            var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+            Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(admitted)).Status);
+            Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+            Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(terminal, prepared.LifecycleVersion)).Status);
+            Assert.Null(await turns.LoadAsync($"missing-{index:D3}"));
+        }
+
+        Assert.Equal(140, Directory.EnumerateFiles(paths.DefaultConversationTurnHistoryPath, "*.json").Count());
+        Assert.Empty(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.json"));
+        Assert.Collection(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath).Select(Path.GetFileName).Order(StringComparer.Ordinal), file => Assert.Equal(".active-set.lock", file));
+    }
+
+    [Fact]
+    public async Task Review_resolution_archives_replays_conflicts_and_releases_active_capacity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-review-resolution", needsReview: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        await File.WriteAllTextAsync(activePath, JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()) + Environment.NewLine);
+        for (var index = 0; index < 127; index++)
+        {
+            var filler = await CreateAdmittedRecordAsync(paths, $"request-review-capacity-{index:D3}");
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, filler.TurnId + ".json"), JsonSerializer.Serialize(filler, CreateTurnJsonOptions()) + Environment.NewLine);
+        }
+
+        var resolved = terminal.ResolveReview(terminal.Transitions[^1].OccurredAtUtc.AddSeconds(1));
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(resolved, terminal.LifecycleVersion)).Status);
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(historyPath));
+        Assert.Equal(DefaultConversationTurnStoreStatus.Replay, (await turns.CreateAsync(resolved)).Status);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Conflict, (await turns.CreateAsync(resolved with { UserMessage = resolved.UserMessage with { Content = "changed" } })).Status);
+
+        var replacement = await CreateAdmittedRecordAsync(paths, "request-after-review-resolution");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(replacement)).Status);
+        Assert.Equal(128, Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.json").Count());
+    }
+
+    [Fact]
+    public async Task Store_enforces_serialized_artifact_and_aggregate_byte_limits_before_commit()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        for (var index = 0; index < 8; index++)
+        {
+            var record = WithSerializedSize(await CreateAdmittedRecordAsync(paths, $"request-byte-boundary-{index:D2}"), 1024 * 1024);
+            Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
+        }
+
+        var aggregateOverflow = await CreateAdmittedRecordAsync(paths, "request-aggregate-overflow");
+        await Assert.ThrowsAsync<FormatException>(() => turns.CreateAsync(aggregateOverflow));
+        Assert.Equal(8, Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.json").Count());
+
+        using var oversizeWorkspace = new TestWorkspace();
+        var oversizePaths = new WorkspacePaths(oversizeWorkspace.RootPath);
+        var oversizeTurns = new DefaultConversationTurnStore(oversizePaths);
+        var admitted = await CreateAdmittedRecordAsync(oversizePaths, "request-artifact-oversize");
+        var oversized = WithSerializedSize(admitted, 1024 * 1024 + 1);
+        await Assert.ThrowsAsync<FormatException>(() => oversizeTurns.CreateAsync(oversized));
+        Assert.False(Directory.Exists(oversizePaths.DefaultConversationActiveTurnsPath));
+
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await oversizeTurns.CreateAsync(admitted)).Status);
+        var oversizedUpdate = admitted.Advance(DefaultConversationTurnCheckpoint.RunStarted, DateTimeOffset.UtcNow, new string('x', 1024 * 1024));
+        await Assert.ThrowsAsync<FormatException>(() => oversizeTurns.UpdateAsync(oversizedUpdate, admitted.LifecycleVersion));
+        var unchanged = await oversizeTurns.LoadAsync(admitted.TurnId);
+        Assert.NotNull(unchanged);
+        Assert.Equal(admitted.LifecycleVersion, unchanged.LifecycleVersion);
+        Assert.Equal(admitted.Checkpoint, unchanged.Checkpoint);
+        Assert.Equal(admitted.UserMessage, unchanged.UserMessage);
+    }
+
+    [Fact]
+    public async Task Archiving_update_rejects_transient_aggregate_overflow_before_mutating_active_or_history()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-archival-overflow", needsReview: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var terminalJson = JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()) + Environment.NewLine;
+        await File.WriteAllTextAsync(activePath, terminalJson);
+        var remainingBytes = 8 * 1024 * 1024 - Encoding.UTF8.GetByteCount(terminalJson);
+        for (var index = 0; index < 7; index++)
+        {
+            var filler = WithSerializedSize(await CreateAdmittedRecordAsync(paths, $"request-archival-overflow-{index:D2}"), 1024 * 1024);
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, filler.TurnId + ".json"), JsonSerializer.Serialize(filler, CreateTurnJsonOptions()) + Environment.NewLine);
+            remainingBytes -= 1024 * 1024;
+        }
+
+        var finalFiller = WithSerializedSize(await CreateAdmittedRecordAsync(paths, "request-archival-overflow-final"), remainingBytes);
+        await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, finalFiller.TurnId + ".json"), JsonSerializer.Serialize(finalFiller, CreateTurnJsonOptions()) + Environment.NewLine);
+        var originalActive = await File.ReadAllBytesAsync(activePath);
+        var resolved = terminal.ResolveReview(terminal.Transitions[^1].OccurredAtUtc.AddSeconds(1));
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.UpdateAsync(resolved, terminal.LifecycleVersion));
+
+        Assert.Equal(originalActive, await File.ReadAllBytesAsync(activePath));
+        Assert.False(File.Exists(historyPath));
+        var reloaded = await turns.LoadAsync(terminal.TurnId);
+        Assert.NotNull(reloaded);
+        Assert.Equal(terminal.LifecycleVersion, reloaded.LifecycleVersion);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, reloaded.Checkpoint);
+        Assert.Null(reloaded.ReviewResolution);
+        Assert.Equal(terminal.TurnId, Assert.Single(await turns.ListNeedsReviewAsync()).TurnId);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Store_rejects_unknown_or_mis_cased_fields_in_active_and_history_artifacts(bool history, bool misCased)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var record = await CreateAdmittedRecordAsync(paths, $"request-strict-json-{history}-{misCased}");
+        var directory = history ? paths.DefaultConversationTurnHistoryPath : paths.DefaultConversationActiveTurnsPath;
+        Directory.CreateDirectory(directory);
+        var json = JsonSerializer.Serialize(record, CreateTurnJsonOptions());
+        json = misCased ? json.Replace("\"schemaVersion\"", "\"SchemaVersion\"", StringComparison.Ordinal) : json.Insert(json.LastIndexOf('}'), ",\"unknownField\":true");
+        await File.WriteAllTextAsync(Path.Combine(directory, record.TurnId + ".json"), json);
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(record.TurnId));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Store_rejects_duplicate_properties_in_active_and_history_artifacts(bool history)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var record = await CreateAdmittedRecordAsync(paths, $"request-duplicate-json-{history}");
+        var directory = history ? paths.DefaultConversationTurnHistoryPath : paths.DefaultConversationActiveTurnsPath;
+        Directory.CreateDirectory(directory);
+        var json = JsonSerializer.Serialize(record, CreateTurnJsonOptions());
+        json = json.Insert(1, "\"schemaVersion\":2,");
+        await File.WriteAllTextAsync(Path.Combine(directory, record.TurnId + ".json"), json);
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(record.TurnId));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Store_rejects_unix_fifo_artifacts_and_leases_without_blocking(bool lease)
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var fifoPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, lease ? ".active-set.lock" : "malicious.json");
+        Assert.Equal(0, mkfifo(fifoPath, 0x180));
+
+        var operation = turns.ListIncompleteAsync();
+        var completed = await Task.WhenAny(operation, Task.Delay(TimeSpan.FromSeconds(2)));
+
+        Assert.Same(operation, completed);
+        var exception = await Assert.ThrowsAsync<IOException>(() => operation);
+        Assert.Contains("not a regular file", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Store_refuses_symbolic_links_for_active_artifacts_and_leases(bool lease)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var targetPath = workspace.File("symbolic-link-target");
+        await File.WriteAllTextAsync(targetPath, "do not follow");
+        var linkPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, lease ? ".active-set.lock" : "malicious.json");
+        try
+        {
+            File.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        Task operation = lease ? turns.ListIncompleteAsync() : turns.LoadAsync("malicious");
+
+        await Assert.ThrowsAsync<IOException>(() => operation);
+        Assert.Equal("do not follow", await File.ReadAllTextAsync(targetPath));
+    }
+
+    [Fact]
+    public async Task Concurrent_admission_at_active_capacity_allows_only_one_new_turn()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var coordination = new BlockingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Create);
+        var turns = new DefaultConversationTurnStore(paths, coordination);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        for (var index = 0; index < 127; index++)
+        {
+            var record = await CreateAdmittedRecordAsync(paths, $"request-capacity-{index:D3}");
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json"), JsonSerializer.Serialize(record, CreateTurnJsonOptions()));
+        }
+
+        var first = await CreateAdmittedRecordAsync(paths, "request-capacity-first");
+        var second = await CreateAdmittedRecordAsync(paths, "request-capacity-second");
+        var firstCreate = CreateAtCapacityAsync(turns, first);
+        await coordination.WaitUntilBlockedAsync();
+        var secondCreate = CreateAtCapacityAsync(turns, second);
+        await Task.Yield();
+        coordination.Release();
+        var outcomes = await Task.WhenAll(firstCreate, secondCreate);
+
+        Assert.Single(outcomes, outcome => outcome == DefaultConversationTurnStoreStatus.Created);
+        Assert.Single(outcomes, outcome => outcome is null);
+        Assert.Equal(128, Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.json").Count());
+    }
+
+    [Fact]
+    public async Task Full_active_set_replays_or_conflicts_the_requested_turn_before_rejecting_new_admission()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var record = await CreateAdmittedRecordAsync(paths, "request-full-set-target");
+        await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json"), JsonSerializer.Serialize(record, CreateTurnJsonOptions()));
+        for (var index = 0; index < 127; index++)
+        {
+            var filler = await CreateAdmittedRecordAsync(paths, $"request-full-set-{index:D3}");
+            await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationActiveTurnsPath, filler.TurnId + ".json"), JsonSerializer.Serialize(filler, CreateTurnJsonOptions()));
+        }
+
+        var changedIntent = record with { UserMessage = record.UserMessage with { Content = "changed" } };
+
+        Assert.Equal(DefaultConversationTurnStoreStatus.Replay, (await turns.CreateAsync(record)).Status);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Conflict, (await turns.CreateAsync(changedIntent)).Status);
+        Assert.Equal(128, Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.json").Count());
+    }
+
+    [Fact]
+    public async Task Concurrent_list_and_terminal_archive_observe_one_active_set_snapshot()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var record = await CreateAdmittedRecordAsync(paths, "request-concurrent-terminal-archive");
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, record.TurnId + ".json");
+        var coordination = new BlockingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update);
+        var updatingStore = new DefaultConversationTurnStore(paths, coordination);
+        var listingStore = new DefaultConversationTurnStore(paths);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(record)).Status);
+        var prepared = CreateTerminalPreparedRecord(record, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, record.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+
+        var updating = updatingStore.UpdateAsync(terminal, prepared.LifecycleVersion);
+        await coordination.WaitUntilBlockedAsync();
+        var listing = listingStore.ListIncompleteAsync();
+        await Task.Yield();
+        coordination.Release();
+        await Task.WhenAll(updating, listing);
+
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await updating).Status);
+        Assert.Empty(await listing);
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(historyPath));
+    }
+
+    [Fact]
+    public async Task Matching_active_and_history_collisions_fail_closed_without_mutating_artifacts_across_store_operations()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var record = await CreateAdmittedRecordAsync(paths, "request-matching-collision");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, record.TurnId + ".json");
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        File.Copy(activePath, historyPath);
+        var originalActive = await File.ReadAllBytesAsync(activePath);
+        var originalHistory = await File.ReadAllBytesAsync(historyPath);
+        var advanced = record.Advance(DefaultConversationTurnCheckpoint.RunStarted, DateTimeOffset.UtcNow, "Run started.");
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(record.TurnId));
+        Assert.Equal(originalActive, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(originalHistory, await File.ReadAllBytesAsync(historyPath));
+        await Assert.ThrowsAsync<FormatException>(() => turns.CreateAsync(record));
+        Assert.Equal(originalActive, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(originalHistory, await File.ReadAllBytesAsync(historyPath));
+        await Assert.ThrowsAsync<FormatException>(() => turns.UpdateAsync(advanced, record.LifecycleVersion));
+        Assert.Equal(originalActive, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(originalHistory, await File.ReadAllBytesAsync(historyPath));
+        await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
+        Assert.Equal(originalActive, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(originalHistory, await File.ReadAllBytesAsync(historyPath));
+    }
+
+    [Fact]
+    public async Task Substituted_history_collisions_fail_closed_without_mutating_artifacts_across_store_operations()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var record = await CreateAdmittedRecordAsync(paths, "request-substituted-collision-a");
+        var substituted = await CreateAdmittedRecordAsync(paths, "request-substituted-collision-b");
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, record.TurnId + ".json");
+        await File.WriteAllTextAsync(activePath, JsonSerializer.Serialize(record, CreateTurnJsonOptions()));
+        await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(substituted, CreateTurnJsonOptions()));
+        var originalActive = await File.ReadAllBytesAsync(activePath);
+        var originalHistory = await File.ReadAllBytesAsync(historyPath);
+        var advanced = record.Advance(DefaultConversationTurnCheckpoint.RunStarted, DateTimeOffset.UtcNow, "Run started.");
+
+        await Assert.ThrowsAsync<FormatException>(() => turns.LoadAsync(record.TurnId));
+        await Assert.ThrowsAsync<FormatException>(() => turns.CreateAsync(record));
+        await Assert.ThrowsAsync<FormatException>(() => turns.UpdateAsync(advanced, record.LifecycleVersion));
+        await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
+        Assert.Equal(originalActive, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(originalHistory, await File.ReadAllBytesAsync(historyPath));
+    }
+
+    [Fact]
+    public async Task Restart_archives_a_terminal_write_left_active_but_retains_an_unresolved_needs_review_turn()
+    {
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var record = await CreateTerminalRecordAsync(paths, "request-terminal-restart", needsReview: false);
+            var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json");
+            var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, record.TurnId + ".json");
+            Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+            await File.WriteAllTextAsync(activePath, JsonSerializer.Serialize(record, CreateTurnJsonOptions()));
+
+            var restarted = new DefaultConversationTurnStore(paths);
+            Assert.Empty(await restarted.ListIncompleteAsync());
+            Assert.False(File.Exists(activePath));
+            Assert.True(File.Exists(historyPath));
+            Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, (await restarted.LoadAsync(record.TurnId))!.Checkpoint);
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var record = await CreateTerminalRecordAsync(paths, "request-review-restart", needsReview: true);
+            var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json");
+            var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, record.TurnId + ".json");
+            Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+            await File.WriteAllTextAsync(activePath, JsonSerializer.Serialize(record, CreateTurnJsonOptions()));
+
+            var restarted = new DefaultConversationTurnStore(paths);
+            Assert.Single(await restarted.ListNeedsReviewAsync());
+            Assert.True(File.Exists(activePath));
+            Assert.False(File.Exists(historyPath));
+        }
+    }
+
+    private static async Task<DefaultConversationTurnRecord> CreateAdmittedRecordAsync(WorkspacePaths paths, string requestId)
+    {
+        var conversation = await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync();
+        var now = DateTimeOffset.UtcNow;
+        var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(requestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, now);
+        return DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), now.AddSeconds(1), requestId);
+    }
+
+    private static async Task<DefaultConversationTurnStoreStatus?> CreateAtCapacityAsync(DefaultConversationTurnStore turns, DefaultConversationTurnRecord record)
+    {
+        try
+        {
+            return (await turns.CreateAsync(record)).Status;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<DefaultConversationTurnRecord> CreateTerminalRecordAsync(WorkspacePaths paths, string requestId, bool needsReview)
+    {
+        var admitted = await CreateAdmittedRecordAsync(paths, requestId);
+        return CreateTerminalRecord(admitted, needsReview);
+    }
+
+    private static DefaultConversationTurnRecord CreateTerminalRecord(DefaultConversationTurnRecord admitted, bool needsReview)
+    {
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview);
+        return prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+    }
+
+    private static DefaultConversationTurnRecord CreateTerminalPreparedRecord(DefaultConversationTurnRecord admitted, bool needsReview)
+    {
+        var terminalTime = admitted.Transitions[^1].OccurredAtUtc.AddSeconds(1);
+        const string Detail = "Terminal evidence.";
+        var run = needsReview ? admitted.Run.NeedsReview(terminalTime, Detail) : admitted.Run.Fail(terminalTime, Detail);
+        return admitted.Advance(DefaultConversationTurnCheckpoint.TerminalPrepared, terminalTime, Detail, run: run, reviewDetail: needsReview ? Detail : null);
+    }
+
+    private static DefaultConversationTurnRecord WithSerializedSize(DefaultConversationTurnRecord record, int targetBytes)
+    {
+        var empty = record with { UserMessage = record.UserMessage with { Content = string.Empty } };
+        var fixedBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(empty, CreateTurnJsonOptions()) + Environment.NewLine);
+        var contentLength = targetBytes - fixedBytes;
+        Assert.True(contentLength > 0);
+        var candidate = record with { UserMessage = record.UserMessage with { Content = new string('x', contentLength) } };
+        Assert.Equal(targetBytes, Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(candidate, CreateTurnJsonOptions()) + Environment.NewLine));
+        return candidate;
+    }
+
+    private static JsonSerializerOptions CreateTurnJsonOptions()
+    {
+        return new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true,
+            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
+        };
     }
 
     private static RecoveryFixture CreateFixture(TestWorkspace workspace, InterruptingFailpoint? failpoint = null, RecordingInferenceClient? client = null)
@@ -745,6 +1359,9 @@ public sealed class DefaultConversationTurnRecoveryTests
 
         return Process.Start(startInfo) ?? throw new InvalidOperationException("The default-conversation test worker did not start.");
     }
+
+    [DllImport("libc", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern int mkfifo(string path, int mode);
 
     private static async Task WaitForFileAsync(string path, Process process, TimeSpan timeout)
     {
@@ -811,6 +1428,18 @@ public sealed class DefaultConversationTurnRecoveryTests
             cancellationToken.ThrowIfCancellationRequested();
             QuarantineCount++;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FileBlockingTurnStoreCoordination(string readyPath, string releasePath) : IDefaultConversationTurnStoreCoordination
+    {
+        public async Task BeforeActiveSetOperationAsync(DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken = default)
+        {
+            await File.WriteAllTextAsync(readyPath, operation.ToString(), cancellationToken);
+            while (!File.Exists(releasePath))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(15), cancellationToken);
+            }
         }
     }
 
