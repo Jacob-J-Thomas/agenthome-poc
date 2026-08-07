@@ -19,6 +19,7 @@ namespace EmbodySense.Core.Persistence.Loops;
 public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
+    // TODO(#268): Reject unmapped root and nested members instead of accepting an implicit compatibility shape. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/268
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -124,6 +125,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     /// <inheritdoc />
     public async Task<IReadOnlyList<DefaultConversationTurnRecord>> ListIncompleteAsync(CancellationToken cancellationToken = default)
     {
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/259): Replace full historical scans with a bounded active/review index while preserving immutable terminal evidence.
         return await ListAsync(record => record.Checkpoint < DefaultConversationTurnCheckpoint.Terminal, cancellationToken);
     }
 
@@ -248,10 +250,21 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return candidate.ProviderOutcome >= existing.ProviderOutcome
             && (existing.AssistantMessage is null || existing.AssistantMessage == candidate.AssistantMessage)
             && (existing.ProviderResponseId is null || string.Equals(existing.ProviderResponseId, candidate.ProviderResponseId, StringComparison.Ordinal))
+            && ReviewCauseAdvances(existing, candidate)
             && (existing.ReviewDetail is null || string.Equals(existing.ReviewDetail, candidate.ReviewDetail, StringComparison.Ordinal))
             && (existing.ReviewResolution is null || existing.ReviewResolution == candidate.ReviewResolution)
             && (!existing.RunProjectionSynchronized || candidate.RunProjectionSynchronized)
             && (existing.Run.Status == LoopRunStatus.Started || RunsEqual(existing.Run, candidate.Run));
+    }
+
+    private static bool ReviewCauseAdvances(DefaultConversationTurnRecord existing, DefaultConversationTurnRecord candidate)
+    {
+        return existing.ReviewCause == candidate.ReviewCause
+            || existing.ReviewCause == DefaultConversationTurnReviewCause.None
+            && candidate.ReviewCause != DefaultConversationTurnReviewCause.None
+            && existing.Checkpoint < DefaultConversationTurnCheckpoint.TerminalPrepared
+            && candidate.Checkpoint == DefaultConversationTurnCheckpoint.TerminalPrepared
+            && candidate.Run.Status == LoopRunStatus.NeedsReview;
     }
 
     private static bool TransitionHistoryExtends(DefaultConversationTurnRecord existing, DefaultConversationTurnRecord candidate)

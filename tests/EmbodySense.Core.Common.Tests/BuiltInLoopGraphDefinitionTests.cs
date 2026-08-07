@@ -3,12 +3,12 @@ using EmbodySense.Core.Common.Loops.Models;
 
 namespace EmbodySense.Core.Common.Tests;
 
-public sealed class LoopGraphDefinitionTests
+public sealed class BuiltInLoopGraphDefinitionTests
 {
     [Fact]
     public void Default_conversation_graph_is_valid_and_system_locked()
     {
-        var graph = LoopGraphDefinition.CreateDefaultConversation();
+        var graph = BuiltInLoopGraphDefinition.CreateDefaultConversation();
 
         Assert.Null(graph.GetValidationFailure());
         Assert.Equal(DefaultConversationLoopGraphIds.AcceptUserMessage, graph.EntryNodeId);
@@ -19,7 +19,7 @@ public sealed class LoopGraphDefinitionTests
 
     [Theory]
     [MemberData(nameof(InvalidGraphs))]
-    public void Validation_reports_first_invalid_graph_condition(LoopGraphDefinition graph, string expectedMessage)
+    public void Validation_reports_first_invalid_graph_condition(BuiltInLoopGraphDefinition graph, string expectedMessage)
     {
         var failure = graph.GetValidationFailure();
 
@@ -29,7 +29,7 @@ public sealed class LoopGraphDefinitionTests
 
     public static IEnumerable<object[]> InvalidGraphs()
     {
-        var graph = LoopGraphDefinition.CreateDefaultConversation();
+        var graph = BuiltInLoopGraphDefinition.CreateDefaultConversation();
         var firstNode = graph.Nodes[0];
         var firstEdge = graph.Edges[0];
         var orphanNode = new LoopGraphNodeDefinition(

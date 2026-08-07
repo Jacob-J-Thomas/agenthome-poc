@@ -18,13 +18,18 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Tests.Verification;
+using EmbodySense.Core.Persistence.Tests.Verification.Models;
 using EmbodySense.Tests.Support;
 using Xunit.Abstractions;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
 
+[Collection(BoundedVerificationCollection.Name)]
 public sealed class CustomLoopRunArtifactMaximumShapeTests
 {
+    private const long MaximumCodecOrReadAllocatedBytes = 512L * 1024 * 1024;
+    private const long MaximumColdRepairAllocatedBytes = 1024L * 1024 * 1024;
     private static readonly DateTimeOffset _now = new(2026, 7, 17, 12, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions _canonicalJsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = false, MaxDepth = 64 };
     private readonly ITestOutputHelper _output;
@@ -37,13 +42,86 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
     [Fact]
     public async Task Public_artifact_contract_round_trips_the_maximum_bounded_shape_below_fifteen_mebibytes()
     {
-        var fixture = await GenerateMaximumExecutionAsync();
+        var probe = new VerificationPhaseProbe(_output, nameof(Public_artifact_contract_round_trips_the_maximum_bounded_shape_below_fifteen_mebibytes), VerificationTier.PullRequest);
+        var fixture = await probe.RunAsync(Amplification("maximum execution and event construction", 30, 300), () => GenerateMaximumExecutionAsync(captureAndValidateTransitions: false));
         var terminal = fixture.Execution.Run!;
+        var validation = probe.Run(Production("final run validation", 5, 60), () => CustomLoopRunValidator.Validate(terminal));
+        AssertMaximumExecutionContract(fixture, terminal, validation);
+
+        var encoded = probe.Run(Production("canonical serialization", 10, 120, MaximumCodecOrReadAllocatedBytes), () => CustomLoopRunArtifactSerializer.Serialize(terminal));
+        _output.WriteLine($"MAX_ARTIFACT_BYTES={encoded.Length}");
+        Assert.True(encoded.Length <= 15 * 1024 * 1024, $"Maximum production artifact was {encoded.Length:N0} bytes.");
+        Assert.True(encoded.Length <= CustomLoopLimits.MaxRunTraceUtf8Bytes);
+        var hydrated = probe.Run(Production("canonical deserialization", 10, 120, MaximumCodecOrReadAllocatedBytes), () => CustomLoopRunArtifactSerializer.Deserialize(encoded));
+        Assert.Equal(terminal.Id, hydrated.Id);
+        Assert.Equal(terminal.Events.Length, hydrated.Events.Length);
+        Assert.Equal(terminal.FinalOutput, hydrated.FinalOutput);
+        var reencoded = probe.Run(Production("canonical reserialization", 10, 120, MaximumCodecOrReadAllocatedBytes), () => CustomLoopRunArtifactSerializer.Serialize(hydrated));
+        Assert.Equal(encoded, reencoded);
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var artifactPath = await probe.RunAsync(Amplification("maximum artifact fixture materialization", 10, 60), () => WriteArtifactAsync(paths, terminal, encoded));
+        var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        var monitor = await probe.RunAsync(Production("cold monitor index repair and projection", 30, 120, MaximumColdRepairAllocatedBytes), () => restarted.GetMonitorAsync(terminal.Id));
+        Assert.Equal(terminal.Id, monitor?.Summary.Id);
+        Assert.Equal(terminal.Status, monitor?.Summary.Status);
+        Assert.Equal(terminal.UpdatedAtUtc, monitor?.Summary.UpdatedAtUtc);
+        var warmMonitor = await probe.RunAsync(Production("warm monitor projection", 2, 30, MaximumCodecOrReadAllocatedBytes), () => restarted.GetMonitorAsync(terminal.Id));
+        Assert.Equal(monitor, warmMonitor);
+        var page = await probe.RunAsync(Production("list projection", 5, 60, MaximumCodecOrReadAllocatedBytes), () => restarted.ListPageAsync(new CustomLoopRunPageRequest(1)));
+        Assert.Equal(terminal.Id, Assert.Single(page.Items).Id);
+        var publicReload = await probe.RunAsync(Production("full artifact reload", 15, 120, MaximumCodecOrReadAllocatedBytes), () => restarted.GetAsync(terminal.Id));
+        Assert.NotNull(publicReload);
+        Assert.Equal(terminal.Id, publicReload.Id);
+        Assert.Equal(terminal.Events.Length, publicReload.Events.Length);
+        Assert.Equal(terminal.FinalOutput, publicReload.FinalOutput);
+        Assert.Equal(encoded, await File.ReadAllBytesAsync(artifactPath));
+        var inspection = await probe.RunAsync(Production("trace inspection and hash", 15, 120, MaximumCodecOrReadAllocatedBytes), () => restarted.InspectTraceAsync(terminal.Id));
+        Assert.NotNull(inspection);
+        Assert.Equal(encoded.Length, inspection.PersistedArtifactUtf8Bytes);
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(encoded)).ToLowerInvariant(), inspection.PersistedArtifactHash);
+        var quota = await probe.RunAsync(Production("trace quota projection", 15, 120, MaximumCodecOrReadAllocatedBytes), () => restarted.GetTraceQuotaAsync());
+        Assert.Equal(encoded.Length, quota.ActualTraceUtf8Bytes);
+        Assert.Equal(encoded.Length + CustomLoopLimits.MaxTraceControlEventUtf8Bytes, quota.AccountedTraceUtf8Bytes);
+        Assert.Equal(1, quota.ActiveReservationCount);
+        Assert.Equal(CustomLoopLimits.MaxTraceControlEventUtf8Bytes, quota.ReservedCapacityUtf8Bytes);
+        Assert.Equal(encoded.Length, new FileInfo(artifactPath).Length);
+    }
+
+    [Fact]
+    [Trait(VerificationTier.TraitName, VerificationTier.Stress)]
+    public async Task Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded()
+    {
+        var probe = new VerificationPhaseProbe(_output, nameof(Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded), VerificationTier.Stress);
+        var fixture = await probe.RunAsync(Amplification("maximum execution with every transition retained and validated", 480, 1_200), () => GenerateMaximumExecutionAsync(captureAndValidateTransitions: true));
+        var terminal = fixture.Execution.Run!;
+        var validation = probe.Run(Production("final run validation", 5, 60), () => CustomLoopRunValidator.Validate(terminal));
+        AssertMaximumExecutionContract(fixture, terminal, validation);
+        await probe.RunAsync(Amplification("representative reservation-class persistence replacements", 300, 900), () => AssertPublicStoreReservationClassesAsync(fixture));
+
+        var encoded = probe.Run(Production("canonical serialization", 10, 120), () => CustomLoopRunArtifactSerializer.Serialize(terminal));
+        _output.WriteLine($"MAX_ARTIFACT_BYTES={encoded.Length}");
+        WriteEnvelopeByteBreakdown(encoded);
+        Assert.True(encoded.Length <= 15 * 1024 * 1024, $"Maximum production artifact was {encoded.Length:N0} bytes.");
+        Assert.True(encoded.Length <= CustomLoopLimits.MaxRunTraceUtf8Bytes);
+        var hydrated = probe.Run(Production("canonical deserialization", 10, 120), () => CustomLoopRunArtifactSerializer.Deserialize(encoded));
+        Assert.Equal(JsonSerializer.Serialize(terminal), JsonSerializer.Serialize(hydrated));
+        Assert.Equal(encoded, CustomLoopRunArtifactSerializer.Serialize(hydrated));
+        probe.Run(Amplification("canonical reference inspection", 30, 180), () => AssertCanonicalReferences(encoded));
+        var orderingRun = WithSecondAuthority(fixture.Store.Transitions.Select(transition => transition.Candidate).First(run => run.Events.Count(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved) >= 2));
+        var orderingValidation = probe.Run(Production("canonical-order fixture validation", 5, 60), () => CustomLoopRunValidator.Validate(orderingRun));
+        Assert.True(orderingValidation.IsValid, Format(orderingValidation.Errors));
+        probe.Run(Amplification("four canonical table-order negative cases", 300, 600), () => AssertCanonicalTableOrderRejections(CustomLoopRunArtifactSerializer.Serialize(orderingRun), orderingRun));
+    }
+
+    private static void AssertMaximumExecutionContract(MaximumExecutionFixture fixture, CustomLoopRunRecord terminal, CustomLoopValidationResult validation)
+    {
         Assert.Equal(CustomLoopOrderedRunStatus.Completed, fixture.Execution.Status);
-        Assert.True(CustomLoopRunValidator.Validate(terminal).IsValid, Format(CustomLoopRunValidator.Validate(terminal).Errors));
-        Assert.Equal(CustomLoopLimits.MaxModelAttemptsPerRun, fixture.Executor.Requests.Count);
-        Assert.Equal(55, fixture.Executor.Requests.Count(request => !request.IsExit));
-        Assert.Equal(10, fixture.Executor.Requests.Count(request => request.IsExit));
+        Assert.True(validation.IsValid, Format(validation.Errors));
+        Assert.Equal(CustomLoopLimits.MaxModelAttemptsPerRun, fixture.Executor.RequestCount);
+        Assert.Equal(55, fixture.Executor.InferenceRequestCount);
+        Assert.Equal(10, fixture.Executor.ExitRequestCount);
         Assert.Equal(CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun, terminal.Checkpoint.ToolRequestsUsed);
         Assert.Equal(CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun, terminal.Events.Count(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved));
         var governanceEvents = terminal.Events.Where(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.GovernanceDecided).ToArray();
@@ -61,50 +139,9 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         Assert.Equal(CustomLoopLimits.MaxModelAttemptsPerRun, terminal.Events.Count(item => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved));
         var expectedPublications = 2 * CustomLoopLimits.MaxConversationPublicationEffectsPerRun;
         Assert.Equal(expectedPublications, terminal.Events.Count(item => item.Kind is CustomLoopRunEventKind.ConversationPublicationStarted or CustomLoopRunEventKind.ConversationPublished));
-        Assert.Equal(CustomLoopLimits.MaxConversationPublicationEffectsPerRun, fixture.Publisher.Requests.Count);
-        Assert.Equal(CustomLoopLimits.MaxConversationPublicationEffectsPerRun - 1, fixture.Publisher.Requests[^1].PriorPublications!.Count);
+        Assert.Equal(CustomLoopLimits.MaxConversationPublicationEffectsPerRun, fixture.Publisher.RequestCount);
+        Assert.Equal(CustomLoopLimits.MaxConversationPublicationEffectsPerRun - 1, fixture.Publisher.LastPriorPublicationCount);
         Assert.InRange(terminal.Events.Length, 1, CustomLoopLimits.MaxTraceEventsPerRun);
-        await AssertPublicStoreReservationClassesAsync(fixture);
-
-        var encoded = CustomLoopRunArtifactSerializer.Serialize(terminal);
-        _output.WriteLine($"MAX_ARTIFACT_BYTES={encoded.Length}");
-        WriteEnvelopeByteBreakdown(encoded);
-        Assert.True(encoded.Length <= 15 * 1024 * 1024, $"Maximum production artifact was {encoded.Length:N0} bytes.");
-        Assert.True(encoded.Length <= CustomLoopLimits.MaxRunTraceUtf8Bytes);
-        var hydrated = CustomLoopRunArtifactSerializer.Deserialize(encoded);
-        Assert.Equal(JsonSerializer.Serialize(terminal), JsonSerializer.Serialize(hydrated));
-        Assert.Equal(encoded, CustomLoopRunArtifactSerializer.Serialize(hydrated));
-
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var artifactPath = await WriteArtifactAsync(paths, terminal, encoded);
-        var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
-        var monitor = await restarted.GetMonitorAsync(terminal.Id);
-        Assert.Equal(terminal.Id, monitor?.Summary.Id);
-        Assert.Equal(terminal.Status, monitor?.Summary.Status);
-        Assert.Equal(terminal.UpdatedAtUtc, monitor?.Summary.UpdatedAtUtc);
-        var publicReload = await restarted.GetAsync(terminal.Id);
-        Assert.NotNull(publicReload);
-        Assert.Equal(JsonSerializer.Serialize(terminal), JsonSerializer.Serialize(publicReload));
-        Assert.Equal(terminal.Events.Length, publicReload.Events.Length);
-        Assert.Equal(terminal.FinalOutput, publicReload.FinalOutput);
-        Assert.Equal(encoded, await File.ReadAllBytesAsync(artifactPath));
-        var inspection = await restarted.InspectTraceAsync(terminal.Id);
-        Assert.NotNull(inspection);
-        Assert.Equal(encoded.Length, inspection.PersistedArtifactUtf8Bytes);
-        Assert.Equal(Convert.ToHexString(SHA256.HashData(encoded)).ToLowerInvariant(), inspection.PersistedArtifactHash);
-        var quota = await restarted.GetTraceQuotaAsync();
-        Assert.Equal(encoded.Length, quota.ActualTraceUtf8Bytes);
-        Assert.Equal(encoded.Length + CustomLoopLimits.MaxTraceControlEventUtf8Bytes, quota.AccountedTraceUtf8Bytes);
-        Assert.Equal(1, quota.ActiveReservationCount);
-        Assert.Equal(CustomLoopLimits.MaxTraceControlEventUtf8Bytes, quota.ReservedCapacityUtf8Bytes);
-
-        AssertCanonicalReferences(encoded);
-        var orderingRun = WithSecondAuthority(fixture.Store.Transitions.Select(transition => transition.Candidate).First(run => run.Events.Count(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved) >= 2));
-        var orderingValidation = CustomLoopRunValidator.Validate(orderingRun);
-        Assert.True(orderingValidation.IsValid, Format(orderingValidation.Errors));
-        AssertCanonicalTableOrderRejections(CustomLoopRunArtifactSerializer.Serialize(orderingRun), orderingRun);
-        Assert.Equal(encoded.Length, new FileInfo(artifactPath).Length);
     }
 
     private async Task AssertPublicStoreReservationClassesAsync(MaximumExecutionFixture fixture)
@@ -181,13 +218,13 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         Assert.Throws<ArgumentNullException>(() => CustomLoopRunArtifactSerializer.Deserialize(null!));
     }
 
-    private static async Task<MaximumExecutionFixture> GenerateMaximumExecutionAsync()
+    private static async Task<MaximumExecutionFixture> GenerateMaximumExecutionAsync(bool captureAndValidateTransitions)
     {
         var definition = MaximumDefinition();
         var authority = Authority();
         var initial = InitialRun(definition, authority);
         var admitted = CompleteAdmissionAudit(initial);
-        var store = new MaximumRunStore(admitted);
+        var store = new MaximumRunStore(admitted, captureAndValidateTransitions);
         var executor = new MaximumExecutor(store, authority);
         var publisher = new PublishedConversation();
         var runner = new CustomLoopOrderedRunner(store, new CustomLoopContextResolver(), executor, publisher, new NullAuditLog(), new FixedAuthorityProvider(authority), new FixedTimeProvider());
@@ -196,7 +233,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
         var execution = await runner.RunAsync(new CustomLoopOrderedRunRequest(admitted.Id, "web"));
 
-        Assert.True(execution.Status == CustomLoopOrderedRunStatus.Completed, $"Execution ended after {executor.Requests.Count} provider requests as {execution.Status}: {execution.Detail} Failure={execution.Run?.FailureCode}: {execution.Run?.FailureDetail}");
+        Assert.True(execution.Status == CustomLoopOrderedRunStatus.Completed, $"Execution ended after {executor.RequestCount} provider requests as {execution.Status}: {execution.Detail} Failure={execution.Run?.FailureCode}: {execution.Run?.FailureDetail}");
         return new MaximumExecutionFixture(initial, admitted, store, executor, publisher, execution);
     }
 
@@ -373,6 +410,16 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         return string.Join(Environment.NewLine, errors.Select(error => $"{error.Code}:{error.Field}:{error.Message}"));
     }
 
+    private static VerificationPhaseBudget Production(string name, int proposedSeconds, int diagnosticSeconds, long? maximumAllocatedBytes = null)
+    {
+        return new VerificationPhaseBudget(name, VerificationPhaseClassification.ProductionBoundary, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds), maximumAllocatedBytes);
+    }
+
+    private static VerificationPhaseBudget Amplification(string name, int proposedSeconds, int diagnosticSeconds)
+    {
+        return new VerificationPhaseBudget(name, VerificationPhaseClassification.TestAmplification, TimeSpan.FromSeconds(proposedSeconds), TimeSpan.FromSeconds(diagnosticSeconds));
+    }
+
     private static CustomLoopRunRecord WithSecondAuthority(CustomLoopRunRecord run)
     {
         var secondReservation = run.Events.Where(item => item.ToolEvidence?.Phase == CustomLoopToolEvidencePhase.RequestReserved).Skip(1).First();
@@ -395,17 +442,17 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
     {
         var cases = new[]
         {
-            (Table: "content", Reference: "$content"),
-            (Table: "contextBlocks", Reference: "$contextBlock"),
-            (Table: "authorities", Reference: "$authority"),
-            (Table: "toolRequests", Reference: "$toolRequest")
+            (Table: "content", Reference: "$content", Rejection: "content table is not in canonical first-use order"),
+            (Table: "contextBlocks", Reference: "$contextBlock", Rejection: "context-block table is not in canonical first-use order"),
+            (Table: "authorities", Reference: "$authority", Rejection: "authority table is not in canonical first-use order"),
+            (Table: "toolRequests", Reference: "$toolRequest", Rejection: "tool-request table is not in canonical first-use order")
         };
         foreach (var testCase in cases)
         {
             var mutated = SwapFirstTwoTableRowsAndReferences(encoded, testCase.Table, testCase.Reference);
             Assert.NotEqual(encoded, mutated);
             var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(mutated));
-            Assert.Contains("not the one canonical hydrate-and-reproject encoding", exception.Message, StringComparison.Ordinal);
+            Assert.Contains(testCase.Rejection, exception.Message, StringComparison.Ordinal);
             var restored = SwapFirstTwoTableRowsAndReferences(mutated, testCase.Table, testCase.Reference);
             Assert.Equal(encoded, restored);
             Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(CustomLoopRunArtifactSerializer.Deserialize(restored)));
@@ -533,19 +580,23 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         private int _exitCount;
         private int _toolCount;
 
-        public List<CustomLoopInferenceAttemptRequest> Requests { get; } = [];
+        public int RequestCount { get; private set; }
+        public int InferenceRequestCount { get; private set; }
+        public int ExitRequestCount { get; private set; }
 
         public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
         {
-            Requests.Add(request);
+            RequestCount++;
             providerRequestStarted?.Invoke();
             if (request.IsExit)
             {
                 _exitCount++;
+                ExitRequestCount++;
                 return new CustomLoopInferenceAttemptResult("Repeat", "provider", "model", $"exit-response-{_exitCount}");
             }
 
             _inferenceCount++;
+            InferenceRequestCount++;
             var consumed = 0;
             if (_toolCount < CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun)
             {
@@ -671,7 +722,7 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
         }
     }
 
-    private sealed class MaximumRunStore(CustomLoopRunRecord current) : ICustomLoopRunStore
+    private sealed class MaximumRunStore(CustomLoopRunRecord current, bool captureAndValidateTransitions) : ICustomLoopRunStore
     {
         public CustomLoopRunRecord Current { get; private set; } = current;
         public List<TraceTransition> Transitions { get; } = [];
@@ -685,9 +736,13 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
                 return Task.FromResult(CustomLoopRunStoreResult.VersionConflict(Current, expectedLifecycleVersion));
             }
 
-            var validation = CustomLoopRunValidator.ValidateUpdate(Current, run);
-            Assert.True(validation.IsValid, Format(validation.Errors));
-            Transitions.Add(new TraceTransition(Current, run));
+            if (captureAndValidateTransitions)
+            {
+                var validation = CustomLoopRunValidator.ValidateUpdate(Current, run);
+                Assert.True(validation.IsValid, Format(validation.Errors));
+                Transitions.Add(new TraceTransition(Current, run));
+            }
+
             Current = run;
             return Task.FromResult(CustomLoopRunStoreResult.Updated(run));
         }
@@ -727,11 +782,13 @@ public sealed class CustomLoopRunArtifactMaximumShapeTests
 
     private sealed class PublishedConversation : ICustomLoopConversationPublisher
     {
-        public List<CustomLoopConversationPublicationRequest> Requests { get; } = [];
+        public int RequestCount { get; private set; }
+        public int LastPriorPublicationCount { get; private set; }
 
         public Task<CustomLoopConversationPublicationResult> PublishAsync(CustomLoopConversationPublicationRequest request, CancellationToken cancellationToken = default)
         {
-            Requests.Add(request);
+            RequestCount++;
+            LastPriorPublicationCount = request.PriorPublications?.Count ?? 0;
             request.AppendStarted?.Invoke();
             return Task.FromResult(new CustomLoopConversationPublicationResult(CustomLoopConversationPublicationOutcome.Published, request.OperationId, "Published."));
         }

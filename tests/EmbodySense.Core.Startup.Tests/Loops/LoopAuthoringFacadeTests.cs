@@ -19,7 +19,8 @@ public sealed class LoopAuthoringFacadeTests
         var facade = new LoopAuthoringFacade(workspace.RootPath);
 
         var initialCatalog = await facade.GetCatalogAsync();
-        var created = await facade.CreateAsync("create-facade-loop");
+        var firstSaveInput = initialCatalog.DraftTemplate.Definition with { DisplayName = "Explicit facade loop", Description = "First durable version." };
+        var created = await facade.CreateAsync("create-facade-loop", firstSaveInput);
         var createdDefinition = Assert.IsType<LoopDefinitionSnapshot>(created.Definition);
         var hostileText = "Review </script><script>alert(\"owned\")</script> & keep it as data.";
         var updateInput = CreateInput(createdDefinition, hostileText);
@@ -37,6 +38,10 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal("default-assistant", initialCatalog.RoleId);
         Assert.Equal("default-conversation", initialCatalog.SystemDefault.Id);
         Assert.Empty(initialCatalog.CustomDefinitions);
+        Assert.Equal(initialCatalog.RoleId, initialCatalog.DraftTemplate.RoleId);
+        Assert.Equal("Untitled loop", initialCatalog.DraftTemplate.Definition.DisplayName);
+        Assert.Null(Assert.Single(initialCatalog.DraftTemplate.Definition.InferenceSteps).Id);
+        Assert.Equal(LoopContextPolicyMode.Inherit, initialCatalog.DraftTemplate.Definition.InferenceSteps.Single().ContextPolicy.Mode);
         Assert.Equal(50, initialCatalog.Limits.MaxDefinitionsPerWorkspace);
         Assert.Equal(1, initialCatalog.Limits.MinInferenceSteps);
         Assert.Equal(5, initialCatalog.Limits.MaxInferenceSteps);
@@ -52,6 +57,10 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal(LoopCustomToolAuthorityCeiling.WorkspaceReadOnly, initialCatalog.Tools.CustomAuthorityCeiling);
         Assert.Equal("Created", created.Status);
         Assert.True(created.IsCommitted);
+        Assert.Equal("Explicit facade loop", createdDefinition.DisplayName);
+        Assert.Equal("First durable version.", createdDefinition.Description);
+        Assert.Equal(1, createdDefinition.DefinitionVersion);
+        Assert.NotNull(Assert.Single(createdDefinition.InferenceSteps).Id);
         Assert.Equal(initialCatalog.RoleId, createdDefinition.RoleId);
         Assert.Equal("Updated", updated.Status);
         Assert.Equal(2, updatedDefinition.DefinitionVersion);

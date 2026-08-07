@@ -139,6 +139,21 @@ internal sealed class CustomLoopArtifactPathGuard
     }
 
     /// <summary>
+    /// Gets the length of one contained non-reparse artifact without opening or parsing its content.
+    /// </summary>
+    /// <param name="root">The artifact root.</param>
+    /// <param name="path">The artifact path.</param>
+    /// <returns>The observed byte length.</returns>
+    public long GetFileLength(string root, string path)
+    {
+        EnsureContained(ValidateRoot(root), Path.GetFullPath(path), "Artifact path escaped its configured root.");
+        EnsureNoReparsePoints(path);
+        var length = new FileInfo(path).Length;
+        EnsureNoReparsePoints(path);
+        return length;
+    }
+
+    /// <summary>
     /// Flushes text to a sibling temporary file and renames it over the contained destination.
     /// </summary>
     /// <param name="root">The root.</param>
@@ -180,6 +195,56 @@ internal sealed class CustomLoopArtifactPathGuard
     }
 
     /// <summary>
+    /// Flushes text to a sibling temporary file and atomically creates the contained destination only when it remains absent.
+    /// </summary>
+    /// <param name="root">The artifact root.</param>
+    /// <param name="path">The destination path.</param>
+    /// <param name="content">The UTF-8 content.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns><see langword="true"/> when this call created the destination; otherwise <see langword="false"/> without replacing pre-existing evidence.</returns>
+    public async Task<bool> WriteTextAtomicallyIfAbsentAsync(string root, string path, string content, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+
+        PrepareRoot(root);
+        EnsureContained(ValidateRoot(root), Path.GetFullPath(path), "Artifact path escaped its configured root.");
+        EnsureNoReparsePoints(path);
+        var tempPath = GetFilePath(root, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes(content);
+            await using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, bufferSize: 4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await stream.WriteAsync(bytes, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+                stream.Flush(flushToDisk: true);
+            }
+
+            EnsureNoReparsePoints(tempPath);
+            EnsureNoReparsePoints(path);
+            try
+            {
+                File.Move(tempPath, path, overwrite: false);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                return false;
+            }
+
+            EnsureNoReparsePoints(path);
+            return true;
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                EnsureNoReparsePoints(tempPath);
+                File.Delete(tempPath);
+            }
+        }
+    }
+
+    /// <summary>
     /// Deletes one contained non-reparse artifact if it exists.
     /// </summary>
     /// <param name="root">The root.</param>
@@ -189,6 +254,23 @@ internal sealed class CustomLoopArtifactPathGuard
         EnsureContained(ValidateRoot(root), Path.GetFullPath(path), "Artifact path escaped its configured root.");
         EnsureNoReparsePoints(path);
         File.Delete(path);
+    }
+
+    /// <summary>
+    /// Atomically moves one contained non-reparse artifact to an absent sibling path.
+    /// </summary>
+    /// <param name="root">The common artifact root.</param>
+    /// <param name="sourcePath">The existing source path.</param>
+    /// <param name="destinationPath">The absent destination path.</param>
+    public void MoveFileIfDestinationAbsent(string root, string sourcePath, string destinationPath)
+    {
+        var safeRoot = ValidateRoot(root);
+        EnsureContained(safeRoot, Path.GetFullPath(sourcePath), "Artifact source path escaped its configured root.");
+        EnsureContained(safeRoot, Path.GetFullPath(destinationPath), "Artifact destination path escaped its configured root.");
+        EnsureNoReparsePoints(sourcePath);
+        EnsureNoReparsePoints(destinationPath);
+        File.Move(sourcePath, destinationPath, overwrite: false);
+        EnsureNoReparsePoints(destinationPath);
     }
 
     private string ValidateRoot(string root)
