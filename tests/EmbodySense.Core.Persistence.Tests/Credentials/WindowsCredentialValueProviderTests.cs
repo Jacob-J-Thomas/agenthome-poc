@@ -315,6 +315,202 @@ public sealed class WindowsCredentialValueProviderTests
     }
 
     [Fact]
+    public async Task Windows_provider_rejects_same_target_mutation_reentrancy_from_source_callbacks_without_blocking_other_targets()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var primary = Requests("workspace-reentrant-" + Guid.NewGuid().ToString("N"), "credential-reentrant-" + Guid.NewGuid().ToString("N"));
+        var secondary = Requests("workspace-reentrant-" + Guid.NewGuid().ToString("N"), "credential-reentrant-" + Guid.NewGuid().ToString("N"));
+        var primaryValue = Encoding.UTF8.GetBytes("primary-reentrant-canary-" + Guid.NewGuid().ToString("N"));
+        var secondaryValue = Encoding.UTF8.GetBytes("secondary-reentrant-canary-" + Guid.NewGuid().ToString("N"));
+        CredentialProviderResult? nestedSameTarget = null;
+        CredentialProviderResult? nestedDelete = null;
+        CredentialProviderResult? nestedOtherTarget = null;
+
+        try
+        {
+            var outer = await provider.CreateAsync(primary.Mutation with { ValueByteLength = primaryValue.Length }, destination =>
+            {
+                nestedSameTarget = provider.CreateAsync(primary.Mutation with { ValueByteLength = primaryValue.Length }, nestedDestination => Copy(primaryValue, nestedDestination), CancellationToken.None).GetAwaiter().GetResult();
+                nestedDelete = provider.DeleteAsync(primary.Delete, CancellationToken.None).GetAwaiter().GetResult();
+                nestedOtherTarget = provider.CreateAsync(secondary.Mutation with { ValueByteLength = secondaryValue.Length }, nestedDestination => Copy(secondaryValue, nestedDestination), CancellationToken.None).GetAwaiter().GetResult();
+                return Copy(primaryValue, destination);
+            }, CancellationToken.None);
+            var primaryConsumer = new RecordingCredentialConsumer();
+            var secondaryConsumer = new RecordingCredentialConsumer();
+            var primaryUse = await provider.UseAsync(primary.Use, primaryConsumer, CancellationToken.None);
+            var secondaryUse = await provider.UseAsync(secondary.Use, secondaryConsumer, CancellationToken.None);
+
+            Assert.True(outer.Succeeded);
+            Assert.Equal(CredentialFailureCode.Conflict, nestedSameTarget?.Failure?.Code);
+            Assert.Equal(CredentialFailureCode.Conflict, nestedDelete?.Failure?.Code);
+            Assert.True(nestedOtherTarget?.Succeeded);
+            Assert.True(primaryUse.Succeeded);
+            Assert.True(secondaryUse.Succeeded);
+            Assert.Equal(primaryValue, primaryConsumer.Observed);
+            Assert.Equal(secondaryValue, secondaryConsumer.Observed);
+        }
+        finally
+        {
+            await provider.DeleteAsync(primary.Delete, CancellationToken.None);
+            await provider.DeleteAsync(secondary.Delete, CancellationToken.None);
+            CryptographicOperations.ZeroMemory(primaryValue);
+            CryptographicOperations.ZeroMemory(secondaryValue);
+        }
+    }
+
+    [Fact]
+    public async Task Windows_provider_rejects_same_target_replace_reentrancy_from_a_source_callback()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var requests = Requests("workspace-reentrant-replace-" + Guid.NewGuid().ToString("N"), "credential-reentrant-replace-" + Guid.NewGuid().ToString("N"));
+        var original = Encoding.UTF8.GetBytes("original-reentrant-canary-" + Guid.NewGuid().ToString("N"));
+        var replacement = Encoding.UTF8.GetBytes("replacement-reentrant-canary-" + Guid.NewGuid().ToString("N"));
+        CredentialProviderResult? nested = null;
+
+        try
+        {
+            Assert.True((await provider.CreateAsync(requests.Mutation with { ValueByteLength = original.Length }, destination => Copy(original, destination), CancellationToken.None)).Succeeded);
+            var outer = await provider.ReplaceAsync(requests.Mutation with { ValueByteLength = replacement.Length }, destination =>
+            {
+                nested = provider.ReplaceAsync(requests.Mutation with { ValueByteLength = replacement.Length }, nestedDestination => Copy(replacement, nestedDestination), CancellationToken.None).GetAwaiter().GetResult();
+                return Copy(replacement, destination);
+            }, CancellationToken.None);
+            var consumer = new RecordingCredentialConsumer();
+            var use = await provider.UseAsync(requests.Use, consumer, CancellationToken.None);
+
+            Assert.True(outer.Succeeded);
+            Assert.Equal(CredentialFailureCode.Conflict, nested?.Failure?.Code);
+            Assert.True(use.Succeeded);
+            Assert.Equal(replacement, consumer.Observed);
+        }
+        finally
+        {
+            await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+            CryptographicOperations.ZeroMemory(original);
+            CryptographicOperations.ZeroMemory(replacement);
+        }
+    }
+
+    [Fact]
+    public async Task Windows_provider_propagates_same_target_callback_scope_into_a_synchronously_waited_worker()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var requests = Requests("workspace-reentrant-worker-" + Guid.NewGuid().ToString("N"), "credential-reentrant-worker-" + Guid.NewGuid().ToString("N"));
+        var value = Encoding.UTF8.GetBytes("worker-reentrant-canary-" + Guid.NewGuid().ToString("N"));
+        CredentialProviderResult? nested = null;
+
+        try
+        {
+            var outer = await provider.CreateAsync(requests.Mutation with { ValueByteLength = value.Length }, destination =>
+            {
+                nested = Task.Run(async () => await provider.DeleteAsync(requests.Delete, CancellationToken.None)).GetAwaiter().GetResult();
+                return Copy(value, destination);
+            }, CancellationToken.None);
+
+            Assert.True(outer.Succeeded);
+            Assert.Equal(CredentialFailureCode.Conflict, nested?.Failure?.Code);
+        }
+        finally
+        {
+            await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+            CryptographicOperations.ZeroMemory(value);
+        }
+    }
+
+    [Fact]
+    public async Task Windows_provider_rejects_a_synchronously_waited_worker_when_execution_context_flow_is_suppressed()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var requests = Requests("workspace-reentrant-suppressed-worker-" + Guid.NewGuid().ToString("N"), "credential-reentrant-suppressed-worker-" + Guid.NewGuid().ToString("N"));
+        var value = Encoding.UTF8.GetBytes("suppressed-worker-reentrant-canary-" + Guid.NewGuid().ToString("N"));
+        CredentialProviderResult? nested = null;
+
+        try
+        {
+            var outer = await provider.CreateAsync(requests.Mutation with { ValueByteLength = value.Length }, destination =>
+            {
+                using (ExecutionContext.SuppressFlow())
+                {
+                    nested = Task.Run(async () => await provider.DeleteAsync(requests.Delete, CancellationToken.None)).GetAwaiter().GetResult();
+                }
+
+                return Copy(value, destination);
+            }, CancellationToken.None);
+
+            Assert.True(outer.Succeeded);
+            Assert.Equal(CredentialFailureCode.Conflict, nested?.Failure?.Code);
+        }
+        finally
+        {
+            await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+            CryptographicOperations.ZeroMemory(value);
+        }
+    }
+
+    [Fact]
+    public async Task Windows_provider_retains_captured_same_target_scope_after_the_source_returns()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var requests = Requests("workspace-reentrant-deferred-" + Guid.NewGuid().ToString("N"), "credential-reentrant-deferred-" + Guid.NewGuid().ToString("N"));
+        var value = Encoding.UTF8.GetBytes("deferred-reentrant-canary-" + Guid.NewGuid().ToString("N"));
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<CredentialProviderResult>? nested = null;
+
+        try
+        {
+            var outer = await provider.CreateAsync(requests.Mutation with { ValueByteLength = value.Length }, destination =>
+            {
+                nested = Task.Run(async () =>
+                {
+                    await release.Task;
+                    return await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+                });
+                return Copy(value, destination);
+            }, CancellationToken.None);
+            release.SetResult();
+            var nestedResult = await nested!;
+            var consumer = new RecordingCredentialConsumer();
+            var use = await provider.UseAsync(requests.Use, consumer, CancellationToken.None);
+
+            Assert.True(outer.Succeeded);
+            Assert.Equal(CredentialFailureCode.Conflict, nestedResult.Failure?.Code);
+            Assert.True(use.Succeeded);
+            Assert.Equal(value, consumer.Observed);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+            CryptographicOperations.ZeroMemory(value);
+        }
+    }
+
+    [Fact]
     public async Task Public_results_diagnostics_process_state_and_serialization_do_not_expose_values_or_private_targets()
     {
         using var provider = new SecureFakeCredentialValueProvider();

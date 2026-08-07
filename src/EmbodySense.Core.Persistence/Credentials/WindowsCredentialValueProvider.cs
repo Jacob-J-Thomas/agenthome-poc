@@ -8,7 +8,7 @@ using EmbodySense.Core.Persistence.Credentials.Models;
 namespace EmbodySense.Core.Persistence.Credentials;
 
 /// <summary>Stores bounded local credential values in Windows Credential Manager under the current-user security boundary.</summary>
-/// <remarks>This provider supplies storage, not broker authorization. It exposes values only through the trusted callback contract and returns stable unavailable failures on unsupported platforms.</remarks>
+/// <remarks>This provider supplies storage, not broker authorization. It exposes values only through the trusted callback contract and returns stable unavailable failures on unsupported platforms. A source callback cannot reenter a mutation for its own credential target; the nested operation returns a value-free conflict.</remarks>
 public sealed class WindowsCredentialValueProvider : ICredentialValueProvider
 {
     private const string ProviderIdentity = "org.embodysense.windows";
@@ -100,6 +100,11 @@ public sealed class WindowsCredentialValueProvider : ICredentialValueProvider
         try
         {
             var target = CredentialProviderTarget.Derive(request.WorkspaceId, request.ReferenceId);
+            if (CredentialMutationCallbackScope.IsActive(target))
+            {
+                return ValueTask.FromResult(Failed(CredentialFailureCode.Conflict));
+            }
+
             if (!CredentialOperationMutex.TryAcquire(target, cancellationToken, out var operationLock))
             {
                 return ValueTask.FromResult(Failed(CredentialFailureCode.Unavailable));
@@ -182,6 +187,11 @@ public sealed class WindowsCredentialValueProvider : ICredentialValueProvider
         try
         {
             var target = CredentialProviderTarget.Derive(request.WorkspaceId, request.ReferenceId);
+            if (CredentialMutationCallbackScope.IsActive(target))
+            {
+                return Failed(CredentialFailureCode.Conflict);
+            }
+
             if (!CredentialOperationMutex.TryAcquire(target, cancellationToken, out var operationLock))
             {
                 return Failed(CredentialFailureCode.Unavailable);
@@ -222,7 +232,7 @@ public sealed class WindowsCredentialValueProvider : ICredentialValueProvider
             int bytesWritten;
             try
             {
-                // TODO(#266): Reject same-target mutation reentrancy from this source callback before a nested write can succeed. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/266
+                using var callbackScope = CredentialMutationCallbackScope.Enter(target);
                 bytesWritten = source(candidate);
             }
             catch (Exception)
