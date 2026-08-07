@@ -9,12 +9,10 @@ namespace EmbodySense.Core.Persistence.Loops.Models;
 /// <param name="Utf8Bytes">The UTF-8 bytes.</param>
 /// <param name="Base64">The base64.</param>
 /// <param name="Text">The text.</param>
-/// <param name="Bytes">The bytes.</param>
 internal sealed record ContentEntry(
     string Id,
     string Hash,
     int Utf16Characters,
     int Utf8Bytes,
     string Base64,
-    string Text,
-    byte[] Bytes);
+    string Text);

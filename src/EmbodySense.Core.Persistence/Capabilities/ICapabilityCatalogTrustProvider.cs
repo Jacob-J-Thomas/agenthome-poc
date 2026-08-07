@@ -6,6 +6,9 @@ namespace EmbodySense.Core.Persistence.Capabilities;
 /// <remarks>Implementations are server infrastructure, not secret brokerage or a catalog projection surface.</remarks>
 public interface ICapabilityCatalogTrustProvider
 {
+    /// <summary>Gets the strict maximum UTF-8 byte count of any authentication tag returned by this provider.</summary>
+    int MaximumAuthenticationTagUtf8Bytes { get; }
+
     /// <summary>Reads the authenticated trust anchor, or <see langword="null"/> when this workspace has never been anchored.</summary>
     Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default);
 

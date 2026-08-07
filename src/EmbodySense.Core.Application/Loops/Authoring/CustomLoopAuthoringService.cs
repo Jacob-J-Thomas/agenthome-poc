@@ -5,6 +5,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -82,7 +83,30 @@ public sealed class CustomLoopAuthoringService
     /// <param name="actor">The actor.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>The committed, replayed, rejected, or integrity-warning result.</returns>
-    public async Task<CustomLoopAuthoringResult> CreateAsync(string roleId, string operationId, string actor, CancellationToken cancellationToken = default)
+    public Task<CustomLoopAuthoringResult> CreateAsync(string roleId, string operationId, string actor, CancellationToken cancellationToken = default)
+    {
+        return CreateCoreAsync(roleId, operationId, actor, null, [], cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates the first durable version of a validated client-authored definition under an idempotent mutation operation.
+    /// </summary>
+    /// <param name="roleId">The server-owned role ID.</param>
+    /// <param name="operationId">The operation ID bound to the complete normalized input.</param>
+    /// <param name="actor">The actor.</param>
+    /// <param name="input">The complete editable definition captured at the explicit save boundary.</param>
+    /// <param name="currentRoleCeiling">The current server-owned tool-assignment ceiling.</param>
+    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <returns>The committed, replayed, rejected, authority-limited, quota-limited, or integrity-warning result.</returns>
+    public Task<CustomLoopAuthoringResult> CreateAsync(string roleId, string operationId, string actor, CustomLoopDefinitionInput input, IReadOnlyCollection<CustomLoopToolAssignment> currentRoleCeiling, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(currentRoleCeiling);
+        ValidateCurrentRoleCeiling(currentRoleCeiling);
+        return CreateCoreAsync(roleId, operationId, actor, NormalizeInput(input), currentRoleCeiling, cancellationToken);
+    }
+
+    private async Task<CustomLoopAuthoringResult> CreateCoreAsync(string roleId, string operationId, string actor, CustomLoopDefinitionInput? input, IReadOnlyCollection<CustomLoopToolAssignment> currentRoleCeiling, CancellationToken cancellationToken)
     {
         var invalidOperation = ValidateOperationId(operationId);
         if (invalidOperation is not null)
@@ -90,7 +114,7 @@ public sealed class CustomLoopAuthoringService
             return invalidOperation;
         }
 
-        var requestHash = ComputeCreateRequestHash(roleId);
+        var requestHash = ComputeCreateRequestHash(roleId, input);
         // Resolve the durable receipt before allocating a definition id. The same operation id must
         // replay the same authorized request rather than create a second definition.
         var operation = await _store.GetMutationOperationAsync(operationId, cancellationToken);
@@ -102,6 +126,17 @@ public sealed class CustomLoopAuthoringService
                 var scopedDefinition = RoleScopedOperationDefinition(existing, roleId);
                 await TryAuditRejectionAsync("create", existing.LoopId, scopedDefinition, actor, operationId, "operation_reuse_conflict", cancellationToken);
                 return Result(CustomLoopAuthoringStatus.Conflict, scopedDefinition, "The mutation operation id was reused for a different authorized request.");
+            }
+
+            if (existing.State == CustomLoopDefinitionMutationState.PendingMutation && !existing.HasAppliedMutationArtifact)
+            {
+                var planned = existing.PlannedDefinition ?? throw new InvalidOperationException("A pending Create operation is missing its planned definition.");
+                var outsideCurrentCeiling = ToolAssignmentsOutsideRoleCeiling(planned.ToolAssignments, currentRoleCeiling);
+                if (outsideCurrentCeiling.Length > 0)
+                {
+                    await TryAuditRejectionAsync("create", existing.LoopId, planned, actor, operationId, "authority_ceiling_rejected", cancellationToken);
+                    return CustomLoopAuthoringResult.Invalid(outsideCurrentCeiling);
+                }
             }
 
             return await ReplayOrRecoverAsync(existing, actor, cancellationToken);
@@ -122,6 +157,12 @@ public sealed class CustomLoopAuthoringService
                 return CustomLoopAuthoringResult.Invalid([new CustomLoopValidationError("role_binding_mismatch", "roleId", "The idempotent Create operation belongs to a different directory role.")]);
             }
 
+            if (input is not null && !MatchesInput(existing, input))
+            {
+                await TryAuditRejectionAsync("create", existing.Id, existing, actor, operationId, "operation_reuse_conflict", cancellationToken);
+                return Result(CustomLoopAuthoringStatus.Conflict, existing, "The mutation operation id was reused with different content.");
+            }
+
             if (legacyOperation.Status == CustomLoopCreateOperationLookupStatus.Committed && legacyOperation.OperationIntegrity == CustomLoopOperationIntegrity.Complete)
             {
                 return Result(CustomLoopAuthoringStatus.Replayed, existing, "The idempotent Create operation was already committed.");
@@ -139,7 +180,44 @@ public sealed class CustomLoopAuthoringService
         }
 
         var now = _timeProvider.GetUtcNow().ToUniversalTime();
-        var definition = CustomLoopDefinition.CreateSeed(_identityGenerator.NewLoopId(), roleId, _identityGenerator.NewInferenceStepId(), operationId, now);
+        var initialStepId = _identityGenerator.NewInferenceStepId();
+        var definition = CustomLoopDefinition.CreateSeed(_identityGenerator.NewLoopId(), roleId, initialStepId, operationId, now);
+        if (input is not null)
+        {
+            var stepResult = BuildCreateSteps(input.InferenceSteps, initialStepId);
+            if (stepResult.Errors.Count > 0)
+            {
+                await TryAuditRejectionAsync("create", definition.Id, definition, actor, operationId, "validation_rejected", cancellationToken);
+                return CustomLoopAuthoringResult.Invalid(stepResult.Errors);
+            }
+
+            var unsupportedAssignments = UnsupportedToolAssignments(input.ToolAssignments);
+            if (unsupportedAssignments.Length > 0)
+            {
+                await TryAuditRejectionAsync("create", definition.Id, definition, actor, operationId, "validation_rejected", cancellationToken);
+                return CustomLoopAuthoringResult.Invalid(unsupportedAssignments);
+            }
+
+            var outsideCurrentCeiling = ToolAssignmentsOutsideRoleCeiling(input.ToolAssignments!, currentRoleCeiling);
+            if (outsideCurrentCeiling.Length > 0)
+            {
+                await TryAuditRejectionAsync("create", definition.Id, definition, actor, operationId, "authority_ceiling_rejected", cancellationToken);
+                return CustomLoopAuthoringResult.Invalid(outsideCurrentCeiling);
+            }
+
+            definition = definition with
+            {
+                ContentHash = new string('0', CustomLoopLimits.Sha256HexCharacters),
+                DisplayName = input.DisplayName,
+                Description = input.Description,
+                TriggerPolicy = input.TriggerPolicy,
+                InferenceSteps = stepResult.Steps,
+                ToolAssignments = input.ToolAssignments!,
+                ExitPolicy = input.ExitPolicy
+            };
+            definition = CustomLoopDefinitionContentHash.Apply(definition);
+        }
+
         var validation = CustomLoopDefinitionValidator.Validate(definition);
         if (!validation.IsValid)
         {
@@ -197,10 +275,7 @@ public sealed class CustomLoopAuthoringService
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(currentRoleCeiling);
-        if (currentRoleCeiling.Any(value => !Enum.IsDefined(value) || value == CustomLoopToolAssignment.Unknown) || currentRoleCeiling.Distinct().Count() != currentRoleCeiling.Count)
-        {
-            throw new ArgumentException("The server-owned current role ceiling must contain unique implemented assignments.", nameof(currentRoleCeiling));
-        }
+        ValidateCurrentRoleCeiling(currentRoleCeiling);
 
         var invalidLoop = ValidateLoopId(loopId);
         if (invalidLoop is not null)
@@ -298,11 +373,7 @@ public sealed class CustomLoopAuthoringService
 
         if (input.ToolAssignments is not null)
         {
-            var unsupportedAssignments = input.ToolAssignments
-                .Select((assignment, index) => (assignment, index))
-                .Where(item => !Enum.IsDefined(item.assignment) || item.assignment == CustomLoopToolAssignment.Unknown)
-                .Select(item => new CustomLoopValidationError("unsupported_tool_assignment", $"toolAssignments[{item.index}]", "Only list, read, and search may be assigned."))
-                .ToArray();
+            var unsupportedAssignments = UnsupportedToolAssignments(input.ToolAssignments);
             if (unsupportedAssignments.Length > 0)
             {
                 await TryAuditRejectionAsync("update", loopId, current, actor, operationId, "validation_rejected", cancellationToken);
@@ -511,8 +582,35 @@ public sealed class CustomLoopAuthoringService
             .ToArray();
     }
 
-    private static string ComputeCreateRequestHash(string roleId)
+    private static CustomLoopValidationError[] UnsupportedToolAssignments(CustomLoopToolAssignment[]? assignments)
     {
+        if (assignments is null)
+        {
+            return [new CustomLoopValidationError("tool_assignments_required", "toolAssignments", "Tool assignment list is required.")];
+        }
+
+        return assignments
+            .Select((assignment, index) => (assignment, index))
+            .Where(item => !Enum.IsDefined(item.assignment) || item.assignment == CustomLoopToolAssignment.Unknown)
+            .Select(item => new CustomLoopValidationError("unsupported_tool_assignment", $"toolAssignments[{item.index}]", "Only list, read, and search may be assigned."))
+            .ToArray();
+    }
+
+    private static void ValidateCurrentRoleCeiling(IReadOnlyCollection<CustomLoopToolAssignment> currentRoleCeiling)
+    {
+        if (currentRoleCeiling.Any(value => !Enum.IsDefined(value) || value == CustomLoopToolAssignment.Unknown) || currentRoleCeiling.Distinct().Count() != currentRoleCeiling.Count)
+        {
+            throw new ArgumentException("The server-owned current role ceiling must contain unique implemented assignments.", nameof(currentRoleCeiling));
+        }
+    }
+
+    private static string ComputeCreateRequestHash(string roleId, CustomLoopDefinitionInput? input)
+    {
+        if (input is not null)
+        {
+            return ComputeRequestHash(CustomLoopDefinitionMutationKind.Create, string.Empty, roleId, 0, input);
+        }
+
         var canonicalRequest = "custom-loop-create\0" + roleId.Normalize(NormalizationForm.FormC);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalRequest))).ToLowerInvariant();
     }
@@ -526,6 +624,37 @@ public sealed class CustomLoopAuthoringService
     private async Task<bool> HasNonterminalRunAsync(string loopId, CancellationToken cancellationToken)
     {
         return _runStore is not null && await _runStore.GetNonterminalByLoopAsync(loopId, cancellationToken) is not null;
+    }
+
+    private (CustomLoopInferenceStep[] Steps, IReadOnlyList<CustomLoopValidationError> Errors) BuildCreateSteps(CustomLoopInferenceStepInput[]? inputs, string initialStepId)
+    {
+        if (inputs is null)
+        {
+            return ([], [new CustomLoopValidationError("inference_steps_required", "inferenceSteps", "Inference step list is required.")]);
+        }
+
+        var steps = new List<CustomLoopInferenceStep>(inputs.Length);
+        var errors = new List<CustomLoopValidationError>();
+        for (var index = 0; index < inputs.Length; index++)
+        {
+            var input = inputs[index];
+            if (input is null)
+            {
+                errors.Add(new CustomLoopValidationError("inference_step_required", $"inferenceSteps[{index}]", "Inference step cannot be null."));
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(input.Id))
+            {
+                errors.Add(new CustomLoopValidationError("create_inference_step_id_not_allowed", $"inferenceSteps[{index}].id", "Omit inference step ids during creation so the server can assign them."));
+                continue;
+            }
+
+            var stepId = index == 0 ? initialStepId : _identityGenerator.NewInferenceStepId();
+            steps.Add(new CustomLoopInferenceStep(stepId, input.Name, input.Instruction, input.ContextPolicy));
+        }
+
+        return (steps.ToArray(), errors);
     }
 
     private (CustomLoopInferenceStep[] Steps, IReadOnlyList<CustomLoopValidationError> Errors) BuildSteps(CustomLoopDefinition current, CustomLoopInferenceStepInput[]? inputs)
@@ -737,8 +866,23 @@ public sealed class CustomLoopAuthoringService
             CustomLoopDefinitionStoreStatus.Conflict => new CustomLoopAuthoringResult(CustomLoopAuthoringStatus.Conflict, null, [], result.Conflict, "The loop definition changed; reload before saving."),
             CustomLoopDefinitionStoreStatus.OperationConflict => Result(CustomLoopAuthoringStatus.Conflict, null, "The mutation operation id was reused for a different authorized request."),
             CustomLoopDefinitionStoreStatus.NotFound => Result(CustomLoopAuthoringStatus.NotFound, null, "The loop definition does not exist."),
-            CustomLoopDefinitionStoreStatus.LimitExceeded => Result(CustomLoopAuthoringStatus.LimitExceeded, null, "The workspace custom-loop definition limit was reached."),
+            CustomLoopDefinitionStoreStatus.LimitExceeded => Result(CustomLoopAuthoringStatus.LimitExceeded, null, DescribeLimitExceeded(result.RetentionExhaustionReason)),
             _ => throw new InvalidOperationException($"Unsupported custom-loop definition store status `{result.Status}`.")
+        };
+    }
+
+    private static string DescribeLimitExceeded(CustomLoopReceiptQuotaExhaustionReason reason)
+    {
+        return reason switch
+        {
+            CustomLoopReceiptQuotaExhaustionReason.None => "The workspace custom-loop definition limit was reached.",
+            CustomLoopReceiptQuotaExhaustionReason.ArtifactCountLimit => "The absolute authoring-receipt artifact-count quota was reached; no mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ArtifactByteLimit => "The absolute authoring-receipt byte quota was reached; no mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactCountLimit => "Only receipt slots reserved for completing pending mutations remain; no new mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ReservedArtifactByteLimit => "Only receipt bytes reserved for completing pending mutations remain; no new mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ProofCountLimit => "The compact authoring-proof count quota cannot preserve another operation identity; no mutation was admitted.",
+            CustomLoopReceiptQuotaExhaustionReason.ProofByteLimit => "The compact authoring-proof byte quota cannot preserve another operation identity; no mutation was admitted.",
+            _ => throw new InvalidOperationException($"Unsupported receipt-retention exhaustion reason `{reason}`.")
         };
     }
 
