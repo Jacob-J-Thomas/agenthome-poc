@@ -143,6 +143,79 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Restart_finalizes_a_successful_empty_provider_completion_as_observed_failure_without_abandonment_or_redispatch(string output)
+    {
+        using var workspace = new TestWorkspace();
+        var client = new RecordingInferenceClient(output);
+        var fixture = CreateFixture(workspace, new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderOutcomeObserved), client);
+        const string RequestId = "empty-provider-success-restart";
+
+        await Assert.ThrowsAsync<DefaultConversationTurnInterruptedException>(() => fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId)));
+        var interrupted = fixture.Failpoint!.InterruptedRecord;
+        Assert.NotNull(interrupted);
+        Assert.Equal(DefaultConversationProviderOutcome.ObservedFailure, interrupted.ProviderOutcome);
+        Assert.Null(interrupted.AssistantMessage);
+
+        var result = Assert.Single((await fixture.Recovery.RecoverAsync()).Results);
+        var recovered = await fixture.Turns.LoadAsync(result.TurnId);
+        Assert.NotNull(recovered);
+        Assert.Equal(DefaultConversationTurnRecoveryClassification.ProviderOutcomeObserved, result.Classification);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, recovered.Checkpoint);
+        Assert.Equal(LoopRunStatus.Failed, recovered.Run.Status);
+        Assert.Contains("no usable assistant output", recovered.Run.FailureDetail, StringComparison.Ordinal);
+        Assert.False(DefaultConversationTurnProtocol.CanAbandonReview(recovered));
+        Assert.Empty(await fixture.Turns.ListNeedsReviewAsync());
+        Assert.Equal(1, client.GenerateCount);
+        Assert.Equal(0, client.QuarantineCount);
+
+        var replay = await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, replay.Status);
+        Assert.Equal(1, client.GenerateCount);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+    }
+
+    [Fact]
+    public async Task Restart_finalizes_an_empty_observed_audit_failure_as_conclusive_failure_without_abandonment_or_redispatch()
+    {
+        using var workspace = new TestWorkspace();
+        var response = new LlmInferenceResponse(string.Empty, LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-empty-audit-restart");
+        var client = new RecordingInferenceClient("unused")
+        {
+            Failure = new LlmInferenceObservedResponseException("completion audit failed after provider success", response, new IOException("audit unavailable"))
+        };
+        var fixture = CreateFixture(workspace, new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderOutcomeObserved), client);
+        const string RequestId = "empty-observed-audit-restart";
+
+        await Assert.ThrowsAsync<DefaultConversationTurnInterruptedException>(() => fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId)));
+        var interrupted = fixture.Failpoint!.InterruptedRecord;
+        Assert.NotNull(interrupted);
+        Assert.Equal(DefaultConversationProviderOutcome.ObservedFailure, interrupted.ProviderOutcome);
+        Assert.Equal("provider-empty-audit-restart", interrupted.ProviderResponseId);
+        Assert.Null(interrupted.AssistantMessage);
+
+        var result = Assert.Single((await fixture.Recovery.RecoverAsync()).Results);
+        var recovered = await fixture.Turns.LoadAsync(result.TurnId);
+        Assert.NotNull(recovered);
+        Assert.Equal(DefaultConversationTurnRecoveryClassification.ProviderOutcomeObserved, result.Classification);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, recovered.Checkpoint);
+        Assert.Equal(LoopRunStatus.Failed, recovered.Run.Status);
+        Assert.Contains("no usable assistant output", recovered.Run.FailureDetail, StringComparison.Ordinal);
+        Assert.False(DefaultConversationTurnProtocol.CanAbandonReview(recovered));
+        Assert.Empty(await fixture.Turns.ListNeedsReviewAsync());
+        Assert.Equal(1, client.GenerateCount);
+        Assert.Equal(0, client.QuarantineCount);
+
+        var replay = await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, replay.Status);
+        Assert.Equal(1, client.GenerateCount);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+    }
+
     [Fact]
     public async Task Restart_preserves_concurrent_transcript_content_but_still_closes_a_conclusive_provider_failure()
     {
@@ -197,6 +270,23 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Equal("observed answer", recovered.AssistantMessage!.Content);
         Assert.Equal(0, client.QuarantineCount);
         Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+
+        var artifactPath = new WorkspacePaths(workspace.RootPath).DefaultConversationTurnsPath + Path.DirectorySeparatorChar + recovered.TurnId + ".json";
+        var retainedArtifact = await File.ReadAllTextAsync(artifactPath);
+        var reviewService = new DefaultConversationTurnReviewService(fixture.Turns, client, new FileConversationWorkspaceLease(new WorkspacePaths(workspace.RootPath)));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => reviewService.ResolveAsync(recovered.TurnId));
+
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.ObservedWithAuditFailure), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.Equal(retainedArtifact, await File.ReadAllTextAsync(artifactPath));
+        var reread = await fixture.Turns.LoadAsync(recovered.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(recovered.LifecycleVersion, reread.LifecycleVersion);
+        Assert.Equal(recovered.ProviderOutcome, reread.ProviderOutcome);
+        Assert.Equal(recovered.AssistantMessage, reread.AssistantMessage);
+        Assert.Equal(recovered.ReviewDetail, reread.ReviewDetail);
+        Assert.Null(reread.ReviewResolution);
+        Assert.Single(await fixture.Turns.ListNeedsReviewAsync());
     }
 
     [Fact]
@@ -239,6 +329,28 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Equal(recovered.TurnId + ":publication:user", recovered.UserPublicationId);
         Assert.Contains(recovered.UserPublicationId, recovered.Run.FailureDetail, StringComparison.Ordinal);
         Assert.Collection(await fixture.Memory.LoadCurrentConversationAsync(), message => Assert.Equal("owner edit", message.Content));
+
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, recovered.TurnId + ".json");
+        var retainedArtifact = await File.ReadAllTextAsync(artifactPath);
+        var reviewService = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => reviewService.ResolveAsync(recovered.TurnId));
+
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.TranscriptConflict), exception.Message, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.Client.QuarantineCount);
+        Assert.Equal(retainedArtifact, await File.ReadAllTextAsync(artifactPath));
+        var reread = await fixture.Turns.LoadAsync(recovered.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(recovered.LifecycleVersion, reread.LifecycleVersion);
+        Assert.Equal(recovered.ProviderOutcome, reread.ProviderOutcome);
+        Assert.Equal(recovered.UserMessage, reread.UserMessage);
+        Assert.Equal(recovered.ReviewDetail, reread.ReviewDetail);
+        Assert.Null(reread.ReviewResolution);
+        Assert.Single(await fixture.Turns.ListNeedsReviewAsync());
+
+        var restartedRecovery = new DefaultConversationTurnRecoveryService(fixture.Turns, fixture.Memory, new LoopRunStore(paths), new FileConversationWorkspaceLease(paths));
+        Assert.Empty((await restartedRecovery.RecoverAsync()).Results);
+        Assert.Single(await fixture.Turns.ListNeedsReviewAsync());
     }
 
     [Fact]
@@ -292,6 +404,45 @@ public sealed class DefaultConversationTurnRecoveryTests
         var completed = await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("new attempt"));
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, completed.Status);
         Assert.Equal(1, fixture.Client.GenerateCount);
+    }
+
+    [Fact]
+    public async Task Provider_dispatch_transcript_conflict_stays_blocked_without_quarantine_or_abandonment()
+    {
+        using var workspace = new TestWorkspace();
+        var fixture = CreateFixture(workspace, new InterruptingFailpoint(DefaultConversationTurnBoundary.ProviderDispatchStarted));
+
+        await Assert.ThrowsAsync<DefaultConversationTurnInterruptedException>(() => fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: "dispatch-conflict")));
+        await fixture.Memory.AppendMessageAsync(LlmMessage.User("owner edit"));
+
+        var recovered = Assert.Single((await fixture.Recovery.RecoverAsync()).Results);
+        var record = await fixture.Turns.LoadAsync(recovered.TurnId);
+        Assert.NotNull(record);
+        Assert.Equal(DefaultConversationTurnRecoveryClassification.Conflict, recovered.Classification);
+        Assert.Equal(DefaultConversationProviderOutcome.OutcomeUnknown, record.ProviderOutcome);
+        Assert.Equal(DefaultConversationTurnReviewCause.TranscriptConflict, record.ReviewCause);
+        Assert.Equal(DefaultConversationTurnReviewClassification.TranscriptConflict, DefaultConversationTurnProtocol.GetReviewClassification(record));
+        var version = record.LifecycleVersion;
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var reviewService = new DefaultConversationTurnReviewService(fixture.Turns, fixture.Client, new FileConversationWorkspaceLease(paths));
+
+        var forgedAbandonment = (record with { ReviewCause = DefaultConversationTurnReviewCause.OutcomeUnknown }).ResolveReview(DateTimeOffset.UtcNow);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Conflict, (await fixture.Turns.UpdateAsync(forgedAbandonment, record.LifecycleVersion)).Status);
+        var afterForgedWrite = await fixture.Turns.LoadAsync(record.TurnId);
+        Assert.NotNull(afterForgedWrite);
+        Assert.Equal(DefaultConversationTurnReviewCause.TranscriptConflict, afterForgedWrite.ReviewCause);
+        Assert.Equal(version, afterForgedWrite.LifecycleVersion);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => reviewService.ResolveAsync(record.TurnId));
+        Assert.Equal(0, fixture.Client.QuarantineCount);
+        var blocked = await fixture.Runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("must remain blocked"));
+        Assert.Equal(DefaultConversationLoopTurnStatus.NeedsReview, blocked.Status);
+        Assert.DoesNotContain("/review resolve", blocked.FailureDetail, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.Client.GenerateCount);
+        var reread = await fixture.Turns.LoadAsync(record.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(version, reread.LifecycleVersion);
+        Assert.Null(reread.ReviewResolution);
     }
 
     [Fact]
