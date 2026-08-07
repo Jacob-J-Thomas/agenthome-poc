@@ -22,6 +22,7 @@ public static class RuntimeCommandRegistry
         new RuntimeCommandDefinition(RuntimeCommandId.VerboseDisable, ["/verbose off", "/verbose false"], includeInHelp: false),
         new RuntimeCommandDefinition(RuntimeCommandId.NewSession, ["/new", "/new-session"], "start a fresh conversation without leaving the session"),
         new RuntimeCommandDefinition(RuntimeCommandId.ConversationHistory, ["/history", "/conversations", "/load"], "load a saved conversation before the first prompt in the current session"),
+        new RuntimeCommandDefinition(RuntimeCommandId.DefaultConversationReview, ["/review"], "inspect default-conversation review evidence; abandon outcome-unknown attempts only", ["/review", "/review resolve <turn-id>"]),
         new RuntimeCommandDefinition(RuntimeCommandId.Exit, ["exit", "quit", "/exit", "/quit"], "leave the session", ["/exit", "/quit"]),
         new RuntimeCommandDefinition(RuntimeCommandId.CancelPendingInput, ["/cancel", "cancel"], includeInHelp: false)
     ];

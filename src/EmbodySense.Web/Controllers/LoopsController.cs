@@ -21,19 +21,23 @@ namespace EmbodySense.Web.Controllers;
 public sealed class LoopsController : ControllerBase
 {
     private readonly LoopAuthoringFacade _loops;
+    private readonly ILoopReceiptRetentionFacade _receiptRetention;
     private readonly WebAgentRuntimeHost _host;
 
     /// <summary>
     /// Initializes the loop-authoring controller.
     /// </summary>
     /// <param name="loops">The reusable authoring facade for durable definitions.</param>
+    /// <param name="receiptRetention">The Startup-only facade that owns receipt posture and governed cleanup attribution.</param>
     /// <param name="host">The Web host used for workspace and runtime-model status.</param>
-    public LoopsController(LoopAuthoringFacade loops, WebAgentRuntimeHost host)
+    public LoopsController(LoopAuthoringFacade loops, ILoopReceiptRetentionFacade receiptRetention, WebAgentRuntimeHost host)
     {
         ArgumentNullException.ThrowIfNull(loops);
+        ArgumentNullException.ThrowIfNull(receiptRetention);
         ArgumentNullException.ThrowIfNull(host);
 
         _loops = loops;
+        _receiptRetention = receiptRetention;
         _host = host;
     }
 
@@ -55,9 +59,25 @@ public sealed class LoopsController : ControllerBase
     }
 
     /// <summary>
-    /// Gets the default loop or one custom-loop definition.
+    /// Gets the canonical read-only default conversation loop.
     /// </summary>
-    /// <param name="loopId">The reserved <c>default-conversation</c> identity or a custom artifact identifier.</param>
+    /// <param name="cancellationToken">The token used to cancel the definition read.</param>
+    /// <returns>HTTP 200 with the system-loop graph and policy, or HTTP 409 when the workspace is not initialized.</returns>
+    [HttpGet("default-conversation")]
+    public async Task<ActionResult<SystemLoopDefinitionSnapshot>> GetSystemDefault(CancellationToken cancellationToken)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
+        }
+
+        return Ok((await _loops.GetCatalogAsync(cancellationToken)).SystemDefault);
+    }
+
+    /// <summary>
+    /// Gets one custom-loop definition.
+    /// </summary>
+    /// <param name="loopId">The custom artifact identifier.</param>
     /// <param name="cancellationToken">The token used to cancel the definition read.</param>
     /// <returns>
     /// HTTP 200 with the definition, HTTP 400 for an invalid custom identifier, HTTP 404 when a
@@ -69,11 +89,6 @@ public sealed class LoopsController : ControllerBase
         if (!IsWorkspaceInitialized())
         {
             return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
-        }
-
-        if (string.Equals(loopId, "default-conversation", StringComparison.Ordinal))
-        {
-            return Ok((await _loops.GetCatalogAsync(cancellationToken)).SystemDefault);
         }
 
         try
@@ -88,9 +103,9 @@ public sealed class LoopsController : ControllerBase
     }
 
     /// <summary>
-    /// Creates a new first-wave custom-loop definition.
+    /// Atomically creates the first durable version of an explicit client-side custom-loop draft.
     /// </summary>
-    /// <param name="request">The caller-owned idempotency identity.</param>
+    /// <param name="request">The caller-owned idempotency identity and complete first-save definition.</param>
     /// <param name="cancellationToken">The token used to cancel authoring.</param>
     /// <returns>
     /// HTTP 201 for a newly created definition; otherwise the facade response projected as HTTP
@@ -104,7 +119,18 @@ public sealed class LoopsController : ControllerBase
             return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
         }
 
-        var response = await _loops.CreateAsync(request.OperationId, cancellationToken);
+        if (request.Definition is null)
+        {
+            return Project(new LoopAuthoringResponse(
+                "Invalid",
+                false,
+                null,
+                [new LoopValidationError("definition_required", "definition", "The complete first-save definition is required.")],
+                null,
+                "The first-save definition is required."));
+        }
+
+        var response = await _loops.CreateAsync(request.OperationId, request.Definition, cancellationToken);
         return response.Status == "Created"
             ? CreatedAtAction(nameof(Get), new { loopId = response.Definition!.Id }, response)
             : Project(response);
@@ -160,6 +186,47 @@ public sealed class LoopsController : ControllerBase
         }
 
         return Project(await _loops.DeleteAsync(loopId, request.ExpectedDefinitionVersion, request.OperationId, cancellationToken));
+    }
+
+    /// <summary>
+    /// Gets bounded custom-loop receipt-retention posture without exposing protocol artifacts.
+    /// </summary>
+    /// <param name="cancellationToken">The token used to cancel the retention inspection.</param>
+    /// <returns>HTTP 200 with safe retention posture, or HTTP 409 when the workspace is not initialized.</returns>
+    [HttpGet("receipt-retention")]
+    public async Task<ActionResult<LoopReceiptRetentionPostureSnapshot>> GetReceiptRetention(CancellationToken cancellationToken)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before inspecting custom-loop receipt retention." });
+        }
+
+        return Ok(await _receiptRetention.GetPostureAsync(cancellationToken));
+    }
+
+    /// <summary>
+    /// Executes one caller-requested, server-attributed, policy-bounded custom-loop receipt cleanup.
+    /// </summary>
+    /// <param name="request">The class, idempotency identity, and bounded cleanup limits.</param>
+    /// <param name="cancellationToken">The token used to cancel cleanup before its durable terminal boundary.</param>
+    /// <returns>HTTP 200 for a terminal result, or a safe error projection when cleanup cannot proceed.</returns>
+    [HttpPost("receipt-retention/cleanup")]
+    public async Task<ActionResult<LoopReceiptCleanupResponse>> CleanupReceiptRetention([FromBody] LoopReceiptCleanupInput request, CancellationToken cancellationToken)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before cleaning custom-loop receipt retention." });
+        }
+
+        var response = await _receiptRetention.CleanupAsync(request, cancellationToken);
+        return response.Status switch
+        {
+            "Pruned" or "Replayed" or "NothingEligible" or "CommittedWithAuditWarning" => Ok(response),
+            "Invalid" => BadRequest(response),
+            "AuditUnavailable" => StatusCode(StatusCodes.Status503ServiceUnavailable, response),
+            "OperationInProgress" or "QuotaExhausted" or "CleanupConflict" or "Corrupt" or "Degraded" => Conflict(response),
+            _ => StatusCode(StatusCodes.Status500InternalServerError, response)
+        };
     }
 
     private ActionResult<LoopAuthoringResponse> Project(LoopAuthoringResponse response)

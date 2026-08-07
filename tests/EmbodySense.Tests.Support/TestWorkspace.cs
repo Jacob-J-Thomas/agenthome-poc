@@ -4,11 +4,15 @@ public sealed class TestWorkspace : IDisposable
 {
     public TestWorkspace()
     {
-        RootPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "embodysense-tests", Guid.NewGuid().ToString("N"));
+        var identifier = Guid.NewGuid().ToString("N");
+        RootPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "embodysense-tests", identifier);
+        ServerStatePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "embodysense-test-server-state", identifier);
         Directory.CreateDirectory(RootPath);
     }
 
     public string RootPath { get; }
+
+    public string ServerStatePath { get; }
 
     public string File(params string[] segments)
     {
@@ -22,6 +26,17 @@ public sealed class TestWorkspace : IDisposable
             if (Directory.Exists(RootPath))
             {
                 Directory.Delete(RootPath, recursive: true);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        try
+        {
+            if (Directory.Exists(ServerStatePath))
+            {
+                Directory.Delete(ServerStatePath, recursive: true);
             }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)

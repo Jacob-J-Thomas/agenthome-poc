@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Inference;
 using System.Text.Json;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Memory;
+using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Common.Memory.Models;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Common.Workspace;
@@ -54,6 +55,24 @@ public sealed class ConversationMemoryStoreTests
                 Assert.Equal(LlmMessageRole.Assistant, message.Role);
                 Assert.Equal("second", message.Content);
             });
+    }
+
+    [Fact]
+    public async Task LoadCurrentConversationAsync_requires_explicit_cleanup_for_the_superseded_identityless_shape()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.ConversationMemoryPath);
+        var legacyEntry = """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-31T00:00:00Z","role":"user","content":"legacy prompt"}""";
+        await File.WriteAllTextAsync(paths.CurrentConversationPath, legacyEntry);
+        var store = new ConversationMemoryStore(paths);
+
+        var exception = await Assert.ThrowsAsync<ConversationTranscriptCleanupRequiredException>(() => store.LoadCurrentConversationSnapshotAsync());
+
+        Assert.Equal(paths.CurrentConversationPath, exception.TranscriptPath);
+        Assert.Contains("Back up and remove this transcript file", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Automatic migration", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(legacyEntry, await File.ReadAllTextAsync(paths.CurrentConversationPath));
     }
 
     [Fact]
@@ -113,6 +132,26 @@ public sealed class ConversationMemoryStoreTests
         var messages = await first.LoadCurrentConversationAsync();
         Assert.Equal(2, messages.Count);
         Assert.Contains(messages[^1].Content, new[] { "winner-a", "winner-b" });
+    }
+
+    [Fact]
+    public async Task Identity_bearing_publication_rejects_reuse_of_an_identity_from_the_expected_prefix()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        await store.AppendMessageAsync(LlmMessage.User("seed"));
+        var expected = await store.LoadCurrentConversationSnapshotAsync();
+        var existing = JsonSerializer.Deserialize<ConversationMemoryEntry>(Assert.Single(await File.ReadAllLinesAsync(paths.CurrentConversationPath)), _jsonOptions)!;
+
+        var result = await store.TryPublishMessageAsync(
+            expected.ConversationId,
+            expected.Version,
+            expected.Messages,
+            new ConversationMessagePublication(existing.MessageId, "new-publication", LlmMessage.Assistant("must not append")));
+
+        Assert.Equal(ConversationPublicationAppendStatus.Conflict, result.Status);
+        Assert.Collection(await store.LoadCurrentConversationAsync(), message => Assert.Equal("seed", message.Content));
     }
 
     [Fact]
@@ -393,6 +432,113 @@ public sealed class ConversationMemoryStoreTests
         Assert.Contains("\"conversationId\":\"current\"", await File.ReadAllTextAsync(paths.CurrentConversationPath));
     }
 
+    [Fact]
+    public async Task Empty_and_invalid_public_boundaries_are_deterministic_and_fail_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+
+        var emptyHistory = await store.LoadConversationHistorySnapshotAsync(1, 1, 1);
+        var current = Assert.Single(emptyHistory.Transcripts);
+        Assert.True(current.IsCurrent);
+        Assert.False(current.Exists);
+        Assert.Empty(await store.ListConversationsAsync());
+        await store.ResumeConversationAsync("current");
+        await Assert.ThrowsAsync<FileNotFoundException>(() => store.ResumeConversationAsync("missing"));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => store.SearchCurrentConversationAsync("query", 0));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.LoadConversationAsync("nested/path"));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.LoadConversationAsync(".."));
+
+        await WriteConversationAsync(paths, "normalized", Entry("normalized", 1, "user", "normalized"));
+        Assert.Equal("normalized", Assert.Single(await store.LoadConversationAsync("normalized.ndjson")).Content);
+    }
+
+    [Fact]
+    public async Task History_snapshot_reports_archive_and_exact_content_bounds_without_losing_complete_lines()
+    {
+        using var archiveWorkspace = new TestWorkspace();
+        var archivePaths = new WorkspacePaths(archiveWorkspace.RootPath);
+        await WriteConversationAsync(archivePaths, Path.Combine("archive", "archive-a"), Entry("current", 1, "user", "first"));
+        await WriteConversationAsync(archivePaths, Path.Combine("archive", "archive-b"), Entry("current", 1, "user", "second"));
+        var archiveStore = new ConversationMemoryStore(archivePaths);
+
+        var boundedArchives = await archiveStore.LoadConversationHistorySnapshotAsync(2, 10, 1_000);
+        Assert.True(boundedArchives.AdditionalFilesOmitted);
+        Assert.Equal(2, boundedArchives.Transcripts.Count);
+        Assert.StartsWith("archive/", boundedArchives.Transcripts[1].ConversationId, StringComparison.Ordinal);
+        Assert.True((await archiveStore.LoadConversationHistorySnapshotAsync(1, 10, 1_000)).AdditionalFilesOmitted);
+
+        using var contentWorkspace = new TestWorkspace();
+        var contentPaths = new WorkspacePaths(contentWorkspace.RootPath);
+        Directory.CreateDirectory(contentPaths.ConversationMemoryPath);
+        await File.WriteAllTextAsync(Path.Combine(contentPaths.ConversationMemoryPath, "unterminated.ndjson"), "abc");
+        await File.WriteAllTextAsync(Path.Combine(contentPaths.ConversationMemoryPath, "crlf.ndjson"), "a\r\nb\r\n");
+        var contentStore = new ConversationMemoryStore(contentPaths);
+
+        var complete = await contentStore.LoadConversationHistorySnapshotAsync(3, 10, 1_000);
+        Assert.Equal("abc", Assert.Single(Assert.Single(complete.Transcripts, item => item.ConversationId == "unterminated").Lines));
+        Assert.Equal(["a", "b"], Assert.Single(complete.Transcripts, item => item.ConversationId == "crlf").Lines);
+        using var characterWorkspace = new TestWorkspace();
+        var characterPaths = new WorkspacePaths(characterWorkspace.RootPath);
+        Directory.CreateDirectory(characterPaths.ConversationMemoryPath);
+        await File.WriteAllTextAsync(Path.Combine(characterPaths.ConversationMemoryPath, "exact-characters.ndjson"), "abc");
+        var exactCharacters = await new ConversationMemoryStore(characterPaths).LoadConversationHistorySnapshotAsync(2, 10, 3);
+        var exactTranscript = Assert.Single(exactCharacters.Transcripts, item => item.ConversationId == "exact-characters");
+        Assert.False(exactTranscript.AdditionalContentOmitted);
+
+        using var lineWorkspace = new TestWorkspace();
+        var linePaths = new WorkspacePaths(lineWorkspace.RootPath);
+        Directory.CreateDirectory(linePaths.ConversationMemoryPath);
+        await File.WriteAllTextAsync(Path.Combine(linePaths.ConversationMemoryPath, "exact-lines.ndjson"), "a\nb\n");
+        var exactLines = await new ConversationMemoryStore(linePaths).LoadConversationHistorySnapshotAsync(2, 2, 1_000);
+        var lines = Assert.Single(exactLines.Transcripts, item => item.ConversationId == "exact-lines");
+        Assert.Equal(["a", "b"], lines.Lines);
+        Assert.False(lines.AdditionalContentOmitted);
+
+        using var overflowWorkspace = new TestWorkspace();
+        var overflowPaths = new WorkspacePaths(overflowWorkspace.RootPath);
+        Directory.CreateDirectory(overflowPaths.ConversationMemoryPath);
+        await File.WriteAllTextAsync(Path.Combine(overflowPaths.ConversationMemoryPath, "overflow.ndjson"), new string('x', 4_097));
+        var overflow = await new ConversationMemoryStore(overflowPaths).LoadConversationHistorySnapshotAsync(2, 10, 4_096);
+        Assert.True(Assert.Single(overflow.Transcripts, item => item.ConversationId == "overflow").AdditionalContentOmitted);
+    }
+
+    [Fact]
+    public async Task Listing_orders_current_and_saved_conversations_by_latest_activity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteConversationAsync(paths, "older", Entry("older", 1, "user", "older"));
+        await WriteConversationAsync(paths, "newer", Entry("newer", 2, "user", "newer"));
+        var store = new ConversationMemoryStore(paths);
+
+        var conversations = await store.ListConversationsAsync();
+
+        Assert.Equal(["newer", "older"], conversations.Select(item => item.ConversationId));
+    }
+
+    [Fact]
+    public async Task Transcript_and_identity_validation_rejects_unsupported_or_ambiguous_persisted_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ConversationMemoryStore(paths);
+        var unsupported = Entry("unsupported", 1, "user", "content") with { SchemaVersion = 2 };
+        await WriteConversationAsync(paths, "unsupported", unsupported);
+        await WriteConversationAsync(paths, "unknown-role", Entry("unknown-role", 1, "unknown", "content"));
+        var duplicate = Entry("duplicate", 1, "user", "first");
+        await WriteConversationAsync(paths, "duplicate", duplicate, duplicate with { Sequence = 2, Content = "second" });
+
+        await Assert.ThrowsAsync<FormatException>(() => store.LoadConversationAsync("unsupported"));
+        await Assert.ThrowsAsync<FormatException>(() => store.LoadConversationAsync("unknown-role"));
+        await Assert.ThrowsAsync<FormatException>(() => store.LoadConversationAsync("duplicate"));
+
+        Directory.CreateDirectory(paths.ConversationMemoryPath);
+        await File.WriteAllTextAsync(paths.CurrentConversationPath + ".identity.json", "{\"schemaVersion\":1,\"conversationId\":\"current\",\"version\":\"short\"}");
+        await Assert.ThrowsAsync<FormatException>(() => store.LoadCurrentConversationSnapshotAsync());
+    }
+
     private static async Task WriteConversationAsync(
         WorkspacePaths paths,
         string conversationId,
@@ -407,6 +553,6 @@ public sealed class ConversationMemoryStoreTests
 
     private static ConversationMemoryEntry Entry(string conversationId, int sequence, string role, string content)
     {
-        return new ConversationMemoryEntry(1, conversationId, sequence, DateTimeOffset.Parse("2026-06-01T00:00:00+00:00").AddMinutes(sequence), role, content);
+        return new ConversationMemoryEntry(1, conversationId, sequence, DateTimeOffset.Parse("2026-06-01T00:00:00+00:00").AddMinutes(sequence), $"message-{sequence}", $"publication-{sequence}", role, content);
     }
 }

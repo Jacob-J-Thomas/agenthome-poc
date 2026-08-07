@@ -68,6 +68,82 @@ public sealed class WindowsCredentialValueProviderTests
     }
 
     [Fact]
+    public async Task Public_provider_fails_closed_for_real_missing_conflicting_callback_limit_and_cancelled_operations()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var requests = Requests("workspace-fail-closed-" + Guid.NewGuid().ToString("N"), "credential-fail-closed-" + Guid.NewGuid().ToString("N"));
+        var value = new byte[16];
+        RandomNumberGenerator.Fill(value);
+        Assert.True(CredentialProviderId.TryParse("org.embodysense.other", out var otherProvider, out _));
+
+        try
+        {
+            var invalid = await provider.CreateAsync(requests.Mutation with { ProviderId = otherProvider! }, _ => throw new InvalidOperationException("must-not-run"), CancellationToken.None);
+            var missingReplace = await provider.ReplaceAsync(requests.Mutation, destination => Copy(value, destination), CancellationToken.None);
+            var created = await provider.CreateAsync(requests.Mutation, destination => Copy(value, destination), CancellationToken.None);
+            var conflict = await provider.CreateAsync(requests.Mutation, destination => Copy(value, destination), CancellationToken.None);
+            var callbackFailure = await provider.ReplaceAsync(requests.Mutation, _ => throw new InvalidOperationException("hostile callback detail"), CancellationToken.None);
+            var wrongLength = await provider.ReplaceAsync(requests.Mutation, _ => 0, CancellationToken.None);
+            var limited = await provider.ReplaceAsync(requests.Mutation with { ValueByteLength = 2_561 }, _ => throw new InvalidOperationException("must-not-run"), CancellationToken.None);
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            var cancelledUse = await provider.UseAsync(requests.Use, new RecordingCredentialConsumer(), cancelled.Token);
+            var cancelledDelete = await provider.DeleteAsync(requests.Delete, cancelled.Token);
+            var cancelledHealth = await provider.GetHealthAsync(requests.Use, cancelled.Token);
+
+            Assert.Equal(CredentialFailureCode.InvalidRequest, invalid.Failure?.Code);
+            Assert.Equal(CredentialFailureCode.NotFound, missingReplace.Failure?.Code);
+            Assert.True(created.Succeeded);
+            Assert.Equal(CredentialFailureCode.Conflict, conflict.Failure?.Code);
+            Assert.Equal(CredentialFailureCode.CallbackFailed, callbackFailure.Failure?.Code);
+            Assert.Equal(CredentialFailureCode.CallbackFailed, wrongLength.Failure?.Code);
+            Assert.Equal(CredentialFailureCode.LimitExceeded, limited.Failure?.Code);
+            Assert.Equal(CredentialFailureCode.Unavailable, cancelledUse.Failure?.Code);
+            Assert.Equal(CredentialFailureCode.Unavailable, cancelledDelete.Failure?.Code);
+            Assert.Equal(CredentialProviderHealthStatus.Unavailable, cancelledHealth.Status);
+        }
+        finally
+        {
+            await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+            CryptographicOperations.ZeroMemory(value);
+        }
+    }
+
+    [Fact]
+    public async Task Public_provider_is_unavailable_without_the_windows_credential_manager()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var provider = new WindowsCredentialValueProvider();
+        var requests = Requests("workspace-not-supported", "credential-not-supported");
+        var callbackInvoked = false;
+        var create = await provider.CreateAsync(requests.Mutation, _ =>
+        {
+            callbackInvoked = true;
+            return requests.Mutation.ValueByteLength;
+        }, CancellationToken.None);
+        var replace = await provider.ReplaceAsync(requests.Mutation, _ => throw new InvalidOperationException("must-not-run"), CancellationToken.None);
+        var use = await provider.UseAsync(requests.Use, new RecordingCredentialConsumer(), CancellationToken.None);
+        var delete = await provider.DeleteAsync(requests.Delete, CancellationToken.None);
+        var health = await provider.GetHealthAsync(requests.Use, CancellationToken.None);
+
+        Assert.False(callbackInvoked);
+        Assert.Equal(CredentialFailureCode.Unavailable, create.Failure?.Code);
+        Assert.Equal(CredentialFailureCode.Unavailable, replace.Failure?.Code);
+        Assert.Equal(CredentialFailureCode.Unavailable, use.Failure?.Code);
+        Assert.Equal(CredentialFailureCode.Unavailable, delete.Failure?.Code);
+        Assert.Equal(CredentialProviderHealthStatus.Unavailable, health.Status);
+    }
+
+    [Fact]
     public async Task Secure_fake_is_deterministic_fail_closed_and_preserves_prior_value_after_hostile_replace_failure()
     {
         using var provider = new SecureFakeCredentialValueProvider();

@@ -3,8 +3,10 @@ param(
     [switch]$SkipRestore,
     [switch]$RunBrowserE2E,
     [switch]$BrowserE2EOnly,
+    [ValidateSet("PullRequest", "Stress")]
+    [string]$VerificationTier = "PullRequest",
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug"
+    [string]$Configuration = "Release"
 )
 
 Set-StrictMode -Version Latest
@@ -13,67 +15,101 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $testsPath = Join-Path $repoRoot "tests"
 $e2eProjectPath = Join-Path $testsPath "EmbodySense.E2ETests\EmbodySense.E2ETests.csproj"
+$persistenceTestProjectPath = Join-Path $testsPath "EmbodySense.Core.Persistence.Tests\EmbodySense.Core.Persistence.Tests.csproj"
+$pullRequestRunSettingsPath = Join-Path $testsPath "verification-pull-request.runsettings"
+$stressRunSettingsPath = Join-Path $testsPath "verification-stress.runsettings"
+$stressResultsPath = Join-Path $testsPath "EmbodySense.Core.Persistence.Tests\TestResults\VerificationStress"
+$powerShellExecutable = (Get-Process -Id $PID).Path
+$runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
+$deletionCapacityStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTraceRetentionStoreTests.Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible"
+
+. (Join-Path $PSScriptRoot "verification-phase.ps1")
+Reset-VerificationPhaseState
 
 if ($BrowserE2EOnly -and -not $RunBrowserE2E) {
     throw "-BrowserE2EOnly requires -RunBrowserE2E."
 }
 
-function Invoke-CheckedNative {
+if ($VerificationTier -eq "Stress" -and ($RunBrowserE2E -or $BrowserE2EOnly)) {
+    throw "The Stress verification tier cannot be combined with browser E2E switches."
+}
+
+function Invoke-CheckedNativePhase {
     param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
         [Parameter(Mandatory = $true)]
         [string]$FileName,
 
         [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
     )
 
-    & $FileName @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FileName exited with code $LASTEXITCODE."
-    }
+    Invoke-VerificationPhase -Name $Name -FileName $FileName -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $repoRoot
 }
 
 Push-Location $repoRoot
 try {
-    $globalJson = Get-Content (Join-Path $repoRoot "global.json") -Raw | ConvertFrom-Json
-    $requestedSdkVersion = [Version]$globalJson.sdk.version
-    $resolvedSdkVersion = [Version]((& dotnet --version).Trim())
-    $requestedFeatureBand = [Math]::Floor($requestedSdkVersion.Build / 100)
-    $resolvedFeatureBand = [Math]::Floor($resolvedSdkVersion.Build / 100)
-    $sameSdkFeatureBand = $resolvedSdkVersion.Major -eq $requestedSdkVersion.Major -and $resolvedSdkVersion.Minor -eq $requestedSdkVersion.Minor -and $resolvedFeatureBand -eq $requestedFeatureBand
-
-    if (-not $sameSdkFeatureBand -or $resolvedSdkVersion -lt $requestedSdkVersion) {
-        throw "The resolved .NET SDK $resolvedSdkVersion does not satisfy global.json version $requestedSdkVersion with latestPatch roll-forward."
+    & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json") -RepositoryRoot $repoRoot
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
     }
 
-    Write-Output "Using .NET SDK $resolvedSdkVersion selected by global.json."
+    Write-VerificationContext -RepositoryRoot $repoRoot -Configuration $Configuration -VerificationTier $VerificationTier
+    Write-Output "VERIFY_TIER_SELECTION tier=$VerificationTier stress_owner=.github/workflows/verification-stress.yml"
 
+    $cleanupStarted = [Diagnostics.Stopwatch]::StartNew()
+    Write-Output "VERIFY_PHASE_START name=clean-test-results started_at_utc=$([DateTimeOffset]::UtcNow.ToString("O")) timeout_seconds=none last_completed=$script:LastCompletedVerificationPhase"
     Get-ChildItem -Path $testsPath -Directory | ForEach-Object {
         $testResultsPath = Join-Path $_.FullName "TestResults"
         if (Test-Path $testResultsPath) {
             Remove-Item -LiteralPath $testResultsPath -Recurse -Force
         }
     }
+    $cleanupStarted.Stop()
+    $script:LastCompletedVerificationPhase = "clean-test-results"
+    Write-Output "VERIFY_PHASE_COMPLETE name=clean-test-results elapsed_seconds=$([Math]::Round($cleanupStarted.Elapsed.TotalSeconds, 3)) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
 
     $buildArguments = @("build")
     if ($SkipRestore) {
         $buildArguments += "--no-restore"
     }
-    $buildArguments += if ($BrowserE2EOnly) { $e2eProjectPath } else { "EmbodySense.sln" }
+    $buildArguments += if ($VerificationTier -eq "Stress") { $persistenceTestProjectPath } elseif ($BrowserE2EOnly) { $e2eProjectPath } else { "EmbodySense.sln" }
     $buildArguments += "-c"
     $buildArguments += $Configuration
     $buildArguments += "/p:RestoreIgnoreFailedSources=true"
 
-    Invoke-CheckedNative "dotnet" $buildArguments
+    Invoke-CheckedNativePhase -Name "build-$($VerificationTier.ToLowerInvariant())" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900
+
+    if ($VerificationTier -eq "Stress") {
+        Write-Output "VERIFY_STRESS_CONTRACT exact_test_count=2 session_timeout_seconds=1500 max_artifact_process_timeout_seconds=1800 deletion_capacity_process_timeout_seconds=1200"
+        $maximumResultsPath = Join-Path $stressResultsPath "MaximumArtifact"
+        $maximumFilter = "FullyQualifiedName=$maximumArtifactStressTest&VerificationTier=Stress"
+        Invoke-CheckedNativePhase -Name "stress-maximum-artifact" -FileName "dotnet" -Arguments @("test", $persistenceTestProjectPath, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $stressRunSettingsPath, "--filter", $maximumFilter, "--logger", "trx;LogFileName=maximum-artifact-stress.trx", "--results-directory", $maximumResultsPath, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 1800
+
+        $deletionResultsPath = Join-Path $stressResultsPath "DeletionCapacity"
+        $deletionFilter = "FullyQualifiedName=$deletionCapacityStressTest&VerificationTier=Stress"
+        Invoke-CheckedNativePhase -Name "stress-deletion-operation-capacity" -FileName "dotnet" -Arguments @("test", $persistenceTestProjectPath, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $stressRunSettingsPath, "--filter", $deletionFilter, "--logger", "trx;LogFileName=deletion-capacity-stress.trx", "--results-directory", $deletionResultsPath, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 1200
+        return
+    }
 
     if (-not $BrowserE2EOnly) {
-        Invoke-CheckedNative "dotnet" @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal")
-        Invoke-CheckedNative "dotnet" @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal")
+        Invoke-CheckedNativePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 300
+        Invoke-CheckedNativePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 300
 
-        $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-        $npm = if ($runningOnWindows) { "npm.cmd" } else { "npm" }
-        Invoke-CheckedNative $npm @("ci", "--include=dev")
-        Invoke-CheckedNative $npm @("test")
+        if ($runningOnWindows) {
+            Invoke-CheckedNativePhase -Name "npm-ci" -FileName $env:ComSpec -Arguments @("/d", "/s", "/c", "npm.cmd ci --include=dev") -TimeoutSeconds 600
+            Invoke-CheckedNativePhase -Name "frontend-tests" -FileName $env:ComSpec -Arguments @("/d", "/s", "/c", "npm.cmd test") -TimeoutSeconds 600
+        }
+        else {
+            Invoke-CheckedNativePhase -Name "npm-ci" -FileName "npm" -Arguments @("ci", "--include=dev") -TimeoutSeconds 600
+            Invoke-CheckedNativePhase -Name "frontend-tests" -FileName "npm" -Arguments @("test") -TimeoutSeconds 600
+        }
     }
 
     if ($RunBrowserE2E) {
@@ -83,7 +119,7 @@ try {
             $env:EMBODYSENSE_RUN_BROWSER_E2E = "1"
             $browserE2ETestResultsPath = Join-Path $testsPath "EmbodySense.E2ETests\TestResults\BrowserE2E"
             $env:EMBODYSENSE_BROWSER_E2E_ARTIFACTS = $browserE2ETestResultsPath
-            Invoke-CheckedNative "dotnet" @("test", $e2eProjectPath, "-c", $Configuration, "--no-build", "--no-restore", "--filter", "FullyQualifiedName~BrowserFlowTests", "--logger", "trx;LogFileName=browser-e2e.trx", "--results-directory", $browserE2ETestResultsPath, "/p:RestoreIgnoreFailedSources=true")
+            Invoke-CheckedNativePhase -Name "browser-e2e" -FileName "dotnet" -Arguments @("test", $e2eProjectPath, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $pullRequestRunSettingsPath, "--filter", "FullyQualifiedName~BrowserFlowTests", "--logger", "trx;LogFileName=browser-e2e.trx", "--results-directory", $browserE2ETestResultsPath, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 1200
         }
         finally {
             if ($null -eq $oldRunBrowserE2E) {
@@ -106,26 +142,39 @@ try {
         return
     }
 
+    Write-Output "VERIFY_REQUIRED_TEST_CONTRACT filter=VerificationTier!=Stress required_maximum_test=EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Public_artifact_contract_round_trips_the_maximum_bounded_shape_below_fifteen_mebibytes"
+    $testProjects = Get-ChildItem -Path $testsPath -Recurse -Filter "*.csproj" | Where-Object {
+        $_.Name -ne "EmbodySense.Tests.Support.csproj"
+    } | Sort-Object FullName
     if (-not $SkipCoverage) {
         $coverageStartedUtc = [DateTime]::UtcNow
-        Get-ChildItem -Path $testsPath -Recurse -Filter "*.csproj" | Where-Object {
-            $_.Name -ne "EmbodySense.Tests.Support.csproj"
-        } | Sort-Object FullName | ForEach-Object {
-            if ($_.Name -eq "EmbodySense.E2ETests.csproj") {
-                Invoke-CheckedNative "dotnet" @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "--collect:XPlat Code Coverage", "--filter", "FullyQualifiedName!~BrowserFlowTests", "/p:RestoreIgnoreFailedSources=true")
+        $testProjects | ForEach-Object {
+            $filter = if ($_.Name -eq "EmbodySense.E2ETests.csproj") { "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)" } else { "VerificationTier!=Stress" }
+            $testArguments = @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $pullRequestRunSettingsPath, "--collect:XPlat Code Coverage", "--filter", $filter, "/p:RestoreIgnoreFailedSources=true")
+            if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
+                $testArguments += @("--logger", "console;verbosity=detailed")
             }
-            else {
-                Invoke-CheckedNative "dotnet" @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "--collect:XPlat Code Coverage", "/p:RestoreIgnoreFailedSources=true")
-            }
+
+            Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900
         }
 
-        & (Join-Path $PSScriptRoot "verify-coverage.ps1") -MinimumWriteTimeUtc $coverageStartedUtc
+        $coverageArguments = @("-NoProfile")
+        if ($runningOnWindows) {
+            $coverageArguments += @("-ExecutionPolicy", "Bypass")
+        }
+
+        $coverageArguments += @("-File", (Join-Path $PSScriptRoot "verify-coverage.ps1"), "-MinimumWriteTimeUtc", $coverageStartedUtc.ToString("O"))
+        Invoke-CheckedNativePhase -Name "coverage-thresholds" -FileName $powerShellExecutable -Arguments $coverageArguments -TimeoutSeconds 300
     }
     else {
-        Get-ChildItem -Path $testsPath -Recurse -Filter "*.csproj" | Where-Object {
-            $_.Name -ne "EmbodySense.Tests.Support.csproj"
-        } | Sort-Object FullName | ForEach-Object {
-            Invoke-CheckedNative "dotnet" @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "/p:RestoreIgnoreFailedSources=true")
+        $testProjects | ForEach-Object {
+            $filter = if ($_.Name -eq "EmbodySense.E2ETests.csproj") { "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)" } else { "VerificationTier!=Stress" }
+            $testArguments = @("test", $_.FullName, "-c", $Configuration, "--no-build", "--no-restore", "--settings", $pullRequestRunSettingsPath, "--filter", $filter, "/p:RestoreIgnoreFailedSources=true")
+            if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
+                $testArguments += @("--logger", "console;verbosity=detailed")
+            }
+
+            Invoke-CheckedNativePhase -Name "tests-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900
         }
     }
 }

@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Clients.CodexAppServer;
 
@@ -17,6 +18,7 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
 {
     private const string Namespace = "embodysense";
     private readonly IToolBroker _toolBroker;
+    private LlmInferenceCorrelation? _inferenceCorrelation;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CodexAppServerToolBridge"/> type.
@@ -34,6 +36,15 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
     /// </summary>
     /// <value>The available commands tool commands.</value>
     public IReadOnlyList<ToolCommand> AvailableCommands => _toolBroker.AvailableCommands;
+
+    /// <summary>
+    /// Sets the serialized inference attempt whose governed tool calls are currently being handled.
+    /// </summary>
+    /// <param name="correlation">The current attempt correlation, or null outside generation.</param>
+    public void SetInferenceCorrelation(LlmInferenceCorrelation? correlation)
+    {
+        _inferenceCorrelation = correlation;
+    }
 
     /// <summary>
     /// Creates the single dynamic-tool declaration when at least one command is available.
@@ -73,7 +84,7 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
         }
     }
 
-    private static ToolRequest CreateToolRequest(JsonElement parameters)
+    private ToolRequest CreateToolRequest(JsonElement parameters)
     {
         var toolName = GetRequiredString(parameters, "tool");
         var toolNamespace = GetOptionalString(parameters, "namespace");
@@ -105,7 +116,8 @@ internal sealed class CodexAppServerToolBridge : ICodexAppServerToolBridge
             GetRequiredString(arguments, "path", "targetPath", "target"),
             GetOptionalString(arguments, "content", "text"),
             GetOptionalString(arguments, "pattern", "query"),
-            GetOptionalString(parameters, "callId"));
+            GetOptionalString(parameters, "callId"),
+            _inferenceCorrelation?.ToolAuditCorrelation);
     }
 
     private JsonObject CreateCommandSpec()
