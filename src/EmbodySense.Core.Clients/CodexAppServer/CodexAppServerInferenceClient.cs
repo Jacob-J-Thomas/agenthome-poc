@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Inference;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 
@@ -24,6 +25,8 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private const string ClientVersion = "0.1.0";
     private const int MaxProtocolLineCharacters = 1_000_000;
     private static readonly TimeSpan _protocolReadTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan _postCheckpointWriteDeadline = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan _lateTransportAuditDeadline = TimeSpan.FromSeconds(5);
     private readonly LlmInferenceClientOptions _options;
     private ICodexAppServerTransport? _transport;
     private readonly CodexAppServerToolBridge? _toolBridge;
@@ -31,6 +34,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     private readonly CodexAppServerRequestHandler _requestHandler;
     private readonly Action? _providerRequestStarted;
     private readonly string _runtimeDirectory;
+    private readonly IAuditLog? _auditLog;
     private readonly bool _transportWasInjected;
     private int _nextRequestId;
     private bool _initialized;
@@ -44,7 +48,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
     /// <param name="toolBroker">The governed tool broker, or <see langword="null"/> to expose no EmbodySense commands.</param>
     /// <param name="transport">An injected protocol transport, or <see langword="null"/> to launch <c>codex app-server --stdio</c>.</param>
     /// <param name="auditLog">The audit sink for declined native app-server requests, or <see langword="null"/> when unavailable.</param>
-    /// <param name="providerRequestStarted">An optional callback invoked immediately before <c>turn/start</c> is sent.</param>
+    /// <param name="providerRequestStarted">An optional legacy dispatch notification. It is invoked at the pre-write boundary only when no durable callback is supplied.</param>
     public CodexAppServerInferenceClient(
         LlmInferenceClientOptions options,
         IToolBroker? toolBroker = null,
@@ -60,6 +64,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         _toolBridge = toolBroker is null ? null : new CodexAppServerToolBridge(toolBroker);
         _contextBuilder = new CodexAppServerContextBuilder(toolBroker?.AvailableCommands);
         _runtimeDirectory = CreateRuntimeDirectory();
+        _auditLog = auditLog;
         _requestHandler = new CodexAppServerRequestHandler(_toolBridge, auditLog);
         _providerRequestStarted = providerRequestStarted;
     }
@@ -97,12 +102,6 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
             var requestId = NextRequestId();
             var userText = _contextBuilder.CreateTurnInput(request);
-            if (providerRequestStarting is not null)
-            {
-                await providerRequestStarting(cancellationToken);
-            }
-
-            _providerRequestStarted?.Invoke();
             await SendRequestAsync("turn/start", requestId, new JsonObject
             {
                 ["threadId"] = _threadId,
@@ -114,7 +113,21 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
                     ["text"] = userText
                 }
             }
-            }, cancellationToken);
+            }, cancellationToken, async token =>
+            {
+                if (providerRequestStarting is not null)
+                {
+                    await providerRequestStarting(token);
+                }
+                else
+                {
+                    _providerRequestStarted?.Invoke();
+                }
+            });
+            if (providerRequestStarting is not null)
+            {
+                _providerRequestStarted?.Invoke();
+            }
 
             var streamedText = new StringBuilder();
             string? turnId = null;
@@ -137,7 +150,7 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
                 if (IsResponse(message, requestId))
                 {
-                    ThrowIfError(message);
+                    ThrowIfTurnStartError(message);
                     turnStartResponseReceived = true;
                     turnId = TryGetNestedString(message, "result", "turn", "id") ?? turnId;
                     continue;
@@ -414,14 +427,19 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }, cancellationToken);
     }
 
-    private async Task SendRequestAsync(string method, int requestId, JsonObject parameters, CancellationToken cancellationToken)
+    private async Task SendRequestAsync(
+        string method,
+        int requestId,
+        JsonObject parameters,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? beforeTransportWrite = null)
     {
         await SendAsync(new JsonObject
         {
             ["id"] = requestId,
             ["method"] = method,
             ["params"] = parameters
-        }, cancellationToken);
+        }, cancellationToken, beforeTransportWrite);
     }
 
     private async Task SendNotificationAsync(string method, JsonObject parameters, CancellationToken cancellationToken)
@@ -433,9 +451,162 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
         }, cancellationToken);
     }
 
-    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken)
+    private async Task SendAsync(JsonObject message, CancellationToken cancellationToken, Func<CancellationToken, Task>? beforeTransportWrite = null)
     {
-        await GetTransport().WriteLineAsync(message.ToJsonString(), cancellationToken);
+        var transport = GetTransport();
+        if (beforeTransportWrite is not null)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await beforeTransportWrite(CancellationToken.None);
+            await WriteAfterDispatchCheckpointAsync(transport, message.ToJsonString(), cancellationToken);
+            return;
+        }
+
+        await transport.WriteLineAsync(message.ToJsonString(), cancellationToken);
+    }
+
+    private async Task WriteAfterDispatchCheckpointAsync(ICodexAppServerTransport transport, string line, CancellationToken callerCancellationToken)
+    {
+        using var writeCancellation = CancellationTokenSource.CreateLinkedTokenSource(callerCancellationToken);
+        writeCancellation.CancelAfter(_postCheckpointWriteDeadline);
+        Task? writeTask = null;
+        try
+        {
+            writeTask = transport.WriteLineAsync(line, writeCancellation.Token);
+            await writeTask.WaitAsync(writeCancellation.Token);
+        }
+        catch (OperationCanceledException) when (callerCancellationToken.IsCancellationRequested)
+        {
+            ObserveLateWrite(writeTask);
+            AbandonAmbiguousTransport(transport);
+            throw;
+        }
+        catch (OperationCanceledException) when (writeCancellation.IsCancellationRequested)
+        {
+            ObserveLateWrite(writeTask);
+            AbandonAmbiguousTransport(transport);
+            throw new TimeoutException("Codex app-server turn/start write exceeded the server-owned deadline after the durable dispatch checkpoint.");
+        }
+        catch (OperationCanceledException exception)
+        {
+            ObserveLateWrite(writeTask);
+            AbandonAmbiguousTransport(transport);
+            throw new IOException("Codex app-server turn/start write was interrupted after the durable dispatch checkpoint.", exception);
+        }
+        catch
+        {
+            ObserveLateWrite(writeTask);
+            AbandonAmbiguousTransport(transport);
+            throw;
+        }
+    }
+
+    private void AbandonAmbiguousTransport(ICodexAppServerTransport transport)
+    {
+        if (!ReferenceEquals(_transport, transport))
+        {
+            return;
+        }
+
+        _transport = null;
+        _threadId = null;
+        _initialized = false;
+        _nextRequestId = 0;
+        _requestHandler.SetInferenceCorrelation(null);
+        _toolBridge?.SetInferenceCorrelation(null);
+        _injectedTransportQuarantined = _transportWasInjected;
+        _ = DisposeAbandonedTransportAsync(transport);
+    }
+
+    private async Task DisposeAbandonedTransportAsync(ICodexAppServerTransport transport)
+    {
+        try
+        {
+            await transport.DisposeAsync();
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or ObjectDisposedException)
+        {
+        }
+        catch (Exception exception)
+        {
+            await RecordLateTransportFailureAsync("dispose", exception);
+        }
+    }
+
+    private void ObserveLateWrite(Task? writeTask)
+    {
+        if (writeTask is null || writeTask.IsCompletedSuccessfully)
+        {
+            return;
+        }
+
+        _ = ObserveLateWriteAsync(writeTask);
+    }
+
+    private async Task ObserveLateWriteAsync(Task writeTask)
+    {
+        try
+        {
+            await writeTask;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+        catch (Exception exception)
+        {
+            await RecordLateTransportFailureAsync("write", exception);
+        }
+    }
+
+    private async Task RecordLateTransportFailureAsync(string operation, Exception exception)
+    {
+        if (_auditLog is null)
+        {
+            return;
+        }
+
+        using var auditCancellation = new CancellationTokenSource(_lateTransportAuditDeadline);
+        Task? auditTask = null;
+        try
+        {
+            auditTask = _auditLog.AppendAsync(AuditEvent.Create(
+                actor: AuditSchema.Actors.Llm,
+                action: AuditSchema.Actions.LlmAppServerRequest,
+                target: "turn/start",
+                outcome: AuditSchema.Outcomes.Failed,
+                detail: "A detached Codex app-server transport operation failed after an ambiguous turn/start write.",
+                metadata: new Dictionary<string, object?>
+                {
+                    ["operation"] = operation,
+                    ["error_type"] = exception.GetType().Name
+                }), auditCancellation.Token);
+            await auditTask.WaitAsync(auditCancellation.Token);
+        }
+        catch (Exception)
+        {
+            ObserveLateAudit(auditTask);
+        }
+    }
+
+    private static void ObserveLateAudit(Task? auditTask)
+    {
+        if (auditTask is null || auditTask.IsCompletedSuccessfully)
+        {
+            return;
+        }
+
+        _ = ObserveLateAuditAsync(auditTask);
+    }
+
+    private static async Task ObserveLateAuditAsync(Task auditTask)
+    {
+        try
+        {
+            await auditTask;
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private async Task<JsonDocument> ReadMessageAsync(CancellationToken cancellationToken)
@@ -542,6 +713,18 @@ public sealed class CodexAppServerInferenceClient : ILlmInferenceClient, IResett
 
         var errorMessage = TryGetString(error, "message") ?? error.GetRawText();
         throw new InvalidOperationException($"Codex app-server request failed: {errorMessage}");
+    }
+
+    private static void ThrowIfTurnStartError(JsonElement message)
+    {
+        if (!message.TryGetProperty("error", out var error))
+        {
+            return;
+        }
+
+        var errorMessage = TryGetString(error, "message") ?? error.GetRawText();
+        var providerResponseId = TryGetNestedString(message, "error", "data", "turnId") ?? TryGetNestedString(message, "error", "data", "turn", "id");
+        throw new LlmInferenceTerminalFailureException($"Codex app-server turn/start failed: {errorMessage}", providerResponseId);
     }
 
     private static void ThrowIfTurnFailed(JsonElement message, string? providerResponseId)

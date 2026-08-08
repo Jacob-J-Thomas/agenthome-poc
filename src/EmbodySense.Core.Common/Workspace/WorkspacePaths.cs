@@ -299,6 +299,51 @@ public sealed class WorkspacePaths
     /// <value>The recipes path.</value>
     public string RecipesPath => Path.Combine(AgentPath, "recipes");
 
+    /// <summary>Gets the governed capability catalog directory.</summary>
+    public string CapabilityCatalogPath => Path.Combine(AgentPath, "capabilities");
+
+    /// <summary>Gets the canonical capability catalog artifact path.</summary>
+    public string CapabilityCatalogDocumentPath => Path.Combine(CapabilityCatalogPath, "catalog.json");
+
+    /// <summary>Gets the last independently proved capability catalog artifact path.</summary>
+    public string CapabilityCatalogProofPath => Path.Combine(CapabilityCatalogPath, "catalog.proved.json");
+
+    /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
+    public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
+
+    /// <summary>Gets the safe public credential-registry directory.</summary>
+    public string CredentialRegistryPath => Path.Combine(AgentPath, "credentials");
+
+    /// <summary>Gets the canonical safe public credential-registry artifact path.</summary>
+    public string CredentialRegistryDocumentPath => Path.Combine(CredentialRegistryPath, "registry.json");
+
+    /// <summary>Gets the last independently proved safe public credential-registry artifact path.</summary>
+    public string CredentialRegistryProofPath => Path.Combine(CredentialRegistryPath, "registry.proved.json");
+
+    /// <summary>Gets the private opaque credential-provider locator directory.</summary>
+    public string CredentialRegistryPrivatePath => Path.Combine(WorkspacePrivatePath, "credentials");
+
+    /// <summary>Gets the canonical private opaque credential-provider locator artifact path.</summary>
+    public string CredentialRegistryPrivateDocumentPath => Path.Combine(CredentialRegistryPrivatePath, "locators.json");
+
+    /// <summary>Gets the last independently proved private credential-provider locator artifact path.</summary>
+    public string CredentialRegistryPrivateProofPath => Path.Combine(CredentialRegistryPrivatePath, "locators.proved.json");
+
+    /// <summary>Gets the cross-process credential-registry mutation lock path.</summary>
+    public string CredentialRegistryLockPath => Path.Combine(CredentialRegistryPath, ".registry.lock");
+
+    /// <summary>Gets the governed authority-profile persistence directory.</summary>
+    public string AuthorityProfilesPath => Path.Combine(AgentPath, "authority-profiles");
+
+    /// <summary>Gets the current canonical authority-profile artifact path.</summary>
+    public string AuthorityProfilesDocumentPath => Path.Combine(AuthorityProfilesPath, "profiles.json");
+
+    /// <summary>Gets the independently proved fallback authority-profile artifact path.</summary>
+    public string AuthorityProfilesProofPath => Path.Combine(AuthorityProfilesPath, "profiles.proved.json");
+
+    /// <summary>Gets the cross-process authority-profile mutation lock path.</summary>
+    public string AuthorityProfilesLockPath => Path.Combine(AuthorityProfilesPath, ".profiles.lock");
+
     /// <summary>
     /// Gets the permissions path.
     /// </summary>
@@ -316,6 +361,12 @@ public sealed class WorkspacePaths
     /// </summary>
     /// <value>The role path.</value>
     public string RolePath => AgentFile("ROLE.md");
+
+    /// <summary>
+    /// Gets the version-one workspace initialization completion marker path.
+    /// </summary>
+    /// <value>The initialization completion marker path.</value>
+    public string WorkspaceInitializationMarkerPath => AgentFile("workspace-initialized.json");
 
     /// <summary>
     /// Gets the workspace private path.
@@ -344,8 +395,8 @@ public sealed class WorkspacePaths
     /// <summary>
     /// Gets a value indicating whether the minimum workspace scaffold exists.
     /// </summary>
-    /// <value><see langword="true"/> when the <c>.agent</c> directory, permissions document, and role document exist; otherwise, <see langword="false"/>.</value>
-    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath);
+    /// <value><see langword="true"/> when the <c>.agent</c> directory, permissions document, role document, and completion marker exist; otherwise, <see langword="false"/>.</value>
+    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath) && File.Exists(WorkspaceInitializationMarkerPath);
 
     private static string ContainedFile(string rootPath, string relativePath)
     {

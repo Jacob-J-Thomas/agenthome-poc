@@ -1,4 +1,3 @@
-let sessionToken = "";
 let catalog = null;
 let currentDefinition = null;
 let draft = null;
@@ -10,7 +9,18 @@ let loopBuilderActivated = false;
 let loopBuilderEventsBound = false;
 let loopBuilderSurfaceActive = false;
 let loopBuilderRefresh = null;
+let loopBuilderRefreshAbortController = null;
 let loopBuilderRefreshQueued = false;
+let loopBuilderRecoveryQueued = false;
+let loopBuilderSessionAvailable =
+  window.embodySenseSession?.getState?.().connected ?? true;
+let loopBuilderSessionAbortController = new AbortController();
+let workspaceStatusSnapshot = null;
+let workspaceInitializationInFlight = false;
+let workspaceInitializationGeneration = 0;
+let workspaceInitializationPhase = "idle";
+let workspaceInitializationMessage = "";
+let workspaceAuthoringHydrated = false;
 let dirty = false;
 let currentView = "builder";
 let retentionPosture = null;
@@ -48,7 +58,17 @@ let selectedRunRefreshTimer = null;
 let selectedRunRefreshInFlight = false;
 let activeRunOperationMonitors = 0;
 let mutationInFlight = false;
-let pendingCreateOperationId = null;
+let newLoopDraftOperationId = null;
+let newLoopDraftCommitState = null;
+let newLoopDraftFailureDetail = null;
+let pendingCreateRequest = null;
+const newLoopDraftStorageKeyPrefix = "embodysense.unsaved-loop-draft.v1";
+const supportedCustomToolAssignments = Object.freeze([
+  "list",
+  "read",
+  "search",
+]);
+let newLoopDraftStorageKey = null;
 let pendingUpdateRequest = null;
 let pendingDeleteRequest = null;
 let pendingTraceDeletion = null;
@@ -79,6 +99,8 @@ let pendingInvocationStorageKey = null;
 let pendingInvocationRegistryLockName = null;
 const maximumPendingInvocationRequests = 100;
 const pendingInvocationRequests = new Map();
+const workspaceInitializationLockNamePrefix =
+  "embodysense.workspace-initialization.v1";
 
 const signalRRecordSeparator = "\u001e";
 const signalRKeepAliveMilliseconds = 10000;
@@ -113,6 +135,9 @@ const elements = {
   inspectorTitle: document.getElementById("inspectorTitle"),
   invocationPrompt: document.getElementById("invocationPrompt"),
   invocationPromptField: document.getElementById("invocationPromptField"),
+  initializeWorkspaceButton: document.getElementById(
+    "initializeLoopsWorkspaceButton",
+  ),
   invokeButton: document.getElementById("invokeButton"),
   invokeError: document.getElementById("invokeError"),
   invokeLimits: document.getElementById("invokeLimits"),
@@ -123,6 +148,15 @@ const elements = {
   loopsView: document.getElementById("loopsView"),
   loopSearch: document.getElementById("loopSearch"),
   loopSettingsButton: document.getElementById("loopSettingsButton"),
+  initializationAnnouncement: document.getElementById(
+    "loopInitializationAnnouncement",
+  ),
+  initializationPanel: document.getElementById("loopInitializationPanel"),
+  initializationRoot: document.getElementById("loopInitializationRoot"),
+  initializationStatus: document.getElementById("loopInitializationStatus"),
+  declineInitializationButton: document.getElementById(
+    "declineLoopsInitializationButton",
+  ),
   name: document.getElementById("loopName"),
   reloadButton: document.getElementById("reloadButton"),
   refreshRetentionButton: document.getElementById("refreshRetentionButton"),
@@ -159,6 +193,7 @@ const elements = {
 
 function activate() {
   loopBuilderSurfaceActive = true;
+  if (!loopBuilderSessionAvailable) return Promise.resolve(false);
   if (loopBuilderRefresh) return loopBuilderRefresh;
   if (loopBuilderActivated) {
     scheduleSelectedRunRefresh();
@@ -177,20 +212,37 @@ function deactivate() {
   scheduleSelectedRunRefresh();
 }
 
-function beginLoopBuilderRefresh(operation) {
-  const refresh = drainLoopBuilderRefresh(operation).finally(() => {
+function beginLoopBuilderRefresh(operation, externalSignal = null) {
+  const abortController = new AbortController();
+  loopBuilderRefreshAbortController = abortController;
+  const relayAbort = () => abortController.abort(externalSignal.reason);
+  if (externalSignal?.aborted) relayAbort();
+  else externalSignal?.addEventListener("abort", relayAbort, { once: true });
+  const refresh = drainLoopBuilderRefresh(
+    operation,
+    abortController.signal,
+  ).finally(() => {
+    externalSignal?.removeEventListener("abort", relayAbort);
+    if (loopBuilderRefreshAbortController === abortController)
+      loopBuilderRefreshAbortController = null;
     if (loopBuilderRefresh === refresh) loopBuilderRefresh = null;
   });
   loopBuilderRefresh = refresh;
   return refresh;
 }
 
-async function drainLoopBuilderRefresh(operation) {
-  let refreshed = await operation();
+async function drainLoopBuilderRefresh(operation, signal) {
+  let refreshed = await operation(signal);
   applyLoopBuilderRefreshOutcome(refreshed);
   while (loopBuilderRefreshQueued) {
+    const recoveryRefresh = loopBuilderRecoveryQueued;
     loopBuilderRefreshQueued = false;
-    refreshed = await refreshWorkspaceCore(Boolean(catalog));
+    loopBuilderRecoveryQueued = false;
+    refreshed = await refreshWorkspaceCore(
+      recoveryRefresh ? false : Boolean(catalog),
+      recoveryRefresh,
+      { signal, suppressRecovery: recoveryRefresh },
+    );
     applyLoopBuilderRefreshOutcome(refreshed);
   }
   return refreshed;
@@ -201,13 +253,16 @@ function applyLoopBuilderRefreshOutcome(refreshed) {
   if (!loopBuilderActivated) appendActivationRetry();
 }
 
-async function startLoopBuilder() {
+async function startLoopBuilder(signal) {
   try {
-    if (!sessionToken) {
-      const session = await requestJson("/api/session");
-      sessionToken = session.token;
-    }
-    return await refreshWorkspaceCore(Boolean(catalog));
+    if (window.embodySenseSession)
+      await waitForLoopBuilderOperation(
+        window.embodySenseSession.getHub(),
+        signal,
+      );
+    else await requestJson("/api/session", { signal });
+    if (signal.aborted) return false;
+    return await refreshWorkspaceCore(Boolean(catalog), false, { signal });
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
@@ -222,12 +277,59 @@ function refreshWorkspace() {
   }
   if (!loopBuilderActivated)
     return loopBuilderSurfaceActive ? activate() : Promise.resolve();
-  return beginLoopBuilderRefresh(refreshWorkspaceCore);
+  return beginLoopBuilderRefresh((signal) =>
+    refreshWorkspaceCore(false, false, { signal }),
+  );
 }
 
-async function refreshWorkspaceCore(reuseCatalog = false) {
+async function rehydrateSession({
+  approvals = [],
+  signal = null,
+  workspaceRoot = null,
+} = {}) {
+  renderLoopApprovals(approvals);
+  if (!loopBuilderEventsBound) return { refreshed: false, skipped: true };
+  if (loopBuilderRefresh) {
+    await loopBuilderRefresh;
+    if (signal?.aborted) return { refreshed: false };
+    return await rehydrateSession({ approvals, signal, workspaceRoot });
+  }
+  if (
+    workspaceRoot &&
+    elements.workspaceRoot.textContent &&
+    elements.workspaceRoot.textContent !== "Workspace loading" &&
+    elements.workspaceRoot.textContent !== workspaceRoot &&
+    dirty
+  ) {
+    showBanner(
+      "The host workspace changed. This unsaved loop draft remains loaded and was not applied to the new workspace.",
+    );
+    setInteractive(false);
+    return { requiresManualAction: true };
+  }
+  const refreshed = await beginLoopBuilderRefresh(
+    (refreshSignal) =>
+      refreshWorkspaceCore(false, true, {
+        propagateFailure: true,
+        signal: refreshSignal,
+        suppressRecovery: true,
+      }),
+    signal,
+  );
+  return { refreshed };
+}
+
+async function refreshWorkspaceCore(
+  reuseCatalog = false,
+  preserveUnsavedDraft = false,
+  { propagateFailure = false, signal = null, suppressRecovery = false } = {},
+) {
   try {
-    const status = await requestJson("/api/status");
+    const requestOptions = { signal, suppressRecovery };
+    const status = await requestJson("/api/status", requestOptions);
+    if (signal?.aborted) return false;
+    workspaceStatusSnapshot = status;
+    renderWorkspaceInitialization();
     try {
       await configurePendingInvocationRegistry(status.workspaceRoot);
     } catch {
@@ -256,33 +358,258 @@ async function refreshWorkspaceCore(reuseCatalog = false) {
       retentionCleanupRegistryFailure =
         "Receipt cleanup is unavailable because this browser cannot durably coordinate its workspace cleanup identity.";
     }
+    configureNewLoopDraftStorage(status.workspaceRoot);
     elements.workspaceRoot.textContent = status.workspaceRoot;
     elements.rolePath.textContent = status.workspaceRoot;
     elements.workspaceStatus.textContent = status.initialized
       ? "Initialized"
       : "Needs initialization";
     if (!status.initialized) {
+      workspaceAuthoringHydrated = false;
       showBanner(
-        "Initialize the workspace from Chat before creating loops.",
+        "Complete workspace initialization before creating loops.",
         "notice",
       );
       setInteractive(false);
       return true;
     }
 
-    if (!reuseCatalog || !catalog) await loadCatalog();
-    const runsLoaded = await loadRuns();
+    if (!reuseCatalog || !catalog)
+      await loadCatalog(undefined, preserveUnsavedDraft, requestOptions);
+    if (signal?.aborted) return false;
+    const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded === false) return false;
     renderAll();
+    workspaceAuthoringHydrated = true;
+    renderWorkspaceInitialization();
     return true;
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
     setInteractive(false);
+    if (propagateFailure) throw error;
     return false;
   }
 }
 
+function initializationState(status = workspaceStatusSnapshot) {
+  if (status?.initialized) return "initialized";
+  return status?.initializationState === "partial"
+    ? "partial"
+    : "uninitialized";
+}
+
+function initializationRequiresCleanup(status = workspaceStatusSnapshot) {
+  return status?.initializationRequiresCleanup === true;
+}
+
+function renderWorkspaceInitialization() {
+  const state = initializationState();
+  const requiresCleanup = initializationRequiresCleanup();
+  const hydrated = state === "initialized" && workspaceAuthoringHydrated;
+  elements.initializationRoot.textContent =
+    workspaceStatusSnapshot?.workspaceRoot ?? "the configured workspace";
+  elements.initializationPanel.hidden = hydrated;
+  elements.initializationPanel.setAttribute(
+    "aria-busy",
+    workspaceInitializationInFlight ? "true" : "false",
+  );
+
+  if (hydrated) return;
+
+  if (workspaceInitializationPhase === "running") {
+    elements.initializationStatus.textContent =
+      "Initialization is in progress. Authoring remains locked until authoritative workspace, role, catalog, and run state are loaded.";
+  } else if (workspaceInitializationMessage) {
+    elements.initializationStatus.textContent = workspaceInitializationMessage;
+  } else if (state === "partial") {
+    elements.initializationStatus.textContent = requiresCleanup
+      ? "This workspace has an unusable protected .agent/ROLE.md or .agent/permissions.json document, or a nonreplaceable .agent/workspace-initialized.json path. Back up any intentional content, remove the invalid file or directory, then initialize again. Retrying without cleanup cannot replace it."
+      : "This workspace has an incomplete .agent scaffold. Retry initialization to create the missing required files; existing protected seed documents will remain unchanged.";
+  } else if (state === "initialized") {
+    elements.initializationStatus.textContent =
+      "The workspace is initialized, but Loops has not finished loading authoritative role and catalog state. Retry hydration.";
+  } else if (!loopBuilderSessionAvailable) {
+    elements.initializationStatus.textContent =
+      "The browser session is disconnected. Reconnect before initializing; no completion is assumed.";
+  } else {
+    elements.initializationStatus.textContent =
+      "Review the effects above, then initialize when you are ready.";
+  }
+
+  elements.initializationStatus.classList.toggle(
+    "error",
+    ["failed", "partial", "disconnected"].includes(
+      workspaceInitializationPhase,
+    ) || state === "partial",
+  );
+  elements.initializeWorkspaceButton.textContent =
+    state === "partial"
+      ? requiresCleanup
+        ? "Check after cleanup"
+        : "Retry initialization"
+      : state === "initialized"
+        ? "Retry Loops hydration"
+        : "Initialize workspace";
+  elements.initializeWorkspaceButton.disabled =
+    workspaceInitializationInFlight || !loopBuilderSessionAvailable;
+  elements.declineInitializationButton.disabled =
+    workspaceInitializationInFlight || !loopBuilderSessionAvailable;
+}
+
+function setWorkspaceInitializationOutcome(phase, message) {
+  workspaceInitializationPhase = phase;
+  workspaceInitializationMessage = message;
+  elements.initializationAnnouncement.textContent = message;
+  renderWorkspaceInitialization();
+}
+
+function declineLoopsInitialization() {
+  setWorkspaceInitializationOutcome(
+    "declined",
+    "Initialization declined. Nothing was changed, and no loop ran. You can initialize this workspace later.",
+  );
+}
+
+async function initializeLoopsWorkspace() {
+  if (workspaceInitializationInFlight || !loopBuilderSessionAvailable) return;
+  const generation = ++workspaceInitializationGeneration;
+  workspaceInitializationInFlight = true;
+  workspaceInitializationPhase = "running";
+  workspaceInitializationMessage = "";
+  renderWorkspaceInitialization();
+
+  const initializeUnderLock = async () => {
+    const currentStatus = await requestJson("/api/status");
+    if (generation !== workspaceInitializationGeneration) return;
+    workspaceStatusSnapshot = currentStatus;
+    if (initializationRequiresCleanup(currentStatus)) {
+      setWorkspaceInitializationOutcome(
+        "partial",
+        "Initialization still requires cleanup. Back up any intentional content, remove the unusable protected .agent/ROLE.md or .agent/permissions.json document or the nonreplaceable .agent/workspace-initialized.json path, then check again. No loop ran, and no protected file was replaced.",
+      );
+      return;
+    }
+
+    if (currentStatus.initialized) {
+      await completeWorkspaceInitialization(generation, "already-initialized");
+      return;
+    }
+
+    const result = await requestJson("/api/workspace/init", {
+      method: "POST",
+      body: "{}",
+    });
+    if (generation !== workspaceInitializationGeneration) return;
+    workspaceStatusSnapshot = result;
+    if (!result.initialized) {
+      const partial = initializationState(result) === "partial";
+      const requiresCleanup = initializationRequiresCleanup(result);
+      setWorkspaceInitializationOutcome(
+        partial ? "partial" : "failed",
+        partial
+          ? requiresCleanup
+            ? "Initialization stopped with an unusable protected .agent/ROLE.md or .agent/permissions.json document or a nonreplaceable .agent/workspace-initialized.json path. No loop ran. Back up any intentional content, remove the invalid file or directory, then initialize again; retrying without cleanup cannot replace it."
+            : "Initialization stopped after creating part of the workspace scaffold. No loop ran. Retry to create the missing required files."
+          : "Initialization did not produce a complete workspace. Nothing is unlocked, and no loop ran. Retry when ready.",
+      );
+      return;
+    }
+
+    await completeWorkspaceInitialization(
+      generation,
+      result.initializationOutcome ?? "initialized",
+    );
+  };
+
+  try {
+    const lockName = `${workspaceInitializationLockNamePrefix}:${workspaceStatusSnapshot?.workspaceRoot ?? "configured-workspace"}`;
+    if (navigator.locks?.request)
+      await navigator.locks.request(
+        lockName,
+        { mode: "exclusive" },
+        initializeUnderLock,
+      );
+    else await initializeUnderLock();
+  } catch (error) {
+    if (generation !== workspaceInitializationGeneration) return;
+    if (!loopBuilderSessionAvailable || error?.name === "AbortError") {
+      setWorkspaceInitializationOutcome(
+        "disconnected",
+        "The browser disconnected during initialization. No completion is assumed. Reconnect to load authoritative workspace state before retrying.",
+      );
+    } else {
+      await reconcileWorkspaceInitializationFailure(generation, error);
+    }
+  } finally {
+    if (generation === workspaceInitializationGeneration) {
+      workspaceInitializationInFlight = false;
+      renderWorkspaceInitialization();
+    }
+  }
+}
+
+async function completeWorkspaceInitialization(generation, outcome) {
+  const refreshed = await refreshWorkspace();
+  if (generation !== workspaceInitializationGeneration) return;
+  if (
+    refreshed === false ||
+    !workspaceStatusSnapshot?.initialized ||
+    !workspaceAuthoringHydrated
+  ) {
+    setWorkspaceInitializationOutcome(
+      "failed",
+      "The workspace reports initialized, but Loops could not hydrate authoritative role, catalog, and run state. Authoring remains locked; retry hydration.",
+    );
+    return;
+  }
+
+  const message =
+    outcome === "already-initialized"
+      ? "This workspace was already initialized. Authoritative role, catalog, and run state are now loaded; no loop ran."
+      : "Workspace initialization completed. Authoritative role, catalog, and run state are loaded; no loop ran.";
+  setWorkspaceInitializationOutcome("succeeded", message);
+  elements.createLoopButton.focus?.();
+}
+
+async function reconcileWorkspaceInitializationFailure(generation, error) {
+  try {
+    const status = await requestJson("/api/status", {
+      suppressRecovery: true,
+    });
+    if (generation !== workspaceInitializationGeneration) return;
+    workspaceStatusSnapshot = status;
+    if (status.initialized) {
+      await completeWorkspaceInitialization(generation, "already-initialized");
+      return;
+    }
+
+    const partial = initializationState(status) === "partial";
+    const requiresCleanup = initializationRequiresCleanup(status);
+    setWorkspaceInitializationOutcome(
+      partial ? "partial" : "failed",
+      partial
+        ? requiresCleanup
+          ? "Initialization failed with an unusable protected .agent/ROLE.md or .agent/permissions.json document or a nonreplaceable .agent/workspace-initialized.json path. No loop ran. Back up any intentional content, remove the invalid file or directory, then initialize again; retrying without cleanup cannot replace it."
+          : "Initialization failed after creating part of the .agent scaffold. No loop ran. Retry to create the missing required files."
+        : `Initialization failed before the workspace became ready. Nothing is unlocked, and no loop ran. ${error.message}`,
+    );
+  } catch {
+    setWorkspaceInitializationOutcome(
+      "disconnected",
+      "Initialization could not be verified because the browser session is unavailable. No completion is assumed. Reconnect to load authoritative workspace state.",
+    );
+  }
+}
+
 function bindStaticEvents() {
+  elements.initializeWorkspaceButton.addEventListener(
+    "click",
+    initializeLoopsWorkspace,
+  );
+  elements.declineInitializationButton.addEventListener(
+    "click",
+    declineLoopsInitialization,
+  );
   elements.createLoopButton.addEventListener("click", createLoop);
   elements.builderTab.addEventListener("click", () => switchView("builder"));
   elements.runsTab.addEventListener("click", () => switchView("runs"));
@@ -452,11 +779,21 @@ function moveLoopOptionFocus(event, currentOption) {
 }
 
 async function requestJson(url, options = {}) {
-  const headers = { ...(options.headers ?? {}) };
-  if (sessionToken) headers["X-EmbodySense-Session"] = sessionToken;
-  if (options.body && !headers["Content-Type"])
+  const { suppressRecovery = false, ...fetchOptions } = options;
+  const signal =
+    fetchOptions.signal ?? loopBuilderSessionAbortController.signal;
+  const headers = { ...(fetchOptions.headers ?? {}) };
+  if (fetchOptions.body && !headers["Content-Type"])
     headers["Content-Type"] = "application/json";
-  const response = await fetch(url, { ...options, headers });
+  const response = await waitForLoopBuilderOperation(
+    fetch(url, {
+      ...fetchOptions,
+      credentials: "same-origin",
+      headers,
+      signal,
+    }),
+    signal,
+  );
   const text = await response.text();
   let payload = null;
   if (text) {
@@ -473,9 +810,15 @@ async function requestJson(url, options = {}) {
         : (payload?.detail ??
           payload?.title ??
           `Request failed (${response.status})`);
-    const error = new Error(detail);
+    const error = new Error(
+      response.status === 401 && url !== "/api/session"
+        ? "The local session changed. Recovery started, and the prior request was not replayed."
+        : detail,
+    );
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401 && url !== "/api/session" && !suppressRecovery)
+      beginSessionRecovery();
     throw error;
   }
   return payload;
@@ -483,12 +826,16 @@ async function requestJson(url, options = {}) {
 
 async function requestRunMonitor(runId) {
   const headers = {};
-  if (sessionToken) headers["X-EmbodySense-Session"] = sessionToken;
   if (selectedRunMonitorId === runId && selectedRunMonitorEtag)
     headers["If-None-Match"] = selectedRunMonitorEtag;
-  const response = await fetch(
-    `/api/loop-runs/${encodeURIComponent(runId)}/monitor`,
-    { headers },
+  const signal = loopBuilderSessionAbortController.signal;
+  const response = await waitForLoopBuilderOperation(
+    fetch(`/api/loop-runs/${encodeURIComponent(runId)}/monitor`, {
+      credentials: "same-origin",
+      headers,
+      signal,
+    }),
+    signal,
   );
   const etag = response.headers?.get?.("ETag") ?? selectedRunMonitorEtag;
   if (response.status === 304)
@@ -512,14 +859,41 @@ async function requestRunMonitor(runId) {
     const error = new Error(detail);
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401) beginSessionRecovery();
     throw error;
   }
   return { notModified: false, summary: payload, etag };
 }
 
-async function loadCatalog(preferredLoopId) {
-  catalog = await requestJson("/api/loops");
+async function loadCatalog(
+  preferredLoopId,
+  preserveUnsavedDraft = false,
+  requestOptions = {},
+) {
+  const nextCatalog = await requestJson("/api/loops", requestOptions);
+  const shouldPreserveDraft = preserveUnsavedDraft && dirty && draft;
+  catalog = nextCatalog;
   elements.roleId.textContent = catalog.roleId;
+  if (isNewLoopDraft()) {
+    const committed = reconcileNewLoopDraftFromCatalog();
+    if (committed) {
+      applyDefinition(committed);
+      return;
+    }
+
+    renderList();
+    return;
+  }
+  if (shouldPreserveDraft) {
+    renderList();
+    return;
+  }
+  if (restoreNewLoopDraft()) {
+    const committed = reconcileNewLoopDraftFromCatalog();
+    if (committed) applyDefinition(committed);
+    else renderAll();
+    return;
+  }
   const definitions = allDefinitions();
   const requested = preferredLoopId ?? currentDefinition?.id;
   const next =
@@ -836,6 +1210,329 @@ function applyDefinition(definition) {
   renderAll();
 }
 
+function configureNewLoopDraftStorage(workspaceRoot) {
+  if (typeof workspaceRoot !== "string" || !workspaceRoot)
+    throw new Error("The workspace identity is unavailable.");
+  const scope = encodeURIComponent(workspaceRoot.normalize("NFC"));
+  const nextKey = `${newLoopDraftStorageKeyPrefix}.${scope}`;
+  if (newLoopDraftStorageKey && newLoopDraftStorageKey !== nextKey) {
+    currentDefinition = null;
+    draft = null;
+    resetNewLoopDraftState(false);
+  }
+  newLoopDraftStorageKey = nextKey;
+}
+
+function startNewLoopDraft() {
+  const template = catalog?.draftTemplate;
+  if (!template)
+    throw new Error("The server did not provide a draft template.");
+  runEvidenceRequestGeneration++;
+  historicalLoopId = null;
+  currentView = "builder";
+  currentDefinition = null;
+  draft = {
+    schemaVersion: template.schemaVersion,
+    id: null,
+    definitionVersion: null,
+    contentHash: null,
+    createdAtUtc: null,
+    updatedAtUtc: null,
+    displayName: template.definition.displayName,
+    description: template.definition.description,
+    roleId: template.roleId,
+    triggerPolicy: clone(template.definition.triggerPolicy),
+    contextDefaults: clone(template.contextDefaults),
+    inferenceSteps: template.definition.inferenceSteps.map((step, index) => ({
+      ...clone(step),
+      id: `local-draft-${index + 1}-${newOperationId()}`,
+    })),
+    toolAssignments: [...template.definition.toolAssignments],
+    exitPolicy: clone(template.definition.exitPolicy),
+    lastMutationOperationId: null,
+  };
+  newLoopDraftOperationId = newOperationId();
+  newLoopDraftCommitState = "editing";
+  newLoopDraftFailureDetail = null;
+  pendingCreateRequest = null;
+  selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
+  dirty = true;
+  elements.name.value = draft.displayName;
+  elements.description.value = draft.description;
+  tryPersistNewLoopDraft();
+  renderAll();
+}
+
+function isNewLoopDraft() {
+  return (
+    currentDefinition === null &&
+    !historicalLoopId &&
+    draft?.id === null &&
+    typeof newLoopDraftOperationId === "string"
+  );
+}
+
+function isUncertainNewLoopDraft() {
+  return isNewLoopDraft() && newLoopDraftCommitState === "uncertain";
+}
+
+function canMutateDraft() {
+  return (
+    Boolean(draft) &&
+    !isSystemLoop() &&
+    !mutationInFlight &&
+    !isUncertainNewLoopDraft()
+  );
+}
+
+function persistNewLoopDraft() {
+  if (!isNewLoopDraft()) return;
+  if (!newLoopDraftStorageKey || !window.sessionStorage)
+    throw new Error("Tab-scoped draft storage is unavailable.");
+  window.sessionStorage.setItem(
+    newLoopDraftStorageKey,
+    JSON.stringify({
+      schemaVersion: 1,
+      roleId: draft.roleId,
+      operationId: newLoopDraftOperationId,
+      commitState:
+        newLoopDraftCommitState === "saving"
+          ? "uncertain"
+          : newLoopDraftCommitState,
+      failureDetail: newLoopDraftFailureDetail,
+      pendingCreateRequest,
+      draft,
+    }),
+  );
+}
+
+function restoreNewLoopDraft() {
+  if (!newLoopDraftStorageKey || !window.sessionStorage) return false;
+  const stored = window.sessionStorage.getItem(newLoopDraftStorageKey);
+  if (!stored) return false;
+  let payload;
+  try {
+    payload = JSON.parse(stored);
+  } catch {
+    window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    return false;
+  }
+  if (!isStoredNewLoopDraft(payload)) {
+    window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    return false;
+  }
+
+  currentDefinition = null;
+  historicalLoopId = null;
+  draft = clone(payload.draft);
+  newLoopDraftOperationId = payload.operationId;
+  newLoopDraftCommitState = payload.commitState;
+  newLoopDraftFailureDetail = payload.failureDetail;
+  pendingCreateRequest = payload.pendingCreateRequest
+    ? clone(payload.pendingCreateRequest)
+    : null;
+  selectedNodeId = "trigger";
+  lastSelectedNodeId = "trigger";
+  dirty = true;
+  elements.name.value = draft.displayName;
+  elements.description.value = draft.description;
+  return true;
+}
+
+function isStoredNewLoopDraft(payload) {
+  return (
+    payload?.schemaVersion === 1 &&
+    payload.roleId === catalog?.roleId &&
+    typeof payload.operationId === "string" &&
+    /^[a-z0-9-]{8,128}$/.test(payload.operationId) &&
+    ["editing", "failed", "conflict", "uncertain"].includes(
+      payload.commitState,
+    ) &&
+    (payload.failureDetail === null ||
+      (typeof payload.failureDetail === "string" &&
+        payload.failureDetail.length <= 4000)) &&
+    isStoredDraftShape(payload.draft, payload.roleId) &&
+    (payload.commitState !== "uncertain" ||
+      payload.pendingCreateRequest !== null) &&
+    isStoredPendingCreateRequest(
+      payload.pendingCreateRequest,
+      payload.operationId,
+    )
+  );
+}
+
+function isStoredDraftShape(candidate, roleId) {
+  return (
+    candidate?.schemaVersion === catalog?.draftTemplate?.schemaVersion &&
+    candidate.id === null &&
+    candidate.definitionVersion === null &&
+    candidate.roleId === roleId &&
+    typeof candidate.displayName === "string" &&
+    typeof candidate.description === "string" &&
+    isStoredTriggerPolicy(candidate.triggerPolicy) &&
+    isStoredContextDefaults(candidate.contextDefaults) &&
+    Array.isArray(candidate.inferenceSteps) &&
+    candidate.inferenceSteps.length >= 1 &&
+    candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
+    candidate.inferenceSteps.every(isStoredInferenceStep) &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
+    isStoredExitPolicy(candidate.exitPolicy)
+  );
+}
+
+function isStoredPendingCreateRequest(candidate, operationId) {
+  if (candidate === null) return true;
+  return (
+    candidate &&
+    typeof candidate.key === "string" &&
+    candidate.body?.operationId === operationId &&
+    candidate.key === JSON.stringify(candidate.body.definition) &&
+    isStoredDefinitionInput(candidate.body.definition)
+  );
+}
+
+function isStoredDefinitionInput(candidate) {
+  return (
+    candidate &&
+    typeof candidate.displayName === "string" &&
+    typeof candidate.description === "string" &&
+    isStoredTriggerPolicy(candidate.triggerPolicy) &&
+    Array.isArray(candidate.inferenceSteps) &&
+    candidate.inferenceSteps.length >= 1 &&
+    candidate.inferenceSteps.length <= catalog.limits.maxInferenceSteps &&
+    candidate.inferenceSteps.every(isStoredInferenceStep) &&
+    isStoredToolAssignments(candidate.toolAssignments) &&
+    isStoredExitPolicy(candidate.exitPolicy)
+  );
+}
+
+function isStoredTriggerPolicy(candidate) {
+  return (
+    candidate &&
+    ["invocation", "preset", "none"].includes(candidate.promptSource) &&
+    typeof candidate.presetPrompt === "string" &&
+    typeof candidate.includeInvokingConversation === "boolean"
+  );
+}
+
+function isStoredContextDefaults(candidate) {
+  return (
+    candidate &&
+    isStoredContextPolicy(candidate.inference) &&
+    isStoredContextPolicy(candidate.exit)
+  );
+}
+
+function isStoredContextPolicy(candidate) {
+  return (
+    candidate &&
+    candidate.contextIn &&
+    [
+      "includeRoleContext",
+      "includeTriggerPrompt",
+      "includeInvokingConversation",
+      "includeEarlierRetainedOutputs",
+      "includePreviousIterationResult",
+    ].every((key) => typeof candidate.contextIn[key] === "boolean") &&
+    candidate.contextOut &&
+    ["retainForLoopReasoning", "publishToInvokingConversation"].every(
+      (key) => typeof candidate.contextOut[key] === "boolean",
+    )
+  );
+}
+
+function isStoredNodeContextPolicy(candidate) {
+  return (
+    candidate &&
+    ["inherit", "custom"].includes(candidate.mode) &&
+    (candidate.mode === "inherit"
+      ? candidate.customPolicy === null
+      : isStoredContextPolicy(candidate.customPolicy))
+  );
+}
+
+function isStoredInferenceStep(candidate) {
+  return (
+    candidate &&
+    (candidate.id === null || typeof candidate.id === "string") &&
+    typeof candidate.name === "string" &&
+    typeof candidate.instruction === "string" &&
+    isStoredNodeContextPolicy(candidate.contextPolicy)
+  );
+}
+
+function isStoredExitPolicy(candidate) {
+  return (
+    candidate &&
+    Number.isInteger(candidate.maxAdditionalIterations) &&
+    typeof candidate.decisionInstruction === "string" &&
+    isStoredNodeContextPolicy(candidate.contextPolicy)
+  );
+}
+
+function isStoredToolAssignments(candidate) {
+  return (
+    Array.isArray(candidate) &&
+    candidate.length <= supportedCustomToolAssignments.length &&
+    candidate.every((value) =>
+      supportedCustomToolAssignments.includes(value),
+    ) &&
+    new Set(candidate).size === candidate.length
+  );
+}
+
+function reconcileNewLoopDraftFromCatalog() {
+  if (!isNewLoopDraft() || !pendingCreateRequest) return null;
+  const committed = catalog.customDefinitions.find(
+    (definition) =>
+      definition.lastMutationOperationId ===
+      pendingCreateRequest.body.operationId,
+  );
+  if (!committed) return null;
+  resetNewLoopDraftState(true);
+  showToast("The first save was already committed and has been restored.");
+  return committed;
+}
+
+function resetNewLoopDraftState(removeStored) {
+  if (removeStored && newLoopDraftStorageKey && window.sessionStorage) {
+    try {
+      window.sessionStorage.removeItem(newLoopDraftStorageKey);
+    } catch {
+      // Clearing in-memory ownership remains safe; tab-scoped storage is discarded when the tab closes.
+    }
+  }
+  newLoopDraftOperationId = null;
+  newLoopDraftCommitState = null;
+  newLoopDraftFailureDetail = null;
+  pendingCreateRequest = null;
+}
+
+function discardNewLoopDraft() {
+  if (!isNewLoopDraft() || newLoopDraftCommitState === "uncertain") return;
+  resetNewLoopDraftState(true);
+  applyDefinition(
+    catalog.systemDefault ?? catalog.customDefinitions[0] ?? null,
+  );
+  showToast("Unsaved draft discarded. No durable loop was deleted.");
+}
+
+function tryPersistNewLoopDraft() {
+  try {
+    persistNewLoopDraft();
+    return true;
+  } catch (error) {
+    const outcomeMayBeUncertain = newLoopDraftCommitState === "uncertain";
+    newLoopDraftCommitState = outcomeMayBeUncertain ? "uncertain" : "failed";
+    const storageFailure = `This tab could not preserve the draft for reload: ${error.message}`;
+    newLoopDraftFailureDetail = newLoopDraftFailureDetail
+      ? `${newLoopDraftFailureDetail} ${storageFailure}`
+      : `The draft remains in memory, but ${storageFailure}`;
+    return false;
+  }
+}
+
 function renderAll() {
   renderList();
   renderTabs();
@@ -860,7 +1557,7 @@ function renderTabs() {
     (currentView === "builder" && Boolean(historicalLoopId));
   const retentionActive = currentView === "retention";
   elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
-  elements.runsTab.disabled = mutationInFlight;
+  elements.runsTab.disabled = mutationInFlight || isNewLoopDraft();
   elements.retentionTab.disabled = mutationInFlight || retentionCleanupInFlight;
   elements.builderTab.classList.toggle("active", builderActive);
   elements.runsTab.classList.toggle("active", runsActive);
@@ -895,6 +1592,7 @@ async function switchView(view) {
   if (mutationInFlight) return;
   if (view !== "builder" && view !== "runs" && view !== "retention") return;
   if (view === "builder" && historicalLoopId) return;
+  if (view === "runs" && isNewLoopDraft()) return;
   currentView = view;
   if (view === "runs") {
     renderAll();
@@ -923,6 +1621,8 @@ async function loadRuns({
   preferredRunId = null,
   preferredAdmissionOperationId = null,
   preserveEmptySelection = false,
+  propagateFailure = false,
+  requestOptions = {},
 } = {}) {
   if (!catalog) return;
   const requestGeneration = ++runEvidenceRequestGeneration;
@@ -931,12 +1631,13 @@ async function loadRuns({
     const filteredPageRequest = loopId
       ? requestJson(
           `/api/loop-runs?maximumCount=50&loopId=${encodeURIComponent(loopId)}`,
+          requestOptions,
         )
       : Promise.resolve(null);
     const [payload, filteredPayload, quotaPayload] = await Promise.all([
-      requestJson("/api/loop-runs?maximumCount=50"),
+      requestJson("/api/loop-runs?maximumCount=50", requestOptions),
       filteredPageRequest,
-      requestJson("/api/loop-runs/quota"),
+      requestJson("/api/loop-runs/quota", requestOptions),
     ]);
     if (
       requestGeneration !== runEvidenceRequestGeneration ||
@@ -983,7 +1684,11 @@ async function loadRuns({
     if (selectedRunId) {
       const requestedRunId = selectedRunId;
       const summary = visible.find((run) => run.id === requestedRunId);
-      const evidence = await loadSelectedRunEvidence(requestedRunId, summary);
+      const evidence = await loadSelectedRunEvidence(
+        requestedRunId,
+        summary,
+        requestOptions,
+      );
       if (evidence.trace?.isDeleted) {
         recentRuns = mergeRunSummaries(
           [tombstoneRunSummary(evidence.trace)],
@@ -1027,6 +1732,7 @@ async function loadRuns({
       !silent
     )
       showBanner(`Run evidence unavailable: ${error.message}`);
+    if (propagateFailure) throw error;
     return false;
   }
 }
@@ -1091,16 +1797,17 @@ async function loadMoreRuns() {
   }
 }
 
-async function loadSelectedRunEvidence(runId, summary) {
+async function loadSelectedRunEvidence(runId, summary, requestOptions = {}) {
   const traceRequest = requestJson(
     `/api/loop-runs/${encodeURIComponent(runId)}/trace`,
+    requestOptions,
   );
   if (summary?.isDeleted) {
     return { run: null, trace: await traceRequest };
   }
 
   const [runResult, traceResult] = await Promise.allSettled([
-    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`),
+    requestJson(`/api/loop-runs/${encodeURIComponent(runId)}`, requestOptions),
     traceRequest,
   ]);
   if (traceResult.status === "rejected") throw traceResult.reason;
@@ -1507,9 +2214,7 @@ function renderRunEvent(event) {
     event.retainedForLoopReasoning != null
       ? `loop reasoning ${event.retainedForLoopReasoning ? "retained" : "evidence only"}`
       : null,
-    event.publishedToInvokingConversation != null
-      ? `conversation ${event.publishedToInvokingConversation ? "published" : "not published"}${event.conversationPublicationId ? ` · ${event.conversationPublicationId}` : ""}`
-      : null,
+    publicationTimelineEvidence(event),
     event.exitDecision
       ? `Exit decision ${formatStatus(event.exitDecision)}`
       : null,
@@ -1834,20 +2539,14 @@ function renderRunEvidence() {
     }
   }
 
-  const publicationEvents = (selectedRun.events ?? []).filter(
-    (event) => event.conversationPublicationId,
-  );
+  const publicationDispositions =
+    selectedRun.conversationPublicationDispositions ?? [];
   appendEvidenceSection(
     "Output disposition",
     selectedRun.finalOutput ?? "No terminal output",
-    publicationEvents.length
-      ? publicationEvents
-          .map(
-            (event) =>
-              `${event.conversationPublicationId}: ${event.publishedToInvokingConversation ? "published" : "not published"}`,
-          )
-          .join("\n")
-      : "Evidence retained; no conversation publication correlation recorded.",
+    publicationDispositionLines(selectedRun, publicationDispositions).join(
+      "\n",
+    ),
   );
   if (selectedRun.failureCode || selectedRun.failureDetail)
     appendEvidenceSection(
@@ -1856,6 +2555,65 @@ function renderRunEvidence() {
       selectedRun.failureDetail ??
         "Inspect the ordered timeline for the persisted boundary.",
     );
+}
+
+function publicationDispositionLines(run, dispositions) {
+  if (dispositions.length === 0)
+    return [
+      "No conversation publication requested; no durable publication operation was recorded.",
+    ];
+
+  return dispositions.flatMap((disposition) => {
+    const phases = (run.events ?? [])
+      .filter(
+        (event) => event.conversationPublicationId === disposition.operationId,
+      )
+      .map(
+        (event) => `event ${event.sequence} · ${publicationPhaseLabel(event)}`,
+      );
+    return [
+      `${disposition.operationId}: ${formatPublicationDisposition(disposition)}${disposition.isDefinite ? " · definite" : " · review required"}`,
+      `  ${disposition.detail}`,
+      ...phases.map((phase) => `  ${phase}`),
+    ];
+  });
+}
+
+function formatPublicationDisposition(disposition) {
+  const label = formatStatus(disposition.disposition);
+  return disposition.hasIntegrityWarning
+    ? `Integrity warning: ${label}`
+    : label;
+}
+
+function publicationPhaseLabel(event) {
+  switch (event.kind) {
+    case "NodeOutcomeObserved":
+    case "ExitDecisionCompleted":
+      return "output policy selected";
+    case "ConversationPublicationStarted":
+      return "intent committed";
+    case "ConversationPublished":
+      return "terminal outcome recorded";
+    default:
+      return `${formatStatus(event.kind)} correlated evidence`;
+  }
+}
+
+function publicationTimelineEvidence(event) {
+  if (event.conversationPublicationId) {
+    const disposition = (
+      selectedRun?.conversationPublicationDispositions ?? []
+    ).find((item) => item.operationId === event.conversationPublicationId);
+    const terminal =
+      event.kind === "ConversationPublished" && disposition
+        ? ` · ${formatPublicationDisposition(disposition)}`
+        : "";
+    return `conversation publication ${publicationPhaseLabel(event)} · ${event.conversationPublicationId}${terminal}`;
+  }
+
+  if (event.publishedToInvokingConversation == null) return null;
+  return `conversation publication ${event.publishedToInvokingConversation ? "selected" : "not selected"}`;
 }
 
 function appendRunProgressEvidence(run, definition) {
@@ -1982,6 +2740,40 @@ function renderList() {
     catalog.systemDefault,
   ].filter(matchesSearch);
   let visibleGroup = null;
+  if (
+    isNewLoopDraft() &&
+    (!loopSearchQuery ||
+      [draft.displayName, draft.description, "unsaved draft"].some((value) =>
+        String(value ?? "")
+          .toLocaleLowerCase()
+          .includes(loopSearchQuery),
+      ))
+  ) {
+    elements.list.append(node("div", "loop-list-group", "Draft"));
+    visibleGroup = "Draft";
+    const button = node("button", "loop-list-item selected");
+    button.type = "button";
+    button.disabled = mutationInFlight;
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "true");
+    button.tabIndex = 0;
+    button.dataset.loopOptionKey = "draft:new-loop";
+    button.append(node("span", "loop-icon custom", "D"));
+    const copy = node("span", "loop-list-copy");
+    copy.append(node("span", "loop-list-name", draft.displayName));
+    const meta = node("span", "loop-list-meta");
+    meta.append(
+      node("span", "version-chip", "Unsaved draft"),
+      node("span", "", "Not durable"),
+    );
+    copy.append(meta);
+    button.append(copy);
+    button.addEventListener("keydown", (event) =>
+      moveLoopOptionFocus(event, button),
+    );
+    elements.list.append(button);
+    listOptions.push(button);
+  }
   for (const definition of visibleDefinitions) {
     const projectedDefinition =
       draft?.id === definition.id ? draft : definition;
@@ -2107,7 +2899,14 @@ function renderList() {
 async function selectDefinition(definition) {
   if (mutationInFlight) return;
   if (definition.id === currentDefinition?.id && !historicalLoopId) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before leaving this draft.",
+    );
+    return;
+  }
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
   runSelectionGeneration++;
   applyDefinition(definition);
   if (currentView === "runs") await loadRuns({ silent: false });
@@ -2115,7 +2914,14 @@ async function selectDefinition(definition) {
 
 async function selectHistoricalLoop(loopId) {
   if (mutationInFlight) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before leaving this draft.",
+    );
+    return;
+  }
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
   runSelectionGeneration++;
   runEvidenceRequestGeneration++;
   historicalLoopId = loopId;
@@ -2614,19 +3420,31 @@ function renderLoopInspector() {
       "Assignments allow inference nodes to request governed capabilities. Permission, approval, and audit policy still decide whether each request may execute. Exit decisions are always tool-less.",
     ),
   );
-  for (const assignment of catalog.tools?.customAssignable ?? []) {
+  const assignableTools = catalog.tools?.customAssignable ?? [];
+  const staleAssignments = [
+    ...new Set(
+      draft.toolAssignments.filter(
+        (assignment) => !assignableTools.includes(assignment),
+      ),
+    ),
+  ];
+  for (const assignment of [...assignableTools, ...staleAssignments]) {
+    const isStaleAssignment = staleAssignments.includes(assignment);
     authority.append(
       checkboxRow(
         capitalize(assignment),
-        `Allow inference nodes to request the governed ${assignment} command.`,
+        isStaleAssignment
+          ? `This assignment is outside the current role authority. Uncheck it before saving the draft.`
+          : `Allow inference nodes to request the governed ${assignment} command.`,
         draft.toolAssignments.includes(assignment),
         (checked) => {
+          if (!canMutateDraft()) return;
           draft.toolAssignments = checked
             ? [...draft.toolAssignments, assignment]
             : draft.toolAssignments.filter((value) => value !== assignment);
           markDirty();
         },
-        isSystemLoop(),
+        !canMutateDraft(),
       ),
     );
   }
@@ -2662,8 +3480,9 @@ function renderTriggerInspector() {
     option.selected = trigger.promptSource === value;
     source.append(option);
   }
-  source.disabled = isSystemLoop();
+  source.disabled = !canMutateDraft();
   source.addEventListener("change", (event) => {
+    if (!canMutateDraft()) return;
     trigger.promptSource = event.target.value;
     if (trigger.promptSource !== "preset") trigger.presetPrompt = "";
     markDirty();
@@ -2681,8 +3500,9 @@ function renderTriggerInspector() {
     const preset = document.createElement("textarea");
     preset.maxLength = catalog.limits.maxTriggerPromptCharacters;
     preset.value = trigger.presetPrompt;
-    preset.disabled = isSystemLoop();
+    preset.disabled = !canMutateDraft();
     preset.addEventListener("input", (event) => {
+      if (!canMutateDraft()) return;
       trigger.presetPrompt = event.target.value;
       markDirty();
     });
@@ -2700,11 +3520,12 @@ function renderTriggerInspector() {
       "Admit a bounded snapshot of the logical user session when one exists. Provider-thread history is never used.",
       trigger.includeInvokingConversation,
       (checked) => {
+        if (!canMutateDraft()) return;
         trigger.includeInvokingConversation = checked;
         markDirty();
         renderCanvas();
       },
-      isSystemLoop(),
+      !canMutateDraft(),
     ),
   );
   purpose.append(
@@ -2731,8 +3552,9 @@ function renderInferenceInspector(step) {
   const name = document.createElement("input");
   name.maxLength = catalog.limits.maxNameCharacters;
   name.value = step.name;
-  name.disabled = isSystemLoop();
+  name.disabled = !canMutateDraft();
   name.addEventListener("input", (event) => {
+    if (!canMutateDraft()) return;
     step.name = event.target.value;
     markDirty();
     renderCanvas();
@@ -2740,8 +3562,9 @@ function renderInferenceInspector(step) {
   const prompt = document.createElement("textarea");
   prompt.maxLength = catalog.limits.maxInstructionCharacters;
   prompt.value = step.instruction;
-  prompt.disabled = isSystemLoop();
+  prompt.disabled = !canMutateDraft();
   prompt.addEventListener("input", (event) => {
+    if (!canMutateDraft()) return;
     step.instruction = event.target.value;
     markDirty();
     renderCanvas();
@@ -2759,17 +3582,17 @@ function renderInferenceInspector(step) {
     actionButton(
       "↑ Move earlier",
       () => moveStep(index, -1),
-      index === 0 || isSystemLoop(),
+      index === 0 || !canMutateDraft(),
     ),
     actionButton(
       "↓ Move later",
       () => moveStep(index, 1),
-      index === draft.inferenceSteps.length - 1 || isSystemLoop(),
+      index === draft.inferenceSteps.length - 1 || !canMutateDraft(),
     ),
     actionButton(
       "Remove",
       () => removeStep(index),
-      draft.inferenceSteps.length === 1 || isSystemLoop(),
+      draft.inferenceSteps.length === 1 || !canMutateDraft(),
       "danger-button",
     ),
   );
@@ -2826,20 +3649,22 @@ function renderExitInspector() {
       "Exit may ask to return to Step 1. The ceiling never causes a repeat by itself.",
       exit.maxAdditionalIterations > 0,
       (checked) => {
+        if (!canMutateDraft()) return;
         exit.maxAdditionalIterations = checked ? 1 : 0;
         markDirty();
         renderInspector();
         renderCanvas();
       },
-      isSystemLoop(),
+      !canMutateDraft(),
     ),
   );
   if (exit.maxAdditionalIterations > 0) {
     const decision = document.createElement("textarea");
     decision.maxLength = catalog.limits.maxInstructionCharacters;
     decision.value = exit.decisionInstruction;
-    decision.disabled = isSystemLoop();
+    decision.disabled = !canMutateDraft();
     decision.addEventListener("input", (event) => {
+      if (!canMutateDraft()) return;
       exit.decisionInstruction = event.target.value;
       markDirty();
     });
@@ -2848,8 +3673,9 @@ function renderExitInspector() {
     ceiling.min = "1";
     ceiling.max = String(catalog.limits.maxAdditionalIterations);
     ceiling.value = String(exit.maxAdditionalIterations);
-    ceiling.disabled = isSystemLoop();
+    ceiling.disabled = !canMutateDraft();
     ceiling.addEventListener("change", (event) => {
+      if (!canMutateDraft()) return;
       const value = Math.max(
         1,
         Math.min(
@@ -2898,8 +3724,9 @@ function contextEditor(owner, kind) {
     option.selected = owner.contextPolicy.mode === value;
     select.append(option);
   }
-  select.disabled = isSystemLoop();
+  select.disabled = !canMutateDraft();
   select.addEventListener("change", (event) => {
+    if (!canMutateDraft()) return;
     owner.contextPolicy =
       event.target.value === "custom"
         ? { mode: "custom", customPolicy: clone(draft.contextDefaults[kind]) }
@@ -2913,7 +3740,7 @@ function contextEditor(owner, kind) {
     owner.contextPolicy.mode === "custom"
       ? owner.contextPolicy.customPolicy
       : draft.contextDefaults[kind];
-  const disabled = isSystemLoop() || owner.contextPolicy.mode !== "custom";
+  const disabled = !canMutateDraft() || owner.contextPolicy.mode !== "custom";
   container.append(node("h3", "section-heading", "Context in"));
   const inputOptions = [
     [
@@ -2950,6 +3777,7 @@ function contextEditor(owner, kind) {
         hint,
         policy.contextIn[key],
         (checked) => {
+          if (!canMutateDraft()) return;
           policy.contextIn[key] = checked;
           markDirty();
         },
@@ -2964,6 +3792,7 @@ function contextEditor(owner, kind) {
       "Makes this canonical output selectable at later model boundaries.",
       policy.contextOut.retainForLoopReasoning,
       (checked) => {
+        if (!canMutateDraft()) return;
         policy.contextOut.retainForLoopReasoning = checked;
         markDirty();
       },
@@ -2976,6 +3805,7 @@ function contextEditor(owner, kind) {
       "Appends idempotently only to the server-bound invoking conversation when one exists.",
       policy.contextOut.publishToInvokingConversation,
       (checked) => {
+        if (!canMutateDraft()) return;
         policy.contextOut.publishToInvokingConversation = checked;
         markDirty();
       },
@@ -3009,23 +3839,41 @@ function evidenceNote() {
 }
 
 function renderToolbar() {
-  const editable = Boolean(draft) && !isSystemLoop() && !mutationInFlight;
+  const newDraft = isNewLoopDraft();
+  const uncertainFirstSave =
+    newDraft && newLoopDraftCommitState === "uncertain";
+  const editable =
+    Boolean(draft) &&
+    !isSystemLoop() &&
+    !mutationInFlight &&
+    !uncertainFirstSave;
   const stepCount = isSystemLoop() ? 0 : (draft?.inferenceSteps.length ?? 0);
   const systemNodeCount = isSystemLoop() ? draft.graph.nodes.length : 0;
   const systemEdgeCount = isSystemLoop() ? draft.graph.edges.length : 0;
   const hasValidationErrors = validateDraft().length > 0;
   elements.name.disabled = !editable;
   elements.description.disabled = !editable;
-  elements.saveButton.disabled = !editable || !dirty || hasValidationErrors;
-  elements.reloadButton.disabled = mutationInFlight || !draft || !dirty;
-  elements.deleteButton.disabled = !editable;
-  elements.invokeButton.disabled = !editable || dirty;
+  elements.saveButton.disabled =
+    mutationInFlight ||
+    !draft ||
+    isSystemLoop() ||
+    (!dirty && !uncertainFirstSave) ||
+    hasValidationErrors;
+  elements.saveButton.textContent = uncertainFirstSave ? "Retry save" : "Save";
+  elements.reloadButton.disabled =
+    mutationInFlight || !draft || (!newDraft && !dirty) || uncertainFirstSave;
+  elements.reloadButton.textContent = newDraft
+    ? "Discard draft"
+    : "Reload saved version";
+  elements.deleteButton.disabled = !editable || newDraft;
+  elements.invokeButton.disabled = !editable || dirty || newDraft;
   elements.addStepButton.disabled =
     !editable || stepCount >= catalog.limits.maxInferenceSteps;
   elements.loopSettingsButton.disabled = mutationInFlight || !draft;
   elements.selectedNodeButton.disabled = mutationInFlight || !draft;
   elements.createLoopButton.disabled =
     mutationInFlight ||
+    uncertainFirstSave ||
     !catalog ||
     catalog.customDefinitions.length >=
       catalog.limits.maxDefinitionsPerWorkspace;
@@ -3039,11 +3887,19 @@ function renderToolbar() {
       ? "No loop selected"
       : isSystemLoop()
         ? "System managed"
-        : dirty
-          ? "Unsaved changes"
-          : hasValidationErrors
-            ? `Saved · v${draft.definitionVersion} · needs attention`
-            : `Saved · v${draft.definitionVersion}`;
+        : newDraft
+          ? newLoopDraftCommitState === "uncertain"
+            ? "First save uncertain · retry required"
+            : newLoopDraftCommitState === "conflict"
+              ? "First save conflict"
+              : newLoopDraftCommitState === "failed"
+                ? "First save failed"
+                : "Unsaved draft · this tab only"
+          : dirty
+            ? "Unsaved changes"
+            : hasValidationErrors
+              ? `Saved · v${draft.definitionVersion} · needs attention`
+              : `Saved · v${draft.definitionVersion}`;
   elements.canvasStepCount.textContent = isSystemLoop()
     ? `${systemNodeCount} system nodes · ${systemEdgeCount} edges`
     : `${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
@@ -3051,7 +3907,9 @@ function renderToolbar() {
     ? "No loop selected"
     : isSystemLoop()
       ? `${draft.roleId} · Schema v${draft.schemaVersion} · ${systemNodeCount} nodes · ${systemEdgeCount} edges`
-      : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
+      : newDraft
+        ? `${draft.roleId} · Unsaved client draft · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`
+        : `${draft.roleId} · Definition v${draft.definitionVersion} · ${stepCount} inference step${stepCount === 1 ? "" : "s"}`;
   elements.canvasAuthority.replaceChildren();
   if (draft) {
     if (isSystemLoop())
@@ -3079,18 +3937,43 @@ function renderValidation() {
     elements.validationBanner.className = "validation-banner";
     return;
   }
+  if (
+    isNewLoopDraft() &&
+    ["uncertain", "conflict", "failed"].includes(newLoopDraftCommitState)
+  ) {
+    const stateLabel =
+      newLoopDraftCommitState === "uncertain"
+        ? "First save outcome is uncertain"
+        : newLoopDraftCommitState === "conflict"
+          ? "First save operation conflicted"
+          : "First save failed";
+    const detail =
+      newLoopDraftFailureDetail ??
+      "The draft remains local and has not been treated as a runnable definition.";
+    elements.validationBanner.textContent = `${stateLabel}. ${detail}`;
+    elements.validationBanner.setAttribute(
+      "aria-label",
+      `${stateLabel}: ${detail}`,
+    );
+    elements.validationBanner.className = "validation-banner visible error";
+    return;
+  }
   if (errors.length === 0) {
     const copy = node("span", "validation-copy");
     const title = isSystemLoop()
       ? "System definition is valid and read-only"
-      : dirty
-        ? "Draft is valid and ready to save"
-        : `Definition v${draft.definitionVersion} is valid and runnable`;
+      : isNewLoopDraft()
+        ? "Unsaved draft is valid and ready for first save"
+        : dirty
+          ? "Draft is valid and ready to save"
+          : `Definition v${draft.definitionVersion} is valid and runnable`;
     const detail = isSystemLoop()
-      ? `${draft.executionContract.runner} validates this five-boundary graph before executing its dedicated turn transaction. The nodes and edges are not dispatched by the custom-loop or a generic graph executor.`
-      : dirty
-        ? "Save this definition before starting a run."
-        : "The server will validate again before saving or admitting a run.";
+      ? draft.executionContract.detail
+      : isNewLoopDraft()
+        ? "Save deliberately creates the first durable definition. This tab keeps the draft across navigation, reload, and reconnect; closing the tab or choosing Discard draft removes it."
+        : dirty
+          ? "Save this definition before starting a run."
+          : "The server will validate again before saving or admitting a run.";
     copy.append(node("strong", "", title));
     copy.append(node("span", "", detail));
     elements.validationBanner.append(
@@ -3111,8 +3994,7 @@ function renderValidation() {
 function validateDraft() {
   if (!draft) return [];
   if (isSystemLoop()) {
-    if (draft.executionContract?.graphSemantics === "validated-runner-contract")
-      return [];
+    if (draft.executionContract?.graphSemantics !== "unknown") return [];
     return [
       draft.executionContract?.detail?.trim() ||
         "The dedicated runner did not validate this system definition.",
@@ -3156,44 +4038,165 @@ function validateDraft() {
 function runnerContractLabel(executionSemantics) {
   return executionSemantics === "validated-runner-contract"
     ? "Validated runner contract"
-    : "Runner contract not validated";
+    : executionSemantics === "authority-topology-only"
+      ? "Authority topology only"
+      : "Runner contract not validated";
 }
 
 function markDirty() {
-  if (isSystemLoop()) return;
+  if (!canMutateDraft()) return;
   dirty = true;
+  if (isNewLoopDraft()) {
+    if (pendingCreateRequest) {
+      newLoopDraftOperationId = newOperationId();
+      pendingCreateRequest = null;
+    }
+    newLoopDraftCommitState = "editing";
+    newLoopDraftFailureDetail = null;
+    tryPersistNewLoopDraft();
+  }
   renderList();
   renderToolbar();
   renderValidation();
 }
 
 function updateDraftValue(fieldName, value) {
-  if (mutationInFlight || !draft || isSystemLoop()) return;
+  if (!canMutateDraft()) return;
   draft[fieldName] = value;
   markDirty();
 }
 
 async function createLoop() {
   if (mutationInFlight) return;
+  if (isNewLoopDraft() && newLoopDraftCommitState === "uncertain") {
+    showBanner(
+      "Resolve the uncertain first save by retrying the same Save request before starting another draft.",
+    );
+    return;
+  }
   if (
     dirty &&
     !window.confirm("Discard unsaved loop edits and create a new loop?")
   )
     return;
-  pendingCreateOperationId ??= newOperationId();
-  setBusy(true, "Creating");
+  if (isNewLoopDraft()) resetNewLoopDraftState(true);
+  try {
+    startNewLoopDraft();
+    showToast("Draft started. Nothing has been saved yet.");
+  } catch (error) {
+    showBanner(`Draft unavailable: ${error.message}`);
+  }
+}
+
+function definitionInputFromDraft() {
+  return {
+    displayName: draft.displayName,
+    description: draft.description,
+    triggerPolicy: clone(draft.triggerPolicy),
+    inferenceSteps: draft.inferenceSteps.map((step) => ({
+      id: step.id?.startsWith("local-") ? null : step.id,
+      name: step.name,
+      instruction: step.instruction,
+      contextPolicy: clone(step.contextPolicy),
+    })),
+    toolAssignments: [...draft.toolAssignments],
+    exitPolicy: clone(draft.exitPolicy),
+  };
+}
+
+async function saveNewLoopDraft(definition) {
+  const requestKey = JSON.stringify(definition);
+  if (pendingCreateRequest?.key !== requestKey) {
+    pendingCreateRequest = {
+      key: requestKey,
+      body: {
+        operationId: newLoopDraftOperationId ?? newOperationId(),
+        definition,
+      },
+    };
+    newLoopDraftOperationId = pendingCreateRequest.body.operationId;
+  }
+
+  newLoopDraftCommitState = "saving";
+  newLoopDraftFailureDetail = null;
+  if (!tryPersistNewLoopDraft()) {
+    renderToolbar();
+    renderValidation();
+    return;
+  }
+
+  let catalogRefreshFailure = null;
+  setBusy(true, "Saving draft");
   try {
     const response = await requestJson("/api/loops", {
       method: "POST",
-      body: JSON.stringify({ operationId: pendingCreateOperationId }),
+      body: JSON.stringify(pendingCreateRequest.body),
     });
-    await loadCatalog(response.definition.id);
-    pendingCreateOperationId = null;
-    showToast("Loop created. Add instructions, review context, then Save.");
+    const committed = response.definition;
+    if (
+      response.isCommitted !== true ||
+      !["Created", "Replayed", "CommittedWithAuditWarning"].includes(
+        response.status,
+      ) ||
+      typeof committed?.id !== "string" ||
+      committed.definitionVersion !== 1 ||
+      committed.roleId !== catalog.roleId ||
+      committed.lastMutationOperationId !==
+        pendingCreateRequest.body.operationId
+    ) {
+      throw new Error(
+        "The server returned an invalid first-save receipt, so the commit outcome remains uncertain.",
+      );
+    }
+    resetNewLoopDraftState(true);
+    catalog.customDefinitions = [
+      ...catalog.customDefinitions.filter(
+        (definition) => definition.id !== committed.id,
+      ),
+      committed,
+    ];
+    applyDefinition(committed);
+    try {
+      await loadCatalog(committed.id);
+    } catch (error) {
+      catalogRefreshFailure = error;
+    }
+    showToast(
+      response.status === "CommittedWithAuditWarning"
+        ? response.detail
+        : "Loop saved for the first time.",
+    );
   } catch (error) {
-    showResponseError(error);
+    const responseStatus =
+      typeof error.payload?.status === "string" ? error.payload.status : null;
+    if (error.status === 409 && responseStatus === "Conflict") {
+      newLoopDraftCommitState = "conflict";
+      newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved for an explicit retry.`;
+      pendingCreateRequest = null;
+      newLoopDraftOperationId = newOperationId();
+    } else if (error.status === 409 && responseStatus === "LimitExceeded") {
+      newLoopDraftCommitState = "failed";
+      newLoopDraftFailureDetail = `${error.message} A fresh operation identity is reserved so Save can retry after capacity is available.`;
+      pendingCreateRequest = null;
+      newLoopDraftOperationId = newOperationId();
+    } else if (
+      typeof error.status !== "number" ||
+      (error.status >= 500 && responseStatus === null)
+    ) {
+      newLoopDraftCommitState = "uncertain";
+      newLoopDraftFailureDetail = `${error.message} The server may have committed the definition. Retry Save to send the exact same request, or reload after reconnect to reconcile the catalog without another mutation.`;
+    } else {
+      newLoopDraftCommitState = "failed";
+      newLoopDraftFailureDetail = error.message;
+    }
+    tryPersistNewLoopDraft();
   } finally {
     setBusy(false);
+    if (catalogRefreshFailure)
+      showBanner(
+        `Loop saved, but the catalog could not be refreshed: ${catalogRefreshFailure.message}`,
+      );
+    else renderValidation();
   }
 }
 
@@ -3204,21 +4207,13 @@ async function saveLoop() {
     showBanner(errors[0]);
     return;
   }
+  const definition = definitionInputFromDraft();
+  if (isNewLoopDraft()) {
+    await saveNewLoopDraft(definition);
+    return;
+  }
   setBusy(true, "Saving");
   try {
-    const definition = {
-      displayName: draft.displayName,
-      description: draft.description,
-      triggerPolicy: clone(draft.triggerPolicy),
-      inferenceSteps: draft.inferenceSteps.map((step) => ({
-        id: step.id?.startsWith("local-") ? null : step.id,
-        name: step.name,
-        instruction: step.instruction,
-        contextPolicy: clone(step.contextPolicy),
-      })),
-      toolAssignments: [...draft.toolAssignments],
-      exitPolicy: clone(draft.exitPolicy),
-    };
     const requestKey = JSON.stringify({
       loopId: draft.id,
       expectedDefinitionVersion: currentDefinition.definitionVersion,
@@ -3256,6 +4251,7 @@ async function deleteLoop() {
   if (mutationInFlight) return;
   if (
     !draft ||
+    isNewLoopDraft() ||
     isSystemLoop() ||
     !window.confirm(
       `Delete “${draft.displayName}”? Historical run evidence will remain available.`,
@@ -3298,7 +4294,14 @@ async function deleteLoop() {
 }
 
 function openInvokeModal() {
-  if (!draft || isSystemLoop() || dirty || invocationInFlight) return;
+  if (
+    !draft ||
+    isSystemLoop() ||
+    isNewLoopDraft() ||
+    dirty ||
+    invocationInFlight
+  )
+    return;
   invokeReturnFocus = document.activeElement ?? elements.invokeButton;
   const trigger = draft.triggerPolicy;
   const promptRequired = trigger.promptSource === "invocation";
@@ -3393,7 +4396,14 @@ function trapInvokeModalFocus(event) {
 }
 
 async function startRun() {
-  if (!draft || dirty || isSystemLoop() || invocationInFlight) return;
+  if (
+    !draft ||
+    dirty ||
+    isSystemLoop() ||
+    isNewLoopDraft() ||
+    invocationInFlight
+  )
+    return;
   clearInvokeError();
   const invocationPrompt =
     draft.triggerPolicy.promptSource === "invocation"
@@ -4947,6 +5957,7 @@ function scheduleSelectedRunRefresh() {
   }
   if (
     !loopBuilderSurfaceActive ||
+    !loopBuilderSessionAvailable ||
     selectedRunRefreshInFlight ||
     activeRunOperationMonitors > 0 ||
     currentView !== "runs" ||
@@ -4959,6 +5970,7 @@ function scheduleSelectedRunRefresh() {
     selectedRunRefreshTimer = null;
     if (
       !loopBuilderSurfaceActive ||
+      !loopBuilderSessionAvailable ||
       currentView !== "runs" ||
       selectedRun?.id !== runId
     )
@@ -4972,6 +5984,93 @@ function scheduleSelectedRunRefresh() {
       scheduleSelectedRunRefresh();
     }
   }, 1000);
+}
+
+function beginSessionRecovery() {
+  suspendSession();
+  void window.embodySenseSession?.recover();
+}
+
+function waitForLoopBuilderOperation(operation, signal) {
+  if (!signal) return Promise.resolve(operation);
+  if (signal.aborted)
+    return Promise.reject(
+      signal.reason ?? new Error("The browser session is unavailable."),
+    );
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () =>
+      finish(
+        reject,
+        signal.reason ?? new Error("The browser session is unavailable."),
+      );
+    signal.addEventListener("abort", abort, { once: true });
+    Promise.resolve(operation).then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+function suspendSession() {
+  loopBuilderSessionAvailable = false;
+  if (workspaceInitializationInFlight) {
+    workspaceInitializationGeneration++;
+    workspaceInitializationInFlight = false;
+    setWorkspaceInitializationOutcome(
+      "disconnected",
+      "The browser disconnected during initialization. No completion is assumed. Reconnect to load authoritative workspace state before retrying.",
+    );
+  } else {
+    renderWorkspaceInitialization();
+  }
+  runEvidenceRequestGeneration++;
+  if (selectedRunRefreshTimer != null) {
+    window.clearTimeout(selectedRunRefreshTimer);
+    selectedRunRefreshTimer = null;
+  }
+  if (!loopBuilderRefreshAbortController?.signal.aborted)
+    loopBuilderRefreshAbortController?.abort(
+      new Error("The browser session is being recovered."),
+    );
+  if (!loopBuilderSessionAbortController.signal.aborted)
+    loopBuilderSessionAbortController.abort(
+      new Error("The browser session is being recovered."),
+    );
+  setInteractive(false);
+}
+
+function resumeSession() {
+  if (loopBuilderSessionAbortController.signal.aborted)
+    loopBuilderSessionAbortController = new AbortController();
+  loopBuilderSessionAvailable = true;
+  if (workspaceInitializationPhase === "disconnected") {
+    if (workspaceStatusSnapshot?.initialized && workspaceAuthoringHydrated)
+      setWorkspaceInitializationOutcome(
+        "succeeded",
+        "Connection restored. The workspace is initialized and authoritative Loops state is loaded; no loop ran.",
+      );
+    else if (initializationState() === "partial")
+      setWorkspaceInitializationOutcome(
+        "partial",
+        "Connection restored. Authoritative status shows an incomplete .agent scaffold. Retry initialization to repair it; no loop ran.",
+      );
+    else
+      setWorkspaceInitializationOutcome(
+        "idle",
+        "Connection restored. Authoritative status shows that this workspace is not initialized. Review the effects and retry when ready.",
+      );
+  } else {
+    renderWorkspaceInitialization();
+  }
+  if (loopBuilderSurfaceActive && !loopBuilderEventsBound) void activate();
+  else scheduleSelectedRunRefresh();
 }
 
 function isNonterminalRun(run) {
@@ -5091,6 +6190,16 @@ async function deleteSelectedTrace() {
 }
 
 async function getHub() {
+  if (window.embodySenseSession) {
+    const sharedConnection = await window.embodySenseSession.getHub();
+    if (hub !== sharedConnection) {
+      hub = sharedConnection;
+      sharedConnection.on("ApprovalsChanged", (approvals) => {
+        if (hub === sharedConnection) renderLoopApprovals(approvals);
+      });
+    }
+    return sharedConnection;
+  }
   if (hub?.connected) return hub;
   const connection = new JsonSignalRConnection(createHubUrl());
   hub = connection;
@@ -5186,7 +6295,6 @@ async function decideLoopApproval(requestId, approved, button) {
 function createHubUrl() {
   const url = new URL("/hubs/session", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("access_token", sessionToken);
   return url.toString();
 }
 
@@ -5205,7 +6313,23 @@ function promptSourceLabel(value) {
 }
 
 async function reloadCurrent() {
-  if (mutationInFlight || !currentDefinition) return;
+  if (mutationInFlight) return;
+  if (isNewLoopDraft()) {
+    if (newLoopDraftCommitState === "uncertain") {
+      showBanner(
+        "The draft cannot be discarded while its first-save outcome is uncertain. Retry Save to resolve the exact operation first.",
+      );
+      return;
+    }
+    if (
+      window.confirm(
+        "Discard this unsaved draft? No durable loop will be deleted.",
+      )
+    )
+      discardNewLoopDraft();
+    return;
+  }
+  if (!currentDefinition) return;
   if (dirty && !window.confirm("Discard unsaved loop edits?")) return;
   const loopId = currentDefinition.id;
   setBusy(true, "Reloading");
@@ -5225,8 +6349,7 @@ function addInferenceStep() {
 
 function insertInferenceStep(index) {
   if (
-    !draft ||
-    isSystemLoop() ||
+    !canMutateDraft() ||
     draft.inferenceSteps.length >= catalog.limits.maxInferenceSteps
   )
     return;
@@ -5271,6 +6394,7 @@ function fitCanvas() {
 }
 
 function moveStep(index, delta) {
+  if (!canMutateDraft()) return;
   const next = index + delta;
   if (next < 0 || next >= draft.inferenceSteps.length) return;
   const [step] = draft.inferenceSteps.splice(index, 1);
@@ -5281,6 +6405,7 @@ function moveStep(index, delta) {
 }
 
 function removeStep(index) {
+  if (!canMutateDraft()) return;
   if (draft.inferenceSteps.length <= 1) return;
   draft.inferenceSteps.splice(index, 1);
   selectedNodeId =
@@ -5657,6 +6782,9 @@ class JsonSignalRConnection {
 window.embodySenseLoopBuilder = Object.freeze({
   activate,
   deactivate,
+  rehydrateSession,
   refreshWorkspace,
+  resumeSession,
+  suspendSession,
 });
 if (!elements.loopsView.hidden) void activate();

@@ -1,8 +1,8 @@
 namespace EmbodySense.Web.Models;
 
 /// <summary>
-/// Carries the bearer token issued to the bootstrapping local browser session.
+/// Describes the process generation and workspace scope established for a local browser session.
 /// </summary>
-/// <param name="Token">The opaque session token required by authenticated HTTP and SignalR surfaces.</param>
+/// <param name="GenerationId">A non-secret identifier that changes whenever the Web host process restarts.</param>
 /// <param name="ChatRequestScope">A non-secret workspace scope for bounded browser chat-request reconciliation state.</param>
-public sealed record WebSessionInfo(string Token, string ChatRequestScope);
+public sealed record WebSessionInfo(string GenerationId, string ChatRequestScope);

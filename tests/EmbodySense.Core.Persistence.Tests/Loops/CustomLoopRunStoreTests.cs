@@ -1106,6 +1106,53 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Exact_monitor_cache_hashes_a_same_metadata_replacement_before_watcher_delivery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        var watchers = new List<ControllableFileSystemWatcher>();
+        using var store = new CustomLoopRunStore(paths, path =>
+        {
+            var watcher = new ControllableFileSystemWatcher(path);
+            watchers.Add(watcher);
+            return watcher;
+        });
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(seed)).Status);
+        var running = Advance(seed, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, seed.LifecycleVersion)).Status);
+        var first = await store.GetMonitorAsync(seed.Id);
+        Assert.Equal(running.UpdatedAtUtc, first?.Summary.UpdatedAtUtc);
+        Assert.Single(watchers).EnableRaisingEvents = false;
+
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, seed.LoopId, seed.Id + ".json");
+        var originalInfo = new FileInfo(artifactPath);
+        var originalLength = originalInfo.Length;
+        var originalLastWriteUtc = originalInfo.LastWriteTimeUtc;
+        using var replacementWorkspace = new TestWorkspace();
+        var replacementPaths = new WorkspacePaths(replacementWorkspace.RootPath);
+        var replacementStore = new CustomLoopRunStore(replacementPaths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await replacementStore.CreateAsync(seed)).Status);
+        var replacementTimestamp = running.UpdatedAtUtc.AddMinutes(1);
+        var replacement = running with
+        {
+            UpdatedAtUtc = replacementTimestamp,
+            ExecutionClock = running.ExecutionClock with { ActiveSinceUtc = replacementTimestamp },
+            Events = [.. running.Events[..^1], running.Events[^1] with { TimestampUtc = replacementTimestamp }]
+        };
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await replacementStore.UpdateAsync(replacement, seed.LifecycleVersion)).Status);
+        var replacementPath = Path.Combine(replacementPaths.CustomLoopRunsPath, seed.LoopId, seed.Id + ".json");
+        var replacementContent = await File.ReadAllBytesAsync(replacementPath);
+        Assert.Equal(originalLength, replacementContent.Length);
+        await File.WriteAllBytesAsync(artifactPath, replacementContent);
+        File.SetLastWriteTimeUtc(artifactPath, originalLastWriteUtc);
+
+        var repaired = await store.GetMonitorAsync(seed.Id);
+
+        Assert.Equal(replacementTimestamp, repaired?.Summary.UpdatedAtUtc);
+    }
+
+    [Fact]
     public async Task Strict_reader_rejects_missing_unknown_and_noncanonical_nested_properties_or_enums()
     {
         var mutations = new Action<JsonObject>[]

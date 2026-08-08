@@ -84,6 +84,7 @@ public sealed class LoopAuthoringFacade
             systemDefinition.RoleId,
             MapSystemDefinition(systemDefinition),
             definitions.Select(Map).ToArray(),
+            CreateDraftTemplate(systemDefinition.RoleId),
             CreateLimits(),
             CreateToolCatalog(systemDefinition));
     }
@@ -102,7 +103,7 @@ public sealed class LoopAuthoringFacade
     }
 
     /// <summary>
-    /// Creates a new server-owned custom-loop draft for the current role.
+    /// Creates a new server-owned custom-loop seed for the current role.
     /// </summary>
     /// <param name="operationId">The idempotency identity to reuse when the caller cannot determine whether a prior response committed.</param>
     /// <param name="cancellationToken">The token used to cancel the authoring operation.</param>
@@ -111,6 +112,23 @@ public sealed class LoopAuthoringFacade
     {
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
         return Map(await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, cancellationToken));
+    }
+
+    /// <summary>
+    /// Validates and atomically creates the first durable version of a client-authored loop draft.
+    /// </summary>
+    /// <param name="operationId">The idempotency identity reused until an uncertain first-save outcome is resolved.</param>
+    /// <param name="input">The complete editable definition captured at the explicit first-save boundary.</param>
+    /// <param name="cancellationToken">The token used to cancel validation, persistence, and auditing.</param>
+    /// <returns>A task whose result reports commit, replay, validation, authority, quota, conflict, and audit-integrity status.</returns>
+    public async Task<LoopAuthoringResponse> CreateAsync(string operationId, LoopDefinitionInput input, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
+        var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
+        var result = await _service.CreateAsync(systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
+        return Map(result);
     }
 
     /// <summary>
@@ -127,15 +145,8 @@ public sealed class LoopAuthoringFacade
         ArgumentNullException.ThrowIfNull(input);
 
         var systemDefinition = await GetSystemDefinitionAsync(cancellationToken);
-        var applicationInput = new CustomLoopDefinitionInput(
-            input.DisplayName,
-            input.Description,
-            Map(input.TriggerPolicy)!,
-            input.InferenceSteps?.Select(step => step is null ? null! : new CustomLoopInferenceStepInput(step.Id, step.Name, step.Instruction, Map(step.ContextPolicy)!)).ToArray()!,
-            input.ToolAssignments?.Select(Map).ToArray()!,
-            Map(input.ExitPolicy)!);
         var currentRoleCeiling = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition);
-        var result = await _service.UpdateAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, applicationInput, currentRoleCeiling, cancellationToken);
+        var result = await _service.UpdateAsync(loopId, expectedDefinitionVersion, systemDefinition.RoleId, operationId, _actor, MapDefinitionInput(input), currentRoleCeiling, cancellationToken);
         return Map(result);
     }
 
@@ -202,6 +213,31 @@ public sealed class LoopAuthoringFacade
             CustomLoopLimits.MaxRunExecutionMilliseconds);
     }
 
+    private static LoopDefinitionDraftTemplate CreateDraftTemplate(string roleId)
+    {
+        var seed = CustomLoopDefinition.CreateSeed("draft-template", roleId, "draft-template-step", "draft-template-operation", DateTimeOffset.UnixEpoch);
+        var definition = new LoopDefinitionInput(
+            seed.DisplayName,
+            seed.Description,
+            Map(seed.TriggerPolicy),
+            seed.InferenceSteps.Select(step => new LoopInferenceStep(null, step.Name, step.Instruction, Map(step.ContextPolicy))).ToArray(),
+            seed.ToolAssignments.Select(Map).ToArray(),
+            Map(seed.ExitPolicy));
+        var contextDefaults = new LoopContextDefaults(Map(seed.ContextDefaults.Inference), Map(seed.ContextDefaults.Exit));
+        return new LoopDefinitionDraftTemplate(seed.SchemaVersion, seed.RoleId, definition, contextDefaults);
+    }
+
+    private static CustomLoopDefinitionInput MapDefinitionInput(LoopDefinitionInput input)
+    {
+        return new CustomLoopDefinitionInput(
+            input.DisplayName,
+            input.Description,
+            Map(input.TriggerPolicy)!,
+            input.InferenceSteps?.Select(step => step is null ? null! : new CustomLoopInferenceStepInput(step.Id, step.Name, step.Instruction, Map(step.ContextPolicy)!)).ToArray()!,
+            input.ToolAssignments?.Select(Map).ToArray()!,
+            Map(input.ExitPolicy)!);
+    }
+
     private static LoopToolCatalog CreateToolCatalog(LoopDefinition systemDefinition)
     {
         var assignable = CustomLoopToolAuthorityProvider.ResolveCurrentRoleCeiling(systemDefinition).Select(Map).ToArray();
@@ -245,9 +281,9 @@ public sealed class LoopAuthoringFacade
     {
         var graph = definition.Graph;
         var executionBlocker = DefaultConversationLoopGraphContract.GetExecutionBlocker(definition);
-        var executionSemantics = executionBlocker is null ? SystemLoopExecutionSemantics.ValidatedRunnerContract : SystemLoopExecutionSemantics.Unknown;
+        var executionSemantics = executionBlocker is null ? SystemLoopExecutionSemantics.AuthorityTopologyOnly : SystemLoopExecutionSemantics.Unknown;
         var executionDetail = executionBlocker is null
-            ? "The dedicated runner validates this exact graph before executing its hard-coded turn transaction. Nodes and edges describe implemented boundaries but are not dispatched independently by the custom-loop or a generic graph executor."
+            ? "The dedicated runner accepts this system-owned graph as its authority topology, but it does not certify the nodes and edges as an exact execution-order contract. The hard-coded transaction assembles context before durable user acceptance, publishes the user message before provider inference, then observes and publishes the assistant message; nodes are not dispatched independently by a generic graph executor."
             : $"The dedicated runner rejects this persisted graph contract: {executionBlocker}";
         return new SystemLoopDefinitionSnapshot(
             definition.SchemaVersion,

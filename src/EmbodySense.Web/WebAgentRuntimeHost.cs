@@ -34,6 +34,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
+    private readonly SemaphoreSlim _workspaceInitializationGate = new(1, 1);
     private readonly object _codexRuntimeStatusGate = new();
     private readonly object _turnCancellationGate = new();
     private readonly CancellationTokenSource _hostLifetimeCancellation = new();
@@ -189,19 +190,30 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     }
 
     /// <summary>
-    /// Idempotently initializes the configured workspace for the Web actor.
+    /// Idempotently and serially initializes the configured workspace for the Web actor.
     /// </summary>
     /// <param name="cancellationToken">The token used to cancel initialization.</param>
     /// <returns>The resulting Web status.</returns>
     public async Task<WebStatus> InitializeWorkspaceAsync(CancellationToken cancellationToken = default)
     {
-        var status = _statusReader.Read(_options.WorkingDirectory);
-        if (!status.IsInitialized)
+        await _workspaceInitializationGate.WaitAsync(cancellationToken);
+        try
         {
-            await _workspaceInitializer.InitializeAsync(status.RootPath, cancellationToken);
-        }
+            var status = _statusReader.Read(_options.WorkingDirectory);
+            if (status.IsInitialized)
+            {
+                return WebStatusFactory.Create(_options, status, "already-initialized");
+            }
 
-        return GetStatus();
+            await _workspaceInitializer.InitializeAsync(status.RootPath, cancellationToken);
+            var initializedStatus = _statusReader.Read(_options.WorkingDirectory);
+            var outcome = initializedStatus.IsInitialized ? "initialized" : initializedStatus.HasPartialScaffold ? "partial" : "failed";
+            return WebStatusFactory.Create(_options, initializedStatus, outcome);
+        }
+        finally
+        {
+            _workspaceInitializationGate.Release();
+        }
     }
 
     /// <summary>
@@ -601,6 +613,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
         _runtimeGate.Dispose();
         _turnGate.Dispose();
+        _workspaceInitializationGate.Dispose();
         _hostLifetimeCancellation.Dispose();
     }
 

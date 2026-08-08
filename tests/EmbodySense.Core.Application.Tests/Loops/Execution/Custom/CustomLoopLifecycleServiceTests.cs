@@ -20,6 +20,25 @@ public sealed class CustomLoopLifecycleServiceTests
 {
     private static readonly DateTimeOffset _now = new(2026, 7, 16, 20, 0, 0, TimeSpan.Zero);
 
+    [Theory]
+    [InlineData(0xD800)]
+    [InlineData(0xDC00)]
+    public async Task Recovery_and_lifecycle_actor_boundaries_reject_malformed_utf16_without_normalization_exceptions(int codeUnit)
+    {
+        var run = Run("run-malformed-actor", CustomLoopRunStatus.Running);
+        var recovery = new CustomLoopRecoveryService(new MultiRunStore([run]), new RecordingAuditLog(), new FixedTimeProvider(_now.AddMinutes(1)));
+        var lifecycle = new CustomLoopLifecycleService(new MultiRunStore([run]), new InMemoryOperationStore(), new NoopResumeExecutor(), new RecordingModelAvailability(), new RecordingCancellationSignal(), new RecordingAuditLog(), new TestExecutionGate(), new FixedTimeProvider(_now.AddMinutes(1)));
+        var actor = new string((char)codeUnit, 1);
+
+        var recoveryFailure = await Assert.ThrowsAsync<ArgumentException>(() => recovery.RecoverAsync(actor));
+        var lifecycleFailure = await Assert.ThrowsAsync<ArgumentException>(() => lifecycle.PauseAsync(new CustomLoopPauseRequest(run.Id, run.LifecycleVersion, "pause-malformed-actor", actor)));
+
+        Assert.Equal("actor", recoveryFailure.ParamName);
+        Assert.StartsWith("Actor must be bounded normalized text without control or invalid surrogate characters.", recoveryFailure.Message, StringComparison.Ordinal);
+        Assert.Equal("actor", lifecycleFailure.ParamName);
+        Assert.StartsWith("Actor must be bounded normalized text without control or invalid surrogate characters.", lifecycleFailure.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Restart_recovery_applies_the_exact_nonterminal_matrix_without_automatic_execution()
     {

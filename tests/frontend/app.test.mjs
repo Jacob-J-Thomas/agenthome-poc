@@ -176,6 +176,24 @@ test("transcript hydration failure leaves the connected chat usable", async () =
   );
 });
 
+test("fresh boot promotes authenticated chat while configuration hydration remains in flight", async () => {
+  let releaseConfiguration;
+  const configurationGate = new Promise((resolve) => {
+    releaseConfiguration = resolve;
+  });
+  const app = await loadApp({ configurationGate });
+
+  assert.equal(app.elements.workspaceStatus.textContent, "Initialized");
+  assert.equal(app.elements.clientStatus.textContent, "Web primary");
+  assert.equal(app.elements.sendButton.disabled, false);
+  assert.equal(app.elements.refreshConfigButton.disabled, true);
+
+  releaseConfiguration();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(app.elements.refreshConfigButton.disabled, false);
+});
+
 test("boot hydrates the complete active runtime transcript instead of the bounded configuration snapshot", async () => {
   const activeTranscript = Array.from({ length: 201 }, (_, index) => ({
     role: index % 2 === 0 ? "user" : "assistant",
@@ -1184,6 +1202,529 @@ test("conflicting durable reconciliation blocks dispatch and retains the exact r
   );
 });
 
+test("browser session credentials stay in same-site cookies and never enter websocket URLs", async () => {
+  const app = await loadApp();
+  const sessionRequest = app.fetchCalls.find(
+    (call) => call.url === "/api/session",
+  );
+
+  assert.equal(sessionRequest.options.credentials, "same-origin");
+  assert.equal(
+    sessionRequest.options.headers["X-EmbodySense-Session"],
+    undefined,
+  );
+  assert.equal(app.socket.url, "ws://127.0.0.1:4378/hubs/session");
+  assert.doesNotMatch(app.socket.url, /access_token|process-generation/i);
+});
+
+test("concurrent disconnect signals collapse into one renewal hub start and rehydration", async () => {
+  let loopRehydrations = 0;
+  const loopBuilder = {
+    activate() {},
+    deactivate() {},
+    refreshWorkspace() {},
+    rehydrateSession() {
+      loopRehydrations++;
+      return { refreshed: true };
+    },
+  };
+  const app = await loadApp({ loopBuilder });
+  const initialLoopRehydrations = loopRehydrations;
+  let releaseRenewal;
+  let renewalCalls = 0;
+  const renewal = new Promise((resolve) => {
+    releaseRenewal = resolve;
+  });
+  const normalFetch = createFetch({ generationId: "process-generation-2" });
+  app.context.fetch = async (url, options) => {
+    if (url === "/api/session") {
+      renewalCalls++;
+      return await renewal;
+    }
+    return await normalFetch(url, options);
+  };
+
+  app.socket.serverClose();
+  const duplicateOne = vm.runInContext(
+    "startSessionRecovery('duplicate-one', { newGeneration: true })",
+    app.context,
+  );
+  const duplicateTwo = vm.runInContext(
+    "startSessionRecovery('duplicate-two', { newGeneration: true })",
+    app.context,
+  );
+  await flushAsyncWork();
+
+  assert.equal(renewalCalls, 1);
+  assert.equal(FakeWebSocket.instances.length, 1);
+  releaseRenewal(
+    jsonResponse({
+      generationId: "process-generation-2",
+      chatRequestScope,
+    }),
+  );
+  await Promise.all([duplicateOne, duplicateTwo]);
+
+  assert.equal(renewalCalls, 1);
+  assert.equal(FakeWebSocket.instances.length, 2);
+  assert.equal(loopRehydrations, initialLoopRehydrations + 1);
+  assert.equal(
+    FakeWebSocket.instances[1].sentInvocations("GetCurrentTranscript").length,
+    1,
+  );
+  assert.equal(
+    FakeWebSocket.instances[1].sentInvocations("GetPendingApprovals").length,
+    1,
+  );
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    true,
+  );
+});
+
+test("transient recovery uses one bounded jittered timer and stops after the attempt limit", async () => {
+  const app = await loadApp();
+  const scheduled = [];
+  app.context.window.setTimeout = (handler, delay) => {
+    const timer = { handler, delay, cancelled: false };
+    scheduled.push(timer);
+    return timer;
+  };
+  app.context.window.clearTimeout = (timer) => {
+    timer.cancelled = true;
+  };
+  app.context.fetch = async () => {
+    throw new Error("host unavailable");
+  };
+  vm.runInContext("Math.random = () => 0", app.context);
+
+  app.socket.serverClose();
+  await flushAsyncWork();
+  await vm.runInContext("startSessionRecovery('duplicate')", app.context);
+  let active = scheduled.filter((timer) => !timer.cancelled);
+  assert.equal(active.length, 1);
+  assert.equal(active[0].delay, 188);
+
+  for (let attempt = 1; attempt < 6; attempt++) {
+    const timer = active[0];
+    timer.cancelled = true;
+    timer.handler();
+    await flushAsyncWork();
+    active = scheduled.filter((item) => !item.cancelled);
+    assert.ok(active.length <= 1);
+  }
+
+  assert.equal(active.length, 0);
+  assert.equal(app.elements.retryConnectionButton.hidden, false);
+  assert.equal(app.elements.clientStatus.textContent, "Web recovery stopped");
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().attempts",
+      app.context,
+    ),
+    6,
+  );
+});
+
+test("a changed workspace stops recovery without replacing visible local state", async () => {
+  const app = await loadApp({
+    activeTranscript: [{ role: "user", content: "keep visible state" }],
+  });
+  app.elements.messageInput.value = "unsent local draft";
+  const changedFetch = createFetch({
+    generationId: "process-generation-2",
+    status: {
+      workspaceRoot: "C:/different-workspace",
+      initialized: true,
+      client: "web",
+      cliRole: "CLI remains available.",
+    },
+  });
+  app.context.fetch = changedFetch;
+
+  app.socket.serverClose();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(app.elements.retryConnectionButton.hidden, false);
+  assert.equal(app.elements.clientStatus.textContent, "Web workspace changed");
+  assert.equal(app.elements.messageInput.value, "unsent local draft");
+  assert.match(app.elements.transcript.textContent, /keep visible state/);
+  assert.equal(FakeWebSocket.instances.length, 2);
+  assert.equal(FakeWebSocket.instances[1].readyState, 3);
+});
+
+test("a session policy rejection enters manual posture without transient retries", async () => {
+  const app = await loadApp();
+  const scheduled = [];
+  app.context.window.setTimeout = (handler, delay) => {
+    const timer = { handler, delay, cancelled: false };
+    scheduled.push(timer);
+    return timer;
+  };
+  app.context.window.clearTimeout = (timer) => {
+    timer.cancelled = true;
+  };
+  app.context.fetch = async (url) =>
+    url === "/api/session"
+      ? errorResponse(403, "origin rejected")
+      : errorResponse(500, "unexpected request");
+
+  app.socket.serverClose();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(scheduled.filter((timer) => !timer.cancelled).length, 0);
+  assert.equal(app.elements.retryConnectionButton.hidden, false);
+  assert.equal(app.elements.clientStatus.textContent, "Web recovery stopped");
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().terminal",
+      app.context,
+    ),
+    true,
+  );
+});
+
+test("a blank process generation enters manual posture", async () => {
+  const app = await loadApp();
+  app.context.fetch = async (url) =>
+    url === "/api/session"
+      ? jsonResponse({ generationId: "   " })
+      : errorResponse(500, "unexpected request");
+
+  app.socket.serverClose();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(app.elements.retryConnectionButton.hidden, false);
+  assert.equal(app.elements.clientStatus.textContent, "Web recovery stopped");
+  assert.equal(FakeWebSocket.instances.length, 1);
+});
+
+test("a stale-auth response starts recovery without replaying the rejected request", async () => {
+  const app = await loadApp();
+  const requests = [];
+  const recoveredFetch = createFetch({ generationId: "process-generation-2" });
+  app.context.fetch = async (url, options = {}) => {
+    requests.push({ url, options });
+    if (url === "/api/configuration" && options.method === "POST") {
+      return errorResponse(401, "stale session");
+    }
+    return await recoveredFetch(url, options);
+  };
+
+  await assert.rejects(
+    vm.runInContext(
+      "fetchJson('/api/configuration', { method: 'POST' })",
+      app.context,
+    ),
+    /was not replayed/,
+  );
+  await flushAsyncWork();
+
+  assert.equal(
+    requests.filter(
+      (request) =>
+        request.url === "/api/configuration" &&
+        request.options.method === "POST",
+    ).length,
+    1,
+  );
+  assert.equal(
+    requests.filter((request) => request.url === "/api/session").length,
+    1,
+  );
+});
+
+test("a replacement connection that closes during loop hydration is never promoted", async () => {
+  let rehydrations = 0;
+  let hydrationStarted;
+  const hydrationPending = new Promise((resolve) => {
+    hydrationStarted = resolve;
+  });
+  const loopBuilder = {
+    activate() {},
+    deactivate() {},
+    refreshWorkspace() {},
+    rehydrateSession() {
+      rehydrations++;
+      if (rehydrations === 1) return { refreshed: true };
+      hydrationStarted();
+      return new Promise(() => {});
+    },
+    resumeSession() {},
+    suspendSession() {},
+  };
+  const app = await loadApp({ loopBuilder });
+  installWindowTimers(app);
+
+  app.socket.serverClose();
+  await hydrationPending;
+  const candidate = FakeWebSocket.instances[1];
+  candidate.serverClose();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(candidate.readyState, 3);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    false,
+  );
+});
+
+test("candidate events received after snapshots are replayed after promotion", async () => {
+  let rehydrations = 0;
+  let releaseHydration;
+  let hydrationStarted;
+  const hydrationPending = new Promise((resolve) => {
+    hydrationStarted = resolve;
+  });
+  const loopBuilder = {
+    activate() {},
+    deactivate() {},
+    refreshWorkspace() {},
+    rehydrateSession() {
+      rehydrations++;
+      if (rehydrations === 1) return { refreshed: true };
+      hydrationStarted();
+      return new Promise((resolve) => {
+        releaseHydration = resolve;
+      });
+    },
+    resumeSession() {},
+    suspendSession() {},
+  };
+  const app = await loadApp({ loopBuilder });
+
+  app.socket.serverClose();
+  await hydrationPending;
+  const candidate = FakeWebSocket.instances[1];
+  candidate.serverSendInvocation("StatusChanged", {
+    workspaceRoot: "C:/workspace",
+    initialized: true,
+    client: "event-authoritative-web",
+    cliRole: "CLI remains available.",
+  });
+  releaseHydration({ refreshed: true });
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(app.elements.clientRole.textContent, "event-authoritative-web");
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    true,
+  );
+});
+
+test("a failed loop rehydration keeps the candidate disconnected", async () => {
+  let rehydrations = 0;
+  const loopBuilder = {
+    activate() {},
+    deactivate() {},
+    refreshWorkspace() {},
+    rehydrateSession() {
+      rehydrations++;
+      return { refreshed: rehydrations === 1 };
+    },
+    resumeSession() {},
+    suspendSession() {},
+  };
+  const app = await loadApp({ loopBuilder });
+  const timers = installWindowTimers(app);
+
+  app.socket.serverClose();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(FakeWebSocket.instances[1].readyState, 3);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    false,
+  );
+  assert.equal(timers.filter((timer) => !timer.cancelled).length, 1);
+});
+
+test("a second host restart during recovery reacquires a fresh generation", async () => {
+  const app = await loadApp();
+  const timers = installWindowTimers(app);
+  vm.runInContext("Math.random = () => 0", app.context);
+  const normalFetch = createFetch({ generationId: "unused-generation" });
+  let sessionReads = 0;
+  let statusReads = 0;
+  app.context.fetch = async (url, options) => {
+    if (url === "/api/session") {
+      sessionReads++;
+      return jsonResponse({
+        generationId: `process-generation-${sessionReads + 1}`,
+        chatRequestScope,
+      });
+    }
+    if (url === "/api/status" && ++statusReads === 1)
+      return errorResponse(401, "the host restarted again");
+    return await normalFetch(url, options);
+  };
+
+  app.socket.serverClose();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+  const retry = timers.find((timer) => !timer.cancelled && timer.delay === 188);
+  assert.ok(retry);
+  retry.cancelled = true;
+  retry.handler();
+  await flushAsyncWork();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(sessionReads, 2);
+  assert.equal(FakeWebSocket.instances.length, 3);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().processGenerationId",
+      app.context,
+    ),
+    "process-generation-3",
+  );
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    true,
+  );
+});
+
+test("a loop-hydration 401 is owned by the outer generation recovery", async () => {
+  let rehydrations = 0;
+  const loopBuilder = {
+    activate() {},
+    deactivate() {},
+    refreshWorkspace() {},
+    rehydrateSession() {
+      rehydrations++;
+      if (rehydrations === 2) {
+        const error = new Error("The host restarted during loop hydration.");
+        error.status = 401;
+        throw error;
+      }
+      return { refreshed: true };
+    },
+    resumeSession() {},
+    suspendSession() {},
+  };
+  const app = await loadApp({ loopBuilder });
+  const timers = installWindowTimers(app);
+  vm.runInContext("Math.random = () => 0", app.context);
+
+  app.socket.serverClose();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+  const retry = timers.find((timer) => !timer.cancelled && timer.delay === 188);
+  assert.ok(retry);
+  retry.cancelled = true;
+  retry.handler();
+  await flushAsyncWork();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(rehydrations, 3);
+  assert.equal(FakeWebSocket.instances.length, 3);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    true,
+  );
+});
+
+test("a websocket that never opens hits its bounded deadline and cannot be promoted", async () => {
+  const app = await loadApp();
+  const timers = installWindowTimers(app);
+  FakeWebSocket.autoOpen = false;
+
+  app.socket.serverClose();
+  for (
+    let attempt = 0;
+    attempt < 20 && FakeWebSocket.instances.length < 2;
+    attempt++
+  )
+    await Promise.resolve();
+  const openDeadline = timers.find(
+    (timer) => !timer.cancelled && timer.delay === 5000,
+  );
+  assert.ok(openDeadline);
+  openDeadline.cancelled = true;
+  openDeadline.handler();
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(FakeWebSocket.instances[1].readyState, 3);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    false,
+  );
+});
+
+test("pagehide cancels a pending recovery and ignores its late completion", async () => {
+  const app = await loadApp();
+  installWindowTimers(app);
+  let releaseSession;
+  app.context.fetch = (url) =>
+    url === "/api/session"
+      ? new Promise((resolve) => {
+          releaseSession = resolve;
+        })
+      : Promise.reject(new Error(`Unexpected URL: ${url}`));
+
+  app.socket.serverClose();
+  for (let attempt = 0; attempt < 20 && !releaseSession; attempt++)
+    await Promise.resolve();
+  app.context.window.dispatchEvent({ type: "pagehide" });
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+  releaseSession(jsonResponse({ generationId: "too-late" }));
+  await flushAsyncWork();
+
+  assert.equal(FakeWebSocket.instances.length, 1);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    false,
+  );
+});
+
+test("a page restored from the back-forward cache reconnects its stopped session", async () => {
+  const app = await loadApp();
+  installWindowTimers(app);
+
+  app.context.window.dispatchEvent({ type: "pagehide", persisted: true });
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    false,
+  );
+
+  app.context.window.dispatchEvent({ type: "pageshow", persisted: true });
+  await vm.runInContext("sessionRecoveryPromise", app.context);
+
+  assert.equal(FakeWebSocket.instances.length, 2);
+  assert.equal(
+    vm.runInContext(
+      "window.embodySenseSession.getState().connected",
+      app.context,
+    ),
+    true,
+  );
+});
+
 async function loadApp(overrides = {}) {
   FakeWebSocket.instances = [];
   FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
@@ -1194,15 +1735,19 @@ async function loadApp(overrides = {}) {
     releaseRequestIdentity: true,
   };
   FakeWebSocket.reconciliations = overrides.reconciliations ?? new Map();
+  FakeWebSocket.autoOpen = overrides.webSocketAutoOpen ?? true;
   const document = new FakeDocument(indexSource);
   const location = {
     href: overrides.locationHref ?? "http://127.0.0.1:4378/",
   };
+  const fetchCalls = [];
+  const windowListeners = new Map();
   const context = {
+    AbortController,
     URL,
     console,
     document,
-    fetch: createFetch(overrides),
+    fetch: createFetch(overrides, fetchCalls),
     crypto: {
       randomUUID:
         overrides.randomUUID ?? (() => "11111111-1111-4111-8111-111111111111"),
@@ -1219,6 +1764,15 @@ async function loadApp(overrides = {}) {
         },
       },
       embodySenseLoopBuilder: overrides.loopBuilder,
+      addEventListener(type, handler) {
+        const listeners = windowListeners.get(type) ?? new Set();
+        listeners.add(handler);
+        windowListeners.set(type, listeners);
+      },
+      dispatchEvent(event) {
+        for (const handler of windowListeners.get(event.type) ?? [])
+          handler(event);
+      },
       setTimeout: overrides.windowSetTimeout ?? setTimeout,
       clearTimeout: overrides.windowClearTimeout ?? clearTimeout,
     },
@@ -1233,11 +1787,12 @@ async function loadApp(overrides = {}) {
     elements: document.elementsObject,
     appTabs: document.appTabs,
     configTabs: document.configTabs,
+    fetchCalls,
     socket: FakeWebSocket.instances[0],
   };
 }
 
-function createFetch(overrides) {
+function createFetch(overrides = {}, calls = []) {
   const status = overrides.status ?? {
     workspaceRoot: "C:/workspace",
     initialized: true,
@@ -1279,10 +1834,11 @@ function createFetch(overrides) {
       rawJson: "",
     },
   };
-  return async (url) => {
+  return async (url, options = {}) => {
+    calls.push({ url, options });
     if (url === "/api/session") {
       return jsonResponse({
-        token: "test-token",
+        generationId: overrides.generationId ?? "process-generation-1",
         chatRequestScope: overrides.chatRequestScope ?? chatRequestScope,
       });
     }
@@ -1292,6 +1848,7 @@ function createFetch(overrides) {
     }
 
     if (url === "/api/configuration") {
+      if (overrides.configurationGate) await overrides.configurationGate;
       return jsonResponse(configuration);
     }
 
@@ -1302,13 +1859,36 @@ function createFetch(overrides) {
 function jsonResponse(value) {
   return {
     ok: true,
+    status: 200,
     json: async () => value,
     text: async () => JSON.stringify(value),
   };
 }
 
+function errorResponse(status, message) {
+  return {
+    ok: false,
+    status,
+    json: async () => ({ detail: message }),
+    text: async () => message,
+  };
+}
+
 async function flushAsyncWork() {
   await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+function installWindowTimers(app) {
+  const scheduled = [];
+  app.context.window.setTimeout = (handler, delay) => {
+    const timer = { handler, delay, cancelled: false };
+    scheduled.push(timer);
+    return timer;
+  };
+  app.context.window.clearTimeout = (timer) => {
+    timer.cancelled = true;
+  };
+  return scheduled;
 }
 
 function configTab(app, name) {
@@ -1352,13 +1932,14 @@ class FakeWebSocket {
     releaseRequestIdentity: true,
   };
   static reconciliations = new Map();
+  static autoOpen = true;
 
   constructor(url) {
     this.url = url;
     this.readyState = FakeWebSocket.OPEN;
     this.sent = [];
     FakeWebSocket.instances.push(this);
-    setTimeout(() => this.onopen?.(), 0);
+    if (FakeWebSocket.autoOpen) setTimeout(() => this.onopen?.(), 0);
   }
 
   send(message) {
@@ -1411,7 +1992,9 @@ class FakeWebSocket {
                 })
               : payload.target === "GetCurrentTranscript"
                 ? FakeWebSocket.currentTranscript
-                : true;
+                : payload.target === "GetPendingApprovals"
+                  ? []
+                  : true;
       setTimeout(
         () =>
           this.serverSend({
@@ -1424,8 +2007,18 @@ class FakeWebSocket {
     }
   }
 
+  close() {
+    this.readyState = 3;
+    this.onclose?.();
+  }
+
   serverSendInvocation(target, ...args) {
     this.serverSend({ type: 1, target, arguments: args });
+  }
+
+  serverClose() {
+    this.readyState = 3;
+    this.onclose?.();
   }
 
   serverSend(message) {

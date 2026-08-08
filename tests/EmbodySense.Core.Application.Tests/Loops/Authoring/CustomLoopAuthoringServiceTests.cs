@@ -219,6 +219,99 @@ public sealed class CustomLoopAuthoringServiceTests
     }
 
     [Fact]
+    public async Task Explicit_create_commits_the_complete_normalized_input_once_with_server_owned_identities()
+    {
+        var store = new FakeStore();
+        var identity = new QueueIdentityGenerator(["loop-explicit"], ["step-first", "step-second"]);
+        var service = Service(store, identity: identity);
+        var input = CreateInput() with
+        {
+            DisplayName = "Cafe\u0301 review",
+            Description = "First durable save",
+            InferenceSteps =
+            [
+                new CustomLoopInferenceStepInput(null, "Collect", "Collect evidence.", CustomLoopNodeContextPolicy.Inherit()),
+                new CustomLoopInferenceStepInput(null, "Summarize", "Summarize evidence.", CustomLoopNodeContextPolicy.Inherit())
+            ],
+            ToolAssignments = [CustomLoopToolAssignment.Read]
+        };
+
+        var result = await service.CreateAsync("role-workspace", "op-explicit", "actor-user", input, [CustomLoopToolAssignment.Read]);
+
+        Assert.Equal(CustomLoopAuthoringStatus.Created, result.Status);
+        var definition = Assert.IsType<CustomLoopDefinition>(result.Definition);
+        Assert.Same(definition, store.CreatedDefinition);
+        Assert.Equal("loop-explicit", definition.Id);
+        Assert.Equal("Caf\u00e9 review", definition.DisplayName);
+        Assert.Equal("role-workspace", definition.RoleId);
+        Assert.Equal(1, definition.DefinitionVersion);
+        Assert.Equal(["step-first", "step-second"], definition.InferenceSteps.Select(step => step.Id));
+        Assert.Equal([CustomLoopToolAssignment.Read], definition.ToolAssignments);
+        Assert.Equal(CustomLoopContextDefaults.CreatePrototypeDefaults(), definition.ContextDefaults);
+        Assert.True(CustomLoopDefinitionContentHash.Matches(definition));
+        Assert.Equal(1, store.CreateCallCount);
+    }
+
+    [Fact]
+    public async Task Explicit_create_replays_the_exact_first_save_and_conflicts_on_operation_reuse_without_duplicates()
+    {
+        var store = new FakeStore();
+        var identity = new QueueIdentityGenerator(["loop-explicit"], ["step-first"]);
+        var service = Service(store, identity: identity);
+        var input = CreateInput();
+
+        var created = await service.CreateAsync("role-workspace", "op-explicit", "actor-user", input, []);
+        var replayed = await service.CreateAsync("role-workspace", "op-explicit", "actor-user", input, []);
+        var conflicted = await service.CreateAsync("role-workspace", "op-explicit", "actor-user", input with { Description = "Different request" }, []);
+
+        Assert.Equal(CustomLoopAuthoringStatus.Created, created.Status);
+        Assert.Equal(CustomLoopAuthoringStatus.Replayed, replayed.Status);
+        Assert.Same(created.Definition, replayed.Definition);
+        Assert.Equal(CustomLoopAuthoringStatus.Conflict, conflicted.Status);
+        Assert.Equal(1, store.CreateCallCount);
+        Assert.Equal(2, identity.CallCount);
+    }
+
+    [Fact]
+    public async Task Explicit_create_rejects_client_owned_step_ids_missing_tools_and_assignments_outside_the_current_role_ceiling()
+    {
+        var suppliedIdStore = new FakeStore();
+        var suppliedId = await Service(suppliedIdStore).CreateAsync("role-workspace", "op-supplied-id", "actor-user", CreateInput() with
+        {
+            InferenceSteps = [new CustomLoopInferenceStepInput("client-step", "Step", "Do the work.", CustomLoopNodeContextPolicy.Inherit())]
+        }, []);
+        var missingToolsStore = new FakeStore();
+        var missingTools = await Service(missingToolsStore).CreateAsync("role-workspace", "op-missing-tools", "actor-user", CreateInput() with { ToolAssignments = null! }, []);
+        var outsideCeilingStore = new FakeStore();
+        var outsideCeiling = await Service(outsideCeilingStore).CreateAsync("role-workspace", "op-outside-ceiling", "actor-user", CreateInput() with { ToolAssignments = [CustomLoopToolAssignment.Read] }, []);
+
+        Assert.Contains(suppliedId.ValidationErrors, error => error.Code == "create_inference_step_id_not_allowed");
+        Assert.Contains(missingTools.ValidationErrors, error => error.Code == "tool_assignments_required");
+        Assert.Contains(outsideCeiling.ValidationErrors, error => error.Code == "tool_assignment_outside_role_ceiling");
+        Assert.Equal(0, suppliedIdStore.CreateCallCount);
+        Assert.Equal(0, missingToolsStore.CreateCallCount);
+        Assert.Equal(0, outsideCeilingStore.CreateCallCount);
+    }
+
+    [Fact]
+    public async Task Pending_explicit_create_recovery_rechecks_the_current_role_tool_ceiling()
+    {
+        var store = new FakeStore();
+        var input = CreateInput() with { ToolAssignments = [CustomLoopToolAssignment.Read] };
+        var first = await Service(store).CreateAsync("role-workspace", "pending-authority-create", "actor-user", input, [CustomLoopToolAssignment.Read]);
+        store.RemoveDefinition(first.Definition!.Id);
+        store.MarkOperationPending("pending-authority-create");
+
+        var blocked = await Service(store).CreateAsync("role-workspace", "pending-authority-create", "actor-user", input, []);
+
+        Assert.Equal(CustomLoopAuthoringStatus.Created, first.Status);
+        var error = Assert.Single(blocked.ValidationErrors);
+        Assert.Equal("tool_assignment_outside_role_ceiling", error.Code);
+        Assert.Equal(1, store.CreateCallCount);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, (await store.GetMutationOperationAsync("pending-authority-create")).Status);
+    }
+
+    [Fact]
     public async Task Update_returns_not_found_without_audit_or_store_mutation_when_the_definition_is_absent()
     {
         var store = new FakeStore();
@@ -876,6 +969,15 @@ public sealed class CustomLoopAuthoringServiceTests
             definition.ExitPolicy);
     }
 
+    private static CustomLoopDefinitionInput CreateInput()
+    {
+        var definition = Definition();
+        return Input(definition) with
+        {
+            InferenceSteps = definition.InferenceSteps.Select(step => new CustomLoopInferenceStepInput(null, step.Name, step.Instruction, step.ContextPolicy)).ToArray()
+        };
+    }
+
     private static CustomLoopContextPolicy Policy(bool role = true, bool trigger = true, bool conversation = false, bool retained = true, bool previous = true, bool retainOutput = true, bool publish = false)
     {
         return new CustomLoopContextPolicy(
@@ -1093,6 +1195,11 @@ public sealed class CustomLoopAuthoringServiceTests
         public void RestoreDefinition(CustomLoopDefinition definition)
         {
             _definitions[definition.Id] = definition;
+        }
+
+        public void RemoveDefinition(string loopId)
+        {
+            _definitions.Remove(loopId);
         }
 
         public void MarkOperationPending(string operationId)

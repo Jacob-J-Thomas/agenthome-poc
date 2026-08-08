@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Memory;
@@ -14,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
@@ -31,7 +33,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_starts_with_fresh_transcript_without_exposing_runtime_internals()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await new ConversationMemoryStore(paths).AppendMessageAsync(LlmMessage.User("old transcript"));
 
@@ -49,7 +51,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_surfaces_actionable_cleanup_without_rewriting_a_superseded_identityless_transcript()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var legacyEntry = """{"schemaVersion":1,"conversationId":"current","sequence":1,"timestampUtc":"2026-07-31T00:00:00Z","role":"user","content":"legacy prompt"}""";
         await File.WriteAllTextAsync(paths.CurrentConversationPath, legacyEntry);
@@ -86,7 +88,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_requires_explicit_runtime_surface()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var fakeCodex = await CreateFakeCodexExecutableAsync(workspace);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
@@ -161,7 +163,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_uses_startup_context_and_streams_response_through_public_runtime()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "ROLE.md"), "runtime guide");
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
         var chunks = new List<string>();
@@ -206,7 +208,7 @@ public sealed class AgentRuntimeFactoryTests
         }
 
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.CreateDirectory(paths.LoopRunsPath);
         var conversationMemory = new ConversationMemoryStore(paths);
@@ -268,7 +270,7 @@ public sealed class AgentRuntimeFactoryTests
         }
 
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         var running = RunningRun("run-owner-exit-recovery");
@@ -294,7 +296,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_keeps_ordinary_chat_available_while_an_in_process_custom_loop_owns_execution()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
         using var activeExecution = gate.TryAcquire("active-custom-loop", new string('a', CustomLoopLimits.Sha256HexCharacters)).Lease!;
@@ -313,7 +315,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task CreateAsync_keeps_ordinary_chat_available_when_custom_loop_recovery_cannot_read_persisted_state()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var conversationMemory = new ConversationMemoryStore(paths);
         await conversationMemory.AppendMessageAsync(LlmMessage.User("preserved recovery-failure transcript"));
@@ -339,7 +341,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task Startup_recovery_preserves_unsupported_discovery_index_guidance_and_retries_after_cleanup()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         await PersistRunningRunAsync(runStore, RunningRun("run-unsupported-startup-recovery"));
@@ -366,7 +368,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task Lifecycle_control_preserves_unsupported_discovery_index_guidance_and_retries_the_same_receipt()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var runStore = new CustomLoopRunStore(paths);
         var running = RunningRun("run-unsupported-control");
@@ -396,7 +398,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_closes_a_conclusive_terminal_provider_failure_without_review_or_quarantine()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var fakeCodex = await CreateFakeCodexExecutableAsync(workspace, "provider exploded");
         AgentRuntimeTurnResult response;
         await using (var runtime = await CreateRuntimeAsync(workspace, codexPath: fakeCodex))
@@ -593,7 +595,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_returns_failed_runtime_result_when_default_loop_is_disabled()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         await new LoopDefinitionStore(paths).SaveAsync(LoopDefinition.CreateDefaultConversation() with { State = LoopState.Disabled });
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -612,7 +614,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_emits_visible_context_when_verbose_is_enabled()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await File.WriteAllTextAsync(Path.Combine(workspace.RootPath, ".agent", "ROLE.md"), "runtime guide");
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
         var contexts = new List<string>();
@@ -638,7 +640,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_handles_commands_and_routes_unknown_slash_text_to_model()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
 
         Assert.True(AgentRuntime.TryHandleStaticRuntimeCommand("/help", out var staticResult));
@@ -663,7 +665,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_loads_pending_history_selection()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new ConversationMemoryStore(paths);
         await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
@@ -707,7 +709,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_handles_pending_history_cancel_and_invalid_selection()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var store = new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath));
         await store.AppendMessageAsync(LlmMessage.User("saved prompt"));
         await using var runtime = await CreateRuntimeAsync(workspace);
@@ -731,7 +733,7 @@ public sealed class AgentRuntimeFactoryTests
     public async Task RunTurnAsync_requires_history_before_model_turn_and_new_resets_state()
     {
         using var workspace = new TestWorkspace();
-        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
 
         _ = await runtime.RunTurnAsync("hello");
@@ -742,6 +744,85 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Contains("before sending the first prompt", historyAfterTurn.Output, StringComparison.Ordinal);
         Assert.Equal("Started a new conversation.", fresh.Output);
         Assert.Contains("Stored conversations:", historyAfterNew.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Review_commands_project_a_transcript_conflict_as_blocked_without_mutating_retained_evidence()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var record = await PersistTranscriptConflictReviewAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var retainedArtifact = await File.ReadAllTextAsync(artifactPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var review = Assert.Single(await runtime.ListDefaultConversationReviewsAsync());
+        Assert.Equal(DefaultConversationTurnReviewClassification.TranscriptConflict, review.Classification);
+        Assert.Contains("remains blocked", review.AllowedAction, StringComparison.Ordinal);
+        Assert.DoesNotContain("/review resolve", review.AllowedAction, StringComparison.Ordinal);
+
+        var listed = await runtime.RunTurnAsync("/review");
+        var rejected = await runtime.RunTurnAsync($"/review resolve {record.TurnId}");
+
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.TranscriptConflict), listed.Output, StringComparison.Ordinal);
+        Assert.Contains("Allowed action", listed.Output, StringComparison.Ordinal);
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.TranscriptConflict), rejected.Output, StringComparison.Ordinal);
+        Assert.Contains("cannot be abandoned", rejected.Output, StringComparison.Ordinal);
+        Assert.Equal(retainedArtifact, await File.ReadAllTextAsync(artifactPath));
+        var reread = await turns.LoadAsync(record.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(record.LifecycleVersion, reread.LifecycleVersion);
+        Assert.Equal(record.ProviderOutcome, reread.ProviderOutcome);
+        Assert.Equal(record.ReviewDetail, reread.ReviewDetail);
+        Assert.Null(reread.ReviewResolution);
+        Assert.Single(await runtime.ListDefaultConversationReviewsAsync());
+    }
+
+    private static async Task<DefaultConversationTurnRecord> PersistTranscriptConflictReviewAsync(TestWorkspace workspace)
+    {
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var memory = new ConversationMemoryStore(paths);
+        var turns = new DefaultConversationTurnStore(paths);
+        var startedAtUtc = DateTimeOffset.UtcNow;
+        const string RequestId = "transcript-conflict-review";
+        var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Cli, LoopTrigger.HumanMessage, startedAtUtc);
+        var record = DefaultConversationTurnProtocol.Admit(run, await memory.LoadCurrentConversationSnapshotAsync(), LlmMessage.User("hello"), startedAtUtc, RequestId);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
+
+        foreach (var checkpoint in new[]
+        {
+            DefaultConversationTurnCheckpoint.RunStarted,
+            DefaultConversationTurnCheckpoint.UserMessageAccepted,
+            DefaultConversationTurnCheckpoint.UserPublicationPrepared,
+            DefaultConversationTurnCheckpoint.UserPublished,
+            DefaultConversationTurnCheckpoint.ProviderDispatchPrepared
+        })
+        {
+            record = record.Advance(checkpoint, startedAtUtc.AddSeconds(record.LifecycleVersion), checkpoint.ToString());
+            Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        }
+
+        record = record.Advance(DefaultConversationTurnCheckpoint.ProviderDispatchStarted, startedAtUtc.AddSeconds(record.LifecycleVersion), "Provider entered.", providerOutcome: DefaultConversationProviderOutcome.OutcomeUnknown);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        var assistant = new DefaultConversationTurnMessage(record.TurnId + ":message:assistant", LlmMessageRole.Assistant, "observed answer");
+        record = record.Advance(DefaultConversationTurnCheckpoint.ProviderOutcomeObserved, startedAtUtc.AddSeconds(record.LifecycleVersion), "Provider outcome observed.", providerOutcome: DefaultConversationProviderOutcome.Observed, assistantMessage: assistant, providerResponseId: "provider-response-1");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        record = record.Advance(DefaultConversationTurnCheckpoint.AssistantPublicationPrepared, startedAtUtc.AddSeconds(record.LifecycleVersion), "Assistant publication prepared.");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        const string Detail = "Transcript publication conflicts with retained turn evidence.";
+        var needsReview = record.Run.NeedsReview(startedAtUtc.AddSeconds(record.LifecycleVersion), Detail);
+        record = record.Advance(DefaultConversationTurnCheckpoint.TerminalPrepared, startedAtUtc.AddSeconds(record.LifecycleVersion), "Terminal review prepared.", run: needsReview, reviewDetail: Detail);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        record = record.Advance(DefaultConversationTurnCheckpoint.Terminal, startedAtUtc.AddSeconds(record.LifecycleVersion), "Terminal review committed.", run: needsReview, runProjectionSynchronized: true);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        return record;
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null)
