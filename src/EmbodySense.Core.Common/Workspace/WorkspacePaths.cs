@@ -311,6 +311,18 @@ public sealed class WorkspacePaths
     /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
     public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
 
+    /// <summary>Gets the immutable capability artifact storage root.</summary>
+    public string CapabilityArtifactsPath => Path.Combine(CapabilityCatalogPath, "artifacts");
+
+    /// <summary>Gets the durable capability artifact activation document.</summary>
+    public string CapabilityArtifactActivationPath => Path.Combine(CapabilityArtifactsPath, "activation.json");
+
+    /// <summary>Gets the last completely written capability artifact activation proof.</summary>
+    public string CapabilityArtifactActivationProofPath => Path.Combine(CapabilityArtifactsPath, "activation.proved.json");
+
+    /// <summary>Gets the cross-process capability artifact mutation lock.</summary>
+    public string CapabilityArtifactLockPath => Path.Combine(CapabilityArtifactsPath, ".artifacts.lock");
+
     /// <summary>Gets the safe public credential-registry directory.</summary>
     public string CredentialRegistryPath => Path.Combine(AgentPath, "credentials");
 

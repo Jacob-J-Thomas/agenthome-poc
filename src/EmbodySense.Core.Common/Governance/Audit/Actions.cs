@@ -134,5 +134,21 @@ public static partial class AuditSchema
         /// Identifies the tool execute audit action.
         /// </summary>
         public const string ToolExecute = "tool.execute";
+
+        /// <summary>
+        /// Identifies a capability artifact intake outcome.
+        /// </summary>
+        public const string CapabilityArtifactIntake = "capability.artifact.intake";
+
+        /// <summary>Identifies a capability artifact verification outcome.</summary>
+        public const string CapabilityArtifactVerification = "capability.artifact.verification";
+
+        /// <summary>Identifies a capability artifact activation or rollback outcome.</summary>
+        public const string CapabilityArtifactActivation = "capability.artifact.activation";
+
+        /// <summary>
+        /// Identifies a capability executable invocation intent or outcome.
+        /// </summary>
+        public const string CapabilityExecutableInvocation = "capability.executable.invocation";
     }
 }
