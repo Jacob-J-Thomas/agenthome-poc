@@ -10,6 +10,8 @@ internal sealed class BlockingCapabilityCatalogTrustProvider(ICapabilityCatalogT
 
     public bool BlockNextRead { get; set; }
 
+    public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
+
     public Task Entered => _entered.Task;
 
     public void Release() => _release.TrySetResult();

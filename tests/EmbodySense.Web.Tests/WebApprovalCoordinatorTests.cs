@@ -236,6 +236,11 @@ public sealed class WebApprovalCoordinatorTests
 
         public IEnumerable<IReadOnlyList<WebPendingApproval>> Snapshots => Notifications.Select(item => item.Approvals);
 
+        public Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
         public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
         {
             Notifications.Add((ownerConnectionId, approvals));

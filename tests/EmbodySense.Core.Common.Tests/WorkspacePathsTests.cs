@@ -19,9 +19,16 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom"), paths.CustomLoopDefinitionsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-tombstones"), paths.CustomLoopDefinitionTombstonesPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "custom-create-operations"), paths.CustomLoopDefinitionOperationsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-cleanup-history"), paths.CustomLoopReceiptCleanupHistoryPath);
+        Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "definition-mutation-receipt"), paths.CustomLoopDefinitionMutationReceiptCleanupHistoryPath);
+        Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "definition-tombstone"), paths.CustomLoopDefinitionTombstoneCleanupHistoryPath);
+        Assert.Equal(Path.Combine(paths.CustomLoopReceiptCleanupHistoryPath, "lifecycle-control-receipt"), paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs"), paths.LoopRunsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "default-conversation-turns"), paths.DefaultConversationTurnsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom"), paths.CustomLoopRunsPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-retention"), paths.CustomLoopReceiptRetentionPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-retention", "lifecycle-control"), paths.CustomLoopControlReceiptCleanupPath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "loops", "receipt-retention", "proof-ledger.json"), paths.CustomLoopReceiptProofLedgerPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "runs", "custom-trace-deletion-operations"), paths.CustomLoopTraceDeletionOperationsPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "loops", "definitions", "default-conversation.json"), paths.DefaultConversationLoopDefinitionPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "memory", "conversations", ".workspace-turn.lock"), paths.ConversationTurnLockPath);
@@ -30,8 +37,25 @@ public sealed class WorkspacePathsTests
         Assert.Equal(Path.Combine(paths.AgentPath, "capabilities", "catalog.proved.json"), paths.CapabilityCatalogProofPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "capabilities", ".catalog.lock"), paths.CapabilityCatalogLockPath);
         Assert.Equal(Path.Combine(paths.AgentPath, "ROLE.md"), paths.RolePath);
+        Assert.Equal(Path.Combine(paths.AgentPath, "workspace-initialized.json"), paths.WorkspaceInitializationMarkerPath);
         Assert.Equal(Path.Combine(paths.RootPath, "shared"), paths.WorkspaceSharedPath);
         Assert.Equal(Path.Combine(paths.RootPath, "private"), paths.WorkspacePrivatePath);
+    }
+
+    [Fact]
+    public async Task IsInitialized_requires_the_completion_marker_after_role_and_permissions_exist()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.AgentPath);
+        await File.WriteAllTextAsync(paths.RolePath, "role");
+        await File.WriteAllTextAsync(paths.PermissionsPath, "permissions");
+
+        Assert.False(paths.IsInitialized);
+
+        await File.WriteAllTextAsync(paths.WorkspaceInitializationMarkerPath, "marker");
+
+        Assert.True(paths.IsInitialized);
     }
 
     [Theory]

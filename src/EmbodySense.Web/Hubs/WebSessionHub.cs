@@ -1,6 +1,7 @@
 using EmbodySense.Web;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -112,30 +113,89 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     /// </summary>
     /// <param name="message">The nonblank user message or supported static command.</param>
     /// <param name="requestId">An optional browser-owned idempotency identity.</param>
-    /// <returns>A task that completes after final, cancellation, or bounded failure events are sent to the caller.</returns>
+    /// <returns>The conclusive invocation disposition after final, cancellation, or bounded failure events are sent to the caller.</returns>
     /// <remarks>
     /// Blank input and expected runtime failures are represented as stream events rather than hub errors.
     /// Disconnect cancellation is likewise projected as a cancellation event when the connection can still receive it.
     /// </remarks>
-    public async Task SendMessage(string message, string? requestId = null)
+    public async Task<WebChatRequestResult> SendMessage(string message, string? requestId = null)
     {
         if (string.IsNullOrWhiteSpace(message))
         {
             await Clients.Caller.StreamEvent(WebStreamEvent.Failure("Message is required."));
-            return;
+            return new WebChatRequestResult("rejected", ReleaseRequestIdentity: true);
         }
 
         try
         {
-            await _host.SendMessageAsync(message, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionId, Context.ConnectionAborted, requestId);
+            var result = await _host.SendMessageAsync(message, (item, _) => Clients.Caller.StreamEvent(item), Context.ConnectionId, Context.ConnectionAborted, requestId);
+            if (result.RunIdentity is not null && !string.IsNullOrWhiteSpace(requestId))
+            {
+                return await ReconcileAfterInvocationAsync(message, requestId);
+            }
+
+            var status = result.Status switch
+            {
+                AgentRuntimeTurnStatus.MessageNeedsReview => "needs-review",
+                AgentRuntimeTurnStatus.MessageFailed or AgentRuntimeTurnStatus.MessageCancelled => "rejected",
+                _ => "completed"
+            };
+            return new WebChatRequestResult(status, ReleaseRequestIdentity: status != "needs-review");
         }
         catch (OperationCanceledException)
         {
+            var disposition = await ReconcileAfterInvocationAsync(message, requestId);
             await Clients.Caller.StreamEvent(WebStreamEvent.Cancelled("Message cancelled."));
+            return disposition;
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
         {
+            var disposition = await ReconcileAfterInvocationAsync(message, requestId);
             await Clients.Caller.StreamEvent(WebStreamEvent.Failure("The web runtime could not process that message. Check configuration and audit details for diagnostics."));
+            return disposition;
+        }
+        catch (Exception exception) when (exception is FormatException or IOException)
+        {
+            return await ReconcileAfterInvocationAsync(message, requestId);
+        }
+    }
+
+    /// <summary>
+    /// Reconciles one exact browser-owned request without dispatching provider work.
+    /// </summary>
+    /// <param name="message">The canonical message retained in bounded browser state.</param>
+    /// <param name="requestId">The request identity retained with the message.</param>
+    /// <returns>A bounded durable disposition that determines whether the browser must retain the identity.</returns>
+    /// <exception cref="HubException">Durable evidence is unavailable, corrupt, unsupported, or cannot be reconciled safely.</exception>
+    public async Task<DefaultConversationRequestReconciliationSnapshot> ReconcileMessage(string message, string requestId)
+    {
+        try
+        {
+            return await _host.ReconcileMessageAsync(message, requestId, Context.ConnectionAborted);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or FormatException or IOException)
+        {
+            throw new HubException("The chat request could not be reconciled safely. Check durable conversation evidence and the local audit log.");
+        }
+    }
+
+    private async Task<WebChatRequestResult> ReconcileAfterInvocationAsync(string message, string? requestId)
+    {
+        if (string.IsNullOrWhiteSpace(requestId))
+        {
+            return new WebChatRequestResult("rejected", ReleaseRequestIdentity: true);
+        }
+
+        try
+        {
+            var reconciliation = await _host.ReconcileMessageAsync(message.Trim(), requestId.Trim(), CancellationToken.None);
+            return reconciliation.Status == "not-found"
+                ? new WebChatRequestResult("rejected", ReleaseRequestIdentity: true)
+                : new WebChatRequestResult(reconciliation.Status, reconciliation.ReleaseRequestIdentity);
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or ArgumentException or InvalidOperationException or FormatException or IOException)
+        {
+            throw new HubException("The chat request completed, but its durable disposition could not be reconciled safely.");
         }
     }
 

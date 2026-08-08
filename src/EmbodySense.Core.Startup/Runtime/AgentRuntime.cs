@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Models;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Commands;
 using EmbodySense.Core.Application.Runtime.Models;
@@ -171,8 +172,8 @@ public sealed class AgentRuntime : IAsyncDisposable
                 return AgentRuntimeTurnResult.CommandOutput("No unresolved default-conversation reviews were found.");
             }
 
-            var lines = reviews.Select(review => $"- {review.TurnId}: attempt `{review.ProviderAttemptId}`, correlation `{review.ProviderCorrelationId}` - {review.Detail}");
-            return AgentRuntimeTurnResult.CommandOutput("Unresolved default-conversation reviews:" + Environment.NewLine + string.Join(Environment.NewLine, lines) + Environment.NewLine + "After inspecting provider and audit evidence, run `/review resolve <turn-id>` to abandon an unknown outcome without redispatching it.");
+            var lines = reviews.Select(review => $"- {review.TurnId}: {review.Classification}; attempt `{review.ProviderAttemptId}`, correlation `{review.ProviderCorrelationId}` - {review.Detail} Allowed action: {review.AllowedAction}");
+            return AgentRuntimeTurnResult.CommandOutput("Unresolved default-conversation reviews:" + Environment.NewLine + string.Join(Environment.NewLine, lines));
         }
 
         const string ResolvePrefix = "/review resolve ";
@@ -185,6 +186,12 @@ public sealed class AgentRuntime : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(turnId))
         {
             return AgentRuntimeTurnResult.CommandOutput("Usage: /review resolve <turn-id>");
+        }
+
+        var review = (await ListDefaultConversationReviewsAsync(cancellationToken)).SingleOrDefault(candidate => string.Equals(candidate.TurnId, turnId, StringComparison.Ordinal));
+        if (review is not null && review.Classification != DefaultConversationTurnReviewClassification.OutcomeUnknown)
+        {
+            return AgentRuntimeTurnResult.CommandOutput($"Default-conversation turn `{turnId}` is classified as {review.Classification} and cannot be abandoned. {review.AllowedAction}");
         }
 
         var resolved = await ResolveDefaultConversationReviewAsync(turnId, cancellationToken);
@@ -202,7 +209,9 @@ public sealed class AgentRuntime : IAsyncDisposable
             record.LifecycleVersion,
             record.ProviderAttemptId,
             record.ProviderCorrelationId,
-            record.ReviewDetail ?? "No review detail was retained.");
+            record.ReviewDetail ?? "No review detail was retained.",
+            DefaultConversationTurnProtocol.GetReviewClassification(record),
+            DefaultConversationTurnProtocol.GetReviewAction(record));
     }
 
     /// <summary>

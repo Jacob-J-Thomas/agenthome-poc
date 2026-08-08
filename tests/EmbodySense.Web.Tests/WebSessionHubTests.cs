@@ -67,11 +67,13 @@ public sealed class WebSessionHubTests
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
 
-        await hub.SendMessage(" ");
+        var result = await hub.SendMessage(" ");
 
         var streamEvent = Assert.Single(clients.CallerClient.StreamEvents);
         Assert.Equal("error", streamEvent.Type);
         Assert.Equal("Message is required.", streamEvent.Error);
+        Assert.Equal("rejected", result.Status);
+        Assert.True(result.ReleaseRequestIdentity);
     }
 
     [Fact]
@@ -83,11 +85,75 @@ public sealed class WebSessionHubTests
         var clients = new RecordingHubClients();
         var hub = CreateHub(host, approvals, clients);
 
-        await hub.SendMessage("hello");
+        var result = await hub.SendMessage("hello");
 
         var streamEvent = Assert.Single(clients.CallerClient.StreamEvents);
         Assert.Equal("error", streamEvent.Type);
         Assert.Contains("could not process", streamEvent.Error);
+        Assert.Equal("rejected", result.Status);
+        Assert.True(result.ReleaseRequestIdentity);
+    }
+
+    [Theory]
+    [InlineData("invalid-operation")]
+    [InlineData("argument")]
+    [InlineData("cancelled")]
+    public async Task SendMessage_reconciles_durable_completion_when_terminal_event_delivery_fails(string failureKind)
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var approvals = new WebApprovalCoordinator();
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
+        await using var host = new WebAgentRuntimeHost(options, approvals);
+        var clients = new RecordingHubClients();
+        clients.CallerClient.StreamEventFailure = failureKind switch
+        {
+            "invalid-operation" => new InvalidOperationException("simulated post-commit delivery failure"),
+            "argument" => new ArgumentException("simulated post-commit delivery failure"),
+            _ => new OperationCanceledException("simulated post-commit delivery failure")
+        };
+        var hub = CreateHub(host, approvals, clients);
+        _ = await hub.InitializeWorkspace();
+
+        var result = await hub.SendMessage("deliver exactly once", "chat-11111111-1111-4111-8111-111111111111");
+        var transcript = await hub.GetCurrentTranscript();
+
+        Assert.Equal("completed", result.Status);
+        Assert.True(result.ReleaseRequestIdentity);
+        Assert.NotNull(transcript);
+        Assert.Equal(2, transcript.Count);
+        Assert.Equal("deliver exactly once", transcript[0].Content);
+        Assert.Equal("browser response: deliver exactly once", transcript[1].Content);
+    }
+
+    [Fact]
+    public async Task ReconcileMessage_returns_bounded_not_found_state_without_creating_a_runtime()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace.RootPath, approvals);
+        var hub = CreateHub(host, approvals, new RecordingHubClients());
+        _ = await hub.InitializeWorkspace();
+
+        var result = await hub.ReconcileMessage("hello", "chat-11111111-1111-4111-8111-111111111111");
+
+        Assert.Equal("not-found", result.Status);
+        Assert.True(result.RetrySameRequest);
+        Assert.False(result.ReleaseRequestIdentity);
+    }
+
+    [Fact]
+    public async Task ReconcileMessage_bounds_unavailable_evidence_details()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace.RootPath, approvals);
+        var hub = CreateHub(host, approvals, new RecordingHubClients());
+
+        var exception = await Assert.ThrowsAsync<HubException>(() => hub.ReconcileMessage("hello", "chat-11111111-1111-4111-8111-111111111111"));
+
+        Assert.Equal("The chat request could not be reconciled safely. Check durable conversation evidence and the local audit log.", exception.Message);
+        Assert.DoesNotContain(workspace.RootPath, exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -400,6 +466,8 @@ public sealed class WebSessionHubTests
 
         public List<WebStreamEvent> StreamEvents { get; } = [];
 
+        public Exception? StreamEventFailure { get; set; }
+
         public Task StatusChanged(WebStatus status)
         {
             Statuses.Add(status);
@@ -420,6 +488,11 @@ public sealed class WebSessionHubTests
 
         public Task StreamEvent(WebStreamEvent streamEvent)
         {
+            if (streamEvent.Type == "assistant_final" && StreamEventFailure is not null)
+            {
+                return Task.FromException(StreamEventFailure);
+            }
+
             StreamEvents.Add(streamEvent);
             return Task.CompletedTask;
         }

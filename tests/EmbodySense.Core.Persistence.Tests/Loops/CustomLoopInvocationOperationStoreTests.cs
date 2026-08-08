@@ -550,6 +550,166 @@ public sealed class CustomLoopInvocationOperationStoreTests
         await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(rejected with { ValidationErrors = [new CustomLoopValidationError("code", "field", "unsafe\nmessage")] }));
     }
 
+    [Theory]
+    [InlineData("code", "code", "D800")]
+    [InlineData("code", "code", "DC00")]
+    [InlineData("field", "field", "D800")]
+    [InlineData("field", "field", "DC00")]
+    [InlineData("message", "message", "D800")]
+    [InlineData("message", "message", "DC00")]
+    public async Task Persisted_validation_error_with_malformed_utf16_fails_through_canonical_format_validation(string propertyName, string value, string codeUnit)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-malformed-validation-error-" + propertyName + codeUnit.ToLowerInvariant(), "prompt");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        pending = await BindContextAsync(store, pending);
+        var rejected = pending with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = "Invalid",
+            ValidationErrors = [new CustomLoopValidationError("code", "field", "message")],
+            Detail = "The invocation was rejected."
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(rejected)).Status);
+
+        var path = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        var persisted = await File.ReadAllTextAsync(path);
+        var malformed = persisted.Replace("\"" + propertyName + "\": \"" + value + "\"", "\"" + propertyName + "\": \"\\u" + codeUnit + "\"", StringComparison.Ordinal);
+        Assert.NotEqual(persisted, malformed);
+        await File.WriteAllTextAsync(path, malformed);
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(pending.OperationId));
+    }
+
+    [Fact]
+    public async Task Invocation_receipt_reports_missing_and_invalid_binding_transitions_without_creating_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var missing = Pending("invoke-missing-binding", "prompt");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.BeginAsync(ContextBound(missing)));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.BindAsync(missing));
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.NotFound, (await store.BindAsync(ContextBound(missing))).Status);
+        Assert.Empty(Directory.EnumerateFiles(paths.CustomLoopInvocationOperationsPath, "*.json", SearchOption.TopDirectoryOnly));
+
+        var pending = Pending("invoke-binding-regression", "prompt") with { UpdatedAtUtc = _timestamp.AddSeconds(2) };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var regressed = ContextBound(pending) with { UpdatedAtUtc = _timestamp.AddSeconds(1) };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(regressed)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(ContextBound(pending))).Status);
+    }
+
+    [Fact]
+    public async Task Retention_warning_transitions_are_idempotent_and_do_not_reopen_terminal_journals()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var now = _timestamp.AddDays(45);
+        var time = new MutableTimeProvider(now);
+        var store = new CustomLoopInvocationOperationStore(paths, time);
+        await PersistCompletedAsync(store, "invoke-outcome-warning-transition", _timestamp.AddSeconds(1));
+        var request = RetentionRequest(now);
+        var reserved = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await store.ReserveCompletedReceiptRetentionAsync(request)).Operation);
+
+        await store.MarkReceiptRetentionIntentAuditedAsync(reserved.OperationId, now.AddSeconds(1));
+        await store.CommitCompletedReceiptRetentionAsync(reserved.OperationId, now.AddSeconds(2));
+        await store.MarkReceiptRetentionOutcomeAuditStartedAsync(reserved.OperationId, now.AddSeconds(3));
+        var warning = await store.MarkReceiptRetentionOutcomeAuditWarningAsync(reserved.OperationId, now.AddSeconds(4));
+        var replay = await store.MarkReceiptRetentionOutcomeAuditWarningAsync(reserved.OperationId, now.AddSeconds(5));
+        var retained = await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now.AddSeconds(6)));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.CommittedWithAuditWarning, warning.State);
+        Assert.Equal(warning.OperationId, replay.OperationId);
+        Assert.Equal(warning.State, replay.State);
+        Assert.Equal(warning.UpdatedAtUtc, replay.UpdatedAtUtc);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, retained.Status);
+        Assert.Equal(warning.OperationId, retained.Operation!.OperationId);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.MarkReceiptRetentionIntentAuditedAsync("receipt-retention-missing", now));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.MarkReceiptRetentionOutcomeAuditedAsync("another-retention-operation", now));
+    }
+
+    [Fact]
+    public async Task Retention_conflict_warning_remains_terminal_after_a_changed_candidate()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var now = _timestamp.AddDays(46);
+        var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
+        await PersistCompletedAsync(store, "invoke-conflict-warning-transition", _timestamp.AddSeconds(1));
+        var request = RetentionRequest(now);
+        var reserved = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await store.ReserveCompletedReceiptRetentionAsync(request)).Operation);
+        await store.MarkReceiptRetentionIntentAuditedAsync(reserved.OperationId, now.AddSeconds(1));
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, "invoke-conflict-warning-transition.json");
+        var receipt = JsonNode.Parse(await File.ReadAllTextAsync(receiptPath))!.AsObject();
+        receipt["detail"] = "The completed receipt changed after retention reserved it.";
+        await File.WriteAllTextAsync(receiptPath, receipt.ToJsonString());
+
+        var abandoned = await store.CommitCompletedReceiptRetentionAsync(reserved.OperationId, now.AddSeconds(2));
+        await store.MarkReceiptRetentionConflictAuditStartedAsync(reserved.OperationId, now.AddSeconds(3));
+        var warning = await store.MarkReceiptRetentionConflictAuditWarningAsync(reserved.OperationId, now.AddSeconds(4));
+        var replay = await store.MarkReceiptRetentionConflictAuditWarningAsync(reserved.OperationId, now.AddSeconds(5));
+        var retained = await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now.AddSeconds(6)));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.AbandonedCandidateChanged, abandoned.State);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, warning.State);
+        Assert.Equal(warning.OperationId, replay.OperationId);
+        Assert.Equal(warning.State, replay.State);
+        Assert.Equal(warning.UpdatedAtUtc, replay.UpdatedAtUtc);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit, retained.Status);
+        Assert.Equal(warning.OperationId, retained.Operation!.OperationId);
+    }
+
+    [Fact]
+    public async Task Stale_committed_and_conflict_audits_recover_with_their_durable_public_statuses()
+    {
+        using var completedWorkspace = new TestWorkspace();
+        var completedPaths = new WorkspacePaths(completedWorkspace.RootPath);
+        var completedNow = _timestamp.AddDays(47);
+        var completedTime = new MutableTimeProvider(completedNow);
+        var completedStore = new CustomLoopInvocationOperationStore(completedPaths, completedTime);
+        await PersistCompletedAsync(completedStore, "invoke-stale-committed", _timestamp.AddSeconds(1));
+        var completedRequest = RetentionRequest(completedNow);
+        var completedReservation = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await completedStore.ReserveCompletedReceiptRetentionAsync(completedRequest)).Operation);
+        await completedStore.MarkReceiptRetentionIntentAuditedAsync(completedReservation.OperationId, completedNow.AddSeconds(1));
+        await completedStore.CommitCompletedReceiptRetentionAsync(completedReservation.OperationId, completedNow.AddSeconds(2));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, (await completedStore.ReserveCompletedReceiptRetentionAsync(RetentionRequest(completedNow))).Status);
+        completedTime.UtcNow += CustomLoopInvocationReceiptRetentionPolicy.StaleRecoveryWindow + TimeSpan.FromSeconds(1);
+        var completedRecovery = await completedStore.ReserveCompletedReceiptRetentionAsync(RetentionRequest(completedTime.UtcNow));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.OutcomeCommitted, completedRecovery.Status);
+        Assert.Equal(completedTime.UtcNow, completedRecovery.Operation!.OwnershipStartedAtUtc);
+
+        using var conflictWorkspace = new TestWorkspace();
+        var conflictPaths = new WorkspacePaths(conflictWorkspace.RootPath);
+        var conflictNow = _timestamp.AddDays(48);
+        var conflictTime = new MutableTimeProvider(conflictNow);
+        var conflictStore = new CustomLoopInvocationOperationStore(conflictPaths, conflictTime);
+        await PersistCompletedAsync(conflictStore, "invoke-stale-conflict", _timestamp.AddSeconds(1));
+        var conflictRequest = RetentionRequest(conflictNow);
+        var conflictReservation = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await conflictStore.ReserveCompletedReceiptRetentionAsync(conflictRequest)).Operation);
+        await conflictStore.MarkReceiptRetentionIntentAuditedAsync(conflictReservation.OperationId, conflictNow.AddSeconds(1));
+        File.Delete(Path.Combine(conflictPaths.CustomLoopInvocationOperationsPath, "invoke-stale-conflict.json"));
+        await conflictStore.CommitCompletedReceiptRetentionAsync(conflictReservation.OperationId, conflictNow.AddSeconds(2));
+        await conflictStore.MarkReceiptRetentionConflictAuditStartedAsync(conflictReservation.OperationId, conflictNow.AddSeconds(3));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, (await conflictStore.ReserveCompletedReceiptRetentionAsync(RetentionRequest(conflictNow))).Status);
+        conflictTime.UtcNow += CustomLoopInvocationReceiptRetentionPolicy.StaleRecoveryWindow + TimeSpan.FromSeconds(1);
+        var conflictRecovery = await conflictStore.ReserveCompletedReceiptRetentionAsync(RetentionRequest(conflictTime.UtcNow));
+        var terminal = await conflictStore.ReserveCompletedReceiptRetentionAsync(RetentionRequest(conflictTime.UtcNow.AddSeconds(1)));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit, conflictRecovery.Status);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, conflictRecovery.Operation!.State);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit, terminal.Status);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, terminal.Operation!.State);
+    }
+
     private static async Task<CustomLoopInvocationOperation> BindConversationAsync(CustomLoopInvocationOperationStore store, CustomLoopInvocationOperation pending, CustomLoopInvocationBindingState bindingState)
     {
         var result = await store.BindAsync(ConversationBound(pending, bindingState));

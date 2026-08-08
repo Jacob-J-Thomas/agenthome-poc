@@ -15,12 +15,14 @@ public static class WebStatusFactory
     /// </summary>
     /// <param name="options">The validated Web binding and workspace options.</param>
     /// <param name="status">The current reusable workspace status.</param>
+    /// <param name="initializationOutcome">The explicit initialization request outcome, when this snapshot completes such a request.</param>
     /// <returns>A Web-primary status projection with the CLI's verification role described.</returns>
-    public static WebStatus Create(WebRunOptions options, WorkspaceStatusSnapshot status)
+    public static WebStatus Create(WebRunOptions options, WorkspaceStatusSnapshot status, string? initializationOutcome = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(status);
 
-        return new WebStatus("web", true, status.RootPath, status.IsInitialized, options.Url, "CLI remains supported for verification and third-party client conformance.");
+        var initializationState = status.IsInitialized ? "initialized" : status.HasPartialScaffold ? "partial" : "uninitialized";
+        return new WebStatus("web", true, status.RootPath, status.IsInitialized, initializationState, status.RequiresExplicitCleanup, initializationOutcome, options.Url, "CLI remains supported for verification and third-party client conformance.");
     }
 }
