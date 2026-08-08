@@ -12,6 +12,9 @@ public sealed class WebSessionSecurityTests
 
         Assert.Equal(64, session.Token.Length);
         Assert.True(session.Token.All(Uri.IsHexDigit));
+        Assert.Equal(64, session.ChatRequestScope.Length);
+        Assert.True(session.ChatRequestScope.All(Uri.IsHexDigit));
+        Assert.NotEqual(session.Token, session.ChatRequestScope);
         Assert.Equal(32, session.GenerationId.Length);
     }
 

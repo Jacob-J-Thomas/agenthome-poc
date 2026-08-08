@@ -5,6 +5,14 @@ let activeConfigTab = "overview";
 let activeAppView = "chat";
 let activeAgentMessage = null;
 let hub = null;
+let chatRequestScope = "";
+let chatRequestStorageKey = "";
+let chatRequestStorageLockName = "";
+let chatRequestRetryEntry = null;
+let chatRequestStorageReady = false;
+let chatRequestStorageError = "";
+let chatRequestDispatchBlocked = false;
+let chatRequestInFlight = false;
 let sessionRecoveryGeneration = 0;
 let sessionRecoveryAttempts = 0;
 let sessionRecoveryPromise = null;
@@ -22,6 +30,10 @@ const maxSynchronizedConversationOperations = 128;
 const maxConversationSynchronizationRetries = 40;
 const initialConversationSynchronizationRetryMilliseconds = 25;
 const maxConversationSynchronizationRetryMilliseconds = 1000;
+const chatRequestStorageKeyPrefix = "embodysense.chat-requests.v1";
+const chatRequestRegistrySchemaVersion = 1;
+const maxPendingChatRequests = 1;
+const maxPendingChatMessageCharacters = 24000;
 const maxSessionRecoveryAttempts = 6;
 const initialSessionRecoveryDelayMilliseconds = 250;
 const maxSessionRecoveryDelayMilliseconds = 8000;
@@ -209,7 +221,7 @@ function applyStatus(nextStatus) {
   elements.clientRole.textContent = status.client;
   elements.cliRole.textContent = status.cliRole;
   elements.initButton.disabled = status.initialized || !hub?.connected;
-  elements.sendButton.disabled = !status.initialized || !hub?.connected;
+  refreshChatControls();
   elements.verboseToggle.disabled = !status.initialized || !hub?.connected;
   if (!wasInitialized && status.initialized) {
     void window.embodySenseLoopBuilder?.refreshWorkspace();
@@ -289,6 +301,7 @@ async function runSessionRecoveryAttempt(generation) {
       abortController.signal,
     );
     requireSessionGeneration(session);
+    const nextChatRequestScope = requireChatRequestScope(session);
     if (generation !== sessionRecoveryGeneration) return false;
 
     candidate = new JsonSignalRConnection(createHubUrl());
@@ -307,6 +320,14 @@ async function runSessionRecoveryAttempt(generation) {
       abortController.signal,
     );
     ensureWorkspaceDidNotChange(nextStatus.workspaceRoot);
+    configureChatRequestStorageScope(nextChatRequestScope);
+    try {
+      await initializeChatRequestStorage();
+      chatRequestStorageReady = true;
+      chatRequestStorageError = "";
+    } catch (error) {
+      failChatRequestStorage(error);
+    }
     if (hub === null && sessionWorkspaceRoot === null) {
       hub = candidate;
       sessionGenerationId = session.generationId;
@@ -361,6 +382,11 @@ async function runSessionRecoveryAttempt(generation) {
         "transient",
         "Loop evidence could not be authoritatively rehydrated.",
       );
+    }
+    if (chatRequestStorageReady) {
+      await reconcilePendingChatRequest(candidate);
+    } else if (chatRequestStorageError) {
+      appendMessage("error", chatRequestStorageError);
     }
     if (
       generation !== sessionRecoveryGeneration ||
@@ -469,6 +495,21 @@ function requireSessionGeneration(session) {
       "The session endpoint returned an invalid process generation.",
     );
   }
+}
+
+function requireChatRequestScope(session) {
+  if (
+    !session ||
+    typeof session.chatRequestScope !== "string" ||
+    !/^[0-9a-f]{64}$/.test(session.chatRequestScope)
+  ) {
+    throw createRecoveryError(
+      "terminal",
+      "The session endpoint returned an invalid workspace chat-request scope.",
+    );
+  }
+
+  return session.chatRequestScope;
 }
 
 function ensureWorkspaceDidNotChange(workspaceRoot) {
@@ -586,6 +627,15 @@ function enterTerminalRecoveryState(kind, error) {
   );
 }
 
+function refreshChatControls() {
+  elements.sendButton.disabled =
+    !status?.initialized ||
+    !hub?.connected ||
+    !chatRequestStorageReady ||
+    chatRequestDispatchBlocked ||
+    chatRequestInFlight;
+}
+
 function queueConversationPublicationSynchronization(notification) {
   const retry = conversationSynchronizationRetries.get(
     notification?.operationId,
@@ -693,6 +743,462 @@ function createHubUrl() {
   const url = new URL("/hubs/session", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
+}
+
+async function initializeChatRequestStorage() {
+  validateChatRequestEnvironment();
+  await withChatRequestRegistry((registry) => {
+    if (registry.scope !== chatRequestScope) {
+      throw chatRequestError(
+        "Pending chat browser state belongs to a different workspace scope.",
+        "storage-corrupt",
+      );
+    }
+
+    return registry;
+  });
+}
+
+async function reserveChatRequest(message) {
+  if (message.length > maxPendingChatMessageCharacters) {
+    throw chatRequestError(
+      `Messages cannot exceed ${maxPendingChatMessageCharacters} characters because the exact pending request must fit in bounded browser state.`,
+      "bounds",
+    );
+  }
+
+  const retryEntry = getChatRequestRetryEntry();
+  return await withChatRequestRegistry((registry) => {
+    const existing = registry.entries[0];
+    if (existing) {
+      if (existing.message !== message) {
+        throw chatRequestError(
+          "A different chat request is still unresolved. Reconcile or retry that exact message before sending another.",
+          "pending-conflict",
+        );
+      }
+
+      return { registry, result: existing };
+    }
+
+    if (retryEntry) {
+      throw chatRequestError(
+        retryEntry.message === message
+          ? "The retained chat identity was changed by another tab. Reconciliation must run again before retrying it."
+          : "A retained chat identity was changed by another tab. Reconcile it before sending a different message.",
+        retryEntry.message === message
+          ? "reconciliation-required"
+          : "pending-conflict",
+      );
+    }
+
+    const requestId = `chat-${globalThis.crypto.randomUUID()}`;
+    const entry = { requestId, message };
+    return {
+      registry: { ...registry, entries: [entry] },
+      result: entry,
+    };
+  });
+}
+
+async function releaseChatRequest(entry) {
+  await withChatRequestRegistry((registry) => {
+    const current = registry.entries[0];
+    if (
+      current?.requestId !== entry.requestId ||
+      current?.message !== entry.message
+    ) {
+      return registry;
+    }
+
+    return { ...registry, entries: [] };
+  });
+}
+
+async function reconcilePendingChatRequest(connection = hub) {
+  let entry;
+  try {
+    entry = await withChatRequestRegistry(
+      (registry) => ({ registry, result: registry.entries[0] ?? null }),
+      false,
+    );
+  } catch (error) {
+    failChatRequestStorage(error);
+    appendMessage("error", chatRequestStorageError);
+    return;
+  }
+
+  entry ??= getChatRequestRetryEntry();
+  if (!entry) {
+    chatRequestDispatchBlocked = false;
+    refreshChatControls();
+    return;
+  }
+
+  retainChatRequestRetryEntry(entry);
+
+  let reconciliation;
+  try {
+    reconciliation = await connection.invoke(
+      "ReconcileMessage",
+      entry.message,
+      entry.requestId,
+    );
+  } catch (error) {
+    appendMessage(
+      "error",
+      `Pending chat reconciliation unavailable: ${error.message}`,
+    );
+    elements.messageInput.value = entry.message;
+    return;
+  }
+
+  const reconciliationStatus = normalizeChatRequestStatus(
+    reconciliation?.status,
+  );
+  if (
+    isReleasableChatRequestStatus(reconciliationStatus) &&
+    reconciliation?.releaseRequestIdentity === true
+  ) {
+    try {
+      await releaseChatRequest(entry);
+      clearChatRequestRetryEntry(entry);
+    } catch (error) {
+      failChatRequestStorage(error);
+      appendMessage("error", chatRequestStorageError);
+      return;
+    }
+
+    chatRequestDispatchBlocked = false;
+    refreshChatControls();
+
+    try {
+      await hydrateCurrentTranscript(connection);
+    } catch (error) {
+      appendMessage("error", `Transcript unavailable: ${error.message}`);
+    }
+
+    return;
+  }
+
+  if (
+    reconciliationStatus === "needs-review" &&
+    reconciliation?.releaseRequestIdentity === false
+  ) {
+    chatRequestDispatchBlocked = false;
+    refreshChatControls();
+    appendMessage(
+      "system",
+      "The prior provider outcome remains unknown and requires explicit review. Its browser request identity remains reserved; use `/review` and `/review resolve <turn-id>` to inspect and explicitly abandon it without redispatching provider work.",
+    );
+    return;
+  }
+
+  if (reconciliationStatus === "conflict") {
+    chatRequestDispatchBlocked = true;
+    refreshChatControls();
+    appendMessage(
+      "error",
+      "The pending chat identity conflicts with durable turn evidence. Dispatch is blocked until the evidence is inspected.",
+    );
+    return;
+  }
+
+  if (!reconciliation?.retrySameRequest) {
+    chatRequestDispatchBlocked = true;
+    refreshChatControls();
+    appendMessage(
+      "error",
+      "The pending chat request returned an unsupported reconciliation state. Dispatch remains blocked.",
+    );
+    return;
+  }
+
+  try {
+    await restoreChatRequestRetryEntry(entry);
+  } catch (error) {
+    chatRequestDispatchBlocked = true;
+    refreshChatControls();
+    appendMessage(
+      "error",
+      `The retained chat identity could not be restored safely. ${error.message}`,
+    );
+    return;
+  }
+
+  elements.messageInput.value = entry.message;
+  chatRequestDispatchBlocked = false;
+  refreshChatControls();
+  appendMessage(
+    "system",
+    reconciliationStatus === "pending"
+      ? "A prior message is still being reconciled. Retrying it will reuse the same request identity and cannot automatically redispatch an outcome-unknown provider attempt."
+      : "A prior message did not reach durable admission. Retrying it will reuse the same request identity.",
+  );
+}
+
+function configureChatRequestStorageScope(scope = chatRequestScope) {
+  if (!/^[0-9a-f]{64}$/.test(scope)) {
+    throw chatRequestError(
+      "Durable, cross-tab browser storage is unavailable.",
+      "storage-unavailable",
+    );
+  }
+
+  chatRequestScope = scope;
+  chatRequestStorageKey = `${chatRequestStorageKeyPrefix}.${chatRequestScope}`;
+  chatRequestStorageLockName = `${chatRequestStorageKeyPrefix}.${chatRequestScope}`;
+  chatRequestRetryEntry = null;
+}
+
+function getChatRequestRetryEntry() {
+  return chatRequestRetryEntry?.scope === chatRequestScope
+    ? chatRequestRetryEntry.entry
+    : null;
+}
+
+function retainChatRequestRetryEntry(entry) {
+  chatRequestRetryEntry = {
+    scope: chatRequestScope,
+    entry: { requestId: entry.requestId, message: entry.message },
+  };
+}
+
+function clearChatRequestRetryEntry(entry) {
+  const retryEntry = getChatRequestRetryEntry();
+  if (
+    retryEntry?.requestId === entry.requestId &&
+    retryEntry.message === entry.message
+  ) {
+    chatRequestRetryEntry = null;
+  }
+}
+
+async function restoreChatRequestRetryEntry(entry) {
+  await withChatRequestRegistry((registry) => {
+    const current = registry.entries[0];
+    if (!current) {
+      return {
+        ...registry,
+        entries: [{ requestId: entry.requestId, message: entry.message }],
+      };
+    }
+
+    if (
+      current.requestId === entry.requestId &&
+      current.message === entry.message
+    ) {
+      return registry;
+    }
+
+    throw chatRequestError(
+      "A different chat identity is already retained in this workspace scope.",
+      "pending-conflict",
+    );
+  });
+}
+
+async function hydrateCurrentTranscript(connection = hub) {
+  const currentTranscript = await connection.invoke("GetCurrentTranscript");
+  if (Array.isArray(currentTranscript)) {
+    replaceTranscript(currentTranscript);
+  }
+}
+
+async function withChatRequestRegistry(action, writeChanges = true) {
+  validateChatRequestEnvironment();
+  try {
+    return await globalThis.navigator.locks.request(
+      chatRequestStorageLockName,
+      { mode: "exclusive" },
+      async () => {
+        const raw = globalThis.localStorage.getItem(chatRequestStorageKey);
+        const registry =
+          raw === null
+            ? createEmptyChatRequestRegistry()
+            : parseChatRequestRegistry(raw);
+        const actionResult = await action(registry);
+        const nextRegistry = actionResult?.registry ?? actionResult;
+        const result = actionResult?.result;
+        validateChatRequestRegistry(nextRegistry);
+
+        if (writeChanges) {
+          const serialized = JSON.stringify(nextRegistry);
+          globalThis.localStorage.setItem(chatRequestStorageKey, serialized);
+          if (
+            globalThis.localStorage.getItem(chatRequestStorageKey) !==
+            serialized
+          ) {
+            throw chatRequestError(
+              "Browser storage did not preserve the pending chat registry exactly.",
+              "storage-unavailable",
+            );
+          }
+        }
+
+        return Object.prototype.hasOwnProperty.call(
+          actionResult ?? {},
+          "result",
+        )
+          ? result
+          : nextRegistry;
+      },
+    );
+  } catch (error) {
+    if (error.chatRequestCode) {
+      throw error;
+    }
+
+    throw chatRequestError(
+      `Durable browser coordination failed. ${error.message}`,
+      "storage-unavailable",
+    );
+  }
+}
+
+function createEmptyChatRequestRegistry() {
+  return {
+    schemaVersion: chatRequestRegistrySchemaVersion,
+    scope: chatRequestScope,
+    entries: [],
+  };
+}
+
+function parseChatRequestRegistry(raw) {
+  let registry;
+  try {
+    registry = JSON.parse(raw);
+  } catch {
+    throw chatRequestError(
+      "Pending chat browser state is corrupt.",
+      "storage-corrupt",
+    );
+  }
+
+  validateChatRequestRegistry(registry);
+  return registry;
+}
+
+function validateChatRequestRegistry(registry) {
+  if (
+    !registry ||
+    typeof registry !== "object" ||
+    Array.isArray(registry) ||
+    !hasExactKeys(registry, ["entries", "schemaVersion", "scope"]) ||
+    registry.schemaVersion !== chatRequestRegistrySchemaVersion ||
+    typeof registry.scope !== "string" ||
+    !/^[0-9a-f]{64}$/.test(registry.scope) ||
+    !Array.isArray(registry.entries) ||
+    registry.entries.length > maxPendingChatRequests
+  ) {
+    throw chatRequestError(
+      "Pending chat browser state is invalid or exceeds its bounded registry.",
+      "storage-corrupt",
+    );
+  }
+
+  for (const entry of registry.entries) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      !hasExactKeys(entry, ["message", "requestId"]) ||
+      typeof entry.requestId !== "string" ||
+      !/^chat-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        entry.requestId,
+      ) ||
+      typeof entry.message !== "string" ||
+      !entry.message ||
+      entry.message !== entry.message.trim() ||
+      entry.message.length > maxPendingChatMessageCharacters
+    ) {
+      throw chatRequestError(
+        "Pending chat browser state contains an invalid request entry.",
+        "storage-corrupt",
+      );
+    }
+  }
+}
+
+function validateChatRequestEnvironment() {
+  if (
+    !/^[0-9a-f]{64}$/.test(chatRequestScope) ||
+    !globalThis.localStorage?.getItem ||
+    !globalThis.localStorage?.setItem ||
+    !globalThis.navigator?.locks?.request ||
+    !globalThis.crypto?.randomUUID
+  ) {
+    throw chatRequestError(
+      "Durable, cross-tab browser storage is unavailable.",
+      "storage-unavailable",
+    );
+  }
+}
+
+function hasExactKeys(value, expected) {
+  const keys = Object.keys(value).sort();
+  return (
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index])
+  );
+}
+
+function chatRequestError(message, code) {
+  const error = new Error(message);
+  error.chatRequestCode = code;
+  return error;
+}
+
+function failChatRequestStorage(error) {
+  chatRequestStorageReady = false;
+  chatRequestStorageError = `Chat dispatch disabled: ${error.message}`;
+  refreshChatControls();
+}
+
+function normalizeChatRequestStatus(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function isTerminalChatRequestStatus(value) {
+  return ["completed", "rejected", "needs-review"].includes(value);
+}
+
+function isReleasableChatRequestStatus(value) {
+  return ["completed", "rejected"].includes(value);
+}
+
+function isDefaultConversationReviewCommand(message) {
+  const normalized = message.toLowerCase();
+  return normalized === "/review" || normalized.startsWith("/review resolve ");
+}
+
+async function sendDefaultConversationReviewCommand(message) {
+  chatRequestInFlight = true;
+  activeAgentMessage = null;
+  appendMessage("user", message);
+  elements.messageInput.value = "";
+  refreshChatControls();
+
+  try {
+    const result = await hub.invoke("SendMessage", message, null);
+    const resultStatus = normalizeChatRequestStatus(result?.status);
+    if (
+      !isReleasableChatRequestStatus(resultStatus) ||
+      result?.releaseRequestIdentity !== true
+    ) {
+      throw new Error("The review command returned no conclusive disposition.");
+    }
+
+    await reconcilePendingChatRequest();
+  } catch (error) {
+    elements.messageInput.value = message;
+    appendMessage("error", `Review command failed: ${error.message}`);
+  } finally {
+    chatRequestInFlight = false;
+    refreshChatControls();
+  }
 }
 
 function applyConnectedState() {
@@ -1426,27 +1932,100 @@ elements.cancelButton.addEventListener("click", async () => {
 elements.messageForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = elements.messageInput.value.trim();
-  if (!message || !status?.initialized || !hub?.connected) {
+  const reviewCommand = isDefaultConversationReviewCommand(message);
+  if (
+    !message ||
+    !status?.initialized ||
+    !hub?.connected ||
+    !chatRequestStorageReady ||
+    (chatRequestDispatchBlocked && !reviewCommand) ||
+    chatRequestInFlight
+  ) {
     return;
   }
 
+  if (reviewCommand) {
+    await sendDefaultConversationReviewCommand(message);
+    return;
+  }
+
+  let request;
+  try {
+    request = await reserveChatRequest(message);
+  } catch (error) {
+    if (
+      error.chatRequestCode === "storage-corrupt" ||
+      error.chatRequestCode === "storage-unavailable"
+    ) {
+      failChatRequestStorage(error);
+      appendMessage("error", chatRequestStorageError);
+    } else if (error.chatRequestCode === "reconciliation-required") {
+      await reconcilePendingChatRequest();
+    } else {
+      appendMessage("error", error.message);
+    }
+
+    return;
+  }
+
+  chatRequestInFlight = true;
   activeAgentMessage = null;
   appendMessage("user", message);
   elements.messageInput.value = "";
-  elements.sendButton.disabled = true;
+  refreshChatControls();
   elements.cancelButton.disabled = false;
 
+  let terminalResultReceived = false;
   try {
-    // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/260): Retain this canonical message/request identity until a conclusive response or transcript reconciliation proves the outcome.
-    const requestId =
-      globalThis.crypto?.randomUUID?.() ??
-      `request-${Date.now()}-${Math.random()}`;
-    await hub.invoke("SendMessage", message, requestId);
+    const result = await hub.invoke(
+      "SendMessage",
+      request.message,
+      request.requestId,
+    );
+    const resultStatus = normalizeChatRequestStatus(result?.status);
+    if (!isTerminalChatRequestStatus(resultStatus)) {
+      throw new Error(
+        "The chat invocation returned no conclusive disposition.",
+      );
+    }
+
+    if (resultStatus === "needs-review") {
+      if (result?.releaseRequestIdentity !== false) {
+        throw new Error(
+          "The review-required disposition did not preserve its request identity.",
+        );
+      }
+
+      chatRequestDispatchBlocked = false;
+    } else {
+      if (result?.releaseRequestIdentity !== true) {
+        throw new Error(
+          "The terminal chat disposition did not authorize identity retirement.",
+        );
+      }
+
+      terminalResultReceived = true;
+      await releaseChatRequest(request);
+      clearChatRequestRetryEntry(request);
+    }
   } catch (error) {
-    appendMessage("error", error.message);
+    if (terminalResultReceived) {
+      failChatRequestStorage(error);
+      appendMessage(
+        "error",
+        `The message reached a conclusive terminal outcome, but its browser identity could not be retired safely. ${chatRequestStorageError}`,
+      );
+    } else {
+      elements.messageInput.value = request.message;
+      appendMessage(
+        "error",
+        `Message outcome is unknown; retrying will reuse the same request identity. ${error.message}`,
+      );
+    }
   } finally {
+    chatRequestInFlight = false;
     elements.cancelButton.disabled = true;
-    elements.sendButton.disabled = !status?.initialized || !hub?.connected;
+    refreshChatControls();
   }
 });
 

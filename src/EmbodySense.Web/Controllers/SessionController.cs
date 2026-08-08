@@ -54,6 +54,6 @@ public sealed class SessionController : ControllerBase
                 SameSite = SameSiteMode.Strict,
                 Secure = Request.IsHttps
             });
-        return Ok(new WebSessionInfo(_sessionSecurity.GenerationId));
+        return Ok(new WebSessionInfo(_sessionSecurity.GenerationId, _sessionSecurity.ChatRequestScope));
     }
 }

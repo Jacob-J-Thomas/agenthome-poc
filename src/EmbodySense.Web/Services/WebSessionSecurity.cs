@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace EmbodySense.Web.Services;
 
@@ -25,7 +26,7 @@ public sealed class WebSessionSecurity
     /// Initializes a session policy with a cryptographically random 256-bit token.
     /// </summary>
     public WebSessionSecurity()
-        : this(CreateToken(), Guid.NewGuid().ToString("N"), WebRunOptions.DefaultPort)
+        : this(CreateToken(), Guid.NewGuid().ToString("N"), CreateChatRequestScope(Environment.CurrentDirectory), WebRunOptions.DefaultPort)
     {
     }
 
@@ -34,7 +35,7 @@ public sealed class WebSessionSecurity
     /// </summary>
     /// <param name="port">The configured localhost port that distinguishes this browser credential from other Web hosts.</param>
     public WebSessionSecurity(int port)
-        : this(CreateToken(), Guid.NewGuid().ToString("N"), port)
+        : this(CreateToken(), Guid.NewGuid().ToString("N"), CreateChatRequestScope(Environment.CurrentDirectory), port)
     {
     }
 
@@ -43,7 +44,7 @@ public sealed class WebSessionSecurity
     /// </summary>
     /// <param name="token">The nonblank token required for authenticated requests.</param>
     public WebSessionSecurity(string token)
-        : this(token, Guid.NewGuid().ToString("N"), WebRunOptions.DefaultPort)
+        : this(token, Guid.NewGuid().ToString("N"), CreateChatRequestScope(Environment.CurrentDirectory), WebRunOptions.DefaultPort)
     {
     }
 
@@ -53,7 +54,7 @@ public sealed class WebSessionSecurity
     /// <param name="token">The nonblank credential required for authenticated requests.</param>
     /// <param name="generationId">The nonblank, non-secret process generation identifier.</param>
     public WebSessionSecurity(string token, string generationId)
-        : this(token, generationId, WebRunOptions.DefaultPort)
+        : this(token, generationId, CreateChatRequestScope(Environment.CurrentDirectory), WebRunOptions.DefaultPort)
     {
     }
 
@@ -64,12 +65,46 @@ public sealed class WebSessionSecurity
     /// <param name="generationId">The nonblank, non-secret process generation identifier.</param>
     /// <param name="port">The configured localhost port that scopes the browser cookie name.</param>
     public WebSessionSecurity(string token, string generationId, int port)
+        : this(token, generationId, CreateChatRequestScope(Environment.CurrentDirectory), port)
+    {
+    }
+
+    /// <summary>
+    /// Creates a process-local bearer token paired with a stable, non-secret workspace chat scope.
+    /// </summary>
+    /// <param name="workingDirectory">The workspace whose durable turn evidence owns retained browser request identities.</param>
+    /// <returns>A session policy whose token changes on restart while its workspace scope remains stable.</returns>
+    public static WebSessionSecurity CreateForWorkspace(string workingDirectory)
+    {
+        return CreateForWorkspace(workingDirectory, WebRunOptions.DefaultPort);
+    }
+
+    /// <summary>
+    /// Creates a process-local session policy for a workspace and configured Web port.
+    /// </summary>
+    /// <param name="workingDirectory">The workspace whose durable turn evidence owns retained browser request identities.</param>
+    /// <param name="port">The configured localhost port that scopes the browser cookie name.</param>
+    /// <returns>A session policy whose token changes on restart, whose cookie is port-scoped, and whose workspace scope remains stable.</returns>
+    public static WebSessionSecurity CreateForWorkspace(string workingDirectory, int port)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
+
+        return new WebSessionSecurity(
+            CreateToken(),
+            Guid.NewGuid().ToString("N"),
+            CreateChatRequestScope(workingDirectory),
+            port);
+    }
+
+    private WebSessionSecurity(string token, string generationId, string chatRequestScope, int port)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
         ArgumentException.ThrowIfNullOrWhiteSpace(generationId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(chatRequestScope);
 
         Token = token;
         GenerationId = generationId;
+        ChatRequestScope = chatRequestScope;
         CookieName = GetCookieName(port);
     }
 
@@ -77,6 +112,15 @@ public sealed class WebSessionSecurity
     /// Gets the process-local opaque bearer token.
     /// </summary>
     public string Token { get; }
+
+    /// <summary>
+    /// Gets a non-secret workspace scope used to partition bounded browser chat-request state.
+    /// </summary>
+    /// <remarks>
+    /// This identity is deliberately independent from the bearer token and remains stable across Web process restarts
+    /// for the same normalized workspace. A different workspace receives a different scope at the same localhost origin.
+    /// </remarks>
+    public string ChatRequestScope { get; }
 
     /// <summary>
     /// Gets the non-secret identifier for this Web host process generation.
@@ -171,5 +215,17 @@ public sealed class WebSessionSecurity
     private static string CreateToken()
     {
         return Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+    }
+
+    private static string CreateChatRequestScope(string workingDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
+        var normalized = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workingDirectory));
+        if (OperatingSystem.IsWindows())
+        {
+            normalized = normalized.ToUpperInvariant();
+        }
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("embodysense-web-chat-request-scope-v1\n" + normalized))).ToLowerInvariant();
     }
 }

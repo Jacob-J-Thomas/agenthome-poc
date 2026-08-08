@@ -39,6 +39,7 @@ public sealed class BrowserFlowTests
             await SubmitMessageAsync(browser, "browser-first-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
+            await AssertChatRequestRegistryEmptyAsync(browser);
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("!document.getElementById('createLoopButton').disabled && document.getElementById('saveState').textContent === 'System managed'");
             await ClickAsync(browser, "#createLoopButton");
@@ -75,6 +76,7 @@ public sealed class BrowserFlowTests
             await SubmitMessageAsync(browser, "browser-second-turn");
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser response: browser-second-turn')");
             await browser.WaitForExpressionAsync("!document.getElementById('sendButton').disabled && document.getElementById('cancelButton').disabled");
+            await AssertChatRequestRegistryEmptyAsync(browser);
 
             var conversationEvidence = await ReadConversationEvidenceAsync(workspace);
             Assert.Contains("browser-first-turn", conversationEvidence, StringComparison.Ordinal);
@@ -493,6 +495,12 @@ public sealed class BrowserFlowTests
     {
         var jsonMessage = JsonSerializer.Serialize(message);
         await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); const send = document.getElementById('sendButton'); const cancel = document.getElementById('cancelButton'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); if (input.value !== '' || !send.disabled || cancel.disabled) throw new Error('The browser did not synchronously accept the submitted turn.'); })()");
+    }
+
+    private static async Task AssertChatRequestRegistryEmptyAsync(HeadlessBrowserSession browser)
+    {
+        const string Expression = "(() => { const prefix = 'embodysense.chat-requests.v1'; const keys = Object.keys(localStorage).filter((key) => key.startsWith(prefix + '.')); if (keys.length !== 1 || localStorage.getItem(prefix) !== null) return false; const scope = keys[0].slice(prefix.length + 1); const raw = localStorage.getItem(keys[0]); if (!raw) return false; const registry = JSON.parse(raw); return Object.keys(registry).sort().join(',') === 'entries,schemaVersion,scope' && registry.schemaVersion === 1 && /^[0-9a-f]{64}$/.test(scope) && registry.scope === scope && Array.isArray(registry.entries) && registry.entries.length === 0 && !raw.includes('access_token'); })()";
+        Assert.True(await browser.EvaluateBooleanAsync(Expression));
     }
 
     private static async Task InvokeLoopAsync(HeadlessBrowserSession browser, string prompt)

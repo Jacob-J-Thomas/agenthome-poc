@@ -16,6 +16,15 @@ const loopsRedirectSource = fs.readFileSync(
   "utf8",
 );
 const recordSeparator = "\u001e";
+const chatRequestStorageKeyPrefix = "embodysense.chat-requests.v1";
+const chatRequestScope = "a".repeat(64);
+const chatRequestId = "chat-11111111-1111-4111-8111-111111111111";
+
+function chatRequestStorageKeyFor(scope = chatRequestScope) {
+  return `${chatRequestStorageKeyPrefix}.${scope}`;
+}
+
+const chatRequestStorageKey = chatRequestStorageKeyFor();
 
 test("the shared shell owns primary navigation while Builder and Runs stay local to Loops", () => {
   assert.match(indexSource, /class="app-rail"/);
@@ -635,6 +644,564 @@ test("pending chat approvals remain visible and actionable outside the Chat view
   assert.equal(app.elements.chatApprovalAlert.hidden, true);
 });
 
+test("ambiguous SignalR failure retains the canonical message and reuses its exact request identity", async () => {
+  const storage = new FakeLocalStorage();
+  const app = await loadApp({
+    localStorage: storage,
+    sendMessageError: "SignalR connection closed.",
+  });
+  app.elements.messageInput.value = "  do this once  ";
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  const retained = JSON.parse(storage.getItem(chatRequestStorageKey));
+  assert.deepEqual(Object.keys(retained).sort(), [
+    "entries",
+    "schemaVersion",
+    "scope",
+  ]);
+  assert.deepEqual(Object.keys(retained.entries[0]).sort(), [
+    "message",
+    "requestId",
+  ]);
+  assert.equal(retained.entries[0].message, "do this once");
+  assert.equal(retained.entries[0].requestId, chatRequestId);
+  assert.doesNotMatch(storage.getItem(chatRequestStorageKey), /test-token/);
+
+  FakeWebSocket.sendMessageError = null;
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  const invocations = app.socket.sentInvocations("SendMessage");
+  assert.equal(invocations.length, 2);
+  assert.deepEqual(invocations[0].arguments, ["do this once", chatRequestId]);
+  assert.deepEqual(invocations[1].arguments, ["do this once", chatRequestId]);
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+});
+
+test("reload reconciles a not-found request without automatic dispatch and retries the same identity", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(
+      chatRequestRegistry("retry after reload"),
+    ),
+  });
+  const app = await loadApp({
+    localStorage: storage,
+    reconciliations: new Map([
+      [
+        chatRequestId,
+        {
+          status: "not-found",
+          retrySameRequest: true,
+          releaseRequestIdentity: false,
+        },
+      ],
+    ]),
+  });
+
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.equal(app.elements.messageInput.value, "retry after reload");
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    assertSingle(app.socket.sentInvocations("SendMessage")).arguments,
+    ["retry after reload", chatRequestId],
+  );
+});
+
+test("concurrent tabs coordinate the same unresolved canonical message through one durable identity", async () => {
+  const storage = new FakeLocalStorage();
+  const locks = new FakeLockManager();
+  const first = await loadApp({
+    localStorage: storage,
+    locks,
+    sendMessageError: "SignalR connection closed.",
+  });
+  const second = await loadApp({
+    localStorage: storage,
+    locks,
+    randomUUID: () => "22222222-2222-4222-8222-222222222222",
+    sendMessageError: "SignalR connection closed.",
+  });
+  first.elements.messageInput.value = "shared tab request";
+  second.elements.messageInput.value = "shared tab request";
+
+  await Promise.all([
+    first.elements.messageForm.submit(),
+    second.elements.messageForm.submit(),
+  ]);
+  await flushAsyncWork();
+
+  const firstArguments = assertSingle(
+    first.socket.sentInvocations("SendMessage"),
+  ).arguments;
+  const secondArguments = assertSingle(
+    second.socket.sentInvocations("SendMessage"),
+  ).arguments;
+  assert.equal(firstArguments[0], "shared tab request");
+  assert.deepEqual(secondArguments, firstArguments);
+  assert.equal(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries[0].requestId,
+    firstArguments[1],
+  );
+});
+
+test("a stale tab re-reconciles its retained identity instead of allocating a second request after another tab clears storage", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(chatRequestRegistry("stale tab")),
+  });
+  const locks = new FakeLockManager();
+  const reconciliations = new Map([
+    [
+      chatRequestId,
+      {
+        status: "not-found",
+        retrySameRequest: true,
+        releaseRequestIdentity: false,
+      },
+    ],
+  ]);
+  const first = await loadApp({
+    localStorage: storage,
+    locks,
+    reconciliations,
+  });
+  const second = await loadApp({
+    localStorage: storage,
+    locks,
+    reconciliations,
+    randomUUID: () => "22222222-2222-4222-8222-222222222222",
+  });
+
+  reconciliations.set(chatRequestId, {
+    status: "completed",
+    retrySameRequest: false,
+    releaseRequestIdentity: true,
+  });
+  await vm.runInContext("reconcilePendingChatRequest()", first.context);
+  await flushAsyncWork();
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+
+  second.elements.messageInput.value = "stale tab";
+  await second.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.equal(second.socket.sentInvocations("SendMessage").length, 0);
+  assert.deepEqual(
+    second.socket.sentInvocations("ReconcileMessage").at(-1).arguments,
+    ["stale tab", chatRequestId],
+  );
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+});
+
+test("retry-permitted reconciliation restores an exact retained identity before a later user retry dispatches it", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(
+      chatRequestRegistry("restored retry"),
+    ),
+  });
+  const reconciliations = new Map([
+    [
+      chatRequestId,
+      {
+        status: "not-found",
+        retrySameRequest: true,
+        releaseRequestIdentity: false,
+      },
+    ],
+  ]);
+  const app = await loadApp({
+    localStorage: storage,
+    reconciliations,
+    randomUUID: () => "22222222-2222-4222-8222-222222222222",
+    sendMessageError: "connection lost",
+  });
+
+  await vm.runInContext(
+    `releaseChatRequest({ requestId: "${chatRequestId}", message: "restored retry" })`,
+    app.context,
+  );
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+
+  await vm.runInContext("reconcilePendingChatRequest()", app.context);
+  await flushAsyncWork();
+
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.deepEqual(JSON.parse(storage.getItem(chatRequestStorageKey)).entries, [
+    { requestId: chatRequestId, message: "restored retry" },
+  ]);
+
+  app.elements.messageInput.value = "restored retry";
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    assertSingle(app.socket.sentInvocations("SendMessage")).arguments,
+    ["restored retry", chatRequestId],
+  );
+});
+
+test("workspace-scoped registries retain unresolved identities across an A to B to A switch", async () => {
+  const workspaceB = "b".repeat(64);
+  const workspaceBKey = chatRequestStorageKeyFor(workspaceB);
+  const storage = new FakeLocalStorage();
+  const locks = new FakeLockManager();
+  const first = await loadApp({
+    localStorage: storage,
+    locks,
+    sendMessageError: "connection lost",
+  });
+  first.elements.messageInput.value = "workspace A request";
+  await first.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  const second = await loadApp({
+    localStorage: storage,
+    locks,
+    chatRequestScope: workspaceB,
+    randomUUID: () => "22222222-2222-4222-8222-222222222222",
+    sendMessageError: "connection lost",
+  });
+  second.elements.messageInput.value = "workspace B request";
+  await second.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(JSON.parse(storage.getItem(chatRequestStorageKey)).entries, [
+    { requestId: chatRequestId, message: "workspace A request" },
+  ]);
+  assert.deepEqual(JSON.parse(storage.getItem(workspaceBKey)).entries, [
+    {
+      requestId: "chat-22222222-2222-4222-8222-222222222222",
+      message: "workspace B request",
+    },
+  ]);
+
+  const returned = await loadApp({
+    localStorage: storage,
+    locks,
+    sendMessageError: "connection lost",
+  });
+  returned.elements.messageInput.value = "workspace A request";
+  await returned.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    assertSingle(returned.socket.sentInvocations("SendMessage")).arguments,
+    ["workspace A request", chatRequestId],
+  );
+  assert.deepEqual(JSON.parse(storage.getItem(chatRequestStorageKey)).entries, [
+    { requestId: chatRequestId, message: "workspace A request" },
+  ]);
+  assert.deepEqual(JSON.parse(storage.getItem(workspaceBKey)).entries, [
+    {
+      requestId: "chat-22222222-2222-4222-8222-222222222222",
+      message: "workspace B request",
+    },
+  ]);
+});
+
+for (const terminalStatus of ["completed", "rejected"]) {
+  test(`durable ${terminalStatus} reconciliation retires browser request state without dispatch`, async () => {
+    const storage = new FakeLocalStorage({
+      [chatRequestStorageKey]: JSON.stringify(
+        chatRequestRegistry(`terminal ${terminalStatus}`),
+      ),
+    });
+    const app = await loadApp({
+      localStorage: storage,
+      reconciliations: new Map([
+        [
+          chatRequestId,
+          {
+            status: terminalStatus,
+            retrySameRequest: false,
+            releaseRequestIdentity: true,
+          },
+        ],
+      ]),
+    });
+
+    assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+    assert.deepEqual(
+      JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+      [],
+    );
+  });
+}
+
+test("NeedsReview reconciliation retains the outcome-unknown identity and blocks dispatch", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(
+      chatRequestRegistry("review required"),
+    ),
+  });
+  const app = await loadApp({
+    localStorage: storage,
+    reconciliations: new Map([
+      [
+        chatRequestId,
+        {
+          status: "needs-review",
+          retrySameRequest: false,
+          releaseRequestIdentity: false,
+        },
+      ],
+    ]),
+  });
+
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.equal(app.elements.sendButton.disabled, false);
+  assert.equal(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries.length,
+    1,
+  );
+});
+
+test("a review command can resolve a retained outcome-unknown identity without provider redispatch", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(
+      chatRequestRegistry("review required"),
+    ),
+  });
+  const reconciliations = new Map([
+    [
+      chatRequestId,
+      {
+        status: "needs-review",
+        retrySameRequest: false,
+        releaseRequestIdentity: false,
+      },
+    ],
+  ]);
+  const app = await loadApp({ localStorage: storage, reconciliations });
+  reconciliations.set(chatRequestId, {
+    status: "rejected",
+    retrySameRequest: false,
+    releaseRequestIdentity: true,
+  });
+  app.elements.messageInput.value = "/review resolve turn-default-chat";
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(
+    assertSingle(app.socket.sentInvocations("SendMessage")).arguments,
+    ["/review resolve turn-default-chat", null],
+  );
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+  assert.equal(app.elements.sendButton.disabled, false);
+});
+
+for (const unresolvedStatus of ["not-found", "pending"]) {
+  test(`${unresolvedStatus} reconciliation retains one bounded request and never redispatches automatically`, async () => {
+    const storage = new FakeLocalStorage({
+      [chatRequestStorageKey]: JSON.stringify(
+        chatRequestRegistry(`unresolved ${unresolvedStatus}`),
+      ),
+    });
+    const app = await loadApp({
+      localStorage: storage,
+      reconciliations: new Map([
+        [
+          chatRequestId,
+          {
+            status: unresolvedStatus,
+            retrySameRequest: true,
+            releaseRequestIdentity: false,
+          },
+        ],
+      ]),
+    });
+
+    assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+    assert.equal(
+      JSON.parse(storage.getItem(chatRequestStorageKey)).entries.length,
+      1,
+    );
+    assert.equal(
+      app.elements.messageInput.value,
+      `unresolved ${unresolvedStatus}`,
+    );
+  });
+}
+
+test("unavailable browser storage fails closed before chat dispatch", async () => {
+  const storage = new FakeLocalStorage();
+  storage.failReads = true;
+  const app = await loadApp({ localStorage: storage });
+  app.elements.messageInput.value = "must not dispatch";
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.equal(app.elements.sendButton.disabled, true);
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.match(app.elements.transcript.textContent, /Chat dispatch disabled/);
+});
+
+test("a browser storage write failure prevents dispatch before admission", async () => {
+  const storage = new FakeLocalStorage();
+  const app = await loadApp({ localStorage: storage });
+  storage.failWrites = true;
+  app.elements.messageInput.value = "must persist before dispatch";
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.equal(app.elements.sendButton.disabled, true);
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.match(app.elements.transcript.textContent, /Chat dispatch disabled/);
+});
+
+test("an oversized canonical message cannot enter browser state or dispatch", async () => {
+  const storage = new FakeLocalStorage();
+  const app = await loadApp({ localStorage: storage });
+  app.elements.messageInput.value = "x".repeat(24001);
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.deepEqual(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries,
+    [],
+  );
+  assert.match(app.elements.transcript.textContent, /cannot exceed 24000/);
+});
+
+test("a conclusive NeedsReview response retains its identity and blocks another dispatch", async () => {
+  const storage = new FakeLocalStorage();
+  const app = await loadApp({
+    localStorage: storage,
+    sendMessageResult: {
+      status: "needs-review",
+      releaseRequestIdentity: false,
+    },
+  });
+  app.elements.messageInput.value = "provider outcome unknown";
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.deepEqual(JSON.parse(storage.getItem(chatRequestStorageKey)).entries, [
+    {
+      requestId: chatRequestId,
+      message: "provider outcome unknown",
+    },
+  ]);
+  assert.equal(app.elements.sendButton.disabled, false);
+});
+
+for (const [name, stored] of [
+  ["corrupt JSON", "{"],
+  [
+    "an over-capacity registry",
+    JSON.stringify({
+      ...chatRequestRegistry("first"),
+      entries: [
+        chatRequestRegistry("first").entries[0],
+        {
+          requestId: "chat-22222222-2222-4222-8222-222222222222",
+          message: "second",
+        },
+      ],
+    }),
+  ],
+  [
+    "unrelated private fields",
+    JSON.stringify({
+      ...chatRequestRegistry("first"),
+      approvalPayload: "must not be accepted",
+    }),
+  ],
+]) {
+  test(`${name} in persisted browser state fails closed before dispatch`, async () => {
+    const storage = new FakeLocalStorage({ [chatRequestStorageKey]: stored });
+    const app = await loadApp({ localStorage: storage });
+    app.elements.messageInput.value = "must not dispatch";
+
+    await app.elements.messageForm.submit();
+    await flushAsyncWork();
+
+    assert.equal(app.elements.sendButton.disabled, true);
+    assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+    assert.equal(storage.getItem(chatRequestStorageKey), stored);
+  });
+}
+
+test("a different message cannot allocate a second identity while one request is unresolved", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(chatRequestRegistry("first")),
+  });
+  const app = await loadApp({
+    localStorage: storage,
+    reconciliations: new Map([
+      [
+        chatRequestId,
+        {
+          status: "not-found",
+          retrySameRequest: true,
+          releaseRequestIdentity: false,
+        },
+      ],
+    ]),
+  });
+  app.elements.messageInput.value = "second";
+
+  await app.elements.messageForm.submit();
+  await flushAsyncWork();
+
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.equal(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries[0].message,
+    "first",
+  );
+});
+
+test("conflicting durable reconciliation blocks dispatch and retains the exact request", async () => {
+  const storage = new FakeLocalStorage({
+    [chatRequestStorageKey]: JSON.stringify(chatRequestRegistry("conflict")),
+  });
+  const app = await loadApp({
+    localStorage: storage,
+    reconciliations: new Map([
+      [
+        chatRequestId,
+        {
+          status: "conflict",
+          retrySameRequest: false,
+          releaseRequestIdentity: false,
+        },
+      ],
+    ]),
+  });
+
+  assert.equal(app.elements.sendButton.disabled, true);
+  assert.equal(app.socket.sentInvocations("SendMessage").length, 0);
+  assert.equal(
+    JSON.parse(storage.getItem(chatRequestStorageKey)).entries.length,
+    1,
+  );
+});
+
 test("browser session credentials stay in same-site cookies and never enter websocket URLs", async () => {
   const app = await loadApp();
   const sessionRequest = app.fetchCalls.find(
@@ -690,7 +1257,12 @@ test("concurrent disconnect signals collapse into one renewal hub start and rehy
 
   assert.equal(renewalCalls, 1);
   assert.equal(FakeWebSocket.instances.length, 1);
-  releaseRenewal(jsonResponse({ generationId: "process-generation-2" }));
+  releaseRenewal(
+    jsonResponse({
+      generationId: "process-generation-2",
+      chatRequestScope,
+    }),
+  );
   await Promise.all([duplicateOne, duplicateTwo]);
 
   assert.equal(renewalCalls, 1);
@@ -991,6 +1563,7 @@ test("a second host restart during recovery reacquires a fresh generation", asyn
       sessionReads++;
       return jsonResponse({
         generationId: `process-generation-${sessionReads + 1}`,
+        chatRequestScope,
       });
     }
     if (url === "/api/status" && ++statusReads === 1)
@@ -1156,6 +1729,12 @@ async function loadApp(overrides = {}) {
   FakeWebSocket.instances = [];
   FakeWebSocket.currentTranscript = overrides.activeTranscript ?? null;
   FakeWebSocket.transcriptError = overrides.transcriptError ?? null;
+  FakeWebSocket.sendMessageError = overrides.sendMessageError ?? null;
+  FakeWebSocket.sendMessageResult = overrides.sendMessageResult ?? {
+    status: "completed",
+    releaseRequestIdentity: true,
+  };
+  FakeWebSocket.reconciliations = overrides.reconciliations ?? new Map();
   FakeWebSocket.autoOpen = overrides.webSocketAutoOpen ?? true;
   const document = new FakeDocument(indexSource);
   const location = {
@@ -1169,6 +1748,12 @@ async function loadApp(overrides = {}) {
     console,
     document,
     fetch: createFetch(overrides, fetchCalls),
+    crypto: {
+      randomUUID:
+        overrides.randomUUID ?? (() => "11111111-1111-4111-8111-111111111111"),
+    },
+    localStorage: overrides.localStorage ?? new FakeLocalStorage(),
+    navigator: { locks: overrides.locks ?? new FakeLockManager() },
     setTimeout,
     clearTimeout,
     window: {
@@ -1254,6 +1839,7 @@ function createFetch(overrides = {}, calls = []) {
     if (url === "/api/session") {
       return jsonResponse({
         generationId: overrides.generationId ?? "process-generation-1",
+        chatRequestScope: overrides.chatRequestScope ?? chatRequestScope,
       });
     }
 
@@ -1340,6 +1926,12 @@ class FakeWebSocket {
   static instances = [];
   static currentTranscript = null;
   static transcriptError = null;
+  static sendMessageError = null;
+  static sendMessageResult = {
+    status: "completed",
+    releaseRequestIdentity: true,
+  };
+  static reconciliations = new Map();
   static autoOpen = true;
 
   constructor(url) {
@@ -1359,6 +1951,19 @@ class FakeWebSocket {
     }
 
     if (payload.type === 1 && payload.invocationId !== undefined) {
+      if (payload.target === "SendMessage" && FakeWebSocket.sendMessageError) {
+        setTimeout(
+          () =>
+            this.serverSend({
+              type: 3,
+              invocationId: payload.invocationId,
+              error: FakeWebSocket.sendMessageError,
+            }),
+          0,
+        );
+        return;
+      }
+
       if (
         payload.target === "GetCurrentTranscript" &&
         FakeWebSocket.transcriptError
@@ -1377,11 +1982,19 @@ class FakeWebSocket {
       const result =
         payload.target === "DecideApproval"
           ? { accepted: true }
-          : payload.target === "GetPendingApprovals"
-            ? []
-            : payload.target === "GetCurrentTranscript"
-              ? FakeWebSocket.currentTranscript
-              : true;
+          : payload.target === "SendMessage"
+            ? FakeWebSocket.sendMessageResult
+            : payload.target === "ReconcileMessage"
+              ? (FakeWebSocket.reconciliations.get(payload.arguments[1]) ?? {
+                  status: "not-found",
+                  retrySameRequest: true,
+                  releaseRequestIdentity: false,
+                })
+              : payload.target === "GetCurrentTranscript"
+                ? FakeWebSocket.currentTranscript
+                : payload.target === "GetPendingApprovals"
+                  ? []
+                  : true;
       setTimeout(
         () =>
           this.serverSend({
@@ -1543,6 +2156,10 @@ class FakeElement {
     return this.listeners.get("change")?.({ preventDefault() {} });
   }
 
+  submit() {
+    return this.listeners.get("submit")?.({ preventDefault() {} });
+  }
+
   querySelector(selector) {
     if (!selector.startsWith(".")) {
       return null;
@@ -1565,6 +2182,56 @@ class FakeElement {
       this.children.map((child) => child.textContent).join("")
     );
   }
+}
+
+class FakeLocalStorage {
+  constructor(initial = {}) {
+    this.values = new Map(Object.entries(initial));
+    this.failReads = false;
+    this.failWrites = false;
+  }
+
+  getItem(key) {
+    if (this.failReads) throw new Error("localStorage read failed");
+    return this.values.has(key) ? this.values.get(key) : null;
+  }
+
+  setItem(key, value) {
+    if (this.failWrites) throw new Error("localStorage write failed");
+    this.values.set(key, String(value));
+  }
+}
+
+class FakeLockManager {
+  constructor() {
+    this.tails = new Map();
+  }
+
+  async request(name, _options, callback) {
+    const prior = this.tails.get(name) ?? Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.tails.set(
+      name,
+      prior.then(() => current),
+    );
+    await prior;
+    try {
+      return await callback();
+    } finally {
+      release();
+    }
+  }
+}
+
+function chatRequestRegistry(message) {
+  return {
+    schemaVersion: 1,
+    scope: chatRequestScope,
+    entries: [{ requestId: chatRequestId, message }],
+  };
 }
 
 function findFirst(root, predicate) {
