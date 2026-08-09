@@ -11,6 +11,8 @@ public sealed class TestCapabilityAdmissionService : ICapabilityAdmissionService
 
     public CapabilityRevalidationResult? RevalidationResult { get; init; }
 
+    public Exception? RevalidationException { get; init; }
+
     public Queue<CapabilityRevalidationResult> RevalidationResults { get; } = [];
 
     public Task<CapabilityAdmissionResult> AdmitAsync(CapabilityDependencyManifest requirements, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken = default)
@@ -31,6 +33,10 @@ public sealed class TestCapabilityAdmissionService : ICapabilityAdmissionService
     public Task<CapabilityRevalidationResult> RevalidateAsync(CapabilityAdmissionSnapshot snapshot, IReadOnlyCollection<CapabilityId> allowedCapabilityIds, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (RevalidationException is not null)
+        {
+            throw RevalidationException;
+        }
         if (RevalidationResults.TryDequeue(out var queued))
         {
             return Task.FromResult(queued);
