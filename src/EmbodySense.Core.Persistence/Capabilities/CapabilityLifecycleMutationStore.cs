@@ -170,7 +170,7 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
 
             var dependentDocuments = dependents.Dependents.Select(Map).ToArray();
             var dependentRevision = current.DependentSetHash == dependents.Hash ? current.DependentSetRevision : checked(current.DependentSetRevision + 1);
-            var impacts = ComputeImpacts(request, target.Descriptor, dependents.Dependents);
+            var impacts = ComputeImpacts(request, target.Descriptor, IsTargetAdmitted(request, entry!), dependents.Dependents);
             var previewRevision = checked(current.Generation + 1);
             var targetDescriptorJson = request.Kind is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? SerializeDescriptor(target.Descriptor) : null;
             var targetArtifactDigest = request.Kind is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback ? target.ArtifactDigest?.Value : null;
@@ -510,7 +510,7 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
         return TryParseDescriptor(entry.DescriptorJson, out var current) && CapabilityIntegrityDigest.TryParse(entry.ArtifactDigest, out var currentDigest, out _) ? (current, currentDigest, null, string.Empty) : (null, null, CapabilityLifecycleMutationStatus.NotFound, "The current lifecycle target is unavailable.");
     }
 
-    private static IReadOnlyList<CapabilityLifecycleImpact> ComputeImpacts(CapabilityLifecyclePreviewRequest request, CapabilityDescriptor? target, IEnumerable<CapabilityDependent> dependents)
+    private static IReadOnlyList<CapabilityLifecycleImpact> ComputeImpacts(CapabilityLifecyclePreviewRequest request, CapabilityDescriptor? target, bool targetIsAdmitted, IEnumerable<CapabilityDependent> dependents)
     {
         var impacts = new List<CapabilityLifecycleImpact>();
         foreach (var dependent in dependents)
@@ -521,13 +521,23 @@ public sealed class CapabilityLifecycleMutationStore : ICapabilityLifecycleMutat
             {
                 foreach (var dependency in dependencies.Where(candidate => candidate.CapabilityId.Equals(request.CapabilityId)))
                 {
-                    var compatible = request.Kind is CapabilityLifecycleOperationKind.Upgrade or CapabilityLifecycleOperationKind.Rollback && target is not null && dependency.CompatibleVersionRange.Contains(target.Version);
+                    var compatible = targetIsAdmitted && target is not null && dependency.CompatibleVersionRange.Contains(target.Version);
                     var outcome = compatible ? CapabilityLifecycleImpactOutcome.Preserved : requirementKind == CapabilityRequirementKind.Required ? CapabilityLifecycleImpactOutcome.Blocked : CapabilityLifecycleImpactOutcome.Degraded;
                     impacts.Add(new CapabilityLifecycleImpact(dependent.Kind, dependent.Identity, dependent.Revision, requirementKind, dependency.CompatibleVersionRange.Value, compatible, dependent.AuthorityPosture, outcome));
                 }
             }
         }
         return impacts.OrderBy(impact => impact.DependentKind).ThenBy(impact => impact.DependentIdentity, StringComparer.Ordinal).ThenBy(impact => impact.RequirementKind).ToArray();
+    }
+
+    private static bool IsTargetAdmitted(CapabilityLifecyclePreviewRequest request, CapabilityLifecycleEntryDocument entry)
+    {
+        return request.Kind switch
+        {
+            CapabilityLifecycleOperationKind.Upgrade => true,
+            CapabilityLifecycleOperationKind.Rollback => entry.History.LastOrDefault() is { IsEnabled: true, IsRemoved: false },
+            _ => false
+        };
     }
 
     private static string ComputeRequestHash(CapabilityLifecyclePreviewRequest request)
