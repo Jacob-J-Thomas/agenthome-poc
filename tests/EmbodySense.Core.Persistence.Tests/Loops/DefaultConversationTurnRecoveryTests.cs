@@ -746,6 +746,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         }
 
         Assert.Equal(140, Directory.EnumerateFiles(paths.DefaultConversationTurnHistoryPath, "*.json").Count());
+        Assert.Equal(140, Directory.EnumerateFiles(paths.DefaultConversationTurnHistoryPath, "*.archive-source-proof").Count());
         Assert.Empty(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.json"));
         Assert.Collection(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath).Select(Path.GetFileName).Order(StringComparer.Ordinal), file => Assert.Equal(".active-set.lock", file));
     }
@@ -1074,6 +1075,772 @@ public sealed class DefaultConversationTurnRecoveryTests
         await Assert.ThrowsAsync<FormatException>(() => turns.ListIncompleteAsync());
         Assert.Equal(originalActive, await File.ReadAllBytesAsync(activePath));
         Assert.Equal(originalHistory, await File.ReadAllBytesAsync(historyPath));
+    }
+
+    [Fact]
+    public async Task Terminal_update_rejects_same_content_path_substitution_after_write_publication_and_preserves_the_replacement()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, "request-terminal-identity-substitution");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var displacedPath = workspace.File("displaced-terminal.json");
+        byte[]? replacementBytes = null;
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.AfterTerminalWritePublication, async _ =>
+        {
+            replacementBytes = await File.ReadAllBytesAsync(activePath);
+            File.Move(activePath, displacedPath);
+            await File.WriteAllBytesAsync(activePath, replacementBytes);
+        });
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion));
+
+        Assert.Contains("pathname was substituted", exception.Message, StringComparison.Ordinal);
+        Assert.NotNull(replacementBytes);
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(activePath));
+        Assert.True(File.Exists(displacedPath));
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(displacedPath));
+        Assert.False(File.Exists(Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json")));
+        Assert.False(File.Exists(Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof")));
+        Assert.Empty(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.archive-source"));
+        Assert.Empty(Directory.EnumerateFiles(paths.DefaultConversationActiveTurnsPath, "*.tmp"));
+    }
+
+    [Fact]
+    public async Task Restart_scavenging_rejects_malformed_path_substitution_without_archiving_or_deleting_it()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-list-path-substitution", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var displacedPath = workspace.File("displaced-list-terminal.json");
+        await File.WriteAllTextAsync(activePath, JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.List, DefaultConversationTurnArchivePhase.BeforeSourceClaim, async _ =>
+        {
+            File.Move(activePath, displacedPath);
+            await File.WriteAllTextAsync(activePath, "{}");
+        });
+
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths, coordination).ListIncompleteAsync());
+
+        Assert.Equal("{}", await File.ReadAllTextAsync(activePath));
+        Assert.True(File.Exists(displacedPath));
+        Assert.False(File.Exists(Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json")));
+    }
+
+    [Fact]
+    public async Task Restart_scavenging_fails_closed_when_the_proved_source_disappears()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-list-source-disappeared", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var displacedPath = workspace.File("disappeared-list-terminal.json");
+        await File.WriteAllTextAsync(activePath, JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.List, DefaultConversationTurnArchivePhase.BeforeSourceClaim, _ =>
+        {
+            File.Move(activePath, displacedPath);
+            return Task.CompletedTask;
+        });
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => new DefaultConversationTurnStore(paths, coordination).ListIncompleteAsync());
+
+        Assert.True(File.Exists(displacedPath));
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json")));
+    }
+
+    [Fact]
+    public async Task Terminal_update_preserves_the_claimed_source_and_stage_when_no_replace_publication_loses_a_race()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, "request-terminal-history-race");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var immutableBytes = Encoding.UTF8.GetBytes("immutable external history");
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.BeforeSourceClaim, async _ =>
+        {
+            Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+            await File.WriteAllBytesAsync(historyPath, immutableBytes);
+        });
+
+        await Assert.ThrowsAsync<IOException>(() => new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion));
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.True(File.Exists(pendingHistoryPath));
+        Assert.Equal(immutableBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(await File.ReadAllBytesAsync(pendingPath), await File.ReadAllBytesAsync(pendingHistoryPath));
+        Assert.False(File.Exists(sourceProofPath));
+
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId));
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.True(File.Exists(pendingHistoryPath));
+        Assert.Equal(immutableBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(await File.ReadAllBytesAsync(pendingPath), await File.ReadAllBytesAsync(pendingHistoryPath));
+        Assert.False(File.Exists(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Terminal_update_rejects_a_same_content_history_stage_substitution_before_publication()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, "request-history-stage-substitution");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var displacedPath = workspace.File("displaced-history-stage.json");
+        byte[]? replacementBytes = null;
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, async _ =>
+        {
+            replacementBytes = await File.ReadAllBytesAsync(pendingHistoryPath);
+            File.Move(pendingHistoryPath, displacedPath);
+            await File.WriteAllBytesAsync(pendingHistoryPath, replacementBytes);
+        });
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion));
+
+        Assert.Contains("canonical history was substituted", exception.Message, StringComparison.Ordinal);
+        Assert.NotNull(replacementBytes);
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(displacedPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        Assert.False(File.Exists(sourceProofPath));
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Terminal_update_keeps_a_complete_history_stage_recoverable_when_publication_is_interrupted(bool cancelPublication)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, $"request-history-publication-{cancelPublication}");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, _ =>
+        {
+            if (cancelPublication)
+            {
+                cancellation.Cancel();
+                return Task.FromCanceled(cancellation.Token);
+            }
+
+            return Task.FromException(new IOException("Injected history publication failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion, cancellation.Token);
+
+        if (cancelPublication)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.True(File.Exists(pendingHistoryPath));
+        Assert.False(File.Exists(historyPath));
+        Assert.False(File.Exists(sourceProofPath));
+        var stageBytes = await File.ReadAllBytesAsync(pendingHistoryPath);
+        Assert.Equal(stageBytes, await File.ReadAllBytesAsync(pendingPath));
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.Equal(terminal.LifecycleVersion, loaded.LifecycleVersion);
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        Assert.Equal(stageBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(stageBytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Terminal_update_removes_only_its_partial_history_stage_before_restoring_source(bool cancelStaging)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, $"request-partial-history-stage-{cancelStaging}");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.AfterPartialHistoryStageWrite, _ =>
+        {
+            if (cancelStaging)
+            {
+                cancellation.Cancel();
+                return Task.FromCanceled(cancellation.Token);
+            }
+
+            return Task.FromException(new IOException("Injected partial history staging failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion, cancellation.Token);
+
+        if (cancelStaging)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.True(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        Assert.False(File.Exists(historyPath));
+        Assert.False(File.Exists(sourceProofPath));
+
+        Assert.Empty(await new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        var historyBytes = await File.ReadAllBytesAsync(historyPath);
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Terminal_update_preserves_a_substituted_partial_history_stage_with_its_pending_source()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, "request-partial-history-stage-substitution");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var displacedPath = workspace.File("displaced-partial-history-stage.json");
+        const string Replacement = "{\"schemaVersion\":";
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.AfterPartialHistoryStageWrite, async _ =>
+        {
+            File.Move(pendingHistoryPath, displacedPath);
+            await File.WriteAllTextAsync(pendingHistoryPath, Replacement);
+        });
+
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion));
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.Equal(Replacement, await File.ReadAllTextAsync(pendingHistoryPath));
+        Assert.True(File.Exists(displacedPath));
+        Assert.Equal(await File.ReadAllBytesAsync(pendingPath), await File.ReadAllBytesAsync(displacedPath));
+        Assert.False(File.Exists(historyPath));
+        Assert.False(File.Exists(sourceProofPath));
+
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId));
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.Equal(Replacement, await File.ReadAllTextAsync(pendingHistoryPath));
+        Assert.True(File.Exists(displacedPath));
+        Assert.Equal(await File.ReadAllBytesAsync(pendingPath), await File.ReadAllBytesAsync(displacedPath));
+        Assert.False(File.Exists(historyPath));
+        Assert.False(File.Exists(sourceProofPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Terminal_update_keeps_the_pending_source_recoverable_when_initial_history_revalidation_fails(bool cancelRevalidation)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, $"request-initial-history-revalidation-{cancelRevalidation}");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, _ =>
+        {
+            if (cancelRevalidation)
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            }
+
+            return Task.FromException(new IOException("Injected initial history revalidation failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion, cancellation.Token);
+
+        if (cancelRevalidation)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(pendingPath));
+        Assert.True(File.Exists(historyPath));
+        Assert.False(File.Exists(sourceProofPath));
+        var historyBytes = await File.ReadAllBytesAsync(historyPath);
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(pendingPath));
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.Equal(terminal.LifecycleVersion, loaded.LifecycleVersion);
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Terminal_update_keeps_the_completed_proof_recoverable_when_final_history_revalidation_fails(bool cancelRevalidation)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, $"request-final-history-revalidation-{cancelRevalidation}");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, _ =>
+        {
+            if (cancelRevalidation)
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            }
+
+            return Task.FromException(new IOException("Injected final history revalidation failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion, cancellation.Token);
+
+        if (cancelRevalidation)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.True(File.Exists(historyPath));
+        Assert.True(File.Exists(sourceProofPath));
+        var historyBytes = await File.ReadAllBytesAsync(historyPath);
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(sourceProofPath));
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.Equal(terminal.LifecycleVersion, loaded.LifecycleVersion);
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Terminal_update_preserves_a_pending_source_replacement_after_history_publication()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, "request-pending-source-substitution");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{admitted.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var displacedPath = workspace.File("displaced-pending-source.json");
+        byte[]? replacementBytes = null;
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.AfterHistoryPublication, async _ =>
+        {
+            replacementBytes = await File.ReadAllBytesAsync(pendingPath);
+            File.Move(pendingPath, displacedPath);
+            await File.WriteAllBytesAsync(pendingPath, replacementBytes);
+        });
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion));
+
+        Assert.Contains("source proof was substituted", exception.Message, StringComparison.Ordinal);
+        Assert.NotNull(replacementBytes);
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.True(File.Exists(displacedPath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(sourceProofPath));
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId));
+    }
+
+    [Fact]
+    public async Task Terminal_update_preserves_a_source_proof_replacement_before_revalidation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var preparingStore = new DefaultConversationTurnStore(paths);
+        var admitted = await CreateAdmittedRecordAsync(paths, "request-source-proof-substitution");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await preparingStore.CreateAsync(admitted)).Status);
+        var prepared = CreateTerminalPreparedRecord(admitted, needsReview: false);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await preparingStore.UpdateAsync(prepared, admitted.LifecycleVersion)).Status);
+        var terminal = prepared.Advance(DefaultConversationTurnCheckpoint.Terminal, prepared.Transitions[^1].OccurredAtUtc, "Terminal evidence.", run: prepared.Run, runProjectionSynchronized: true);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, admitted.TurnId + ".json");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, admitted.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{admitted.TurnId}.json.archive-source-proof");
+        var displacedPath = workspace.File("displaced-source-proof.json");
+        byte[]? replacementBytes = null;
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.Update, DefaultConversationTurnArchivePhase.AfterSourceProofPublication, async _ =>
+        {
+            replacementBytes = await File.ReadAllBytesAsync(sourceProofPath);
+            File.Move(sourceProofPath, displacedPath);
+            await File.WriteAllBytesAsync(sourceProofPath, replacementBytes);
+        });
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths, coordination).UpdateAsync(terminal, prepared.LifecycleVersion));
+
+        Assert.Contains("source proof was substituted", exception.Message, StringComparison.Ordinal);
+        Assert.NotNull(replacementBytes);
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(replacementBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.True(File.Exists(displacedPath));
+        Assert.False(File.Exists(sourceProofPath));
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(admitted.TurnId));
+    }
+
+    [Fact]
+    public async Task History_without_its_exact_source_proof_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-history-missing-proof", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(terminal.TurnId));
+
+        Assert.Contains("incomplete immutable archival evidence", exception.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(historyPath));
+    }
+
+    [Fact]
+    public async Task History_with_a_byte_different_source_proof_fails_closed_without_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-history-conflicting-proof", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        var historyBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        byte[] proofBytes = [.. historyBytes, (byte)' '];
+        await File.WriteAllBytesAsync(historyPath, historyBytes);
+        await File.WriteAllBytesAsync(sourceProofPath, proofBytes);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(terminal.TurnId));
+
+        Assert.Contains("conflicting immutable archival evidence", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(proofBytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Restart_restores_an_interrupted_source_claim_then_completes_identity_bound_archival()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-source-claim-restart", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        await File.WriteAllTextAsync(activePath, JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        File.Move(activePath, pendingPath);
+
+        Assert.Empty(await new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.True(File.Exists(historyPath));
+        Assert.Equal(await File.ReadAllBytesAsync(historyPath), await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Restart_finishes_exact_interrupted_history_publication_without_reintroducing_the_active_source()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-history-publication-restart", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        await File.WriteAllBytesAsync(pendingPath, bytes);
+        await File.WriteAllBytesAsync(pendingHistoryPath, bytes);
+
+        Assert.Empty(await new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Theory]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, false)]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, true)]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, false)]
+    [InlineData(DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, true)]
+    public async Task Restart_keeps_post_publication_evidence_recoverable_when_history_revalidation_fails(DefaultConversationTurnArchivePhase phase, bool cancelRevalidation)
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, $"request-restart-revalidation-{phase}-{cancelRevalidation}", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        await File.WriteAllBytesAsync(pendingPath, bytes);
+        await File.WriteAllBytesAsync(pendingHistoryPath, bytes);
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.List, phase, _ =>
+        {
+            if (cancelRevalidation)
+            {
+                cancellation.Cancel();
+                return Task.CompletedTask;
+            }
+
+            return Task.FromException(new IOException("Injected restart history revalidation failure."));
+        });
+        var operation = new DefaultConversationTurnStore(paths, coordination).ListIncompleteAsync(cancellation.Token);
+
+        if (cancelRevalidation)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        }
+        else
+        {
+            await Assert.ThrowsAsync<IOException>(() => operation);
+        }
+
+        Assert.False(File.Exists(activePath));
+        Assert.True(File.Exists(historyPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        Assert.Equal(phase == DefaultConversationTurnArchivePhase.BeforeInitialHistoryRevalidation, File.Exists(pendingPath));
+        Assert.Equal(phase == DefaultConversationTurnArchivePhase.BeforeFinalHistoryRevalidation, File.Exists(sourceProofPath));
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(terminal.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.False(File.Exists(activePath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Restart_rejects_a_same_content_history_stage_substitution_before_publication()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-restart-history-stage-substitution", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var activePath = Path.Combine(paths.DefaultConversationActiveTurnsPath, terminal.TurnId + ".json");
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.tmp");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        var displacedPath = workspace.File("displaced-restart-history-stage.json");
+        await File.WriteAllBytesAsync(pendingPath, bytes);
+        await File.WriteAllBytesAsync(pendingHistoryPath, bytes);
+        var coordination = new SubstitutingTurnStoreCoordination(DefaultConversationTurnStoreOperation.List, DefaultConversationTurnArchivePhase.BeforeHistoryPublication, async _ =>
+        {
+            var replacementBytes = await File.ReadAllBytesAsync(pendingHistoryPath);
+            File.Move(pendingHistoryPath, displacedPath);
+            await File.WriteAllBytesAsync(pendingHistoryPath, replacementBytes);
+        });
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths, coordination).ListIncompleteAsync());
+
+        Assert.Contains("canonical history was substituted", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(activePath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(displacedPath));
+        Assert.False(File.Exists(pendingPath));
+        Assert.False(File.Exists(pendingHistoryPath));
+        Assert.False(File.Exists(sourceProofPath));
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).LoadAsync(terminal.TurnId));
+    }
+
+    [Fact]
+    public async Task Restart_accepts_an_exact_completed_history_and_source_proof_boundary()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-source-proof-boundary-restart", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        await File.WriteAllBytesAsync(historyPath, bytes);
+        await File.WriteAllBytesAsync(sourceProofPath, bytes);
+
+        var loaded = await new DefaultConversationTurnStore(paths).LoadAsync(terminal.TurnId);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(terminal.TurnId, loaded.TurnId);
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Restart_rejects_duplicate_pending_and_completed_source_proof_states()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-duplicate-proof-restart", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        var sourceProofPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-source-proof");
+        await File.WriteAllBytesAsync(pendingPath, bytes);
+        await File.WriteAllBytesAsync(historyPath, bytes);
+        await File.WriteAllBytesAsync(sourceProofPath, bytes);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+
+        Assert.Contains("duplicate interrupted archival evidence", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(pendingPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(historyPath));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(sourceProofPath));
+    }
+
+    [Fact]
+    public async Task Restart_fails_closed_and_preserves_a_partial_history_stage_with_its_exact_claimed_source()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-partial-history-restart", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var pendingHistoryPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, $".{terminal.TurnId}.json.archive-history.tmp");
+        await File.WriteAllBytesAsync(pendingPath, bytes);
+        await File.WriteAllTextAsync(pendingHistoryPath, "{\"schemaVersion\":");
+
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(pendingPath));
+        Assert.Equal("{\"schemaVersion\":", await File.ReadAllTextAsync(pendingHistoryPath));
+    }
+
+    [Fact]
+    public async Task Restart_rejects_conflicting_interrupted_history_and_preserves_both_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var terminal = await CreateTerminalRecordAsync(paths, "request-conflicting-publication-restart", needsReview: false);
+        var conflicting = await CreateTerminalRecordAsync(paths, "request-conflicting-publication-other", needsReview: false);
+        Directory.CreateDirectory(paths.DefaultConversationActiveTurnsPath);
+        Directory.CreateDirectory(paths.DefaultConversationTurnHistoryPath);
+        var pendingPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, $".{terminal.TurnId}.json.archive-source");
+        var historyPath = Path.Combine(paths.DefaultConversationTurnHistoryPath, terminal.TurnId + ".json");
+        await File.WriteAllTextAsync(pendingPath, JsonSerializer.Serialize(terminal, CreateTurnJsonOptions()));
+        await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(conflicting, CreateTurnJsonOptions()));
+        var pendingBytes = await File.ReadAllBytesAsync(pendingPath);
+        var historyBytes = await File.ReadAllBytesAsync(historyPath);
+
+        await Assert.ThrowsAsync<FormatException>(() => new DefaultConversationTurnStore(paths).ListIncompleteAsync());
+
+        Assert.Equal(pendingBytes, await File.ReadAllBytesAsync(pendingPath));
+        Assert.Equal(historyBytes, await File.ReadAllBytesAsync(historyPath));
     }
 
     [Fact]
