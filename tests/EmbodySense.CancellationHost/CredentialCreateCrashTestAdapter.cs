@@ -6,6 +6,8 @@ using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
 
+namespace EmbodySense.CancellationHost.Credentials;
+
 internal sealed class CredentialCreateCrashTestAdapter(string locatorMarker) : ICredentialActiveRunIndex, ICredentialProviderLocatorSource, ICredentialProviderLocatorVerifier, ICapabilityDependentIndexSource
 {
     public string Name => "credential-create-crash";

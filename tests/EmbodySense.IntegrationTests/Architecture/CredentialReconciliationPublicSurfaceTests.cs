@@ -38,7 +38,7 @@ public sealed class CredentialReconciliationPublicSurfaceTests
             Assert.DoesNotContain(serviceSurface, signature => signature.Contains(term, StringComparison.Ordinal));
             Assert.DoesNotContain(factorySurface, signature => signature.Contains(term, StringComparison.Ordinal));
         }
-        Assert.DoesNotContain(serviceSurface, signature => signature.Contains("Void .ctor(", StringComparison.Ordinal));
+        Assert.Contains(serviceSurface, signature => signature.Contains("Void .ctor(EmbodySense.Core.Application.Credentials.ICredentialRegistryStore", StringComparison.Ordinal));
         Assert.Single(startupFactoryMembers);
         Assert.Single(persistenceFactoryMembers);
         Assert.NotNull(startupFactory);
@@ -50,7 +50,7 @@ public sealed class CredentialReconciliationPublicSurfaceTests
     }
 
     [Fact]
-    public async Task HostileAuthenticatedRepairRegistryCannotBeComposedWithAProviderThroughThePublicSurface()
+    public async Task HostileAuthenticatedRepairRegistryDoesNotExposePersistenceMutationAuthority()
     {
         var registry = new HostileCredentialRegistryStore();
         var provider = new CountingCredentialValueProvider();
@@ -62,7 +62,6 @@ public sealed class CredentialReconciliationPublicSurfaceTests
         Assert.Equal(CredentialActorAuthentication.AuthenticatedUser, authentication);
         Assert.Equal(CredentialProviderHealthStatus.NeedsRepair, Assert.Single(state.Entries).Health);
         Assert.Equal(interruptedRepair.OperationId, interruptedRepair.LifecycleIntentOperationId);
-        Assert.DoesNotContain(typeof(CredentialLifecycleService).GetMembers(), member => (member.ToString() ?? member.Name).Contains("Void .ctor(", StringComparison.Ordinal));
         Assert.DoesNotContain(typeof(CredentialLifecycleFactory).GetMembers(), member => (member.ToString() ?? member.Name).Contains(nameof(ICredentialRegistryStore), StringComparison.Ordinal));
         Assert.DoesNotContain(typeof(CredentialLifecyclePersistenceFactory).GetMembers(), member => (member.ToString() ?? member.Name).Contains(nameof(ICredentialRegistryStore), StringComparison.Ordinal));
         Assert.Equal(0, registry.MutationCount);

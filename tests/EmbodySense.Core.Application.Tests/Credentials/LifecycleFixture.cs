@@ -6,18 +6,12 @@ using EmbodySense.Core.Application.Tests.Capabilities;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
-using EmbodySense.Core.Common.Workspace;
-using EmbodySense.Core.Persistence.Capabilities;
-using EmbodySense.Core.Persistence.Credentials;
-using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Application.Tests.Credentials;
 
 internal sealed class LifecycleFixture : IDisposable
 {
     private static readonly DateTimeOffset _timestamp = new(2026, 8, 2, 12, 0, 0, TimeSpan.Zero);
-    private readonly TestWorkspace _workspace = new();
-    private readonly FileCapabilityCatalogTrustProvider _trustProvider;
 
     internal LifecycleFixture()
     {
@@ -35,10 +29,8 @@ internal sealed class LifecycleFixture : IDisposable
         ActiveRuns = new StubCredentialActiveRunIndex();
         LocatorSource = new StubCredentialProviderLocatorSource();
         Audit = new RecordingCapabilityAuditLog();
-        var paths = new WorkspacePaths(_workspace.RootPath);
-        _trustProvider = new FileCapabilityCatalogTrustProvider(_workspace.ServerStatePath);
-        Registry = new CredentialLifecycleRegistryProbe(paths, new CredentialRegistryStore(paths, _trustProvider, LocatorSource, new FixedTimeProvider(_timestamp)));
-        Service = CredentialLifecyclePersistenceFactory.Create(paths, _trustProvider, LocatorSource, Provider, LocatorSource, Dependents, ActiveRuns, Audit, new FixedTimeProvider(_timestamp));
+        Registry = new CredentialLifecycleRegistryProbe(ActorId, _timestamp);
+        Service = CreateService(Audit);
     }
 
     internal string ActorId { get; }
@@ -60,11 +52,12 @@ internal sealed class LifecycleFixture : IDisposable
     internal CredentialLifecycleRequest ReconciliationRequest(string operationId, string interruptedRepairOperationId, long revision, CredentialLifecyclePreview preview) => new(CredentialLifecycleOperationKind.ReconcileRepair, Id(operationId), Reference.Id, "workspace-1", ActorId, revision, _timestamp, Preview: preview, Confirmed: true, InterruptedRepairOperationId: Id(interruptedRepairOperationId));
     internal CredentialLifecycleService CreateService(IAuditLog auditLog)
     {
-        var paths = new WorkspacePaths(_workspace.RootPath);
-        return CredentialLifecyclePersistenceFactory.Create(paths, _trustProvider, LocatorSource, Provider, LocatorSource, Dependents, ActiveRuns, auditLog, new FixedTimeProvider(_timestamp));
+        return new CredentialLifecycleService(Registry.LifecycleStore, Provider, LocatorSource, Dependents, ActiveRuns, auditLog, new StubCapabilityAuthorityTransaction());
     }
 
-    public void Dispose() => _workspace.Dispose();
+    public void Dispose()
+    {
+    }
 
     private static string Hash(char value) => "sha256:" + new string(value, 64);
 

@@ -4,6 +4,8 @@ using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
 
+namespace EmbodySense.CancellationHost.Credentials;
+
 internal sealed class CredentialCreateCrashValueProvider(string providerEntryMarker) : ICredentialValueProvider
 {
     public async ValueTask<CredentialProviderResult> CreateAsync(CredentialProviderMutationRequest request, CredentialSecretWriteCallback source, CancellationToken cancellationToken)

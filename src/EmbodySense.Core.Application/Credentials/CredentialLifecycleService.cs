@@ -23,7 +23,16 @@ public sealed class CredentialLifecycleService
     private readonly IAuditLog _auditLog;
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
-    internal CredentialLifecycleService(ICredentialRegistryStore registry, ICredentialValueProvider provider, ICredentialProviderLocatorSource locatorSource, ICapabilityDependentIndex dependentIndex, ICredentialActiveRunIndex activeRunIndex, IAuditLog auditLog, ICapabilityAuthorityTransaction authorityTransaction)
+    /// <summary>Creates a lifecycle orchestrator over already-governed application ports.</summary>
+    /// <param name="registry">The closed registry port that authenticates actors and commits lifecycle evidence.</param>
+    /// <param name="provider">The value provider used only during value-bearing lifecycle operations.</param>
+    /// <param name="locatorSource">The provider-owned source of opaque registration locators.</param>
+    /// <param name="dependentIndex">The complete capability dependent index used for destructive previews.</param>
+    /// <param name="activeRunIndex">The authoritative active-run index used for restrictive transitions.</param>
+    /// <param name="auditLog">The append-only audit sink used for lifecycle observations.</param>
+    /// <param name="authorityTransaction">The transaction that serializes lifecycle observations and mutations.</param>
+    /// <remarks>Composition supplies ports that preserve registry authentication and lifecycle mutation authority. This constructor does not expose a raw persistence mutation API or grant authority to its callers.</remarks>
+    public CredentialLifecycleService(ICredentialRegistryStore registry, ICredentialValueProvider provider, ICredentialProviderLocatorSource locatorSource, ICapabilityDependentIndex dependentIndex, ICredentialActiveRunIndex activeRunIndex, IAuditLog auditLog, ICapabilityAuthorityTransaction authorityTransaction)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _provider = provider ?? throw new ArgumentNullException(nameof(provider));
@@ -851,8 +860,15 @@ public sealed class CredentialLifecycleService
     {
         var outcome = preview.Status is CredentialLifecyclePreviewStatus.Ready or CredentialLifecyclePreviewStatus.Replayed ? AuditSchema.Outcomes.Succeeded : preview.Status == CredentialLifecyclePreviewStatus.Conflict ? AuditSchema.Outcomes.Conflict : preview.Status == CredentialLifecyclePreviewStatus.Denied ? AuditSchema.Outcomes.Denied : AuditSchema.Outcomes.Failed;
         var metadata = new Dictionary<string, object?> { ["operationId"] = preview.OperationId?.Value, ["transition"] = preview.Kind.ToString(), ["workspaceId"] = IsSafe(preview.WorkspaceId, 256) ? preview.WorkspaceId : "invalid", ["actorId"] = IsSafe(preview.ActorId, 128) ? preview.ActorId : "invalid", ["registryRevision"] = preview.RegistryRevision, ["dependentSetRevision"] = preview.DependentSetRevision, ["previewRevision"] = preview.PreviewRevision, ["impactCount"] = preview.Impacts.Count };
-        await _auditLog.AppendAsync(AuditEvent.Create(AuditSchema.Actors.CredentialHost, AuditSchema.Actions.CredentialLifecyclePreview, target, outcome, preview.Detail, metadata), CancellationToken.None);
-        return preview;
+        try
+        {
+            await _auditLog.AppendAsync(AuditEvent.Create(AuditSchema.Actors.CredentialHost, AuditSchema.Actions.CredentialLifecyclePreview, target, outcome, preview.Detail, metadata), CancellationToken.None);
+            return preview;
+        }
+        catch (Exception)
+        {
+            return new CredentialLifecyclePreview(CredentialLifecyclePreviewStatus.Unavailable, preview.OperationId!, preview.Kind, preview.ReferenceId!, preview.WorkspaceId, preview.ActorId, null, string.Empty, string.Empty, [], "The credential lifecycle preview audit is unavailable.");
+        }
     }
 
     private async Task<CredentialLifecycleAuditDrainResult> DrainAuditUnderAuthorityAsync(CancellationToken cancellationToken)

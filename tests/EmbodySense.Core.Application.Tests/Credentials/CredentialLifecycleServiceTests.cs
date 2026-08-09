@@ -280,6 +280,44 @@ public sealed class CredentialLifecycleServiceTests
     }
 
     [Fact]
+    public async Task PreviewAuditFailureMakesReadyPreviewUnavailableAndUnusableForMutation()
+    {
+        using var fixture = await CreatedFixtureAsync("preview-audit-create");
+        var revision = fixture.Registry.Revision;
+        var service = fixture.CreateService(new FailingAuditLog());
+
+        var preview = await service.PreviewAsync(fixture.PreviewRequest("preview-audit-delete", CredentialLifecycleOperationKind.Delete, revision));
+        var result = await service.ExecuteAsync(fixture.DestructiveRequest("preview-audit-delete", CredentialLifecycleOperationKind.Delete, revision, preview));
+
+        Assert.Equal(CredentialLifecyclePreviewStatus.Unavailable, preview.Status);
+        Assert.Null(preview.RegistryRevision);
+        Assert.Empty(preview.DependentSetRevision);
+        Assert.Empty(preview.PreviewRevision);
+        Assert.Empty(preview.Impacts);
+        Assert.Equal("The credential lifecycle preview audit is unavailable.", preview.Detail);
+        Assert.DoesNotContain("Injected audit sink failure", preview.Detail);
+        Assert.Equal(CredentialLifecycleResultStatus.Conflict, result.Status);
+        Assert.Equal(0, fixture.Provider.DeleteCount);
+        Assert.Equal(revision, fixture.Registry.Revision);
+        Assert.Equal(CredentialLifecycleStatus.Active, Assert.Single((await fixture.Registry.ReadAsync()).Entries).Reference.Status);
+    }
+
+    [Fact]
+    public async Task PreviewAuditFailureMakesInvalidAndDeniedPreviewsUnavailable()
+    {
+        using var fixture = new LifecycleFixture();
+        var service = fixture.CreateService(new FailingAuditLog());
+
+        var invalid = await service.PreviewAsync(fixture.PreviewRequest("preview-audit-invalid", CredentialLifecycleOperationKind.Test, 0));
+        var denied = await service.PreviewAsync(fixture.PreviewRequest("preview-audit-denied", CredentialLifecycleOperationKind.Delete, 0) with { ActorId = "agent-1" });
+
+        Assert.Equal(CredentialLifecyclePreviewStatus.Unavailable, invalid.Status);
+        Assert.Equal(CredentialLifecyclePreviewStatus.Unavailable, denied.Status);
+        Assert.Equal("The credential lifecycle preview audit is unavailable.", invalid.Detail);
+        Assert.Equal("The credential lifecycle preview audit is unavailable.", denied.Detail);
+    }
+
+    [Fact]
     public async Task InvalidUnauthenticatedUnavailableStaleAndMissingRequestsFailBeforeMutation()
     {
         using var invalid = new LifecycleFixture();

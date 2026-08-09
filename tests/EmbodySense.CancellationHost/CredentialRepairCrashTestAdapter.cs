@@ -5,6 +5,8 @@ using EmbodySense.Core.Application.Credentials.Models;
 using EmbodySense.Core.Common.Credentials;
 using EmbodySense.Core.Common.Credentials.Models;
 
+namespace EmbodySense.CancellationHost.Credentials;
+
 internal sealed class CredentialRepairCrashTestAdapter : ICredentialActiveRunIndex, ICredentialProviderLocatorSource, ICredentialProviderLocatorVerifier, ICapabilityDependentIndexSource
 {
     internal static CredentialRepairCrashTestAdapter Instance { get; } = new();

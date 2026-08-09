@@ -29,7 +29,7 @@ public sealed class TestBoundaryGuardTests
     {
         ["EmbodySense.Tests.Support"] = [],
         ["EmbodySense.Core.Common.Tests"] = ["EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
-        ["EmbodySense.Core.Application.Tests"] = ["EmbodySense.Core.Application", "EmbodySense.Core.Common", "EmbodySense.Core.Persistence", "EmbodySense.Tests.Support"],
+        ["EmbodySense.Core.Application.Tests"] = ["EmbodySense.Core.Application", "EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
         ["EmbodySense.Core.Clients.Tests"] = ["EmbodySense.CancellationHost", "EmbodySense.Core.Clients", "EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
         ["EmbodySense.Core.Persistence.Tests"] = ["EmbodySense.CancellationHost", "EmbodySense.Core.Application", "EmbodySense.Core.Common", "EmbodySense.Core.Persistence", "EmbodySense.Tests.Support"],
         ["EmbodySense.Core.Startup.Tests"] = ["EmbodySense.Core.Application", "EmbodySense.Core.Common", "EmbodySense.Core.Persistence", "EmbodySense.Core.Startup", "EmbodySense.Tests.Support"],
@@ -39,10 +39,8 @@ public sealed class TestBoundaryGuardTests
         ["EmbodySense.E2ETests"] = ["EmbodySense.Tests.Support", "EmbodySense.Web"]
     };
 
-    private const string AllowedFriendAssemblyDeclaration = "src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs|[assembly: InternalsVisibleTo(\"EmbodySense.Core.Persistence\")]";
-
     [Fact]
-    public void Source_friend_assemblies_are_explicitly_allowlisted()
+    public void Production_source_does_not_declare_friend_assemblies()
     {
         var root = FindRepositoryRoot();
         var declarations = Directory
@@ -53,7 +51,7 @@ public sealed class TestBoundaryGuardTests
             .Order(StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal([AllowedFriendAssemblyDeclaration], declarations);
+        Assert.Empty(declarations);
         var persistenceConstructionSites = Directory
             .EnumerateFiles(Path.Combine(root, "src", "EmbodySense.Core.Persistence"), "*.cs", SearchOption.AllDirectories)
             .SelectMany(file => File.ReadLines(file)

@@ -19,6 +19,7 @@ using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.Credentials;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.CancellationHost.Credentials;
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
