@@ -762,7 +762,7 @@ public sealed class AgentRuntimeFactoryTests
         var record = await PersistTranscriptConflictReviewAsync(workspace);
         var paths = new WorkspacePaths(workspace.RootPath);
         var turns = new DefaultConversationTurnStore(paths);
-        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var artifactPath = Path.Combine(paths.DefaultConversationActiveTurnsPath, record.TurnId + ".json");
         var retainedArtifact = await File.ReadAllTextAsync(artifactPath);
         await using var runtime = await CreateRuntimeAsync(workspace);
 
