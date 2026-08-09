@@ -604,6 +604,20 @@ test("Loops initializes through the existing workspace boundary and hydrates onl
     };
   });
   const app = await loadLoopBuilder({ server });
+  const initializationPanel = app.elements.loopInitializationPanel;
+  let initializationPanelHidden = initializationPanel.hidden;
+  let announcementWhenInitializationCompleted;
+  Object.defineProperty(initializationPanel, "hidden", {
+    configurable: true,
+    get: () => initializationPanelHidden,
+    set: (hidden) => {
+      initializationPanelHidden = hidden;
+      if (hidden) {
+        announcementWhenInitializationCompleted =
+          app.elements.loopInitializationAnnouncement.textContent;
+      }
+    },
+  });
 
   await app.elements.initializeLoopsWorkspaceButton.click();
 
@@ -619,6 +633,10 @@ test("Loops initializes through the existing workspace boundary and hydrates onl
   assert.match(app.elements.loopList.textContent, /Research pass/);
   assert.match(
     app.elements.loopInitializationAnnouncement.textContent,
+    /initialization completed.*no loop ran/i,
+  );
+  assert.match(
+    announcementWhenInitializationCompleted,
     /initialization completed.*no loop ran/i,
   );
   assert.equal(

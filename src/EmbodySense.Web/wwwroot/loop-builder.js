@@ -405,7 +405,10 @@ function initializationRequiresCleanup(status = workspaceStatusSnapshot) {
 function renderWorkspaceInitialization() {
   const state = initializationState();
   const requiresCleanup = initializationRequiresCleanup();
-  const hydrated = state === "initialized" && workspaceAuthoringHydrated;
+  const hydrated =
+    state === "initialized" &&
+    workspaceAuthoringHydrated &&
+    !workspaceInitializationInFlight;
   elements.initializationRoot.textContent =
     workspaceStatusSnapshot?.workspaceRoot ?? "the configured workspace";
   elements.initializationPanel.hidden = hydrated;

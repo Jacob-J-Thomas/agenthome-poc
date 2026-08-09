@@ -40,16 +40,39 @@ public sealed class TestBoundaryGuardTests
     };
 
     [Fact]
-    public void Source_does_not_expose_friend_assemblies_for_tests()
+    public void Production_source_does_not_declare_friend_assemblies()
     {
         var root = FindRepositoryRoot();
-        var violations = Directory
+        var declarations = Directory
             .EnumerateFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories)
-            .Where(file => File.ReadAllText(file).Contains("InternalsVisibleTo", StringComparison.Ordinal))
-            .Select(file => Path.GetRelativePath(root, file))
+            .SelectMany(file => File.ReadLines(file)
+                .Where(line => line.Contains("InternalsVisibleTo", StringComparison.Ordinal))
+                .Select(line => $"{NormalizeRepositoryRelativePath(Path.GetRelativePath(root, file))}|{line.Trim()}"))
+            .Order(StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Empty(violations);
+        Assert.Empty(declarations);
+        var persistenceConstructionSites = Directory
+            .EnumerateFiles(Path.Combine(root, "src", "EmbodySense.Core.Persistence"), "*.cs", SearchOption.AllDirectories)
+            .SelectMany(file => File.ReadLines(file)
+                .Select((line, index) => (Line: line, Number: index + 1))
+                .Where(item => item.Line.Contains("new CredentialLifecycleService(", StringComparison.Ordinal))
+                .Select(item => $"{NormalizeRepositoryRelativePath(Path.GetRelativePath(root, file))}:{item.Number}"))
+            .ToArray();
+
+        Assert.Single(persistenceConstructionSites);
+        Assert.StartsWith("src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs:", persistenceConstructionSites[0], StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs", "src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs")]
+    [InlineData("src\\EmbodySense.Core.Application\\Properties\\AssemblyInfo.cs", "src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs")]
+    [InlineData("src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs", "src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs")]
+    [InlineData("src\\EmbodySense.Core.Persistence\\Credentials\\CredentialLifecyclePersistenceFactory.cs", "src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs")]
+    public void Repository_relative_source_paths_are_normalized_for_allowlist_and_prefix_comparisons(string sourcePath, string expectedPath)
+    {
+        Assert.Equal(expectedPath, NormalizeRepositoryRelativePath(sourcePath));
+        Assert.StartsWith(expectedPath + ":", $"{NormalizeRepositoryRelativePath(sourcePath)}:123", StringComparison.Ordinal);
     }
 
     [Fact]
@@ -136,6 +159,8 @@ public sealed class TestBoundaryGuardTests
             .Order(StringComparer.Ordinal)
             .ToArray();
     }
+
+    private static string NormalizeRepositoryRelativePath(string path) => path.Replace('\\', '/');
 
     private static bool IsAuthoredSourceFile(string root, string file)
     {
