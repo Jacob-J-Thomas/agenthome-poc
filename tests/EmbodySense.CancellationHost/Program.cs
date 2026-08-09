@@ -10,6 +10,12 @@ using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.ContextualRoles.Models;
 using EmbodySense.Core.Persistence.Loops;
 using System.Collections.Immutable;
+using System.Text.Json;
+
+if (args is ["capability", var behavior])
+{
+    return await HostCapabilityAsync(behavior);
+}
 
 if (args is ["hold-contextual-role", var contextualRoleWorkspaceRoot])
 {
@@ -27,6 +33,40 @@ if (args is [var cancellationWorkspaceRoot, var cancellationRunId])
 }
 
 return 2;
+
+static async Task<int> HostCapabilityAsync(string behavior)
+{
+    var input = await Console.In.ReadLineAsync() ?? "null";
+    switch (behavior)
+    {
+        case "echo":
+            Console.Write(input);
+            return 0;
+        case "malformed":
+            Console.Write("not-json");
+            return 0;
+        case "crash":
+            Console.Error.Write("password=hunter2 C:\\private\\secret.txt");
+            return 7;
+        case "hang":
+            await Task.Delay(Timeout.InfiniteTimeSpan);
+            return 0;
+        case "oversize":
+            Console.Write(new string('x', 128 * 1024));
+            return 0;
+        case "stderr-oversize":
+            Console.Error.Write(new string('x', 128 * 1024));
+            return 0;
+        case "environment":
+            Console.Write(JsonSerializer.Serialize(Environment.GetEnvironmentVariables().Keys.Cast<object>().Select(value => value.ToString()).OrderBy(value => value, StringComparer.Ordinal)));
+            return 0;
+        case "working-root":
+            Console.Write(JsonSerializer.Serialize(Environment.CurrentDirectory));
+            return 0;
+        default:
+            return 2;
+    }
+}
 
 static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
 {

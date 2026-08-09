@@ -30,7 +30,7 @@ public sealed class TestBoundaryGuardTests
         ["EmbodySense.Tests.Support"] = [],
         ["EmbodySense.Core.Common.Tests"] = ["EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
         ["EmbodySense.Core.Application.Tests"] = ["EmbodySense.Core.Application", "EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
-        ["EmbodySense.Core.Clients.Tests"] = ["EmbodySense.Core.Clients", "EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
+        ["EmbodySense.Core.Clients.Tests"] = ["EmbodySense.CancellationHost", "EmbodySense.Core.Clients", "EmbodySense.Core.Common", "EmbodySense.Tests.Support"],
         ["EmbodySense.Core.Persistence.Tests"] = ["EmbodySense.CancellationHost", "EmbodySense.Core.Application", "EmbodySense.Core.Common", "EmbodySense.Core.Persistence", "EmbodySense.Tests.Support"],
         ["EmbodySense.Core.Startup.Tests"] = ["EmbodySense.Core.Application", "EmbodySense.Core.Common", "EmbodySense.Core.Persistence", "EmbodySense.Core.Startup", "EmbodySense.Tests.Support"],
         ["EmbodySense.Cli.Command.Tests"] = ["EmbodySense.Cli.Command", "EmbodySense.Core.Startup", "EmbodySense.Tests.Support"],
