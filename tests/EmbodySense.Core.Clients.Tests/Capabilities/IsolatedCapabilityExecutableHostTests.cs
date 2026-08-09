@@ -89,6 +89,50 @@ public sealed class IsolatedCapabilityExecutableHostTests
     }
 
     [Fact]
+    public async Task Lifecycle_change_at_final_launch_fence_prevents_process_start()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var artifact = PrepareArtifact();
+        var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
+        var lease = new TestCapabilityExecutableArtifactLease(artifact.RootPath, Path.Combine(artifact.RootPath, artifact.EntryPoint), manifest.Checksum, 1, launchAllowed: false);
+        var resolver = new TestCapabilityExecutableArtifactResolver { Resolution = new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Available, lease, "Resolved before lifecycle transition.") };
+        var boundary = new TestCapabilityProcessIsolationBoundary();
+        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), boundary, resolver);
+
+        var result = await host.InvokeAsync(new CapabilityExecutableInvocation(manifest, artifact.RootPath, "{}", "lifecycle-changed-before-launch", 1));
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.Unavailable, result.Status);
+        Assert.Equal(0, boundary.Starts);
+    }
+
+    [Fact]
+    public async Task Cancellation_while_acquiring_final_launch_fence_is_reported_as_cancelled()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using var artifact = PrepareArtifact();
+        var manifest = CapabilityClientTestData.Manifest(artifact.EntryPoint);
+        var lease = new TestCapabilityExecutableArtifactLease(artifact.RootPath, Path.Combine(artifact.RootPath, artifact.EntryPoint), manifest.Checksum, 1, waitForLaunchCancellation: true);
+        var resolver = new TestCapabilityExecutableArtifactResolver { Resolution = new CapabilityExecutableArtifactResolution(CapabilityExecutableAvailabilityStatus.Available, lease, "Resolved before launch cancellation.") };
+        var boundary = new TestCapabilityProcessIsolationBoundary();
+        using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), boundary, resolver);
+        using var cancellation = new CancellationTokenSource();
+        var invocation = host.InvokeAsync(new CapabilityExecutableInvocation(manifest, artifact.RootPath, "{}", "cancelled-at-launch-fence", 1), cancellation.Token);
+
+        await lease.LaunchFenceAttempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        var result = await invocation.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(CapabilityExecutableInvocationStatus.Cancelled, result.Status);
+        Assert.Equal(0, boundary.Starts);
+    }
+
+    [Fact]
     public async Task Resolver_cancellation_and_boundary_failure_are_safe_terminal_results()
     {
         if (!OperatingSystem.IsWindows())

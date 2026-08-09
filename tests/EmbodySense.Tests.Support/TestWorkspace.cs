@@ -5,14 +5,21 @@ public sealed class TestWorkspace : IDisposable
     public TestWorkspace()
     {
         var identifier = Guid.NewGuid().ToString("N");
-        RootPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "embodysense-tests", identifier);
-        ServerStatePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "embodysense-test-server-state", identifier);
+        var tempPath = PhysicalTempPath();
+        RootPath = System.IO.Path.Combine(tempPath, "embodysense-tests", identifier);
+        ServerStatePath = System.IO.Path.Combine(tempPath, "embodysense-test-server-state", identifier);
         Directory.CreateDirectory(RootPath);
     }
 
     public string RootPath { get; }
 
     public string ServerStatePath { get; }
+
+    private static string PhysicalTempPath()
+    {
+        var tempPath = System.IO.Path.GetFullPath(System.IO.Path.GetTempPath());
+        return OperatingSystem.IsMacOS() && (string.Equals(tempPath, "/var", StringComparison.Ordinal) || tempPath.StartsWith("/var/", StringComparison.Ordinal)) ? "/private" + tempPath : tempPath;
+    }
 
     public string File(params string[] segments)
     {

@@ -1,10 +1,12 @@
 using EmbodySense.Core.Common.Loops;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
 
 namespace EmbodySense.Core.Persistence.Loops;
 
@@ -21,16 +23,19 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { WriteIndented = true, Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) } };
     private readonly WorkspacePaths _paths;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LoopDefinitionStore"/> type.
     /// </summary>
     /// <param name="paths">The paths.</param>
-    public LoopDefinitionStore(WorkspacePaths paths)
+    /// <param name="authorityTransaction">The optional shared workspace capability-authority transaction.</param>
+    public LoopDefinitionStore(WorkspacePaths paths, ICapabilityAuthorityTransaction? authorityTransaction = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
 
         _paths = paths;
+        _authorityTransaction = authorityTransaction ?? new CapabilityAuthorityTransaction(paths);
     }
 
     /// <summary>
@@ -39,13 +44,16 @@ public sealed class LoopDefinitionStore : ILoopDefinitionStore
     /// <param name="definition">The definition.</param>
     /// <param name="cancellationToken">The token used to cancel the operation.</param>
     /// <returns>A task that represents the asynchronous operation.</returns>
-    public async Task SaveAsync(LoopDefinition definition, CancellationToken cancellationToken = default)
+    public Task SaveAsync(LoopDefinition definition, CancellationToken cancellationToken = default) => _authorityTransaction.ExecuteAsync(transactionCancellationToken => SaveCoreAsync(definition, transactionCancellationToken), cancellationToken);
+
+    private async Task<bool> SaveCoreAsync(LoopDefinition definition, CancellationToken cancellationToken)
     {
         ValidateDefinition(definition);
 
         Directory.CreateDirectory(_paths.LoopDefinitionsPath);
         var json = JsonSerializer.Serialize(definition, _jsonOptions) + Environment.NewLine;
         await LoopArtifactFileWriter.WriteTextAsync(LoopArtifactPaths.GetDefinitionPath(_paths, definition.Id), json, cancellationToken);
+        return true;
     }
 
     /// <summary>

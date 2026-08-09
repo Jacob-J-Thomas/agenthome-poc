@@ -8,8 +8,10 @@ internal sealed class CapabilityExecutableArtifactLease : ICapabilityExecutableA
 {
     private CapabilityCatalogPathSession? _session;
     private FileStream? _executable;
+    private readonly ICapabilityAuthorityTransaction _authorityTransaction;
+    private readonly Func<CancellationToken, Task<bool>> _launchValidator;
 
-    internal CapabilityExecutableArtifactLease(CapabilityCatalogPathSession session, FileStream executable, string artifactRoot, string executablePath, CapabilityIntegrityDigest artifactDigest, long activationRevision)
+    internal CapabilityExecutableArtifactLease(CapabilityCatalogPathSession session, FileStream executable, string artifactRoot, string executablePath, CapabilityIntegrityDigest artifactDigest, long activationRevision, ICapabilityAuthorityTransaction authorityTransaction, Func<CancellationToken, Task<bool>> launchValidator)
     {
         _session = session;
         _executable = executable;
@@ -17,6 +19,8 @@ internal sealed class CapabilityExecutableArtifactLease : ICapabilityExecutableA
         ExecutablePath = executablePath;
         ArtifactDigest = artifactDigest;
         ActivationRevision = activationRevision;
+        _authorityTransaction = authorityTransaction;
+        _launchValidator = launchValidator;
     }
 
     public string ArtifactRoot { get; }
@@ -28,6 +32,12 @@ internal sealed class CapabilityExecutableArtifactLease : ICapabilityExecutableA
     public CapabilityIntegrityDigest ArtifactDigest { get; }
 
     public long ActivationRevision { get; }
+
+    public async Task<ICapabilityExecutableLaunchFence?> AcquireLaunchFenceAsync(CancellationToken cancellationToken = default)
+    {
+        var authorityLease = await _authorityTransaction.AcquireValidatedLeaseAsync(_launchValidator, cancellationToken);
+        return authorityLease is null ? null : new CapabilityExecutableLaunchFence(authorityLease);
+    }
 
     public ValueTask DisposeAsync()
     {

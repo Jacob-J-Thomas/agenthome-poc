@@ -108,6 +108,50 @@ public sealed class CapabilityAdmissionServiceTests
         Assert.Null(result.Snapshot);
     }
 
+    [Theory]
+    [InlineData(CapabilityEnablementState.Disabled, CapabilityHealthState.Healthy, CapabilityRetirementState.Active, CapabilityTrustState.Verified)]
+    [InlineData(CapabilityEnablementState.Enabled, CapabilityHealthState.Healthy, CapabilityRetirementState.Removed, CapabilityTrustState.Verified)]
+    [InlineData(CapabilityEnablementState.Enabled, CapabilityHealthState.Healthy, CapabilityRetirementState.Active, CapabilityTrustState.Rejected)]
+    [InlineData(CapabilityEnablementState.Enabled, CapabilityHealthState.Degraded, CapabilityRetirementState.Active, CapabilityTrustState.Verified)]
+    public async Task Admission_fences_every_catalog_page_until_concurrent_revocation_can_commit(
+        CapabilityEnablementState enablement,
+        CapabilityHealthState health,
+        CapabilityRetirementState retirement,
+        CapabilityTrustState trust)
+    {
+        var admittedEntry = Entry();
+        var entries = new List<CapabilityCatalogEntry> { admittedEntry };
+        entries.AddRange(Enumerable.Range(0, 100).Select(index => Entry(capabilityId: $"org.example/supplemental-{index:D3}")));
+        var store = new CoordinatedPagedCapabilityCatalogStore(entries);
+        var authority = new SerializingCapabilityAuthorityTransaction();
+        var projection = new CapabilityLifecycleCatalogStore(store, new StubCapabilityLifecycleMutationStore(), authority);
+        var service = Service(projection, authorityTransaction: authority);
+        var admissionTask = service.AdmitAsync(Manifest(), [admittedEntry.Descriptor.Id]);
+        await store.FirstPageCaptured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var writerAttempted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = Task.Run(async () =>
+        {
+            writerAttempted.TrySetResult();
+            await authority.ExecuteAsync(_ =>
+            {
+                writerEntered.TrySetResult();
+                store.Replace(Entry(enablement, health, retirement, trust));
+                return Task.FromResult(true);
+            });
+        });
+
+        await writerAttempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(writerEntered.Task.IsCompleted);
+        store.ReleaseFirstPage.TrySetResult();
+        var admitted = await admissionTask.WaitAsync(TimeSpan.FromSeconds(5));
+        await writer.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(admitted.IsAdmitted, admitted.Detail);
+        Assert.True(writerEntered.Task.IsCompleted);
+        Assert.False((await service.RevalidateAsync(admitted.Snapshot!, [admittedEntry.Descriptor.Id])).IsValid);
+    }
+
     [Fact]
     public async Task Admission_rejects_missing_requirements_narrower_authority_and_noncurrent_catalog_state()
     {
@@ -150,7 +194,7 @@ public sealed class CapabilityAdmissionServiceTests
 
         store.Entries = [original];
         Assert.False((await service.RevalidateAsync(snapshot, [])).IsValid);
-        Assert.False((await new CapabilityAdmissionService(store, "workspace-other", Version("1.5.0"), Platform("linux/x64")).RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
+        Assert.False((await new CapabilityAdmissionService(store, "workspace-other", Version("1.5.0"), Platform("linux/x64"), new StubCapabilityAuthorityTransaction()).RevalidateAsync(snapshot, [original.Descriptor.Id])).IsValid);
 
         var malformedEvidence = snapshot with { Evidence = [null!] };
         Assert.False((await service.RevalidateAsync(malformedEvidence, [original.Descriptor.Id])).IsValid);
@@ -197,7 +241,7 @@ public sealed class CapabilityAdmissionServiceTests
         Assert.Null(CapabilityAdmissionSnapshotValidator.Validate(snapshot));
     }
 
-    private static CapabilityAdmissionService Service(MutableCatalogStore store, string hostVersion = "1.5.0", string hostPlatform = "linux/x64") => new(store, "workspace-test", Version(hostVersion), Platform(hostPlatform), new FixedTimeProvider(_now));
+    private static CapabilityAdmissionService Service(ICapabilityCatalogStore store, string hostVersion = "1.5.0", string hostPlatform = "linux/x64", ICapabilityAuthorityTransaction? authorityTransaction = null) => new(store, "workspace-test", Version(hostVersion), Platform(hostPlatform), authorityTransaction ?? new StubCapabilityAuthorityTransaction(), new FixedTimeProvider(_now));
 
     private static CapabilityCatalogEntry Entry(
         CapabilityEnablementState enablement = CapabilityEnablementState.Enabled,
@@ -206,9 +250,10 @@ public sealed class CapabilityAdmissionServiceTests
         CapabilityTrustState trust = CapabilityTrustState.Verified,
         string purpose = "A safe test capability description.",
         string hostVersionRange = "*",
-        string supportedPlatform = "any/any")
+        string supportedPlatform = "any/any",
+        string capabilityId = "org.example/effect")
     {
-        Assert.True(CapabilityId.TryParse("org.example/effect", out var id, out _));
+        Assert.True(CapabilityId.TryParse(capabilityId, out var id, out _));
         Assert.True(CapabilityProviderId.TryParse("org.example", out var provider, out _));
         Assert.True(CapabilityVersion.TryParse("1.2.3", out var version, out _));
         Assert.True(CapabilityVersionRange.TryParse(hostVersionRange, out var compatibility, out _));

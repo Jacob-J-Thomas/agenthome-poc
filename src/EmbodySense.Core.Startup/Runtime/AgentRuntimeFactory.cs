@@ -10,6 +10,7 @@ using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Memory;
+using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -259,10 +260,11 @@ public sealed class AgentRuntimeFactory
                 customExecutionGate.RelinquishWorkspaceHost();
             }
 
-            var workspaceClient = new LocalWorkspaceClient(paths);
-            var loopDefinitionStore = new LoopDefinitionStore(paths);
+            var capabilityAuthority = new CapabilityAuthorityTransaction(paths);
+            var workspaceClient = new LocalWorkspaceClient(paths, new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, capabilityAuthority));
+            var loopDefinitionStore = new LoopDefinitionStore(paths, capabilityAuthority);
             var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
-            var capabilityAdmission = new CapabilityAdmissionService(new CapabilityCatalogStore(paths, _capabilityTrustProvider), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform);
+            var capabilityAdmission = CapabilityAdmissionFactory.Create(paths, _capabilityTrustProvider, capabilityAuthority);
             var conversationTurnStore = new DefaultConversationTurnStore(paths);
             var defaultCapabilityRevalidator = new DefaultConversationCapabilityAuthorityRevalidator(conversationTurnStore, loopDefinitionStore, capabilityAdmission);
             var toolBroker = new ToolBroker(paths, permissionService, _approvalPrompt, workspaceClient, auditLog, defaultLoop, new ToolResultRetentionStore(paths), actuationAuthorityRevalidator: defaultCapabilityRevalidator);
@@ -296,7 +298,7 @@ public sealed class AgentRuntimeFactory
 
             var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId, conversationTurnStore, capabilityAdmissionService: capabilityAdmission);
             var defaultConversationReviews = new DefaultConversationTurnReviewService(conversationTurnStore, inferenceClient, new FileConversationWorkspaceLease(paths));
-            var customDefinitionStore = new CustomLoopDefinitionStore(paths);
+            var customDefinitionStore = new CustomLoopDefinitionStore(paths, capabilityAuthority);
             var customInvocationOperations = new CustomLoopInvocationOperationStore(paths);
             var customInvocationReceiptRetention = new CustomLoopInvocationReceiptRetentionService(customInvocationOperations, auditLog);
             var customControlOperations = new CustomLoopControlOperationStore(paths, auditLog);
@@ -305,7 +307,7 @@ public sealed class AgentRuntimeFactory
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority, capabilityAdmission);
             var customRuntimeContext = new CustomLoopRuntimeContext(paths, conversationState, conversationMemory);
             var customPublisher = new CurrentConversationLoopPublisher(conversationState, conversationMemory, _conversationPublicationObserver);
-            var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(effectiveOptions, _approvalPrompt, customToolAuthority, customToolEvidence, capabilityAdmission);
+            var customInferenceExecutor = new CustomLoopInferenceAttemptExecutor(effectiveOptions, _approvalPrompt, customToolAuthority, customToolEvidence, capabilityAdmission, capabilityAuthorityTransaction: capabilityAuthority);
             var customRunner = new CustomLoopOrderedRunner(customRunStore, new CustomLoopContextResolver(), customInferenceExecutor, customPublisher, auditLog, customToolAuthority, attemptCancellationBroker: customExecutionGate, capabilityAdmissionService: capabilityAdmission);
             var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, customRunner, customInferenceExecutor, customRunner, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
