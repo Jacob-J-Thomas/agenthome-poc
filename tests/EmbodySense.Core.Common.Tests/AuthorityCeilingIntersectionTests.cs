@@ -160,6 +160,49 @@ public sealed class AuthorityCeilingIntersectionTests
         Assert.Equal(AuthorityBoundaryDecision.Deny, AuthorityCeilingIntersection.Evaluate([AuthorityContractTestData.Profile(status: AuthorityProfileStatus.Retired)], AuthorityContractTestData.IssuedAtUtc.AddSeconds(1)).Receipt.Decision);
     }
 
+    [Theory]
+    [InlineData(AuthorityProfileStatus.Active, AuthorityBoundaryDecision.Pause)]
+    [InlineData(AuthorityProfileStatus.Draft, AuthorityBoundaryDecision.Pause)]
+    [InlineData(AuthorityProfileStatus.Suspended, AuthorityBoundaryDecision.Pause)]
+    [InlineData(AuthorityProfileStatus.Retired, AuthorityBoundaryDecision.Deny)]
+    public void Profiles_are_not_effective_before_their_inclusive_issue_time(AuthorityProfileStatus status, AuthorityBoundaryDecision beforeIssueDecision)
+    {
+        var profile = AuthorityContractTestData.Profile(status: status, expiresAtUtc: AuthorityContractTestData.IssuedAtUtc.AddMinutes(1));
+
+        var beforeIssue = AuthorityCeilingIntersection.Evaluate([profile], AuthorityContractTestData.IssuedAtUtc.AddTicks(-1));
+        var atIssue = AuthorityCeilingIntersection.Evaluate([profile], AuthorityContractTestData.IssuedAtUtc);
+        var afterIssue = AuthorityCeilingIntersection.Evaluate([profile], AuthorityContractTestData.IssuedAtUtc.AddTicks(1));
+        var atExpiry = AuthorityCeilingIntersection.Evaluate([profile], AuthorityContractTestData.IssuedAtUtc.AddMinutes(1));
+        var issuedDecision = status switch
+        {
+            AuthorityProfileStatus.Active => AuthorityBoundaryDecision.Direct,
+            AuthorityProfileStatus.Draft or AuthorityProfileStatus.Suspended => AuthorityBoundaryDecision.Pause,
+            AuthorityProfileStatus.Retired => AuthorityBoundaryDecision.Deny,
+            _ => throw new ArgumentOutOfRangeException(nameof(status))
+        };
+
+        Assert.Equal(beforeIssueDecision, beforeIssue.Receipt.Decision);
+        Assert.Contains(beforeIssue.Receipt.Conditions, condition => condition.Decision == AuthorityBoundaryDecision.Pause && condition.Reason == AuthorityBoundaryReason.StaleEvidence);
+        AssertEmptyCeiling(beforeIssue.EffectiveCeiling);
+        Assert.Equal(issuedDecision, atIssue.Receipt.Decision);
+        Assert.Equal(issuedDecision, afterIssue.Receipt.Decision);
+        Assert.DoesNotContain(atIssue.Receipt.Conditions, condition => condition.Reason == AuthorityBoundaryReason.StaleEvidence);
+        Assert.DoesNotContain(afterIssue.Receipt.Conditions, condition => condition.Reason == AuthorityBoundaryReason.StaleEvidence);
+        Assert.Equal(AuthorityBoundaryDecision.Deny, atExpiry.Receipt.Decision);
+        Assert.Contains(atExpiry.Receipt.Conditions, condition => condition.Reason == AuthorityBoundaryReason.ProfileExpired);
+        AssertEmptyCeiling(atExpiry.EffectiveCeiling);
+        if (status == AuthorityProfileStatus.Active)
+        {
+            AssertCeilingEqual(profile.Ceiling, atIssue.EffectiveCeiling);
+            AssertCeilingEqual(profile.Ceiling, afterIssue.EffectiveCeiling);
+        }
+        else
+        {
+            AssertEmptyCeiling(atIssue.EffectiveCeiling);
+            AssertEmptyCeiling(afterIssue.EffectiveCeiling);
+        }
+    }
+
     [Fact]
     public void Direct_markers_do_not_create_contradictory_restrictive_receipt_evidence()
     {

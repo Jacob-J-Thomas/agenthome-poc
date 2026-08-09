@@ -4,9 +4,11 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.TraceRetention;
+using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops.Execution;
@@ -59,6 +61,36 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.Matches("^[a-f0-9]{64}$", monitor?.ArtifactHash);
         Assert.Equal(interrupted.LifecycleVersion + 1, recovered.LifecycleVersion);
         Assert.Contains("Restart recovery parked the admitted run", await File.ReadAllTextAsync(paths.EventsLogPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Authenticated_facade_persists_recovery_audit_with_each_runs_retained_admission_actor()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var parked = await CreateRecoverableRunAsync(
+            store, "run-parked", CustomLoopRunStatus.Admitted, AuditSchema.Actors.Web);
+        var cancelled = await CreateRecoverableRunAsync(
+            store, "run-cancelled", CustomLoopRunStatus.CancelRequested, AuditSchema.Actors.Cli);
+        var needsReview = await CreateRecoverableRunAsync(
+            store, "run-needs-review", CustomLoopRunStatus.Running, AuditSchema.Actors.Llm, openAttempt: true);
+        await using var facade = new LoopRunInspectionFacade(workspace.RootPath, "recovery-operator", "web");
+
+        var recovery = await facade.RecoverInterruptedRunsAsync();
+        var events = await new AuditLog(paths).ReadTailAsync(6);
+
+        Assert.True(recovery.Completed);
+        Assert.Equal(CustomLoopRunStatus.Paused, (await store.GetAsync(parked.Id))?.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, (await store.GetAsync(cancelled.Id))?.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, (await store.GetAsync(needsReview.Id))?.Status);
+        AssertRecoveryAudit(
+            events, parked.Id, parked.AdmissionActor, AuditSchema.Outcomes.Succeeded);
+        AssertRecoveryAudit(
+            events, cancelled.Id, cancelled.AdmissionActor, AuditSchema.Outcomes.Succeeded);
+        AssertRecoveryAudit(
+            events, needsReview.Id, needsReview.AdmissionActor, AuditSchema.Outcomes.NeedsReview);
+        Assert.DoesNotContain(events, auditEvent => auditEvent.Actor == "recovery-operator");
     }
 
     [Fact]
@@ -254,6 +286,159 @@ public sealed class LoopRunInspectionFacadeTests
         Assert.True(CustomLoopRunValidator.Validate(audited).IsValid);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(audited, admitted.LifecycleVersion)).Status);
         return audited;
+    }
+
+    private static async Task<CustomLoopRunRecord> CreateRecoverableRunAsync(
+        CustomLoopRunStore store,
+        string id,
+        CustomLoopRunStatus status,
+        string admissionActor,
+        bool openAttempt = false)
+    {
+        var updated = _timestamp.AddSeconds(2);
+        var definition = CustomLoopDefinition.CreateSeed($"loop-{id}", "default-role", "step-1", $"create-{id}", _timestamp);
+        var events = new List<CustomLoopRunEvent>
+        {
+            Event(1, $"admitted-{id}", CustomLoopRunEventKind.Admitted, _timestamp),
+            Event(2, $"admission-audit-{id}", CustomLoopRunEventKind.AdmissionAuditCompleted, _timestamp)
+        };
+        if (status != CustomLoopRunStatus.Admitted)
+        {
+            events.Add(Event(3, $"lifecycle-{id}", CustomLoopRunEventKind.LifecycleChanged, _timestamp.AddSeconds(1)));
+        }
+
+        if (status == CustomLoopRunStatus.CancelRequested)
+        {
+            events.Add(Event(4, $"cancel-requested-{id}", CustomLoopRunEventKind.LifecycleChanged, updated));
+        }
+
+        if (openAttempt)
+        {
+            events.Add(new CustomLoopRunEvent(
+                events.Count + 1,
+                $"attempt-{id}",
+                updated,
+                CustomLoopRunEventKind.NodeAttemptStarted,
+                1,
+                "step-1",
+                1,
+                "Attempt started.",
+                [],
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                "provider",
+                "model",
+                "attempt-correlation",
+                null,
+                null,
+                null,
+                CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes));
+        }
+
+        var admitted = new CustomLoopRunRecord(
+            CustomLoopRunRecord.CurrentSchemaVersion,
+            id,
+            definition.Id,
+            1,
+            CustomLoopRunStatus.Admitted,
+            _timestamp,
+            _timestamp,
+            null,
+            "web",
+            new CustomLoopModelSnapshot("provider", "model"),
+            $"admit-{id}",
+            admissionActor,
+            string.Empty,
+            definition,
+            "prompt",
+            null,
+            CustomLoopContextSnapshot.CreateEmpty(_timestamp),
+            CustomLoopExecutionClock.NotStarted(),
+            CustomLoopRunCheckpoint.Start(),
+            [events[0]],
+            null,
+            null,
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp)
+        };
+        admitted = CustomLoopAdmissionRequestHash.Apply(admitted);
+        Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+
+        var audited = CustomLoopAdmissionRequestHash.Apply(admitted with
+        {
+            LifecycleVersion = 2,
+            Events = events.Take(2).ToArray()
+        });
+        Assert.True(CustomLoopRunValidator.Validate(audited).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(audited, admitted.LifecycleVersion)).Status);
+        if (status == CustomLoopRunStatus.Admitted)
+        {
+            return audited;
+        }
+
+        var transitionStatus = status == CustomLoopRunStatus.CancelRequested ? CustomLoopRunStatus.Running : status;
+        DateTimeOffset? activeAtUtc = transitionStatus is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested ? _timestamp : null;
+        var transitioned = CustomLoopAdmissionRequestHash.Apply(audited with
+        {
+            LifecycleVersion = 3,
+            Status = transitionStatus,
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            ExecutionClock = new CustomLoopExecutionClock(0, activeAtUtc),
+            Events = events.Take(3).ToArray()
+        });
+        Assert.True(CustomLoopRunValidator.Validate(transitioned).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(transitioned, audited.LifecycleVersion)).Status);
+        if (status == CustomLoopRunStatus.CancelRequested)
+        {
+            var cancellationRequested = CustomLoopAdmissionRequestHash.Apply(transitioned with
+            {
+                LifecycleVersion = 4,
+                Status = status,
+                UpdatedAtUtc = updated,
+                Events = events.Take(4).ToArray()
+            });
+            Assert.True(CustomLoopRunValidator.Validate(cancellationRequested).IsValid);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(cancellationRequested, transitioned.LifecycleVersion)).Status);
+            return cancellationRequested;
+        }
+
+        if (!openAttempt)
+        {
+            return transitioned;
+        }
+
+        var open = CustomLoopAdmissionRequestHash.Apply(transitioned with
+        {
+            LifecycleVersion = 4,
+            UpdatedAtUtc = updated,
+            Events = events.ToArray()
+        });
+        Assert.True(CustomLoopRunValidator.Validate(open).IsValid);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(open, transitioned.LifecycleVersion)).Status);
+        return open;
+    }
+
+    private static void AssertRecoveryAudit(
+        IReadOnlyList<AuditEvent> events,
+        string runId,
+        string actor,
+        string outcome)
+    {
+        var recoveryEvents = events.Where(auditEvent => auditEvent.Target == runId).ToArray();
+        Assert.Equal(2, recoveryEvents.Length);
+        Assert.All(recoveryEvents, auditEvent =>
+        {
+            Assert.Equal(actor, auditEvent.Actor);
+            Assert.Equal(AuditSchema.Actions.LoopRunLifecycle, auditEvent.Action);
+        });
+        Assert.Contains(recoveryEvents, auditEvent => auditEvent.Outcome == AuditSchema.Outcomes.Requested);
+        Assert.Contains(recoveryEvents, auditEvent => auditEvent.Outcome == outcome);
     }
 
     private static CustomLoopRunRecord Advance(CustomLoopRunRecord run, CustomLoopRunStatus status)

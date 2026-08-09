@@ -16,5 +16,20 @@ public enum TriggerQueueEntryState
     Cancelled,
 
     /// <summary>The queued entry reached its expiry or deadline before selection.</summary>
-    Expired
+    Expired,
+
+    /// <summary>A generation-scoped worker owns the entry but has not recorded dispatch intent.</summary>
+    WorkerOwned,
+
+    /// <summary>Durable dispatch intent exists and the provider outcome is not yet durably known.</summary>
+    Dispatching,
+
+    /// <summary>The governed runner accepted and terminalized the dispatch request.</summary>
+    Dispatched,
+
+    /// <summary>Current authority or the governed runner rejected the request before provider dispatch.</summary>
+    DispatchRejected,
+
+    /// <summary>Dispatch may have occurred and requires explicit review before any retry.</summary>
+    NeedsReview
 }
