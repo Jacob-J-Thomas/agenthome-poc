@@ -454,9 +454,11 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('capabilityList').textContent.includes(" + capabilityIdJson + ")");
             await browser.EvaluateWithUserGestureAsync("(() => { const item = [...document.querySelectorAll('#capabilityList .capability-list-item')].find((candidate) => candidate.textContent.includes(" + capabilityIdJson + ")); if (!item) throw new Error('Browser lifecycle capability was not rendered.'); item.click(); })()");
             await browser.WaitForExpressionAsync("document.getElementById('capabilityTitle').textContent === " + capabilityIdJson);
+            await browser.WaitForExpressionAsync("document.getElementById('capabilityPurpose').textContent.includes('Browser lifecycle E2E capability')");
 
+            var purpose = await browser.EvaluateStringAsync("document.getElementById('capabilityPurpose').textContent");
             var detail = await browser.EvaluateStringAsync("document.getElementById('capabilityContent').textContent");
-            Assert.Contains("Browser lifecycle E2E capability", detail, StringComparison.Ordinal);
+            Assert.Contains("Browser lifecycle E2E capability", purpose, StringComparison.Ordinal);
             Assert.Contains("No registered loop, skill, or package currently depends", detail, StringComparison.Ordinal);
             Assert.DoesNotContain(workspace.RootPath, detail, StringComparison.Ordinal);
             Assert.DoesNotContain("secretValue", detail, StringComparison.OrdinalIgnoreCase);
