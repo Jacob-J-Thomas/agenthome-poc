@@ -18,4 +18,18 @@ public interface IDefaultConversationTurnStoreCoordination
     /// <param name="cancellationToken">Cancels the coordination wait.</param>
     /// <returns>A task that completes when the operation may continue.</returns>
     Task BeforeActiveSetOperationAsync(DefaultConversationTurnStoreOperation operation, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Observes a phase of the identity-bound archival transition while the active-set lease remains held.
+    /// </summary>
+    /// <param name="operation">The operation preparing to archive the artifact.</param>
+    /// <param name="turnId">The stable identity of the artifact being archived.</param>
+    /// <param name="phase">The archival phase being observed.</param>
+    /// <param name="cancellationToken">Cancels the coordination wait.</param>
+    /// <returns>A task that completes when the archival transition may continue.</returns>
+    Task ObserveArchivePhaseAsync(
+        DefaultConversationTurnStoreOperation operation,
+        string turnId,
+        DefaultConversationTurnArchivePhase phase,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
 }
