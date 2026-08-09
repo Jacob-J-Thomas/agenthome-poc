@@ -820,11 +820,25 @@ public sealed class CredentialRegistryStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var result = await new CredentialRegistryStore(paths, TestTrust(paths), new RejectingCredentialProviderLocatorVerifier()).MutateAsync(Register(0));
-        Assert.Equal(CredentialRegistryMutationStatus.Invalid, result.Status);
-        Assert.Equal(CredentialFailureCode.Unauthorized, result.Failure!.Code);
-        Assert.False(File.Exists(paths.CredentialRegistryDocumentPath));
-        Assert.False(File.Exists(paths.CredentialRegistryPrivateDocumentPath));
+        var locatorSource = new CoordinatedCredentialCreateAdapter();
+        var locatorVerifier = new RecordingRejectingLocatorVerifier();
+        var provider = new CountingCreateCredentialValueProvider();
+        var service = CredentialLifecyclePersistenceFactory.Create(paths, TestTrust(paths), locatorVerifier, provider, locatorSource, new CapabilityDependentIndex([locatorSource]), locatorSource, new AuditLog(paths));
+        var reference = Reference() with { OwnerId = Environment.UserName };
+        var binding = Binding() with { Scope = Binding().Scope with { ActorId = Environment.UserName } };
+
+        var result = await service.ExecuteAsync(new CredentialLifecycleRequest(CredentialLifecycleOperationKind.Create, Id("reject-unowned-locator"), ReferenceId(), "workspace-1", Environment.UserName, 0, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), 4, reference, binding, Id("reject-unowned-locator-consent")), destination =>
+        {
+            destination.Fill(1);
+            return destination.Length;
+        });
+        var persisted = await Store(paths).ReadAsync();
+
+        Assert.Equal(CredentialLifecycleResultStatus.NeedsRepair, result.Status);
+        Assert.Equal(Locator().Value, Assert.Single(locatorVerifier.Locators));
+        Assert.Empty(persisted.Entries);
+        Assert.Empty(JsonNode.Parse(await File.ReadAllTextAsync(paths.CredentialRegistryPrivateDocumentPath))!["locators"]!.AsArray());
+        Assert.Equal(0, provider.CreateCount);
     }
 
     [Fact]
@@ -1552,6 +1566,17 @@ public sealed class CredentialRegistryStoreTests
         {
             Locators.Add(locator.Value);
             return ValueTask.FromResult(true);
+        }
+    }
+
+    private sealed class RecordingRejectingLocatorVerifier : ICredentialProviderLocatorVerifier
+    {
+        internal List<string> Locators { get; } = [];
+
+        public ValueTask<bool> VerifyAsync(string workspaceIdentity, CredentialReferenceId referenceId, CredentialProviderId providerId, CredentialProviderLocator locator, CancellationToken cancellationToken)
+        {
+            Locators.Add(locator.Value);
+            return ValueTask.FromResult(false);
         }
     }
 
