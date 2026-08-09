@@ -920,7 +920,9 @@ public sealed class DefaultConversationTurnRecoveryTests
             var conversation = await fixture.Memory.LoadCurrentConversationSnapshotAsync();
             var startedAtUtc = new DateTimeOffset(2026, 8, 1, 12, 0, 0, TimeSpan.Zero);
             var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(requestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, startedAtUtc);
-            var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("strict JSON"), startedAtUtc.AddSeconds(1), requestId);
+            var admittedAtUtc = startedAtUtc.AddSeconds(1);
+            var capabilities = TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, admittedAtUtc);
+            var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("strict JSON"), admittedAtUtc, requestId, capabilities);
             Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await fixture.Turns.CreateAsync(record)).Status);
             if (state == "incomplete")
             {
