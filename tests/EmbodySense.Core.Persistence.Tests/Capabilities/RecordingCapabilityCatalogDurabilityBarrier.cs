@@ -10,12 +10,19 @@ internal sealed class RecordingCapabilityCatalogDurabilityBarrier : ICapabilityC
 
     public int? FailDirectoryCreateAt { get; init; }
 
+    public IOException? BeforeDirectoryMoveFailure { get; init; }
+
+    public Action<string, string>? BeforeDirectoryMoveAction { get; init; }
+
     public IReadOnlyList<string> Events => _events.ToArray();
 
     public void BeforeDirectoryMove(string stagingPath, string destinationPath)
     {
-        _ = stagingPath;
-        _ = destinationPath;
+        BeforeDirectoryMoveAction?.Invoke(stagingPath, destinationPath);
+        if (BeforeDirectoryMoveFailure is not null)
+        {
+            throw BeforeDirectoryMoveFailure;
+        }
     }
 
     public void AfterDirectoryMove(string stagingPath, string destinationPath)

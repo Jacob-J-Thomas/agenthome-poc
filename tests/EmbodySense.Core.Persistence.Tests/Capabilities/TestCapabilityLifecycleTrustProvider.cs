@@ -12,6 +12,10 @@ internal sealed class TestCapabilityLifecycleTrustProvider : ICapabilityCatalogT
     internal Action<CancellationToken>? BeforeRead { get; set; }
     public int MaximumAuthenticationTagUtf8Bytes => 69;
 
+    public void RequireDisjointWorkspace(string workspaceRootPath)
+    {
+    }
+
     public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default)
     {
         BeforeRead?.Invoke(cancellationToken);

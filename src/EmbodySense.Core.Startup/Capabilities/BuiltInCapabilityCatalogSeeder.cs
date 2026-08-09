@@ -42,12 +42,22 @@ public sealed class BuiltInCapabilityCatalogSeeder
     public async Task SeedAsync(WorkspacePaths paths, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        RequireDisjointTrustRoot(paths.RootPath);
         var store = new CapabilityCatalogStore(paths, _trustProvider);
         var service = new CapabilityCatalogService(store);
         foreach (var descriptor in BuiltInCapabilityCatalog.Descriptors)
         {
             await SeedDescriptorAsync(service, store, descriptor, cancellationToken);
         }
+    }
+
+    /// <summary>Validates file-backed trust-root topology before workspace initialization can create storage.</summary>
+    /// <param name="workspaceRootPath">The governed workspace root.</param>
+    /// <exception cref="InvalidOperationException">Thrown when a file-backed trust root overlaps the workspace.</exception>
+    public void RequireDisjointTrustRoot(string workspaceRootPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workspaceRootPath);
+        _trustProvider.RequireDisjointWorkspace(workspaceRootPath);
     }
 
     private async Task SeedDescriptorAsync(CapabilityCatalogService service, CapabilityCatalogStore store, CapabilityDescriptor descriptor, CancellationToken cancellationToken)

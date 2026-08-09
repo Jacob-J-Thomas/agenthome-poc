@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Text;
 using EmbodySense.Core.Persistence.Capabilities.Models;
 using Microsoft.Win32.SafeHandles;
@@ -217,6 +218,51 @@ internal static class CapabilityCatalogNativeFileSystem
         if (!OperatingSystem.IsWindows() && fchmod(file, PermissionUserReadWrite) != 0)
         {
             throw NativeIOException("The capability catalog authentication key permissions could not be restricted", Marshal.GetLastPInvokeError());
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    public static bool TryGetExistingWindowsDirectoryIdentity(string fullPath, out string identity, out string finalPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fullPath);
+        identity = string.Empty;
+        finalPath = string.Empty;
+        var handle = CreateFile(fullPath, 0, FileShareRead | FileShareWrite | FileShareDelete, IntPtr.Zero, OpenExisting, FileFlagBackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            if (error is ErrorFileNotFound or ErrorPathNotFound)
+            {
+                return false;
+            }
+
+            throw NativeIOException("The capability catalog root topology could not inspect an existing directory", error);
+        }
+
+        using (handle)
+        {
+            RequireWindowsTopologyQuery(GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileAttributeTagInfo, out CapabilityCatalogFileAttributeTagInfo attributes, (uint)Marshal.SizeOf<CapabilityCatalogFileAttributeTagInfo>()), "The capability catalog root topology could not inspect an existing directory");
+
+            if ((attributes.FileAttributes & FileAttributeDirectory) == 0)
+            {
+                return false;
+            }
+
+            RequireWindowsTopologyQuery(GetFileInformationByHandleEx(handle, FileInfoByHandleClass.FileIdInfo, out CapabilityCatalogFileIdInfo information, (uint)Marshal.SizeOf<CapabilityCatalogFileIdInfo>()), "The capability catalog root topology could not inspect an existing directory");
+
+            identity = $"{information.VolumeSerialNumber:x16}:{information.FileId:N}";
+            var finalPathBuffer = new StringBuilder(32_768);
+            var finalPathLength = GetFinalPathNameByHandle(handle, finalPathBuffer, finalPathBuffer.Capacity, 0);
+            RequireWindowsTopologyQuery(finalPathLength != 0, "The capability catalog root topology could not resolve an existing directory");
+
+            if (finalPathLength >= finalPathBuffer.Capacity)
+            {
+                throw new IOException("The capability catalog root topology resolved an existing directory path beyond its safety bound.");
+            }
+
+            finalPath = finalPathBuffer.ToString();
+            return true;
         }
     }
 
@@ -480,12 +526,18 @@ internal static class CapabilityCatalogNativeFileSystem
         }
         finally
         {
-            if (!renamed && staging is not null && !staging.IsInvalid && !staging.IsClosed)
+            try
             {
-                MarkWindowsDirectoryForDeletion(staging);
+                if (!renamed && staging is not null && !staging.IsInvalid && !staging.IsClosed)
+                {
+                    MarkWindowsDirectoryForDeletion(staging);
+                }
             }
-            staging?.Dispose();
-            movedIdentity?.Dispose();
+            finally
+            {
+                staging?.Dispose();
+                movedIdentity?.Dispose();
+            }
         }
     }
 
@@ -772,6 +824,14 @@ internal static class CapabilityCatalogNativeFileSystem
         }
     }
 
+    private static void RequireWindowsTopologyQuery(bool succeeded, string failureMessage)
+    {
+        if (!succeeded)
+        {
+            throw NativeIOException(failureMessage, Marshal.GetLastPInvokeError());
+        }
+    }
+
     private static IOException NativeIOException(string message, int error)
     {
         return new IOException($"{message}: {new Win32Exception(error).Message}", unchecked((int)(0x80070000U | (uint)error)));
@@ -807,6 +867,9 @@ internal static class CapabilityCatalogNativeFileSystem
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool FlushFileBuffers(SafeFileHandle file);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, int pathLength, uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
