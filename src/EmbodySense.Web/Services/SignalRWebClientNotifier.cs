@@ -24,6 +24,21 @@ public sealed class SignalRWebClientNotifier : IWebClientNotifier
     }
 
     /// <summary>
+    /// Broadcasts the authoritative workspace status to all authenticated clients.
+    /// </summary>
+    /// <param name="status">The current Web workspace status.</param>
+    /// <param name="cancellationToken">
+    /// Reserved for notifier implementations; the typed SignalR dispatch itself does not observe this token.
+    /// </param>
+    /// <returns>The SignalR dispatch task.</returns>
+    public Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+
+        return _hubContext.Clients.All.StatusChanged(status);
+    }
+
+    /// <summary>
     /// Replaces the approval projection for one owner, or broadcasts an empty clear when no owner is supplied.
     /// </summary>
     /// <param name="ownerConnectionId">The target connection, or <see langword="null"/> or whitespace only when broadcasting an empty clear.</param>

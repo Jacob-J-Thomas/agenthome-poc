@@ -101,6 +101,7 @@ public sealed class WorkspaceInitializerTests
 
         Assert.True(paths.IsInitialized);
         Assert.True(File.Exists(paths.RolePath));
+        Assert.Equal("{\"schemaVersion\":1,\"status\":\"completed\"}\n", await File.ReadAllTextAsync(paths.WorkspaceInitializationMarkerPath));
         Assert.Equal("legacy role", await File.ReadAllTextAsync(paths.AgentFile("AGENT.md")));
     }
 

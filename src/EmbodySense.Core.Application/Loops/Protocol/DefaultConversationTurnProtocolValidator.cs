@@ -143,7 +143,7 @@ public static class DefaultConversationTurnProtocolValidator
         Require(record.RunProjectionSynchronized == (record.Checkpoint >= DefaultConversationTurnCheckpoint.Terminal), "Default-conversation terminal synchronization evidence did not match its checkpoint.");
         if (!terminal)
         {
-            Require(record.Run.CompletedAtUtc is null && record.Run.FailureDetail is null && record.ReviewDetail is null && record.ReviewResolution is null, "A nonterminal default-conversation turn contained terminal evidence.");
+            Require(record.Run.CompletedAtUtc is null && record.Run.FailureDetail is null && record.ReviewCause == DefaultConversationTurnReviewCause.None && record.ReviewDetail is null && record.ReviewResolution is null, "A nonterminal default-conversation turn contained terminal evidence.");
             return;
         }
 
@@ -167,18 +167,18 @@ public static class DefaultConversationTurnProtocolValidator
         switch (record.Run.Status)
         {
             case LoopRunStatus.Completed:
-                Require(operationalCheckpoint == DefaultConversationTurnCheckpoint.TranscriptSynchronized && record.ProviderOutcome == DefaultConversationProviderOutcome.Observed && record.Run.FailureDetail is null && record.ReviewDetail is null, "Completed default-conversation evidence requires a synchronized successfully observed transcript and no failure detail.");
+                Require(operationalCheckpoint == DefaultConversationTurnCheckpoint.TranscriptSynchronized && record.ProviderOutcome == DefaultConversationProviderOutcome.Observed && record.Run.FailureDetail is null && record.ReviewCause == DefaultConversationTurnReviewCause.None && record.ReviewDetail is null, "Completed default-conversation evidence requires a synchronized successfully observed transcript and no failure detail.");
                 break;
             case LoopRunStatus.Failed:
                 var definitelyPreDispatch = operationalCheckpoint < DefaultConversationTurnCheckpoint.ProviderDispatchStarted;
                 var terminalProviderFailure = operationalCheckpoint == DefaultConversationTurnCheckpoint.ProviderOutcomeObserved && record.ProviderOutcome == DefaultConversationProviderOutcome.ObservedFailure;
-                Require((definitelyPreDispatch || terminalProviderFailure) && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && record.ReviewDetail is null, "Failed default-conversation evidence must be definitively pre-dispatch or retain a conclusive terminal provider failure.");
+                Require((definitelyPreDispatch || terminalProviderFailure) && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && record.ReviewCause == DefaultConversationTurnReviewCause.None && record.ReviewDetail is null, "Failed default-conversation evidence must be definitively pre-dispatch or retain a conclusive terminal provider failure.");
                 break;
             case LoopRunStatus.Cancelled:
-                Require(operationalCheckpoint < DefaultConversationTurnCheckpoint.ProviderDispatchStarted && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && record.ReviewDetail is null, "Cancelled default-conversation evidence must be definitively pre-dispatch and retain failure detail.");
+                Require(operationalCheckpoint < DefaultConversationTurnCheckpoint.ProviderDispatchStarted && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && record.ReviewCause == DefaultConversationTurnReviewCause.None && record.ReviewDetail is null, "Cancelled default-conversation evidence must be definitively pre-dispatch and retain failure detail.");
                 break;
             case LoopRunStatus.NeedsReview:
-                Require(operationalCheckpoint != DefaultConversationTurnCheckpoint.TranscriptSynchronized && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && string.Equals(record.ReviewDetail, record.Run.FailureDetail, StringComparison.Ordinal), "Needs-review evidence must retain one exact actionable detail and cannot claim a synchronized transcript.");
+                Require(operationalCheckpoint != DefaultConversationTurnCheckpoint.TranscriptSynchronized && !string.IsNullOrWhiteSpace(record.Run.FailureDetail) && string.Equals(record.ReviewDetail, record.Run.FailureDetail, StringComparison.Ordinal) && IsValidReviewCause(record), "Needs-review evidence must retain one exact actionable detail, a matching durable cause, and cannot claim a synchronized transcript.");
                 break;
             default:
                 throw Invalid("Default-conversation terminal run status was invalid.");
@@ -190,11 +190,23 @@ public static class DefaultConversationTurnProtocolValidator
         Require(record.Run.Status == LoopRunStatus.NeedsReview, "A resolved review requires an unresolved needs-review terminal predecessor.");
         var resolution = record.ReviewResolution ?? throw Invalid("A resolved review requires explicit resolution evidence.");
         var completedAtUtc = record.Run.CompletedAtUtc ?? throw Invalid("A resolved review requires terminal completion evidence.");
+        Require(record.ProviderOutcome == DefaultConversationProviderOutcome.OutcomeUnknown && record.ReviewCause == DefaultConversationTurnReviewCause.OutcomeUnknown, "Only an outcome-unknown provider attempt can be abandoned after review.");
         Require(resolution.Disposition == DefaultConversationTurnReviewDisposition.Abandoned, "Default-conversation review disposition was invalid.");
         Require(string.Equals(resolution.ResolutionId, DefaultConversationTurnProtocol.CreateReviewResolutionId(record.TurnId), StringComparison.Ordinal), "Default-conversation review resolution identity was noncanonical.");
         Require(string.Equals(resolution.Detail, DefaultConversationTurnProtocol.ReviewAbandonmentDetail, StringComparison.Ordinal), "Default-conversation review resolution detail was noncanonical.");
         Require(IsUtc(resolution.ResolvedAtUtc) && resolution.ResolvedAtUtc >= completedAtUtc && resolution.ResolvedAtUtc == record.Transitions[^1].OccurredAtUtc, "Default-conversation review resolution timestamp was invalid.");
         Require(string.Equals(record.Transitions[^1].Detail, resolution.Detail, StringComparison.Ordinal), "Default-conversation resolved-review transition did not retain the canonical disposition detail.");
+    }
+
+    private static bool IsValidReviewCause(DefaultConversationTurnRecord record)
+    {
+        return record.ReviewCause switch
+        {
+            DefaultConversationTurnReviewCause.OutcomeUnknown => record.ProviderOutcome == DefaultConversationProviderOutcome.OutcomeUnknown,
+            DefaultConversationTurnReviewCause.ObservedWithAuditFailure => record.ProviderOutcome == DefaultConversationProviderOutcome.ObservedWithAuditFailure,
+            DefaultConversationTurnReviewCause.TranscriptConflict => true,
+            _ => false
+        };
     }
 
     internal static bool IsLegalTransition(DefaultConversationTurnCheckpoint from, DefaultConversationTurnCheckpoint to)

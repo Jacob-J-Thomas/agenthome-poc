@@ -156,6 +156,54 @@ public sealed class WorkspacePaths
     public string CustomLoopDefinitionOperationsPath => Path.Combine(LoopDefinitionsPath, "custom-create-operations");
 
     /// <summary>
+    /// Gets the shared custom-loop receipt-retention state path.
+    /// </summary>
+    /// <value>The receipt-retention state path.</value>
+    public string CustomLoopReceiptRetentionPath => Path.Combine(LoopsPath, "receipt-retention");
+
+    /// <summary>
+    /// Gets the canonical compact custom-loop receipt proof ledger path.
+    /// </summary>
+    /// <value>The proof-ledger path.</value>
+    public string CustomLoopReceiptProofLedgerPath => Path.Combine(CustomLoopReceiptRetentionPath, "proof-ledger.json");
+
+    /// <summary>
+    /// Gets the definition-mutation receipt cleanup journal path.
+    /// </summary>
+    /// <value>The definition-mutation cleanup journal path.</value>
+    public string CustomLoopDefinitionMutationReceiptCleanupJournalPath => Path.Combine(CustomLoopReceiptRetentionPath, "definition-mutation-receipt-cleanup.json");
+
+    /// <summary>
+    /// Gets the definition-tombstone cleanup journal path.
+    /// </summary>
+    /// <value>The definition-tombstone cleanup journal path.</value>
+    public string CustomLoopDefinitionTombstoneCleanupJournalPath => Path.Combine(CustomLoopReceiptRetentionPath, "definition-tombstone-cleanup.json");
+
+    /// <summary>
+    /// Gets the bounded completed cleanup-operation history root.
+    /// </summary>
+    /// <value>The receipt cleanup history root.</value>
+    public string CustomLoopReceiptCleanupHistoryPath => Path.Combine(LoopsPath, "receipt-cleanup-history");
+
+    /// <summary>
+    /// Gets the completed definition-mutation receipt cleanup history path.
+    /// </summary>
+    /// <value>The definition-mutation cleanup history path.</value>
+    public string CustomLoopDefinitionMutationReceiptCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "definition-mutation-receipt");
+
+    /// <summary>
+    /// Gets the completed definition-tombstone cleanup history path.
+    /// </summary>
+    /// <value>The definition-tombstone cleanup history path.</value>
+    public string CustomLoopDefinitionTombstoneCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "definition-tombstone");
+
+    /// <summary>
+    /// Gets the completed lifecycle-control receipt cleanup history path.
+    /// </summary>
+    /// <value>The lifecycle-control cleanup history path.</value>
+    public string CustomLoopLifecycleControlReceiptCleanupHistoryPath => Path.Combine(CustomLoopReceiptCleanupHistoryPath, "lifecycle-control-receipt");
+
+    /// <summary>
     /// Gets the loop runs path.
     /// </summary>
     /// <value>The loop runs path.</value>
@@ -178,6 +226,12 @@ public sealed class WorkspacePaths
     /// </summary>
     /// <value>The custom loop control operations path.</value>
     public string CustomLoopControlOperationsPath => Path.Combine(LoopRunsPath, "custom-control-operations");
+
+    /// <summary>
+    /// Gets the lifecycle-control receipt cleanup journal path.
+    /// </summary>
+    /// <value>The path that owns the one active lifecycle-control cleanup journal.</value>
+    public string CustomLoopControlReceiptCleanupPath => Path.Combine(CustomLoopReceiptRetentionPath, "lifecycle-control");
 
     /// <summary>
     /// Gets the custom loop invocation operations path.
@@ -257,6 +311,51 @@ public sealed class WorkspacePaths
     /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
     public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
 
+    /// <summary>Gets the immutable capability artifact storage root.</summary>
+    public string CapabilityArtifactsPath => Path.Combine(CapabilityCatalogPath, "artifacts");
+
+    /// <summary>Gets the durable capability artifact activation document.</summary>
+    public string CapabilityArtifactActivationPath => Path.Combine(CapabilityArtifactsPath, "activation.json");
+
+    /// <summary>Gets the last completely written capability artifact activation proof.</summary>
+    public string CapabilityArtifactActivationProofPath => Path.Combine(CapabilityArtifactsPath, "activation.proved.json");
+
+    /// <summary>Gets the cross-process capability artifact mutation lock.</summary>
+    public string CapabilityArtifactLockPath => Path.Combine(CapabilityArtifactsPath, ".artifacts.lock");
+
+    /// <summary>Gets the safe public credential-registry directory.</summary>
+    public string CredentialRegistryPath => Path.Combine(AgentPath, "credentials");
+
+    /// <summary>Gets the canonical safe public credential-registry artifact path.</summary>
+    public string CredentialRegistryDocumentPath => Path.Combine(CredentialRegistryPath, "registry.json");
+
+    /// <summary>Gets the last independently proved safe public credential-registry artifact path.</summary>
+    public string CredentialRegistryProofPath => Path.Combine(CredentialRegistryPath, "registry.proved.json");
+
+    /// <summary>Gets the private opaque credential-provider locator directory.</summary>
+    public string CredentialRegistryPrivatePath => Path.Combine(WorkspacePrivatePath, "credentials");
+
+    /// <summary>Gets the canonical private opaque credential-provider locator artifact path.</summary>
+    public string CredentialRegistryPrivateDocumentPath => Path.Combine(CredentialRegistryPrivatePath, "locators.json");
+
+    /// <summary>Gets the last independently proved private credential-provider locator artifact path.</summary>
+    public string CredentialRegistryPrivateProofPath => Path.Combine(CredentialRegistryPrivatePath, "locators.proved.json");
+
+    /// <summary>Gets the cross-process credential-registry mutation lock path.</summary>
+    public string CredentialRegistryLockPath => Path.Combine(CredentialRegistryPath, ".registry.lock");
+
+    /// <summary>Gets the governed authority-profile persistence directory.</summary>
+    public string AuthorityProfilesPath => Path.Combine(AgentPath, "authority-profiles");
+
+    /// <summary>Gets the current canonical authority-profile artifact path.</summary>
+    public string AuthorityProfilesDocumentPath => Path.Combine(AuthorityProfilesPath, "profiles.json");
+
+    /// <summary>Gets the independently proved fallback authority-profile artifact path.</summary>
+    public string AuthorityProfilesProofPath => Path.Combine(AuthorityProfilesPath, "profiles.proved.json");
+
+    /// <summary>Gets the cross-process authority-profile mutation lock path.</summary>
+    public string AuthorityProfilesLockPath => Path.Combine(AuthorityProfilesPath, ".profiles.lock");
+
     /// <summary>
     /// Gets the permissions path.
     /// </summary>
@@ -274,6 +373,12 @@ public sealed class WorkspacePaths
     /// </summary>
     /// <value>The role path.</value>
     public string RolePath => AgentFile("ROLE.md");
+
+    /// <summary>
+    /// Gets the version-one workspace initialization completion marker path.
+    /// </summary>
+    /// <value>The initialization completion marker path.</value>
+    public string WorkspaceInitializationMarkerPath => AgentFile("workspace-initialized.json");
 
     /// <summary>
     /// Gets the workspace private path.
@@ -302,8 +407,8 @@ public sealed class WorkspacePaths
     /// <summary>
     /// Gets a value indicating whether the minimum workspace scaffold exists.
     /// </summary>
-    /// <value><see langword="true"/> when the <c>.agent</c> directory, permissions document, and role document exist; otherwise, <see langword="false"/>.</value>
-    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath);
+    /// <value><see langword="true"/> when the <c>.agent</c> directory, permissions document, role document, and completion marker exist; otherwise, <see langword="false"/>.</value>
+    public bool IsInitialized => Directory.Exists(AgentPath) && File.Exists(PermissionsPath) && File.Exists(RolePath) && File.Exists(WorkspaceInitializationMarkerPath);
 
     private static string ContainedFile(string rootPath, string relativePath)
     {

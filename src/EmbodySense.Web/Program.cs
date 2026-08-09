@@ -56,6 +56,8 @@ public static class Program
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = ResolveContentRoot(), ApplicationName = Assembly.GetExecutingAssembly().GetName().Name });
         builder.Logging.ClearProviders();
         builder.Logging.AddSimpleConsole();
+        // ASP.NET's information-level request logs include raw query strings before application middleware runs.
+        builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
         builder.WebHost.UseUrls(options.Url);
         ConfigureServices(builder.Services, options);
         return builder;
@@ -96,7 +98,7 @@ public static class Program
             });
         });
         services.AddSingleton(options);
-        services.AddSingleton<WebSessionSecurity>();
+        services.AddSingleton(_ => WebSessionSecurity.CreateForWorkspace(options.WorkingDirectory, options.Port));
         services.AddSingleton<IWebClientNotifier, SignalRWebClientNotifier>();
         services.AddSingleton<IAgentRuntimeConversationPublicationObserver, WebConversationPublicationObserver>();
         services.AddSingleton<WebApprovalCoordinator>();
@@ -107,6 +109,7 @@ public static class Program
             provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>()));
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
         services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
+        services.AddSingleton<ILoopReceiptRetentionFacade>(_ => new LoopReceiptRetentionFacade(options.WorkingDirectory));
     }
 
     /// <summary>

@@ -46,6 +46,11 @@ public sealed class WebConversationPublicationObserverTests
     {
         public List<WebConversationChanged> ConversationChanges { get; } = [];
 
+        public Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
         public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default)
         {
             return Task.CompletedTask;

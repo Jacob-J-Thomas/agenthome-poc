@@ -144,10 +144,13 @@ public sealed class PersistencePublicBoundaryCoverageTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new CustomLoopControlOperationStore(paths);
         Directory.CreateDirectory(paths.CustomLoopControlOperationsPath);
-        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopControlOperationsPath, "control-corrupt.json"), "{ malformed");
+        var corruptPath = Path.Combine(paths.CustomLoopControlOperationsPath, "control-corrupt.json");
+        await File.WriteAllTextAsync(corruptPath, "{ malformed");
         await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("control-corrupt"));
 
         var pending = PendingControl("control-embedded", "web");
+        await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(pending));
+        File.Delete(corruptPath);
         Assert.Equal(CustomLoopControlOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
         var source = Path.Combine(paths.CustomLoopControlOperationsPath, pending.OperationId + ".json");
         var mismatch = Path.Combine(paths.CustomLoopControlOperationsPath, "control-other.json");
@@ -300,6 +303,148 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     [Fact]
+    public void Artifact_deserializer_rejects_compact_json_with_noncanonical_projected_property_order()
+    {
+        var root = Parse(Artifact());
+        var run = root["run"]!.AsObject();
+        var properties = run.ToArray();
+        var reordered = new JsonObject
+        {
+            [properties[1].Key] = properties[1].Value?.DeepClone(),
+            [properties[0].Key] = properties[0].Value?.DeepClone()
+        };
+        foreach (var property in properties.Skip(2))
+        {
+            reordered[property.Key] = property.Value?.DeepClone();
+        }
+
+        root["run"] = reordered;
+        var noncanonical = Encoding.UTF8.GetBytes(root.ToJsonString() + "\n");
+
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(noncanonical));
+
+        Assert.Contains("not in canonical serializer order", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Artifact_deserializer_rejects_omitted_default_fields_and_alternate_typed_primitive_spellings()
+    {
+        var omitted = Parse(Artifact());
+        omitted["run"]!.AsObject().Remove("failureDetail");
+        var omission = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(omitted.ToJsonString() + "\n")));
+        Assert.Contains("not in canonical serializer order", omission.Message, StringComparison.Ordinal);
+
+        var alternate = Parse(Artifact());
+        var run = alternate["run"]!.AsObject();
+        var canonicalTimestamp = run["createdAtUtc"]!.GetValue<string>();
+        run["createdAtUtc"] = canonicalTimestamp.EndsWith('Z') ? canonicalTimestamp[..^1] + "+00:00" : canonicalTimestamp.Replace("+00:00", "Z", StringComparison.Ordinal);
+        var spelling = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(alternate.ToJsonString() + "\n")));
+        Assert.Contains("does not use its canonical serializer spelling", spelling.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Artifact_deserializer_rejects_noncanonical_integer_spellings_in_untyped_content_metadata()
+    {
+        var canonical = Encoding.UTF8.GetString(Artifact());
+        foreach (var propertyName in new[] { "utf16Characters", "utf8Bytes" })
+        {
+            var noncanonical = canonical.Replace($"\"{propertyName}\":0", $"\"{propertyName}\":-0", StringComparison.Ordinal);
+            Assert.NotEqual(canonical, noncanonical);
+
+            var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(noncanonical)));
+
+            Assert.Contains("does not use its canonical serializer spelling", exception.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Artifact_deserializer_rejects_alternate_string_escape_spellings_in_headers_and_projected_fields()
+    {
+        var canonical = Encoding.UTF8.GetString(Artifact());
+        var escapedHeader = canonical.Replace("\"artifactKind\":\"custom-loop-run\"", "\"artifactKind\":\"custom-loop-\\u0072un\"", StringComparison.Ordinal);
+        Assert.NotEqual(canonical, escapedHeader);
+        _ = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(escapedHeader)));
+
+        var escapedProjection = canonical.Replace("\"id\":\"run-boundary\"", "\"id\":\"run-bounda\\u0072y\"", StringComparison.Ordinal);
+        Assert.NotEqual(canonical, escapedProjection);
+        _ = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(escapedProjection)));
+    }
+
+    [Fact]
+    public void Artifact_deserializer_rejects_rehashed_structural_payloads_with_noncanonical_typed_property_order()
+    {
+        var contextRoot = Parse(Artifact());
+        var contextBlock = new JsonObject
+        {
+            ["source"] = "harnessGovernance",
+            ["sourceId"] = new JsonObject { ["$content"] = "c0" },
+            ["role"] = "system",
+            ["included"] = true,
+            ["omissionReason"] = null,
+            ["content"] = new JsonObject { ["$content"] = "c0" },
+            ["contentHash"] = new string('0', 64),
+            ["characterCount"] = 0,
+            ["truncated"] = false,
+            ["sourceVersion"] = null
+        };
+        Blocks(contextRoot).Add(StructuralEntry("b0", "contextBlock", ReverseProperties(contextBlock)));
+        FirstEvent(contextRoot)["contextBlocks"]!.AsArray().Add(new JsonObject { ["$contextBlock"] = "b0" });
+        AssertCanonicalTypedOrderRejected(contextRoot);
+
+        var authorityRoot = Parse(CustomLoopRunArtifactSerializer.Serialize(CreateToolRun()));
+        var authorityEntry = Authorities(authorityRoot)[0]!.AsObject();
+        var reorderedAuthority = ReverseProperties(authorityEntry["authority"]!.AsObject());
+        authorityEntry["sha256"] = Hash(Encoding.UTF8.GetBytes(reorderedAuthority.ToJsonString()));
+        authorityEntry["authority"] = reorderedAuthority;
+        AssertCanonicalTypedOrderRejected(authorityRoot);
+
+        var governanceRoot = Parse(CustomLoopRunArtifactSerializer.Serialize(CreateToolRun()));
+        var governanceEvidence = ToolEvidence(governanceRoot, 3);
+        governanceEvidence["governance"] = ReverseProperties(governanceEvidence["governance"]!.AsObject());
+        AssertCanonicalTypedOrderRejected(governanceRoot);
+    }
+
+    [Fact]
+    public void Artifact_deserializer_rejects_noncanonical_compact_tool_enum_spellings()
+    {
+        var commandRoot = Parse(CustomLoopRunArtifactSerializer.Serialize(CreateToolRun()));
+        var requestEntry = ToolRequests(commandRoot)[0]!.AsObject();
+        var request = requestEntry["toolRequest"]!.AsObject();
+        request["command"] = "Search";
+        requestEntry["sha256"] = Hash(Encoding.UTF8.GetBytes(request.ToJsonString()));
+        AssertCanonicalEnumSpellingRejected(commandRoot);
+
+        var outcomeRoot = Parse(CustomLoopRunArtifactSerializer.Serialize(CreateToolRun()));
+        var outcome = Events(outcomeRoot)
+            .Select(item => item!["toolEvidence"] as JsonObject)
+            .Single(evidence => evidence?["shape"]?.GetValue<int>() == 3)!;
+        outcome["outcome"] = "Succeeded";
+        AssertCanonicalEnumSpellingRejected(outcomeRoot);
+
+        foreach (var shape in new[] { 2, 3, 4, 5 })
+        {
+            var phaseRoot = Parse(CustomLoopRunArtifactSerializer.Serialize(CreateToolRun(includeIntegrity: true)));
+            var evidence = Events(phaseRoot)
+                .Select(item => item!["toolEvidence"] as JsonObject)
+                .Single(candidate => candidate?["shape"]?.GetValue<int>() == shape)!;
+            var phase = evidence["phase"]!.GetValue<string>();
+            evidence["phase"] = char.ToUpperInvariant(phase[0]) + phase[1..];
+            AssertCanonicalEnumSpellingRejected(phaseRoot);
+        }
+    }
+
+    [Fact]
+    public void Artifact_deserializer_rejects_present_properties_that_the_typed_serializer_ignores()
+    {
+        var root = Parse(Artifact());
+        root["run"]!["isTerminal"] = false;
+
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString() + "\n")));
+
+        Assert.Contains("is omitted by the canonical serializer", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Tool_evidence_artifact_round_trips_all_success_phases_and_integrity_markers()
     {
         var run = CreateToolRun(includeIntegrity: true);
@@ -317,6 +462,101 @@ public sealed class PersistencePublicBoundaryCoverageTests
         Assert.NotNull(legacyIntegrity.Outcome);
         Assert.NotNull(legacyIntegrity.CanonicalResultReturnedToModel);
         Assert.Equal(CustomLoopLimits.MaxGovernedToolEvidenceReservationUtf8Bytes, legacyIntegrity.ReservedUtf8Bytes);
+    }
+
+    [Fact]
+    public async Task Run_store_accounts_for_completed_and_standalone_tool_evidence_lifecycles()
+    {
+        using var completedWorkspace = new TestWorkspace();
+        var completedStore = new CustomLoopRunStore(new WorkspacePaths(completedWorkspace.RootPath));
+        var completed = CreateToolRun();
+        var completedInitial = CustomLoopAdmissionRequestHash.Apply(completed with
+        {
+            LifecycleVersion = 1,
+            Events = [completed.Events[0]],
+            Checkpoint = CustomLoopRunCheckpoint.Start()
+        });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await completedStore.CreateAsync(completedInitial)).Status);
+        Assert.True(await completedStore.HasSufficientTraceCapacityForDispatchAsync(completed, completedInitial.LifecycleVersion));
+        using var missingWorkspace = new TestWorkspace();
+        Assert.True(await new CustomLoopRunStore(new WorkspacePaths(missingWorkspace.RootPath)).HasSufficientTraceCapacityForDispatchAsync(completed, completedInitial.LifecycleVersion));
+        var completedCurrent = completedInitial;
+        for (var eventCount = 2; eventCount <= completed.Events.Length; eventCount++)
+        {
+            var next = completed with
+            {
+                LifecycleVersion = completedCurrent.LifecycleVersion + 1,
+                Events = completed.Events.Take(eventCount).ToArray(),
+                Checkpoint = eventCount < 3 ? CustomLoopRunCheckpoint.Start() : completed.Checkpoint
+            };
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await completedStore.UpdateAsync(next, completedCurrent.LifecycleVersion)).Status);
+            completedCurrent = next;
+        }
+        var completedQuota = await completedStore.GetTraceQuotaAsync();
+        var completedReloaded = Assert.IsType<CustomLoopRunRecord>(await completedStore.GetAsync(completed.Id));
+
+        Assert.Equal(completed.Events.Length, completedReloaded.Events.Length);
+        Assert.True(await completedStore.HasSufficientTraceCapacityForDispatchAsync(completed, completed.LifecycleVersion));
+        Assert.True(await completedStore.HasSufficientTraceCapacityForDispatchAsync(completed, completed.LifecycleVersion - 1));
+        Assert.Equal(1, completedQuota.ActiveReservationCount);
+        Assert.True(completedQuota.AccountedTraceUtf8Bytes > 0);
+
+        using var integrityWorkspace = new TestWorkspace();
+        var integrityStore = new CustomLoopRunStore(new WorkspacePaths(integrityWorkspace.RootPath));
+        var integrity = CreateStandaloneRepeatedIntegrityRun();
+        var integrityInitial = CustomLoopAdmissionRequestHash.Apply(integrity with
+        {
+            LifecycleVersion = 1,
+            Events = [integrity.Events[0]],
+            Checkpoint = CustomLoopRunCheckpoint.Start()
+        });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await integrityStore.CreateAsync(integrityInitial)).Status);
+        var integrityCurrent = integrityInitial;
+        for (var eventCount = 2; eventCount <= integrity.Events.Length; eventCount++)
+        {
+            var next = integrity with
+            {
+                LifecycleVersion = integrityCurrent.LifecycleVersion + 1,
+                Events = integrity.Events.Take(eventCount).ToArray(),
+                Checkpoint = eventCount < 3 ? CustomLoopRunCheckpoint.Start() : integrity.Checkpoint
+            };
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await integrityStore.UpdateAsync(next, integrityCurrent.LifecycleVersion)).Status);
+            integrityCurrent = next;
+        }
+        var integrityQuota = await integrityStore.GetTraceQuotaAsync();
+
+        Assert.Equal(integrity.Events.Length, (await integrityStore.GetAsync(integrity.Id))!.Events.Length);
+        Assert.Equal(1, integrityQuota.ActiveReservationCount);
+        Assert.True(integrityQuota.AccountedTraceUtf8Bytes > 0);
+
+        using var legacyWorkspace = new TestWorkspace();
+        var legacyStore = new CustomLoopRunStore(new WorkspacePaths(legacyWorkspace.RootPath));
+        var legacy = CreateToolRun(includeIntegrity: true) with { Id = "run-tool-legacy", AdmissionOperationId = "invoke-tool-legacy" };
+        legacy = CustomLoopAdmissionRequestHash.Apply(legacy with { AdmissionRequestHash = string.Empty });
+        var legacyInitial = CustomLoopAdmissionRequestHash.Apply(legacy with
+        {
+            LifecycleVersion = 1,
+            Events = [legacy.Events[0]],
+            Checkpoint = CustomLoopRunCheckpoint.Start()
+        });
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await legacyStore.CreateAsync(legacyInitial)).Status);
+        var legacyCurrent = legacyInitial;
+        for (var eventCount = 2; eventCount <= legacy.Events.Length; eventCount++)
+        {
+            var next = legacy with
+            {
+                LifecycleVersion = legacyCurrent.LifecycleVersion + 1,
+                Events = legacy.Events.Take(eventCount).ToArray(),
+                Checkpoint = eventCount < 3 ? CustomLoopRunCheckpoint.Start() : legacy.Checkpoint
+            };
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await legacyStore.UpdateAsync(next, legacyCurrent.LifecycleVersion)).Status);
+            legacyCurrent = next;
+        }
+
+        Assert.True((await legacyStore.GetTraceQuotaAsync()).AccountedTraceUtf8Bytes > 0);
     }
 
     [Fact]
@@ -712,9 +952,17 @@ public sealed class PersistencePublicBoundaryCoverageTests
 
     private static JsonArray Authorities(JsonObject root) => root["authorities"]!.AsArray();
 
+    private static JsonArray ToolRequests(JsonObject root) => root["toolRequests"]!.AsArray();
+
     private static JsonArray Events(JsonObject root) => root["run"]!["events"]!.AsArray();
 
     private static JsonObject ToolEvidence(JsonObject root, int eventIndex) => Events(root)[eventIndex]!["toolEvidence"]!.AsObject();
+
+    private static void AssertCanonicalEnumSpellingRejected(JsonObject root)
+    {
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString() + "\n")));
+        Assert.Contains("does not use its canonical serializer spelling", exception.Message, StringComparison.Ordinal);
+    }
 
     private static void AppendCompactToolEvent(JsonObject root, int sourceIndex, string eventId)
     {
@@ -748,6 +996,23 @@ public sealed class PersistencePublicBoundaryCoverageTests
             ["sha256"] = hash ?? Hash(Encoding.UTF8.GetBytes(value.ToJsonString())),
             [propertyName] = value
         };
+    }
+
+    private static JsonObject ReverseProperties(JsonObject value)
+    {
+        var reordered = new JsonObject();
+        foreach (var property in value.Reverse())
+        {
+            reordered[property.Key] = property.Value?.DeepClone();
+        }
+
+        return reordered;
+    }
+
+    private static void AssertCanonicalTypedOrderRejected(JsonObject root)
+    {
+        var exception = Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString() + "\n")));
+        Assert.Contains("not in canonical serializer order", exception.Message, StringComparison.Ordinal);
     }
 
     private static string Hash(byte[] value) => Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant();

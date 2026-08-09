@@ -5,6 +5,7 @@ using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Memory;
@@ -14,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
@@ -745,6 +747,85 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Contains("before sending the first prompt", historyAfterTurn.Output, StringComparison.Ordinal);
         Assert.Equal("Started a new conversation.", fresh.Output);
         Assert.Contains("Stored conversations:", historyAfterNew.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Review_commands_project_a_transcript_conflict_as_blocked_without_mutating_retained_evidence()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        await new WorkspaceInitializer().InitializeAsync(workspace.RootPath);
+        var record = await PersistTranscriptConflictReviewAsync(workspace);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+        var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, record.TurnId + ".json");
+        var retainedArtifact = await File.ReadAllTextAsync(artifactPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var review = Assert.Single(await runtime.ListDefaultConversationReviewsAsync());
+        Assert.Equal(DefaultConversationTurnReviewClassification.TranscriptConflict, review.Classification);
+        Assert.Contains("remains blocked", review.AllowedAction, StringComparison.Ordinal);
+        Assert.DoesNotContain("/review resolve", review.AllowedAction, StringComparison.Ordinal);
+
+        var listed = await runtime.RunTurnAsync("/review");
+        var rejected = await runtime.RunTurnAsync($"/review resolve {record.TurnId}");
+
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.TranscriptConflict), listed.Output, StringComparison.Ordinal);
+        Assert.Contains("Allowed action", listed.Output, StringComparison.Ordinal);
+        Assert.Contains(nameof(DefaultConversationTurnReviewClassification.TranscriptConflict), rejected.Output, StringComparison.Ordinal);
+        Assert.Contains("cannot be abandoned", rejected.Output, StringComparison.Ordinal);
+        Assert.Equal(retainedArtifact, await File.ReadAllTextAsync(artifactPath));
+        var reread = await turns.LoadAsync(record.TurnId);
+        Assert.NotNull(reread);
+        Assert.Equal(record.LifecycleVersion, reread.LifecycleVersion);
+        Assert.Equal(record.ProviderOutcome, reread.ProviderOutcome);
+        Assert.Equal(record.ReviewDetail, reread.ReviewDetail);
+        Assert.Null(reread.ReviewResolution);
+        Assert.Single(await runtime.ListDefaultConversationReviewsAsync());
+    }
+
+    private static async Task<DefaultConversationTurnRecord> PersistTranscriptConflictReviewAsync(TestWorkspace workspace)
+    {
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var memory = new ConversationMemoryStore(paths);
+        var turns = new DefaultConversationTurnStore(paths);
+        var startedAtUtc = DateTimeOffset.UtcNow;
+        const string RequestId = "transcript-conflict-review";
+        var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Cli, LoopTrigger.HumanMessage, startedAtUtc);
+        var record = DefaultConversationTurnProtocol.Admit(run, await memory.LoadCurrentConversationSnapshotAsync(), LlmMessage.User("hello"), startedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, startedAtUtc));
+        Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
+
+        foreach (var checkpoint in new[]
+        {
+            DefaultConversationTurnCheckpoint.RunStarted,
+            DefaultConversationTurnCheckpoint.UserMessageAccepted,
+            DefaultConversationTurnCheckpoint.UserPublicationPrepared,
+            DefaultConversationTurnCheckpoint.UserPublished,
+            DefaultConversationTurnCheckpoint.ProviderDispatchPrepared
+        })
+        {
+            record = record.Advance(checkpoint, startedAtUtc.AddSeconds(record.LifecycleVersion), checkpoint.ToString());
+            Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        }
+
+        record = record.Advance(DefaultConversationTurnCheckpoint.ProviderDispatchStarted, startedAtUtc.AddSeconds(record.LifecycleVersion), "Provider entered.", providerOutcome: DefaultConversationProviderOutcome.OutcomeUnknown);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        var assistant = new DefaultConversationTurnMessage(record.TurnId + ":message:assistant", LlmMessageRole.Assistant, "observed answer");
+        record = record.Advance(DefaultConversationTurnCheckpoint.ProviderOutcomeObserved, startedAtUtc.AddSeconds(record.LifecycleVersion), "Provider outcome observed.", providerOutcome: DefaultConversationProviderOutcome.Observed, assistantMessage: assistant, providerResponseId: "provider-response-1");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        record = record.Advance(DefaultConversationTurnCheckpoint.AssistantPublicationPrepared, startedAtUtc.AddSeconds(record.LifecycleVersion), "Assistant publication prepared.");
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        const string Detail = "Transcript publication conflicts with retained turn evidence.";
+        var needsReview = record.Run.NeedsReview(startedAtUtc.AddSeconds(record.LifecycleVersion), Detail);
+        record = record.Advance(DefaultConversationTurnCheckpoint.TerminalPrepared, startedAtUtc.AddSeconds(record.LifecycleVersion), "Terminal review prepared.", run: needsReview, reviewDetail: Detail);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        record = record.Advance(DefaultConversationTurnCheckpoint.Terminal, startedAtUtc.AddSeconds(record.LifecycleVersion), "Terminal review committed.", run: needsReview, runProjectionSynchronized: true);
+        Assert.Equal(DefaultConversationTurnStoreStatus.Updated, (await turns.UpdateAsync(record, record.LifecycleVersion - 1)).Status);
+        return record;
     }
 
     private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null)

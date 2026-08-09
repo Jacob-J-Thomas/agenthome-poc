@@ -5,6 +5,8 @@ namespace EmbodySense.Core.Persistence.Tests.Capabilities;
 
 internal sealed class FailingCapabilityCatalogTrustProvider(ICapabilityCatalogTrustProvider inner) : ICapabilityCatalogTrustProvider
 {
+    public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
+
     public bool FailAfterNextInitialization { get; set; }
 
     public bool FailNextAdvance { get; set; }

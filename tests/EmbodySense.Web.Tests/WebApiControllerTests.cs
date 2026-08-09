@@ -13,12 +13,70 @@ using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace EmbodySense.Web.Tests;
 
 public sealed class WebApiControllerTests
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
+
+    [Fact]
+    public async Task Session_scope_survives_web_process_restart_for_the_same_workspace()
+    {
+        using var workspace = new TestWorkspace();
+        WebSessionInfo firstSession;
+        await using (var first = CreateApp(workspace.RootPath, out var firstOptions))
+        {
+            await first.StartAsync();
+            using var client = new HttpClient { BaseAddress = new Uri(firstOptions.Url) };
+            firstSession = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!;
+            await first.StopAsync();
+        }
+
+        await using var second = CreateApp(workspace.RootPath, out var secondOptions);
+        await second.StartAsync();
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(secondOptions.Url) };
+            var secondSession = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!;
+
+            Assert.NotEqual(firstSession.GenerationId, secondSession.GenerationId);
+            Assert.Equal(firstSession.ChatRequestScope, secondSession.ChatRequestScope);
+        }
+        finally
+        {
+            await second.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Workspace_init_rest_path_broadcasts_authoritative_status()
+    {
+        using var workspace = new TestWorkspace();
+        var notifier = new RecordingStatusNotifier();
+        await using var app = CreateApp(workspace.RootPath, out var options, notifier: notifier);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/workspace/init");
+            request.Headers.Add(WebSessionSecurity.HeaderName, app.Services.GetRequiredService<WebSessionSecurity>().Token);
+            request.Content = JsonContent.Create(new { }, options: _jsonOptions);
+
+            using var response = await client.SendAsync(request);
+
+            Assert.True(response.IsSuccessStatusCode);
+            var status = Assert.Single(notifier.Statuses);
+            Assert.True(status.Initialized);
+            Assert.Equal("initialized", status.InitializationState);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
 
     [Fact]
     public async Task Configured_app_serves_status_init_and_approval_endpoints()
@@ -30,34 +88,45 @@ public sealed class WebApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var session = await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions);
+            using var unauthenticatedClient = new HttpClient { BaseAddress = new Uri(options.Url) };
+            using var sessionResponse = await client.GetAsync("/api/session");
+            var session = await sessionResponse.Content.ReadFromJsonAsync<WebSessionInfo>(_jsonOptions);
+            var sessionCookie = SessionCookie(sessionResponse);
             using var beforeResponse = await client.GetAsync("/api/status");
             var before = await beforeResponse.Content.ReadFromJsonAsync<WebStatus>(_jsonOptions);
             using var indexResponse = await client.GetAsync("/");
             var index = await indexResponse.Content.ReadAsStringAsync();
             using var faviconResponse = await client.GetAsync("/favicon.svg");
-            var rejectedInit = await client.PostAsJsonAsync("/api/workspace/init", new { }, _jsonOptions);
-            var rejectedQueryTokenConfiguration = await client.GetAsync($"/api/configuration?access_token={Uri.EscapeDataString(session!.Token)}");
+            var rejectedInit = await unauthenticatedClient.PostAsJsonAsync("/api/workspace/init", new { }, _jsonOptions);
+            var rejectedQueryTokenConfiguration = await unauthenticatedClient.GetAsync("/api/configuration?access_token=rejected-query-token");
             var initRequest = new HttpRequestMessage(HttpMethod.Post, "/api/workspace/init");
-            initRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            initRequest.Headers.Add("Cookie", sessionCookie);
             initRequest.Content = JsonContent.Create(new { }, options: _jsonOptions);
             var initialized = await client.SendAsync(initRequest);
             var after = await initialized.Content.ReadFromJsonAsync<WebStatus>(_jsonOptions);
             var approvalsRequest = new HttpRequestMessage(HttpMethod.Get, "/api/approvals/pending");
-            approvalsRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            approvalsRequest.Headers.Add("Cookie", sessionCookie);
             var approvalsResponse = await client.SendAsync(approvalsRequest);
             var approvals = await approvalsResponse.Content.ReadFromJsonAsync<WebPendingApproval[]>(_jsonOptions);
-            var rejectedConfiguration = await client.GetAsync("/api/configuration");
+            var rejectedConfiguration = await unauthenticatedClient.GetAsync("/api/configuration");
             var configurationRequest = new HttpRequestMessage(HttpMethod.Get, "/api/configuration");
-            configurationRequest.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            configurationRequest.Headers.Add("Cookie", sessionCookie);
             var configurationResponse = await client.SendAsync(configurationRequest);
             var configuration = await configurationResponse.Content.ReadFromJsonAsync<WorkspaceConfigurationSnapshot>(_jsonOptions);
             var missingApproval = new HttpRequestMessage(HttpMethod.Post, "/api/approvals/missing");
-            missingApproval.Headers.Add(WebSessionSecurity.HeaderName, session.Token);
+            missingApproval.Headers.Add("Cookie", sessionCookie);
             missingApproval.Content = JsonContent.Create(new WebApprovalDecision(true, null), options: _jsonOptions);
             var missingApprovalResponse = await client.SendAsync(missingApproval);
 
             Assert.False(before!.Initialized);
+            Assert.Equal(64, session!.ChatRequestScope.Length);
+            Assert.Equal("uninitialized", before.InitializationState);
+            Assert.Null(before.InitializationOutcome);
+            Assert.False(string.IsNullOrWhiteSpace(session!.GenerationId));
+            Assert.DoesNotContain(app.Services.GetRequiredService<WebSessionSecurity>().Token, await sessionResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            Assert.Contains("HttpOnly", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("SameSite=Strict", sessionResponse.Headers.GetValues("Set-Cookie").Single(), StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("no-store", sessionResponse.Headers.CacheControl?.ToString());
             Assert.True(beforeResponse.Headers.TryGetValues("Content-Security-Policy", out var csp));
             Assert.Equal("default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'", csp.Single());
             Assert.DoesNotContain("ws://", csp.Single(), StringComparison.Ordinal);
@@ -73,6 +142,8 @@ public sealed class WebApiControllerTests
             Assert.Equal(HttpStatusCode.Unauthorized, rejectedQueryTokenConfiguration.StatusCode);
             Assert.True(initialized.IsSuccessStatusCode);
             Assert.True(after!.Initialized);
+            Assert.Equal("initialized", after.InitializationState);
+            Assert.Equal("initialized", after.InitializationOutcome);
             Assert.Equal("web", after.Client);
             Assert.True(after.PrimaryClient);
             Assert.Equal(options.Url, after.Url);
@@ -94,21 +165,69 @@ public sealed class WebApiControllerTests
     }
 
     [Fact]
-    public async Task Hub_negotiate_requires_session_token()
+    public async Task Browser_cookie_jar_keeps_two_local_web_hosts_authenticated_on_different_ports()
+    {
+        using var firstWorkspace = new TestWorkspace();
+        await using var firstApp = CreateApp(firstWorkspace.RootPath, out var firstOptions);
+        await firstApp.StartAsync();
+        using var secondWorkspace = new TestWorkspace();
+        await using var secondApp = CreateApp(secondWorkspace.RootPath, out var secondOptions);
+        await secondApp.StartAsync();
+
+        try
+        {
+            var cookies = new CookieContainer();
+            using var handler = new HttpClientHandler { CookieContainer = cookies };
+            using var client = new HttpClient(handler);
+            using var firstSession = await client.GetAsync(firstOptions.Url + "/api/session");
+            using var secondSession = await client.GetAsync(secondOptions.Url + "/api/session");
+            var firstSecurity = firstApp.Services.GetRequiredService<WebSessionSecurity>();
+            var secondSecurity = secondApp.Services.GetRequiredService<WebSessionSecurity>();
+            using var firstStatus = await client.GetAsync(firstOptions.Url + "/api/status");
+            using var secondStatus = await client.GetAsync(secondOptions.Url + "/api/status");
+
+            Assert.True(firstSession.IsSuccessStatusCode);
+            Assert.True(secondSession.IsSuccessStatusCode);
+            Assert.NotEqual(firstSecurity.CookieName, secondSecurity.CookieName);
+            Assert.Equal(firstSecurity.Token, cookies.GetCookies(new Uri(firstOptions.Url))[firstSecurity.CookieName]?.Value);
+            Assert.Equal(secondSecurity.Token, cookies.GetCookies(new Uri(secondOptions.Url))[secondSecurity.CookieName]?.Value);
+            Assert.True(firstStatus.IsSuccessStatusCode);
+            Assert.True(secondStatus.IsSuccessStatusCode);
+        }
+        finally
+        {
+            await secondApp.StopAsync();
+            await firstApp.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Hub_negotiate_requires_session_cookie_and_rejects_query_credentials()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        using var logs = new RecordingLoggerProvider();
+        await using var app = CreateApp(workspace.RootPath, out var options, logs);
         await app.StartAsync();
 
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            using var unauthenticatedClient = new HttpClient { BaseAddress = new Uri(options.Url) };
             var rejected = await client.PostAsync("/hubs/session/negotiate?negotiateVersion=1", null);
-            var accepted = await client.PostAsync($"/hubs/session/negotiate?negotiateVersion=1&access_token={Uri.EscapeDataString(token)}", null);
+            using var sessionResponse = await client.GetAsync("/api/session");
+            var currentToken = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var cookieRequest = new HttpRequestMessage(HttpMethod.Post, "/hubs/session/negotiate?negotiateVersion=1");
+            cookieRequest.Headers.Add("Cookie", SessionCookie(sessionResponse));
+            var accepted = await client.SendAsync(cookieRequest);
+            var rejectedLegacyQuery = await unauthenticatedClient.GetAsync($"/api/configuration?access_token={Uri.EscapeDataString(currentToken)}");
+            var rejectedNegotiateQuery = await unauthenticatedClient.PostAsync($"/hubs/session/negotiate?negotiateVersion=1&access_token={Uri.EscapeDataString(currentToken)}", null);
 
             Assert.Equal(HttpStatusCode.Unauthorized, rejected.StatusCode);
             Assert.True(accepted.IsSuccessStatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedLegacyQuery.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, rejectedNegotiateQuery.StatusCode);
+            Assert.NotEmpty(logs.Messages);
+            Assert.DoesNotContain(logs.Messages, message => message.Contains(currentToken, StringComparison.Ordinal));
         }
         finally
         {
@@ -126,7 +245,7 @@ public sealed class WebApiControllerTests
         try
         {
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
-            var token = (await client.GetFromJsonAsync<WebSessionInfo>("/api/session", _jsonOptions))!.Token;
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var coordinator = app.Services.GetRequiredService<WebApprovalCoordinator>();
             coordinator.RegisterOwnerConnection("connection-1");
             using var scope = coordinator.BeginApprovalScope("connection-1");
@@ -163,6 +282,12 @@ public sealed class WebApiControllerTests
             "Needs approval.");
     }
 
+    private static string SessionCookie(HttpResponseMessage response)
+    {
+        var setCookie = response.Headers.GetValues("Set-Cookie").Single();
+        return setCookie.Split(';', 2)[0];
+    }
+
     private static async Task WaitForPendingAsync(WebApprovalCoordinator coordinator, string ownerConnectionId)
     {
         for (var i = 0; i < 20; i++)
@@ -178,12 +303,22 @@ public sealed class WebApiControllerTests
         throw new TimeoutException("Approval request was not queued.");
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options)
+    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoggerProvider? loggerProvider = null, IWebClientNotifier? notifier = null)
     {
         var port = GetFreePort();
         var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
+        if (loggerProvider is not null)
+        {
+            builder.Logging.AddProvider(loggerProvider);
+        }
+
+        if (notifier is not null)
+        {
+            builder.Services.AddSingleton<IWebClientNotifier>(notifier);
+        }
+
         return BuildApp(builder);
     }
 
@@ -209,4 +344,20 @@ public sealed class WebApiControllerTests
         listener.Stop();
         return port;
     }
+
+    private sealed class RecordingStatusNotifier : IWebClientNotifier
+    {
+        public List<WebStatus> Statuses { get; } = [];
+
+        public Task StatusChangedAsync(WebStatus status, CancellationToken cancellationToken = default)
+        {
+            Statuses.Add(status);
+            return Task.CompletedTask;
+        }
+
+        public Task ApprovalsChangedAsync(string? ownerConnectionId, IReadOnlyList<WebPendingApproval> approvals, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task ConversationChangedAsync(WebConversationChanged notification, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
 }

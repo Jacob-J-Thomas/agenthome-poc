@@ -19,10 +19,18 @@ namespace EmbodySense.Core.Persistence.Loops;
 public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
+    // TODO(#268): Reject unmapped root and nested members instead of accepting an implicit compatibility shape. https://github.com/Jacob-J-Thomas/agenthome-poc/issues/268
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) }
+    };
+    private static readonly JsonDocumentOptions _jsonDocumentOptions = new()
+    {
+        AllowTrailingCommas = false,
+        CommentHandling = JsonCommentHandling.Disallow
     };
     private static readonly TimeSpan _leaseRetryDelay = TimeSpan.FromMilliseconds(25);
     private readonly WorkspacePaths _paths;
@@ -124,6 +132,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     /// <inheritdoc />
     public async Task<IReadOnlyList<DefaultConversationTurnRecord>> ListIncompleteAsync(CancellationToken cancellationToken = default)
     {
+        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/259): Replace full historical scans with a bounded active/review index while preserving immutable terminal evidence.
         return await ListAsync(record => record.Checkpoint < DefaultConversationTurnCheckpoint.Terminal, cancellationToken);
     }
 
@@ -177,7 +186,7 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         {
             cancellationToken.ThrowIfCancellationRequested();
             var record = await ReadRequiredAsync(path, cancellationToken);
-            if (predicate(record))
+            if (HasCanonicalFileName(path, record.TurnId) && predicate(record))
             {
                 records.Add(record);
             }
@@ -191,12 +200,15 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         DefaultConversationTurnRecord? record;
         try
         {
-            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            record = await JsonSerializer.DeserializeAsync<DefaultConversationTurnRecord>(stream, _jsonOptions, cancellationToken);
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 16 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            // TODO(#259): Bound the persisted-artifact byte budget before DOM materialization so one corrupt turn cannot consume unbounded memory.
+            using var document = await JsonDocument.ParseAsync(stream, _jsonDocumentOptions, cancellationToken);
+            RejectDuplicateProperties(document.RootElement);
+            record = JsonSerializer.Deserialize<DefaultConversationTurnRecord>(document.RootElement, _jsonOptions);
         }
-        catch (JsonException exception)
+        catch (JsonException)
         {
-            throw new FormatException($"Default-conversation turn artifact `{path}` contains invalid JSON or unsupported enum values.", exception);
+            throw new FormatException($"Default-conversation turn artifact `{path}` contains invalid JSON, unsupported fields, or unsupported enum values.");
         }
 
         if (record is null)
@@ -206,6 +218,30 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
 
         ValidateRecord(record);
         return record;
+    }
+
+    private static void RejectDuplicateProperties(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw new FormatException("Default-conversation turn artifact contains duplicate JSON object members.");
+                }
+
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                RejectDuplicateProperties(item);
+            }
+        }
     }
 
     private static async Task WriteAsync(string path, DefaultConversationTurnRecord record, CancellationToken cancellationToken)
@@ -218,6 +254,12 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
     {
         DefaultConversationTurnProtocolValidator.Validate(record);
         LoopArtifactPaths.ValidateArtifactId(record.TurnId);
+    }
+
+    private static bool HasCanonicalFileName(string path, string turnId)
+    {
+        var expectedFileName = LoopArtifactPaths.ValidateArtifactId(turnId) + ".json";
+        return string.Equals(Path.GetFileName(path), expectedFileName, StringComparison.Ordinal);
     }
 
     private static bool ImmutableIdentityMatches(DefaultConversationTurnRecord left, DefaultConversationTurnRecord right)
@@ -249,10 +291,21 @@ public sealed class DefaultConversationTurnStore : IDefaultConversationTurnStore
         return candidate.ProviderOutcome >= existing.ProviderOutcome
             && (existing.AssistantMessage is null || existing.AssistantMessage == candidate.AssistantMessage)
             && (existing.ProviderResponseId is null || string.Equals(existing.ProviderResponseId, candidate.ProviderResponseId, StringComparison.Ordinal))
+            && ReviewCauseAdvances(existing, candidate)
             && (existing.ReviewDetail is null || string.Equals(existing.ReviewDetail, candidate.ReviewDetail, StringComparison.Ordinal))
             && (existing.ReviewResolution is null || existing.ReviewResolution == candidate.ReviewResolution)
             && (!existing.RunProjectionSynchronized || candidate.RunProjectionSynchronized)
             && (existing.Run.Status == LoopRunStatus.Started || RunsEqual(existing.Run, candidate.Run));
+    }
+
+    private static bool ReviewCauseAdvances(DefaultConversationTurnRecord existing, DefaultConversationTurnRecord candidate)
+    {
+        return existing.ReviewCause == candidate.ReviewCause
+            || existing.ReviewCause == DefaultConversationTurnReviewCause.None
+            && candidate.ReviewCause != DefaultConversationTurnReviewCause.None
+            && existing.Checkpoint < DefaultConversationTurnCheckpoint.TerminalPrepared
+            && candidate.Checkpoint == DefaultConversationTurnCheckpoint.TerminalPrepared
+            && candidate.Run.Status == LoopRunStatus.NeedsReview;
     }
 
     private static bool TransitionHistoryExtends(DefaultConversationTurnRecord existing, DefaultConversationTurnRecord candidate)

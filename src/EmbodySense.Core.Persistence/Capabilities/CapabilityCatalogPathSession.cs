@@ -202,6 +202,38 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         return ReadAllBytesAsync(path, maximumBytes, allowEmpty: true, missingIsNull: true, cancellationToken, requireStableBinding: true);
     }
 
+    public FileStream OpenBoundReadLease(string path, int maximumBytes)
+    {
+        var safePath = RequireContained(path);
+        var parentPath = Path.GetDirectoryName(safePath)!;
+        var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        EnsurePhysicalDirectoryBinding(parentPath);
+        var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new FileNotFoundException("Capability catalog artifact is missing.", safePath);
+        FileStream? stream = null;
+        try
+        {
+            stream = new FileStream(handle, FileAccess.Read, 4096, isAsync: false);
+            if (stream.Length <= 0 || stream.Length > maximumBytes)
+            {
+                throw new FormatException("The capability catalog artifact is empty or exceeds its bounded size.");
+            }
+            var physicalIdentity = CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(stream.SafeFileHandle);
+            EnsurePhysicalDirectoryBinding(parentPath);
+            using var revalidated = CapabilityCatalogNativeFileSystem.OpenRegularFile(safePath, parent, Path.GetFileName(safePath), FileMode.Open, FileAccess.Read, FileShare.Read, writeThrough: false) ?? throw new IOException("Capability catalog artifact disappeared while opening an execution lease.");
+            if (!string.Equals(physicalIdentity, CapabilityCatalogNativeFileSystem.GetPhysicalIdentityMaterial(revalidated), StringComparison.Ordinal))
+            {
+                throw new IOException("Capability catalog artifact was substituted while opening an execution lease.");
+            }
+            var result = stream;
+            stream = null;
+            return result;
+        }
+        finally
+        {
+            stream?.Dispose();
+        }
+    }
+
     private async Task<byte[]?> ReadAllBytesAsync(string path, int maximumBytes, bool allowEmpty, bool missingIsNull, CancellationToken cancellationToken, bool requireStableBinding = false)
     {
         var safePath = RequireContained(path);

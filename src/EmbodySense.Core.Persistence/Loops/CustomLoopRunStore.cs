@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -31,7 +32,9 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
+    private const int MaximumAtomicMoveAttempts = 3;
     private static readonly byte[] _discoveryIndexPendingContent = "pending\n"u8.ToArray();
+    private static readonly TimeSpan _atomicMoveRetryDelay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan _discoveryIndexMaintenanceTimeout = TimeSpan.FromSeconds(30);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _processMutationGates = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
@@ -287,9 +290,12 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         }
 
         CustomLoopRunDiscoveryIndex index;
+        var rebuiltFromCanonicalArtifacts = false;
         await using (var mutation = await AcquireMutationLockAsync(cancellationToken))
         {
-            index = await LoadDiscoveryIndexAsync(cancellationToken);
+            var loaded = await LoadDiscoveryIndexWithSourceAsync(cancellationToken);
+            index = loaded.Index;
+            rebuiltFromCanonicalArtifacts = loaded.RebuiltFromCanonicalArtifacts;
             CacheDiscoveryIndex(index, GetDiscoveryIndexFingerprint());
         }
 
@@ -299,7 +305,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             return null;
         }
 
-        var verified = await ValidateMonitorEntryAsync(entry, cancellationToken);
+        var verified = rebuiltFromCanonicalArtifacts ? await ValidateRebuiltMonitorEntryAsync(entry, cancellationToken) : await ValidateMonitorEntryAsync(entry, cancellationToken);
         if (verified is not null)
         {
             return new CustomLoopRunMonitor(verified.Summary, verified.ArtifactHash);
@@ -315,7 +321,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                 return null;
             }
 
-            verified = await ValidateMonitorEntryAsync(entry, cancellationToken);
+            verified = await ValidateRebuiltMonitorEntryAsync(entry, cancellationToken);
             return verified is null
                 ? throw new FormatException($"Custom loop run `{safeRunId}` changed independently of its discovery metadata and could not be repaired.")
                 : new CustomLoopRunMonitor(verified.Summary, verified.ArtifactHash);
@@ -1066,6 +1072,11 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private async Task<CustomLoopRunDiscoveryIndex> LoadDiscoveryIndexAsync(CancellationToken cancellationToken)
     {
+        return (await LoadDiscoveryIndexWithSourceAsync(cancellationToken)).Index;
+    }
+
+    private async Task<(CustomLoopRunDiscoveryIndex Index, bool RebuiltFromCanonicalArtifacts)> LoadDiscoveryIndexWithSourceAsync(CancellationToken cancellationToken)
+    {
         DeleteOrphanedDiscoveryIndexTemporaryArtifacts();
         var hasPendingMutation = File.Exists(_discoveryIndexPendingPath);
         if (hasPendingMutation)
@@ -1078,7 +1089,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             var index = await ReadDiscoveryIndexAsync(cancellationToken);
             if (!hasPendingMutation && index is not null && DiscoveryIndexMatchesArtifacts(index))
             {
-                return index;
+                return (index, false);
             }
         }
         catch (FormatException exception) when (exception is not UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
@@ -1086,7 +1097,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
             // The index is derived evidence. Rebuild it from canonical run artifacts below.
         }
 
-        return await RebuildDiscoveryIndexAsync(previousRevision: 0, cancellationToken);
+        return (await RebuildDiscoveryIndexAsync(previousRevision: 0, cancellationToken), true);
     }
 
     private async Task<CustomLoopRunDiscoveryIndex?> ReadCleanDiscoveryIndexAsync(CancellationToken cancellationToken)
@@ -1275,6 +1286,20 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         {
             if (summaryWasVerified)
             {
+                try
+                {
+                    var observedHash = await ComputeBoundedArtifactHashAsync(path, cancellationToken);
+                    if (!string.Equals(observedHash, entry.ArtifactHash, StringComparison.Ordinal))
+                    {
+                        return null;
+                    }
+                }
+                catch (IOException exception) when (IsLockContention(exception))
+                {
+                    // A previously verified cache remains the only readable snapshot while another reader owns an
+                    // exclusive lease. Watcher uncertainty and all accessible-file paths still require current bytes.
+                }
+
                 ThrowIfRunIdentityIsAmbiguous(entry.Summary.Id, entry.Summary.LoopId);
                 return new CachedMonitorResult(entry.Summary, entry.ArtifactHash);
             }
@@ -1306,6 +1331,36 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         {
             return null;
         }
+    }
+
+    private async Task<CachedMonitorResult?> ValidateRebuiltMonitorEntryAsync(CustomLoopRunDiscoveryIndexEntry entry, CancellationToken cancellationToken)
+    {
+        ThrowIfRunIdentityIsAmbiguous(entry.Summary.Id, entry.Summary.LoopId);
+        var path = GetRunPath(entry.Summary.LoopId, entry.Summary.Id);
+        var info = new FileInfo(path);
+        info.Refresh();
+        if (!info.Exists || info.Length != entry.ArtifactUtf8Bytes || info.LastWriteTimeUtc.Ticks != entry.ArtifactLastWriteUtcTicks)
+        {
+            return null;
+        }
+
+        EnsureSafeArtifactPath(path, mustExist: true);
+        var content = await ReadBoundedArtifactAsync(path, cancellationToken);
+        if (!string.Equals(ComputeHash(content), entry.ArtifactHash, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        lock (_monitorCacheGate)
+        {
+            if (!_monitorWatcherUncertain && _monitorWatcher is not null && !_monitorArtifactChangeVersions.ContainsKey(path))
+            {
+                _verifiedMonitorSummaryBindings.Add(entry.SummaryBindingHash);
+            }
+        }
+
+        ThrowIfRunIdentityIsAmbiguous(entry.Summary.Id, entry.Summary.LoopId);
+        return new CachedMonitorResult(entry.Summary, entry.ArtifactHash);
     }
 
     private void ThrowIfRunIdentityIsAmbiguous(string runId, string expectedLoopId)
@@ -1608,24 +1663,13 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         var summaries = new List<CustomLoopRunSummary>();
         foreach (var entry in entries)
         {
-            var summary = entry.Summary;
-            var path = GetRunPath(summary.LoopId, summary.Id);
-            RunArtifact artifact;
-            try
-            {
-                artifact = await ReadArtifactAsync(new RunArtifactLocation(path, summary.LoopId, summary.Id), cancellationToken);
-            }
-            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
-            {
-                return null;
-            }
-            var canonicalSummary = artifact.Run is not null ? ToSummary(artifact.Run) : ToSummary(artifact.Tombstone!);
-            if (!string.Equals(artifact.PersistedHash, entry.ArtifactHash, StringComparison.Ordinal) || canonicalSummary != summary)
+            var verified = await ValidateMonitorEntryAsync(entry, cancellationToken);
+            if (verified is null)
             {
                 return null;
             }
 
-            summaries.Add(canonicalSummary);
+            summaries.Add(verified.Summary);
         }
 
         return summaries.ToArray();
@@ -1810,13 +1854,45 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private async Task<RunArtifact> ReadArtifactAsync(RunArtifactLocation location, CancellationToken cancellationToken)
     {
-        var utf8Json = await ReadBoundedArtifactAsync(location.Path, cancellationToken);
-        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json, _jsonOptions.MaxDepth, "Custom loop run artifact", location.Path);
+        EnsureSafeArtifactPath(location.Path, mustExist: true);
+        await using var stream = new FileStream(location.Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
+        {
+            throw new FormatException($"Custom loop run `{location.Path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
+        }
+
+        var length = checked((int)stream.Length);
+        var rented = ArrayPool<byte>.Shared.Rent(length);
         try
         {
+            await stream.ReadExactlyAsync(rented.AsMemory(0, length), cancellationToken);
+            return ReadArtifact(location, rented.AsMemory(0, length));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented, clearArray: true);
+        }
+    }
+
+    private RunArtifact ReadArtifact(RunArtifactLocation location, ReadOnlyMemory<byte> utf8Json)
+    {
+        CustomLoopJsonDepthPolicy.ValidatePersistedJsonDepth(utf8Json.Span, _jsonOptions.MaxDepth, "Custom loop run artifact", location.Path);
+        try
+        {
+            var persistedHash = ComputeHash(utf8Json.Span);
+            if (CustomLoopRunArtifactCodec.IsEnvelope(utf8Json.Span))
+            {
+                var run = CustomLoopRunArtifactCodec.DecodeDepthValidated(utf8Json, location.Path);
+                if (!string.Equals(run.Id, location.RunId, StringComparison.Ordinal) || !string.Equals(run.LoopId, location.LoopId, StringComparison.Ordinal))
+                {
+                    throw new FormatException($"Custom loop run `{location.Path}` identity does not match its containing directory and filename.");
+                }
+
+                return new RunArtifact(location, run, null, persistedHash, utf8Json.Length);
+            }
+
             using var document = JsonDocument.Parse(utf8Json, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = _jsonOptions.MaxDepth });
             RejectDuplicateProperties(document.RootElement, "$", new HashSet<string>(StringComparer.Ordinal));
-            var persistedHash = ComputeHash(utf8Json);
             if (document.RootElement.TryGetProperty("artifactKind", out var artifactKind))
             {
                 if (artifactKind.ValueKind != JsonValueKind.String)
@@ -1827,31 +1903,19 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                 if (string.Equals(artifactKind.GetString(), CustomLoopTraceTombstone.CurrentArtifactKind, StringComparison.Ordinal))
                 {
                     RequireCompleteContract(document.RootElement, typeof(CustomLoopTraceTombstone), "$");
-                    var tombstone = JsonSerializer.Deserialize<CustomLoopTraceTombstone>(utf8Json, _jsonOptions) ?? throw new FormatException($"Custom loop trace tombstone `{location.Path}` was empty.");
+                    var tombstone = JsonSerializer.Deserialize<CustomLoopTraceTombstone>(utf8Json.Span, _jsonOptions) ?? throw new FormatException($"Custom loop trace tombstone `{location.Path}` was empty.");
                     ValidateTombstone(tombstone);
                     if (!string.Equals(tombstone.RunId, location.RunId, StringComparison.Ordinal) || !string.Equals(tombstone.LoopId, location.LoopId, StringComparison.Ordinal))
                     {
                         throw new FormatException($"Custom loop trace tombstone `{location.Path}` identity does not match its containing directory and filename.");
                     }
 
-                    if (utf8Json.LongLength > CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes)
+                    if (utf8Json.Length > CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes)
                     {
                         throw new FormatException($"Custom loop trace tombstone `{location.Path}` exceeds {CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes} UTF-8 bytes.");
                     }
 
-                    return new RunArtifact(location, null, tombstone, persistedHash, utf8Json.LongLength);
-                }
-
-                if (CustomLoopRunArtifactCodec.IsEnvelope(document.RootElement))
-                {
-                    var run = CustomLoopRunArtifactCodec.DecodeDepthValidated(utf8Json, location.Path);
-                    ValidateCanonicalRun(run);
-                    if (!string.Equals(run.Id, location.RunId, StringComparison.Ordinal) || !string.Equals(run.LoopId, location.LoopId, StringComparison.Ordinal))
-                    {
-                        throw new FormatException($"Custom loop run `{location.Path}` identity does not match its containing directory and filename.");
-                    }
-
-                    return new RunArtifact(location, run, null, persistedHash, utf8Json.LongLength);
+                    return new RunArtifact(location, null, tombstone, persistedHash, utf8Json.Length);
                 }
 
                 throw new FormatException($"Custom loop trace `{location.Path}` has an unsupported artifact kind.");
@@ -1888,6 +1952,19 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
         var content = new byte[(int)stream.Length];
         await stream.ReadExactlyAsync(content, cancellationToken);
         return content;
+    }
+
+    private async Task<string> ComputeBoundedArtifactHashAsync(string path, CancellationToken cancellationToken)
+    {
+        EnsureSafeArtifactPath(path, mustExist: true);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length <= 0 || stream.Length > CustomLoopLimits.MaxRunTraceUtf8Bytes)
+        {
+            throw new FormatException($"Custom loop run `{path}` must contain between 1 and {CustomLoopLimits.MaxRunTraceUtf8Bytes} UTF-8 bytes.");
+        }
+
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     private static byte[] SerializeBounded(CustomLoopRunRecord run)
@@ -2444,7 +2521,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
             EnsureSafeDirectory(directory, create: false);
             EnsureSafeArtifactPath(root, temporaryPath, mustExist: true);
-            File.Move(temporaryPath, path, overwrite);
+            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, cancellationToken);
         }
         finally
         {
@@ -2489,7 +2566,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
             EnsureSafeDirectory(directory, create: false);
             EnsureSafeArtifactPath(temporaryPath, mustExist: true);
-            File.Move(temporaryPath, path, overwrite);
+            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, cancellationToken);
         }
         finally
         {
@@ -2498,6 +2575,45 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
                 File.Delete(temporaryPath);
             }
         }
+    }
+
+    private static async Task MoveAtomicallyWithRetryAsync(string sourcePath, string destinationPath, bool overwrite, CancellationToken cancellationToken)
+    {
+        var attempt = 0;
+        while (true)
+        {
+            attempt++;
+            try
+            {
+                File.Move(sourcePath, destinationPath, overwrite);
+                return;
+            }
+            catch (Exception exception) when (attempt < MaximumAtomicMoveAttempts && IsTransientWindowsFileAccess(exception))
+            {
+                await Task.Delay(_atomicMoveRetryDelay, cancellationToken);
+            }
+        }
+    }
+
+    private static bool IsTransientWindowsFileAccess(Exception exception)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        if (exception is UnauthorizedAccessException)
+        {
+            return true;
+        }
+
+        if (exception is not IOException ioException)
+        {
+            return false;
+        }
+
+        var errorCode = ioException.HResult & 0xFFFF;
+        return errorCode is 5 or 32 or 33;
     }
 
     private string GetRunPath(string loopId, string runId)
@@ -2855,7 +2971,7 @@ public sealed class CustomLoopRunStore : ICustomLoopRunStore, IDisposable
 
     private static bool IsSurface(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= CustomLoopLimits.MaxArtifactIdCharacters && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
 
-    private static string ComputeHash(byte[] content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+    private static string ComputeHash(ReadOnlySpan<byte> content) => Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
 
     private static string ComputeSummaryBindingHash(CustomLoopRunSummary summary, string artifactHash)
     {

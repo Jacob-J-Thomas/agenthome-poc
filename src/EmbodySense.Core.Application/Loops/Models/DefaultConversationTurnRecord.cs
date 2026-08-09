@@ -30,6 +30,7 @@ public sealed record DefaultConversationTurnRecord(
     string? ProviderResponseId,
     DefaultConversationTurnCheckpoint Checkpoint,
     bool RunProjectionSynchronized,
+    DefaultConversationTurnReviewCause ReviewCause,
     string? ReviewDetail,
     DefaultConversationTurnReviewResolution? ReviewResolution,
     IReadOnlyList<DefaultConversationTurnTransition> Transitions)

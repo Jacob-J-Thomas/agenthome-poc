@@ -118,7 +118,7 @@ public sealed class DefaultConversationTurnRecoveryService
                     return await ParkConflictAsync(record, originalCheckpoint, "The transcript diverged while the provider outcome was unknown; existing content was preserved and no provider request was repeated.", cancellationToken);
                 }
 
-                record = await FinalizeAsync(record, LoopRunStatus.NeedsReview, OutcomeUnknownDetail(record), cancellationToken);
+                record = await FinalizeAsync(record, LoopRunStatus.NeedsReview, OutcomeUnknownDetail(record), cancellationToken, DefaultConversationTurnReviewCause.OutcomeUnknown);
                 return Result(record, originalCheckpoint, DefaultConversationTurnRecoveryClassification.ProviderOutcomeUnknown, OutcomeUnknownDetail(record));
 
             case DefaultConversationTurnCheckpoint.ProviderOutcomeObserved:
@@ -129,7 +129,7 @@ public sealed class DefaultConversationTurnRecoveryService
                     var reviewDetail = transcriptMatches
                         ? auditFailure
                         : $"{auditFailure} Recovery also detected divergent transcript content and preserved it exactly.";
-                    record = await FinalizeAsync(record, LoopRunStatus.NeedsReview, reviewDetail, cancellationToken);
+                    record = await FinalizeAsync(record, LoopRunStatus.NeedsReview, reviewDetail, cancellationToken, DefaultConversationTurnReviewCause.ObservedWithAuditFailure);
                     return Result(record, originalCheckpoint, DefaultConversationTurnRecoveryClassification.ProviderOutcomeObserved, reviewDetail);
                 }
 
@@ -212,11 +212,11 @@ public sealed class DefaultConversationTurnRecoveryService
 
     private async Task<DefaultConversationTurnRecoveryResult> ParkConflictAsync(DefaultConversationTurnRecord record, DefaultConversationTurnCheckpoint originalCheckpoint, string detail, CancellationToken cancellationToken)
     {
-        record = await FinalizeAsync(record, LoopRunStatus.NeedsReview, detail, cancellationToken);
+        record = await FinalizeAsync(record, LoopRunStatus.NeedsReview, detail, cancellationToken, DefaultConversationTurnReviewCause.TranscriptConflict);
         return Result(record, originalCheckpoint, DefaultConversationTurnRecoveryClassification.Conflict, detail);
     }
 
-    private async Task<DefaultConversationTurnRecord> FinalizeAsync(DefaultConversationTurnRecord record, LoopRunStatus status, string detail, CancellationToken cancellationToken)
+    private async Task<DefaultConversationTurnRecord> FinalizeAsync(DefaultConversationTurnRecord record, LoopRunStatus status, string detail, CancellationToken cancellationToken, DefaultConversationTurnReviewCause reviewCause = DefaultConversationTurnReviewCause.None)
     {
         if (record.Checkpoint < DefaultConversationTurnCheckpoint.TerminalPrepared)
         {
@@ -229,7 +229,7 @@ public sealed class DefaultConversationTurnRecoveryService
                 LoopRunStatus.Failed => record.Run.Fail(now, detail),
                 _ => throw new ArgumentOutOfRangeException(nameof(status), status, "Choose a terminal recovery status.")
             };
-            record = await AdvanceAsync(record, DefaultConversationTurnCheckpoint.TerminalPrepared, "Recovery persisted the desired terminal run status and checkpoint.", DefaultConversationTurnBoundary.TerminalPrepared, cancellationToken, run: terminalRun, reviewDetail: status == LoopRunStatus.NeedsReview ? detail : null);
+            record = await AdvanceAsync(record, DefaultConversationTurnCheckpoint.TerminalPrepared, "Recovery persisted the desired terminal run status and checkpoint.", DefaultConversationTurnBoundary.TerminalPrepared, cancellationToken, run: terminalRun, reviewDetail: status == LoopRunStatus.NeedsReview ? detail : null, reviewCause: status == LoopRunStatus.NeedsReview ? reviewCause : DefaultConversationTurnReviewCause.None);
         }
 
         await _loopRuns.SaveAsync(record.Run, cancellationToken);
@@ -246,9 +246,10 @@ public sealed class DefaultConversationTurnRecoveryService
         CancellationToken cancellationToken,
         LoopRunRecord? run = null,
         bool? runProjectionSynchronized = null,
-        string? reviewDetail = null)
+        string? reviewDetail = null,
+        DefaultConversationTurnReviewCause? reviewCause = null)
     {
-        var candidate = record.Advance(checkpoint, DateTimeOffset.UtcNow, detail, run: run, runProjectionSynchronized: runProjectionSynchronized, reviewDetail: reviewDetail);
+        var candidate = record.Advance(checkpoint, DateTimeOffset.UtcNow, detail, run: run, runProjectionSynchronized: runProjectionSynchronized, reviewDetail: reviewDetail, reviewCause: reviewCause);
         var result = await _turns.UpdateAsync(candidate, record.LifecycleVersion, cancellationToken);
         if (result.Status is not (DefaultConversationTurnStoreStatus.Updated or DefaultConversationTurnStoreStatus.Replay) || result.Record is null)
         {

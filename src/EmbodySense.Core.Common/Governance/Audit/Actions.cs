@@ -61,6 +61,26 @@ public static partial class AuditSchema
         public const string LoopInvocationReceiptRetentionOutcome = "loop.invocation_receipt.retention.outcome";
 
         /// <summary>
+        /// Identifies the lifecycle-control receipt retention intent audit action.
+        /// </summary>
+        public const string LoopControlReceiptRetentionIntent = "loop.control_receipt.retention.intent";
+
+        /// <summary>
+        /// Identifies the lifecycle-control receipt retention outcome audit action.
+        /// </summary>
+        public const string LoopControlReceiptRetentionOutcome = "loop.control_receipt.retention.outcome";
+
+        /// <summary>
+        /// Identifies a governed definition authoring-receipt cleanup intent.
+        /// </summary>
+        public const string LoopDefinitionReceiptRetentionIntent = "loop.definition_receipt.retention.intent";
+
+        /// <summary>
+        /// Identifies a governed definition authoring-receipt cleanup outcome.
+        /// </summary>
+        public const string LoopDefinitionReceiptRetentionOutcome = "loop.definition_receipt.retention.outcome";
+
+        /// <summary>
         /// Identifies the loop trace deletion intent audit action.
         /// </summary>
         public const string LoopTraceDeletionIntent = "loop.trace.deletion.intent";
@@ -114,5 +134,21 @@ public static partial class AuditSchema
         /// Identifies the tool execute audit action.
         /// </summary>
         public const string ToolExecute = "tool.execute";
+
+        /// <summary>
+        /// Identifies a capability artifact intake outcome.
+        /// </summary>
+        public const string CapabilityArtifactIntake = "capability.artifact.intake";
+
+        /// <summary>Identifies a capability artifact verification outcome.</summary>
+        public const string CapabilityArtifactVerification = "capability.artifact.verification";
+
+        /// <summary>Identifies a capability artifact activation or rollback outcome.</summary>
+        public const string CapabilityArtifactActivation = "capability.artifact.activation";
+
+        /// <summary>
+        /// Identifies a capability executable invocation intent or outcome.
+        /// </summary>
+        public const string CapabilityExecutableInvocation = "capability.executable.invocation";
     }
 }

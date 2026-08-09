@@ -97,17 +97,15 @@ public sealed class DefaultConversationTurnProtocolValidatorTests
         var cancelled = PrepareTerminal(AdvanceTo(DefaultConversationTurnCheckpoint.RunStarted), LoopRunStatus.Cancelled);
         DefaultConversationTurnProtocolValidator.Validate(SynchronizeTerminal(cancelled));
 
-        foreach (var checkpoint in new[]
+        var outcomeUnknown = SynchronizeTerminal(PrepareTerminal(AdvanceTo(DefaultConversationTurnCheckpoint.ProviderDispatchStarted), LoopRunStatus.NeedsReview));
+        DefaultConversationTurnProtocolValidator.Validate(outcomeUnknown);
+        DefaultConversationTurnProtocolValidator.Validate(outcomeUnknown.ResolveReview(NextTime(outcomeUnknown)));
+
+        foreach (var checkpoint in new[] { DefaultConversationTurnCheckpoint.AssistantPublicationPrepared, DefaultConversationTurnCheckpoint.AssistantPublished })
         {
-            DefaultConversationTurnCheckpoint.ProviderDispatchStarted,
-            DefaultConversationTurnCheckpoint.AssistantPublicationPrepared,
-            DefaultConversationTurnCheckpoint.AssistantPublished
-        })
-        {
-            var record = PrepareTerminal(AdvanceTo(checkpoint), LoopRunStatus.NeedsReview);
-            record = SynchronizeTerminal(record);
+            var record = SynchronizeTerminal(PrepareTerminal(AdvanceTo(checkpoint), LoopRunStatus.NeedsReview));
             DefaultConversationTurnProtocolValidator.Validate(record);
-            DefaultConversationTurnProtocolValidator.Validate(record.ResolveReview(NextTime(record)));
+            Assert.Throws<InvalidOperationException>(() => record.ResolveReview(NextTime(record)));
         }
     }
 

@@ -132,6 +132,14 @@
               aria-live="polite"
               hidden
             ></button>
+            <button
+              id="retryConnectionButton"
+              class="statusbar-retry"
+              type="button"
+              hidden
+            >
+              Retry connection
+            </button>
             <span id="clientStatus">Web connecting</span
             ><span>Local agent body</span>
           </div>
@@ -162,6 +170,7 @@
                   id="messageInput"
                   name="message"
                   rows="3"
+                  maxlength="24000"
                   placeholder="Send a message to the agent"
                 ></textarea>
                 <div class="composer-actions">
@@ -227,6 +236,80 @@
             aria-labelledby="loopsNav"
             hidden
           >
+            <section
+              id="loopInitializationPanel"
+              class="loop-initialization-panel"
+              aria-labelledby="loopInitializationTitle"
+              aria-describedby="loopInitializationEffects loopInitializationNoRun"
+              hidden
+            >
+              <p class="eyebrow">Workspace prerequisite</p>
+              <h1 id="loopInitializationTitle" tabindex="-1">
+                Initialize this workspace to author loops
+              </h1>
+              <p>
+                Loops are durable, governed workspace artifacts. EmbodySense
+                needs its local body scaffold before it can read a role, show
+                the loop catalog, or enable authoring for
+                <code id="loopInitializationRoot">this workspace</code>.
+              </p>
+              <div
+                id="loopInitializationEffects"
+                class="initialization-effects"
+              >
+                <strong>Initialization will:</strong>
+                <ul>
+                  <li>
+                    create <code>.agent/</code> identity, role, context, memory,
+                    permissions, audit, loop, task, skill, hook, recipe, log,
+                    and export scaffolding;
+                  </li>
+                  <li>
+                    create the workspace <code>private/</code>,
+                    <code>shared/</code>, <code>generated/</code>, and
+                    <code>system/</code> directories;
+                  </li>
+                  <li>
+                    preserve protected seed documents that already exist while
+                    refreshing generated memory, permissions, and audit
+                    guidance.
+                  </li>
+                </ul>
+              </div>
+              <p id="loopInitializationNoRun" class="initialization-no-run">
+                No custom loop is created, and no loop or model inference runs
+                as a side effect.
+              </p>
+              <p
+                id="loopInitializationStatus"
+                class="initialization-status"
+                role="status"
+                aria-live="polite"
+              ></p>
+              <div class="initialization-actions">
+                <button
+                  id="initializeLoopsWorkspaceButton"
+                  class="primary-button"
+                  type="button"
+                >
+                  Initialize workspace
+                </button>
+                <button
+                  id="declineLoopsInitializationButton"
+                  class="secondary-button"
+                  type="button"
+                >
+                  Not now
+                </button>
+              </div>
+            </section>
+            <p
+              id="loopInitializationAnnouncement"
+              class="sr-only"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            ></p>
             <div class="loop-workspace">
               <aside class="loop-sidebar" aria-label="Loop definitions">
                 <div class="sidebar-heading">
@@ -350,6 +433,16 @@
                   >
                     Runs <span id="runCount" class="tab-count">0</span>
                   </button>
+                  <button
+                    id="retentionTab"
+                    class="workspace-tab"
+                    role="tab"
+                    aria-selected="false"
+                    aria-controls="retentionView"
+                    type="button"
+                  >
+                    Retention
+                  </button>
                 </nav>
 
                 <div id="builderLayout" class="builder-layout">
@@ -465,6 +558,42 @@
                         <div id="runTimeline" class="timeline-scroll"></div>
                       </section>
                     </div>
+                    <section
+                      id="retentionView"
+                      class="retention-view"
+                      role="tabpanel"
+                      aria-labelledby="retentionTab"
+                      hidden
+                    >
+                      <header class="retention-header">
+                        <div>
+                          <p class="eyebrow">Inspectable governed evidence</p>
+                          <h2>Receipt retention</h2>
+                          <p>
+                            Exact replay evidence is retained for 30 days.
+                            Cleanup is explicit, bounded, audited, and never
+                            runs automatically.
+                          </p>
+                        </div>
+                        <button
+                          id="refreshRetentionButton"
+                          class="secondary-button compact-button"
+                          type="button"
+                        >
+                          Refresh posture
+                        </button>
+                      </header>
+                      <div
+                        id="retentionNotice"
+                        class="retention-notice"
+                        role="status"
+                        aria-live="polite"
+                      ></div>
+                      <div
+                        id="retentionContent"
+                        class="retention-content"
+                      ></div>
+                    </section>
                   </section>
 
                   <aside class="inspector" aria-label="Selected loop item">

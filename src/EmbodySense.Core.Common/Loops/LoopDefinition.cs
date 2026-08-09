@@ -44,7 +44,7 @@ public sealed record LoopDefinition(
     /// Gets the loop graph definition.
     /// </summary>
     /// <value>The loop graph definition.</value>
-    public LoopGraphDefinition Graph { get; init; } = null!;
+    public BuiltInLoopGraphDefinition Graph { get; init; } = null!;
 
     /// <summary>Gets the bounded capability requirements declared by this loop.</summary>
     public CapabilityDependencyManifest CapabilityRequirements { get; init; } = null!;
@@ -77,7 +77,7 @@ public sealed record LoopDefinition(
             LoopState.Enabled)
         {
             EditMode = LoopEditMode.SystemLocked,
-            Graph = LoopGraphDefinition.CreateDefaultConversation(),
+            Graph = BuiltInLoopGraphDefinition.CreateDefaultConversation(),
             CapabilityRequirements = LoopCapabilityRequirements.CreateDefaultConversationManifest()
         };
     }
