@@ -260,6 +260,11 @@ public sealed class ToolResultRetentionStoreTests
     [InlineData("chunk-content")]
     [InlineData("aggregate-hash")]
     [InlineData("oversized-manifest")]
+    [InlineData("manifest-bounds")]
+    [InlineData("chunk-manifest")]
+    [InlineData("chunk-bounds")]
+    [InlineData("unexpected-file")]
+    [InlineData("nested-directory")]
     public async Task RetainAsync_fails_closed_when_existing_retention_state_is_not_canonical(string corruption)
     {
         using var workspace = new TestWorkspace();
@@ -296,9 +301,35 @@ public sealed class ToolResultRetentionStoreTests
                 manifest["contentSha256"] = new string('0', 64);
                 await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             }
-            else
+            else if (corruption == "oversized-manifest")
             {
                 await File.WriteAllTextAsync(manifestPath, new string('x', ToolResultRetentionLimits.MaxManifestUtf8Bytes + 1));
+            }
+            else if (corruption == "manifest-bounds")
+            {
+                var manifest = JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+                manifest["characterCount"] = -1;
+                await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            else if (corruption == "chunk-manifest")
+            {
+                var manifest = JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+                manifest["chunks"]!.AsArray()[0]!["sequence"] = 2;
+                await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            else if (corruption == "chunk-bounds")
+            {
+                var manifest = JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))!.AsObject();
+                manifest["chunks"]!.AsArray()[0]!["utf8ByteCount"] = 9;
+                await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            else if (corruption == "unexpected-file")
+            {
+                await File.WriteAllTextAsync(Path.Combine(Path.GetDirectoryName(manifestPath)!, "unexpected.txt"), "unexpected");
+            }
+            else
+            {
+                Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(manifestPath)!, "unexpected-directory"));
             }
         }
 
@@ -306,6 +337,55 @@ public sealed class ToolResultRetentionStoreTests
 
         Assert.Equal(ToolResultRetentionStatus.Unavailable, unavailable.Status);
         Assert.Contains("InvalidDataException", unavailable.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetainAsync_fails_closed_for_missing_workspace_invalid_identity_and_exhausted_timestamp()
+    {
+        using var workspace = new TestWorkspace();
+        using var oversizedManifestWorkspace = new TestWorkspace();
+        var missingPaths = new WorkspacePaths(workspace.File("missing-workspace"));
+        var missing = await new ToolResultRetentionStore(missingPaths)
+            .RetainAsync(Result(new string('a', 32), "missing"), LoopDefinition.CreateDefaultConversation());
+
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var invalid = await new ToolResultRetentionStore(paths)
+            .RetainAsync(Result("not-a-canonical-request-id", "invalid"), LoopDefinition.CreateDefaultConversation());
+        var maximumTimeStore = new ToolResultRetentionStore(paths, new FixedTimeProvider(DateTimeOffset.MaxValue));
+        var first = await maximumTimeStore.RetainAsync(Result(new string('b', 32), "first"), LoopDefinition.CreateDefaultConversation());
+        var exhausted = await maximumTimeStore.RetainAsync(Result(new string('c', 32), "second"), LoopDefinition.CreateDefaultConversation());
+        var oversizedManifest = await new ToolResultRetentionStore(new WorkspacePaths(oversizedManifestWorkspace.RootPath))
+            .RetainAsync(
+                Result(new string('f', 32), "bounded output", targetPath: new string('p', ToolResultRetentionLimits.MaxManifestUtf8Bytes)),
+                LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, missing.Status);
+        Assert.Contains("InvalidDataException", missing.Detail, StringComparison.Ordinal);
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, invalid.Status);
+        Assert.Contains("InvalidDataException", invalid.Detail, StringComparison.Ordinal);
+        Assert.Equal(ToolResultRetentionStatus.Retained, first.Status);
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, exhausted.Status);
+        Assert.Contains("InvalidDataException", exhausted.Detail, StringComparison.Ordinal);
+        Assert.Equal(ToolResultRetentionStatus.Unavailable, oversizedManifest.Status);
+        Assert.Contains("bounded manifest or artifact byte limit", oversizedManifest.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetainAsync_forgets_a_removed_cached_artifact_before_writing_a_new_request()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ToolResultRetentionStore(paths);
+        var firstRequestId = new string('d', 32);
+        Assert.Equal(
+            ToolResultRetentionStatus.Retained,
+            (await store.RetainAsync(Result(firstRequestId, "first"), LoopDefinition.CreateDefaultConversation())).Status);
+        Directory.Delete(Path.Combine(paths.ToolResponsesPath, firstRequestId), recursive: true);
+
+        var second = await store.RetainAsync(Result(new string('e', 32), "second"), LoopDefinition.CreateDefaultConversation());
+
+        Assert.Equal(ToolResultRetentionStatus.Retained, second.Status);
+        Assert.False(Directory.Exists(Path.Combine(paths.ToolResponsesPath, firstRequestId)));
     }
 
     [Fact]

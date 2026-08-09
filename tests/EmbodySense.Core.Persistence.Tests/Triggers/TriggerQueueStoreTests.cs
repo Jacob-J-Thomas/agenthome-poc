@@ -89,6 +89,28 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Unix_linked_queue_lock_is_never_followed_during_bounded_acquisition()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var root = QueueRoot(paths);
+        var target = workspace.File("outside-lock-target");
+        Directory.CreateDirectory(root);
+        await File.WriteAllTextAsync(target, "outside lock");
+        File.CreateSymbolicLink(Path.Combine(root, ".queue.lock"), target);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new TriggerQueueStore(paths).GetSnapshotAsync(TriggerQueueTestData.CreatedAtUtc.AddSeconds(3), cancellation.Token));
+
+        Assert.Equal("outside lock", await File.ReadAllTextAsync(target));
+    }
+
+    [Fact]
     public async Task Admitted_entry_survives_restart_and_exact_retry_replays_without_payload_duplication()
     {
         using var workspace = new TestWorkspace();
@@ -1598,6 +1620,46 @@ public sealed class TriggerQueueStoreTests
     }
 
     [Fact]
+    public async Task Worker_mutations_return_structured_unknown_rollback_and_expiry_outcomes()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath));
+        var acquiredAtUtc = TriggerQueueTestData.CreatedAtUtc.AddSeconds(4);
+        var entry = await AcquireWorkerLeaseAsync(store, acquiredAtUtc, TimeSpan.FromSeconds(2));
+        Assert.True(TriggerDeliveryId.TryParse("missing-delivery", out var missingDelivery));
+
+        var missing = await store.RenewAsync(missingDelivery!, "worker-1", 1, 1, acquiredAtUtc.AddSeconds(1), TimeSpan.FromSeconds(2));
+        var rollback = await store.RenewAsync(entry.DeliveryId, "worker-1", 1, entry.Revision, acquiredAtUtc.AddTicks(-1), TimeSpan.FromSeconds(2));
+        var expired = await store.ReleaseAsync(entry.DeliveryId, "worker-1", 1, entry.Revision, entry.WorkerLease!.ExpiresAtUtc);
+
+        Assert.Equal(TriggerWorkerMutationStatus.NotFound, missing.Status);
+        Assert.Equal(TriggerWorkerMutationStatus.ClockRollback, rollback.Status);
+        Assert.Equal(TriggerWorkerMutationStatus.StaleOwner, expired.Status);
+        Assert.Equal(TriggerQueueEntryState.WorkerOwned, expired.Entry!.State);
+    }
+
+    [Fact]
+    public async Task Dispatch_and_release_wrong_state_preserve_the_exact_worker_entry()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath));
+        var selected = await AcquireWorkerLeaseAsync(store, TriggerQueueTestData.CreatedAtUtc.AddSeconds(4), TimeSpan.FromSeconds(10));
+        var intent = Intent(selected, TriggerQueueTestData.CreatedAtUtc.AddSeconds(5));
+        var begun = await store.BeginDispatchAsync(selected.DeliveryId, "worker-1", 1, selected.Revision, intent);
+
+        var replayed = await store.BeginDispatchAsync(selected.DeliveryId, "worker-1", 1, begun.Entry!.Revision, intent);
+        var released = await store.ReleaseAsync(selected.DeliveryId, "worker-1", 1, begun.Entry.Revision, TriggerQueueTestData.CreatedAtUtc.AddSeconds(6));
+        var rejection = intent with { Outcome = TriggerDispatchOutcome.Rejected, OutcomeRecordedAtUtc = TriggerQueueTestData.CreatedAtUtc.AddSeconds(6), Detail = "too late to reject before dispatch" };
+        var rejected = await store.RejectBeforeDispatchAsync(selected.DeliveryId, "worker-1", 1, begun.Entry.Revision, rejection);
+
+        Assert.Equal(TriggerWorkerMutationStatus.Replayed, replayed.Status);
+        Assert.Equal(TriggerWorkerMutationStatus.InvalidState, released.Status);
+        Assert.Equal(TriggerWorkerMutationStatus.InvalidState, rejected.Status);
+        Assert.Equal(TriggerQueueEntryState.Dispatching, rejected.Entry!.State);
+        Assert.Equal(intent, rejected.Entry.Dispatch);
+    }
+
+    [Fact]
     public async Task Renewal_budget_commits_the_exact_duration_limit_and_rejects_limit_plus_one()
     {
         using var workspace = new TestWorkspace();
@@ -2223,9 +2285,10 @@ public sealed class TriggerQueueStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        startInfo.ArgumentList.Add("vstest");
-        startInfo.ArgumentList.Add(typeof(TriggerQueueStoreTests).Assembly.Location);
-        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=EmbodySense.Core.Persistence.Tests.Triggers.TriggerQueueStoreTests.Cross_process_queue_admission_host");
+        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(TriggerQueueStoreTests).Assembly.Location,
+            "EmbodySense.Core.Persistence.Tests.Triggers.TriggerQueueStoreTests.Cross_process_queue_admission_host");
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[CrossProcessWorkspace] = workspace;
         startInfo.Environment[CrossProcessGate] = gate;
@@ -2257,9 +2320,10 @@ public sealed class TriggerQueueStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        startInfo.ArgumentList.Add("vstest");
-        startInfo.ArgumentList.Add(typeof(TriggerQueueStoreTests).Assembly.Location);
-        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=EmbodySense.Core.Persistence.Tests.Triggers.TriggerQueueStoreTests.Cross_process_worker_selection_host");
+        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(TriggerQueueStoreTests).Assembly.Location,
+            "EmbodySense.Core.Persistence.Tests.Triggers.TriggerQueueStoreTests.Cross_process_worker_selection_host");
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[CrossProcessWorkspace] = workspace;
         startInfo.Environment[CrossProcessGate] = gate;

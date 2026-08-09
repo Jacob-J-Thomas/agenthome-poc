@@ -20,13 +20,12 @@ foreach ($testProjectDirectory in $testProjectDirectories) {
         continue
     }
 
-    $coverageFile = Get-ChildItem -Path $testResultsPath -Recurse -Filter "coverage.cobertura.xml" |
+    $projectCoverageFiles = @(Get-ChildItem -Path $testResultsPath -Recurse -Filter "coverage.cobertura.xml" |
         Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc } |
-        Sort-Object LastWriteTimeUtc -Descending |
-        Select-Object -First 1
+        Sort-Object FullName)
 
-    if ($null -ne $coverageFile) {
-        $coverageFiles += $coverageFile
+    if ($projectCoverageFiles.Count -gt 0) {
+        $coverageFiles += $projectCoverageFiles
     }
 }
 
@@ -36,6 +35,7 @@ if ($coverageFiles.Count -eq 0) {
 
 $failures = @()
 $packageLines = @{}
+$packageFileLines = @{}
 $sourceProjectDirectories = @{}
 Get-ChildItem -Path (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object {
     Test-Path (Join-Path $_.FullName ($_.Name + ".csproj"))
@@ -96,15 +96,27 @@ foreach ($coverageFile in $coverageFiles) {
 
         if (-not $packageLines.ContainsKey($packageName)) {
             $packageLines[$packageName] = @{}
+            $packageFileLines[$packageName] = @{}
         }
 
         foreach ($class in $package.classes.class) {
             foreach ($line in $class.SelectNodes("lines/line")) {
                 $lineKey = Get-CoverageLineKey -PackageName $packageName -FileName $class.filename -LineNumber $line.number
+                $lineKeySeparatorIndex = $lineKey.LastIndexOf(":", [StringComparison]::Ordinal)
+                $fileKey = $lineKey.Substring(0, $lineKeySeparatorIndex)
                 $hits = [int]$line.hits
 
                 if (-not $packageLines[$packageName].ContainsKey($lineKey) -or $hits -gt $packageLines[$packageName][$lineKey]) {
                     $packageLines[$packageName][$lineKey] = $hits
+                }
+
+                if (-not $packageFileLines[$packageName].ContainsKey($fileKey)) {
+                    $packageFileLines[$packageName][$fileKey] = @{}
+                }
+
+                $lineNumber = [int]$line.number
+                if (-not $packageFileLines[$packageName][$fileKey].ContainsKey($lineNumber) -or $hits -gt $packageFileLines[$packageName][$fileKey][$lineNumber]) {
+                    $packageFileLines[$packageName][$fileKey][$lineNumber] = $hits
                 }
             }
         }
@@ -131,6 +143,33 @@ foreach ($expectedPackage in $expectedPackages) {
     Write-Output ("{0}: {1}%" -f $expectedPackage, $percent)
 
     if ($lineRate -lt $threshold) {
+        $normalizedRepoRoot = [IO.Path]::GetFullPath($repoRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).ToUpperInvariant()
+        $packageFileLines[$expectedPackage].GetEnumerator() |
+            ForEach-Object {
+                $fileLineCount = $_.Value.Count
+                $fileCoveredLineCount = @($_.Value.Values | Where-Object { $_ -gt 0 }).Count
+                $uncoveredLineNumbers = @($_.Value.GetEnumerator() | Where-Object { $_.Value -le 0 } | ForEach-Object { $_.Key } | Sort-Object)
+                $displayPath = if ($_.Key.StartsWith($normalizedRepoRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                    $_.Key.Substring($normalizedRepoRoot.Length + 1)
+                }
+                else {
+                    $_.Key
+                }
+
+                [pscustomobject]@{
+                    File = $displayPath
+                    Uncovered = $fileLineCount - $fileCoveredLineCount
+                    Total = $fileLineCount
+                    UncoveredLines = $uncoveredLineNumbers
+                }
+            } |
+            Where-Object { $_.Uncovered -gt 0 } |
+            Sort-Object -Property @{ Expression = "Uncovered"; Descending = $true }, @{ Expression = "Total"; Descending = $true }, @{ Expression = "File"; Descending = $false } |
+            Select-Object -First 25 |
+            ForEach-Object {
+                Write-Output ("COVERAGE_GAP package={0} uncovered={1} total={2} file={3} lines={4}" -f $expectedPackage, $_.Uncovered, $_.Total, $_.File, ($_.UncoveredLines -join ","))
+            }
+
         $failures += "{0} line coverage {1}% is below {2}%" -f $expectedPackage, $percent, ($threshold * 100)
     }
 }

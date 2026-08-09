@@ -833,6 +833,23 @@ public sealed class DefaultConversationTurnRecoveryTests
     }
 
     [Fact]
+    public async Task Missing_reads_preserve_an_absent_root_and_return_null_from_an_empty_initialized_root()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var turns = new DefaultConversationTurnStore(paths);
+
+        Assert.False(Directory.Exists(paths.DefaultConversationTurnsPath));
+        Assert.Null(await turns.LoadAsync("missing-turn"));
+        Assert.False(Directory.Exists(paths.DefaultConversationTurnsPath));
+
+        Directory.CreateDirectory(paths.DefaultConversationTurnsPath);
+
+        Assert.Null(await turns.LoadAsync("missing-turn"));
+        Assert.True(Directory.Exists(paths.DefaultConversationActiveTurnsPath));
+    }
+
+    [Fact]
     public async Task Normal_archival_and_arbitrary_loads_leave_only_the_single_active_set_lease_artifact()
     {
         using var workspace = new TestWorkspace();
@@ -3634,9 +3651,10 @@ public sealed class DefaultConversationTurnRecoveryTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        startInfo.ArgumentList.Add("vstest");
-        startInfo.ArgumentList.Add(typeof(DefaultConversationTurnRecoveryTests).Assembly.Location);
-        startInfo.ArgumentList.Add($"--TestCaseFilter:FullyQualifiedName={typeof(DefaultConversationTurnRecoveryTests).FullName}.{testName}");
+        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(DefaultConversationTurnRecoveryTests).Assembly.Location,
+            $"{typeof(DefaultConversationTurnRecoveryTests).FullName}.{testName}");
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         foreach (var item in environment)
         {

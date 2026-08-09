@@ -8,9 +8,15 @@ namespace EmbodySense.Core.Persistence.Tests.Capabilities;
 internal sealed class TestCapabilityLifecycleTrustProvider : ICapabilityCatalogTrustProvider
 {
     private readonly Dictionary<string, CapabilityCatalogTrustState> _states = new(StringComparer.Ordinal);
+    private readonly int _maximumAuthenticationTagUtf8Bytes;
+
+    internal TestCapabilityLifecycleTrustProvider(int maximumAuthenticationTagUtf8Bytes = 69)
+    {
+        _maximumAuthenticationTagUtf8Bytes = maximumAuthenticationTagUtf8Bytes;
+    }
 
     internal Action<CancellationToken>? BeforeRead { get; set; }
-    public int MaximumAuthenticationTagUtf8Bytes => 69;
+    public int MaximumAuthenticationTagUtf8Bytes => _maximumAuthenticationTagUtf8Bytes;
 
     public void RequireDisjointWorkspace(string workspaceRootPath)
     {

@@ -53,6 +53,82 @@ function Invoke-CheckedNativePhase {
     Invoke-VerificationPhase -Name $Name -FileName $FileName -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $repoRoot
 }
 
+function Assert-CoverageReportProduced {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$TestProject,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$MinimumWriteTimeUtc
+    )
+
+    $coverageReport = Get-ChildItem -Path (Join-Path $TestProject.DirectoryName "TestResults") -Recurse -Filter "coverage.cobertura.xml" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTimeUtc -ge $MinimumWriteTimeUtc } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+
+    if ($null -eq $coverageReport) {
+        throw "Coverage collection for $($TestProject.BaseName) did not produce a fresh coverage.cobertura.xml report."
+    }
+}
+
+function New-CoverageChildProcessAssemblyCopy {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$TestProject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BuildConfiguration
+    )
+
+    [xml]$project = Get-Content -LiteralPath $TestProject.FullName -Raw
+    $targetFrameworks = @($project.Project.PropertyGroup.TargetFramework | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($targetFrameworks.Count -ne 1) {
+        throw "Coverage child-process isolation requires one explicit target framework in $($TestProject.Name)."
+    }
+
+    $targetFramework = [string]$targetFrameworks[0]
+    $sourceDirectory = Join-Path (Join-Path (Join-Path $TestProject.DirectoryName "bin") $BuildConfiguration) $targetFramework
+    if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
+        throw "Coverage child-process isolation source does not exist: $sourceDirectory"
+    }
+
+    $assetsPath = Join-Path $TestProject.DirectoryName "obj\project.assets.json"
+    if (-not (Test-Path -LiteralPath $assetsPath -PathType Leaf)) {
+        throw "Coverage child-process isolation assets do not exist: $assetsPath"
+    }
+
+    $assets = Get-Content -LiteralPath $assetsPath -Raw | ConvertFrom-Json
+    $coverletPackage = @($assets.libraries.PSObject.Properties.Name | Where-Object {
+        $_.StartsWith("coverlet.collector/", [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($coverletPackage.Count -ne 1) {
+        throw "Coverage child-process isolation requires one resolved coverlet.collector package."
+    }
+
+    $collectorSource = $null
+    foreach ($packageFolder in $assets.packageFolders.PSObject.Properties.Name) {
+        $candidate = Join-Path (Join-Path (Join-Path $packageFolder $coverletPackage[0]) "build") $targetFramework
+        if (Test-Path -LiteralPath $candidate -PathType Container) {
+            $collectorSource = $candidate
+            break
+        }
+    }
+    if ($null -eq $collectorSource) {
+        throw "Coverage child-process isolation could not locate the resolved coverlet.collector binaries for $targetFramework."
+    }
+
+    $isolationRoot = Join-Path $TestProject.DirectoryName "TestResults\CoverageChildProcess"
+    $pristineDirectory = Join-Path $isolationRoot "Pristine"
+    $collectorDirectory = Join-Path $isolationRoot "Collector"
+    New-Item -ItemType Directory -Path $pristineDirectory -Force | Out-Null
+    New-Item -ItemType Directory -Path $collectorDirectory -Force | Out-Null
+    Copy-Item -Path (Join-Path $sourceDirectory "*") -Destination $pristineDirectory -Recurse -Force
+    Copy-Item -Path (Join-Path $collectorSource "*") -Destination $collectorDirectory -Recurse -Force
+    Copy-Item -LiteralPath $pullRequestRunSettingsPath -Destination (Join-Path $isolationRoot "verification-pull-request.runsettings") -Force
+    return $pristineDirectory
+}
+
 Push-Location $repoRoot
 try {
     & (Join-Path $PSScriptRoot "verify-sdk.ps1") -GlobalJsonPath (Join-Path $repoRoot "global.json") -RepositoryRoot $repoRoot
@@ -144,7 +220,7 @@ try {
 
     Write-Output "VERIFY_REQUIRED_TEST_CONTRACT filter=VerificationTier!=Stress required_maximum_test=EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Public_artifact_contract_round_trips_the_maximum_bounded_shape_below_fifteen_mebibytes"
     $testProjects = Get-ChildItem -Path $testsPath -Recurse -Filter "*.csproj" | Where-Object {
-        $_.Name -ne "EmbodySense.Tests.Support.csproj"
+        $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj"
     } | Sort-Object FullName
     if (-not $SkipCoverage) {
         $coverageStartedUtc = [DateTime]::UtcNow
@@ -155,7 +231,23 @@ try {
                 $testArguments += @("--logger", "console;verbosity=detailed")
             }
 
-            Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900
+            $previousCoverageChildAssemblyDirectory = $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY
+            try {
+                if ($_.Name -eq "EmbodySense.Core.Persistence.Tests.csproj") {
+                    $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = New-CoverageChildProcessAssemblyCopy -TestProject $_ -BuildConfiguration $Configuration
+                }
+
+                Invoke-CheckedNativePhase -Name "coverage-$($_.BaseName)" -FileName "dotnet" -Arguments $testArguments -TimeoutSeconds 900
+                Assert-CoverageReportProduced -TestProject $_ -MinimumWriteTimeUtc $coverageStartedUtc
+            }
+            finally {
+                if ($null -eq $previousCoverageChildAssemblyDirectory) {
+                    Remove-Item Env:\EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY -ErrorAction SilentlyContinue
+                }
+                else {
+                    $env:EMBODYSENSE_COVERAGE_CHILD_ASSEMBLY_DIRECTORY = $previousCoverageChildAssemblyDirectory
+                }
+            }
         }
 
         $coverageArguments = @("-NoProfile")

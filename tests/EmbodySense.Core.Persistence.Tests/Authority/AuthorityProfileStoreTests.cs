@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Capabilities.Models;
 using EmbodySense.Core.Persistence.Tests.Capabilities;
 using EmbodySense.Tests.Support;
 
@@ -125,6 +126,110 @@ public sealed class AuthorityProfileStoreTests : IDisposable
         Assert.Equal(AuthorityProfileMutationStatus.Invalid, invalidTransition.Status);
         Assert.Single(persisted.Record!.Operations);
         Assert.Equal("create-once", persisted.Record.Operations[0].OperationId);
+    }
+
+    [Fact]
+    public async Task Cancellation_is_propagated_without_attempting_a_read_or_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new AuthorityProfileStore(paths);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.ReadAsync("missing-profile", cancellation.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.MutateAsync(Create(Profile(), "cancelled-create"), cancellation.Token));
+
+        Assert.False(File.Exists(paths.AuthorityProfilesDocumentPath));
+        Assert.False(File.Exists(paths.AuthorityProfilesProofPath));
+    }
+
+    [Fact]
+    public async Task Invalid_utf8_artifacts_recover_only_the_last_proved_profile()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = Profile();
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await Store(paths).MutateAsync(Create(profile, "create-before-invalid-utf8"))).Status);
+
+        await File.WriteAllBytesAsync(paths.AuthorityProfilesDocumentPath, [0xc3, 0x28]);
+        var recovered = await Store(paths).ReadAsync(profile.ProfileId.Value);
+        await File.WriteAllBytesAsync(paths.AuthorityProfilesProofPath, [0xc3, 0x28]);
+        var unavailable = await Store(paths).ReadAsync(profile.ProfileId.Value);
+
+        Assert.Equal(AuthorityProfileReadStatus.NotFound, recovered.Status);
+        Assert.Null(recovered.Record);
+        Assert.Equal(AuthorityProfileReadStatus.Unavailable, unavailable.Status);
+    }
+
+    [Fact]
+    public async Task Missing_current_and_proof_artifacts_never_become_a_mutation_base()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = Profile();
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await Store(paths).MutateAsync(Create(profile, "create-before-artifact-loss"))).Status);
+        File.Delete(paths.AuthorityProfilesDocumentPath);
+        File.Delete(paths.AuthorityProfilesProofPath);
+
+        var read = await Store(paths).ReadAsync(profile.ProfileId.Value);
+        var mutation = await Store(paths).MutateAsync(Transition(profile.ProfileId, 1, AuthorityProfileStatus.Suspended, "transition-after-artifact-loss"));
+
+        Assert.Equal(AuthorityProfileReadStatus.Unavailable, read.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Unavailable, mutation.Status);
+    }
+
+    [Fact]
+    public async Task Trust_read_failure_returns_only_unavailable_results()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = Profile();
+        var failing = new FaultInjectingTrustProvider(_trustProvider) { FailRead = true };
+        var store = new AuthorityProfileStore(paths, failing);
+
+        var read = await store.ReadAsync(profile.ProfileId.Value);
+        var mutation = await store.MutateAsync(Create(profile, "create-with-unavailable-trust"));
+
+        Assert.Equal(AuthorityProfileReadStatus.Unavailable, read.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Unavailable, mutation.Status);
+        Assert.False(File.Exists(paths.AuthorityProfilesDocumentPath));
+    }
+
+    [Fact]
+    public async Task Unreadable_authenticated_artifacts_are_not_used_as_current_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profile = Profile();
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, (await Store(paths).MutateAsync(Create(profile, "create-before-verification-failure"))).Status);
+        var failing = new FaultInjectingTrustProvider(_trustProvider) { FailVerificationWithFormat = true };
+
+        var read = await new AuthorityProfileStore(paths, failing).ReadAsync(profile.ProfileId.Value);
+
+        Assert.Equal(AuthorityProfileReadStatus.Unavailable, read.Status);
+    }
+
+    [Fact]
+    public async Task Profile_quota_rejects_a_new_declaration_without_evicting_existing_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = Store(paths);
+        for (var index = 0; index < AuthorityProfileStoreLimits.MaximumProfiles; index++)
+        {
+            var profile = Profile($"profile-{index:00}");
+            Assert.Equal(AuthorityProfileMutationStatus.Applied, (await store.MutateAsync(Create(profile, $"create-profile-{index:00}"))).Status);
+        }
+
+        var rejected = await store.MutateAsync(Create(Profile("profile-overflow"), "create-profile-overflow"));
+        var retained = await Store(paths).ReadAsync("profile-31");
+        var overflow = await Store(paths).ReadAsync("profile-overflow");
+
+        Assert.Equal(AuthorityProfileMutationStatus.Unavailable, rejected.Status);
+        Assert.Equal(AuthorityProfileReadStatus.Available, retained.Status);
+        Assert.Equal("profile-31", retained.Record!.ProfileId.Value);
+        Assert.Equal(AuthorityProfileReadStatus.NotFound, overflow.Status);
     }
 
     [Fact]
@@ -348,5 +453,31 @@ public sealed class AuthorityProfileStoreTests : IDisposable
     {
         Assert.True(AuthorityPurpose.TryParse(value, out var parsed, out _));
         return parsed!;
+    }
+
+    private sealed class FaultInjectingTrustProvider(ICapabilityCatalogTrustProvider inner) : ICapabilityCatalogTrustProvider
+    {
+        public bool FailRead { get; init; }
+
+        public bool FailVerificationWithFormat { get; init; }
+
+        public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
+
+        public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
+
+        public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default)
+            => FailRead ? Task.FromException<CapabilityCatalogTrustState?>(new IOException("Injected trust read failure.")) : inner.ReadAsync(workspaceIdentity, cancellationToken);
+
+        public Task<CapabilityCatalogTrustState> InitializeAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default)
+            => inner.InitializeAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
+
+        public Task<string> AuthenticateArtifactAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default)
+            => inner.AuthenticateArtifactAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
+
+        public Task<bool> VerifyArtifactAsync(string workspaceIdentity, long generation, string contentDigest, string authenticationTag, CancellationToken cancellationToken = default)
+            => FailVerificationWithFormat ? Task.FromException<bool>(new FormatException("Injected artifact verification failure.")) : inner.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, authenticationTag, cancellationToken);
+
+        public Task<CapabilityCatalogTrustState> AdvanceAsync(string workspaceIdentity, long expectedGeneration, string expectedContentDigest, long newGeneration, string newContentDigest, CancellationToken cancellationToken = default)
+            => inner.AdvanceAsync(workspaceIdentity, expectedGeneration, expectedContentDigest, newGeneration, newContentDigest, cancellationToken);
     }
 }

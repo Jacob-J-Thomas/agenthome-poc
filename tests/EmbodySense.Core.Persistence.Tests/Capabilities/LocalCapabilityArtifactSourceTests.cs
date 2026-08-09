@@ -57,4 +57,17 @@ public sealed class LocalCapabilityArtifactSourceTests
 
         await Assert.ThrowsAsync<IOException>(() => new LocalCapabilityArtifactSource(root).ReadAsync(new CapabilityArtifactSourceReference(CapabilityArtifactSourceKind.Local, new Uri(link).AbsoluteUri, "rev", CapabilityArtifactUpdatePolicy.Pinned)));
     }
+
+    [Fact]
+    public async Task Missing_contained_file_is_not_treated_as_empty_content()
+    {
+        using var workspace = new TestWorkspace();
+        var root = workspace.File("sources");
+        Directory.CreateDirectory(root);
+        var missing = Path.Combine(root, "missing.bin");
+        var source = new CapabilityArtifactSourceReference(CapabilityArtifactSourceKind.Local, new Uri(missing).AbsoluteUri, "rev", CapabilityArtifactUpdatePolicy.Pinned);
+
+        await Assert.ThrowsAsync<FileNotFoundException>(() => new LocalCapabilityArtifactSource(root).ReadAsync(source));
+    }
+
 }
