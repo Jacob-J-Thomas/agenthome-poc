@@ -111,7 +111,8 @@ public sealed class CustomLoopContextResolver
         var assignedTools = effectiveToolAssignments.Count == 0
             ? "none"
             : string.Join(", ", effectiveToolAssignments.Select(value => value.ToString().ToLowerInvariant()));
-        var metadata = $"Loop: {run.LoopId}{Environment.NewLine}Run: {run.Id}{Environment.NewLine}Role: {run.AdmittedDefinition.RoleId}{Environment.NewLine}Iteration: {run.Checkpoint.Iteration}{Environment.NewLine}Node: {stepId}{Environment.NewLine}Tools: {(isExit ? "none (Exit is tool-less)" : assignedTools)}";
+        var capabilityDescriptions = string.Join(Environment.NewLine, run.CapabilityAdmission.Pins.OrderBy(pin => pin.DescriptorIdentity.Id.Value, StringComparer.Ordinal).Select(pin => $"- {pin.SafeDescription}"));
+        var metadata = $"Loop: {run.LoopId}{Environment.NewLine}Run: {run.Id}{Environment.NewLine}Role: {run.AdmittedDefinition.RoleId}{Environment.NewLine}Iteration: {run.Checkpoint.Iteration}{Environment.NewLine}Node: {stepId}{Environment.NewLine}Tools: {(isExit ? "none (Exit is tool-less)" : assignedTools)}{Environment.NewLine}Effective capabilities (safe descriptions only):{Environment.NewLine}{capabilityDescriptions}";
         AddIncluded(messages, blocks, CustomLoopContextSource.RunMetadata, "run-metadata", LlmMessageRole.User, metadata);
         trustedInstructions.Add(new EmbodySenseTrustedInstruction(stepId, instruction));
         AddIncluded(blocks, CustomLoopContextSource.NodeInstruction, stepId, LlmMessageRole.System, instruction);

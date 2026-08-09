@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Application.Loops.Models;
@@ -213,6 +214,7 @@ public sealed class CustomLoopAuthoringService
                 TriggerPolicy = input.TriggerPolicy,
                 InferenceSteps = stepResult.Steps,
                 ToolAssignments = input.ToolAssignments!,
+                CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, input.ToolAssignments!),
                 ExitPolicy = input.ExitPolicy
             };
             definition = CustomLoopDefinitionContentHash.Apply(definition);
@@ -399,6 +401,7 @@ public sealed class CustomLoopAuthoringService
             TriggerPolicy = input.TriggerPolicy,
             InferenceSteps = stepResult.Steps,
             ToolAssignments = input.ToolAssignments!,
+            CapabilityRequirements = input.ToolAssignments is null ? current.CapabilityRequirements : LoopCapabilityRequirements.CreateCustomLoopManifest(current.Id, input.ToolAssignments),
             ExitPolicy = input.ExitPolicy,
             LastMutationOperationId = operationId
         };

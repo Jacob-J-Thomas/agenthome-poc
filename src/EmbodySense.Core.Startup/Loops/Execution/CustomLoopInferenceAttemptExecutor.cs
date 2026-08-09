@@ -21,6 +21,9 @@ using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.ToolResults;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Startup.Capabilities;
 
 namespace EmbodySense.Core.Startup.Loops.Execution;
 
@@ -46,6 +49,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     private readonly ICustomLoopToolAuthorityProvider _authorityProvider;
     private readonly ICustomLoopToolEvidenceSink _evidenceSink;
     private readonly ToolResultRetentionStore _toolResultRetentionStore;
+    private readonly ICapabilityAdmissionService _capabilityAdmissionService;
 
     /// <summary>
     /// Creates the production attempt executor over the workspace's live role authority and run evidence.
@@ -61,6 +65,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             new ToolApprovalPromptAdapter(approvalPrompt),
             new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(CreatePaths(options))),
             new CustomLoopRunToolEvidenceSink(new CustomLoopRunStore(CreatePaths(options))),
+            new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform),
             clientFactory)
     {
     }
@@ -68,7 +73,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     internal CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
-        CustomLoopInferenceClientFactory? clientFactory = null) : this(options, approvalPrompt, new AdmittedMaximumAuthorityProvider(), new NullToolEvidenceSink(), clientFactory)
+        CustomLoopInferenceClientFactory? clientFactory = null) : this(options, approvalPrompt, new AdmittedMaximumAuthorityProvider(), new NullToolEvidenceSink(), new CapabilityAdmissionService(new CapabilityCatalogStore(CreatePaths(options)), CapabilityWorkspaceScopeId.Create(CreatePaths(options).RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform), clientFactory)
     {
     }
 
@@ -79,18 +84,21 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     /// <param name="approvalPrompt">The approval prompt.</param>
     /// <param name="authorityProvider">The authority provider.</param>
     /// <param name="evidenceSink">The evidence sink.</param>
+    /// <param name="capabilityAdmissionService">The exact capability effect-boundary revalidator.</param>
     /// <param name="clientFactory">The client factory.</param>
     public CustomLoopInferenceAttemptExecutor(
         LlmInferenceClientOptions options,
         IToolApprovalPrompt approvalPrompt,
         ICustomLoopToolAuthorityProvider authorityProvider,
         ICustomLoopToolEvidenceSink evidenceSink,
+        ICapabilityAdmissionService capabilityAdmissionService,
         CustomLoopInferenceClientFactory? clientFactory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         ArgumentNullException.ThrowIfNull(authorityProvider);
         ArgumentNullException.ThrowIfNull(evidenceSink);
+        ArgumentNullException.ThrowIfNull(capabilityAdmissionService);
         if (string.IsNullOrWhiteSpace(options.WorkingDirectory))
         {
             throw new ArgumentException("Custom-loop inference requires a working directory.", nameof(options));
@@ -103,6 +111,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
         _auditLog = new AuditLog(_paths);
         _authorityProvider = authorityProvider;
         _evidenceSink = evidenceSink;
+        _capabilityAdmissionService = capabilityAdmissionService;
         _toolResultRetentionStore = new ToolResultRetentionStore(_paths);
     }
 
@@ -133,6 +142,14 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
     public async Task<CustomLoopInferenceAttemptResult> ExecuteAsync(CustomLoopInferenceAttemptRequest request, CancellationToken cancellationToken = default, Action? providerRequestStarted = null)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.CapabilityAdmission);
+        var allowedCapabilities = LoopCapabilityRequirements.GetAssignedCapabilityIds(request.CapabilityAdmission.Requirements);
+        var currentCapabilities = await _capabilityAdmissionService.RevalidateAsync(request.CapabilityAdmission, allowedCapabilities, cancellationToken);
+        if (!currentCapabilities.IsValid)
+        {
+            throw new InvalidOperationException($"Capability authority changed before provider dispatch: {currentCapabilities.Detail}");
+        }
+
         var authority = request.AuthoritySnapshot ?? await _authorityProvider.ResolveAsync(request.RoleId, request.AdmittedToolAssignments, cancellationToken);
         request = request with { AuthoritySnapshot = authority };
         ValidateRequest(request, _options.Surface);
@@ -144,7 +161,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
             var permissionService = new ReloadingToolPermissionService(_paths, new PermissionPolicyStore());
             var observer = new CorrelatedToolEvidenceObserver(_evidenceSink, request);
             var retention = new ToolResultRetentionService(_auditLog, loopDefinition, _toolResultRetentionStore);
-            var revalidator = new CustomLoopToolActuationAuthorityRevalidator(_authorityProvider, request, observer);
+            var revalidator = new CustomLoopToolActuationAuthorityRevalidator(_authorityProvider, request, observer, _capabilityAdmissionService);
             var broker = new ToolBroker(_paths, permissionService, _approvalPrompt, new LocalWorkspaceClient(_paths), _auditLog, loopDefinition, _toolResultRetentionStore, observer, revalidator);
             boundedBroker = new BoundedCorrelatedToolBroker(broker, _auditLog, _authorityProvider, retention, observer, _paths, request);
             toolBroker = boundedBroker;

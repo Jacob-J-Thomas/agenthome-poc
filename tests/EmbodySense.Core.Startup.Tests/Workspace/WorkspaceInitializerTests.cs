@@ -42,7 +42,7 @@ public sealed class WorkspaceInitializerTests
     }
 
     [Fact]
-    public async Task InitializeAsync_seeds_exact_built_ins_as_installed_but_not_enabled_trusted_assigned_or_authorized()
+    public async Task InitializeAsync_seeds_exact_built_ins_as_available_but_not_assigned_or_authorized()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -61,8 +61,9 @@ public sealed class WorkspaceInitializerTests
         {
             Assert.Equal(CapabilityDeclarationState.Declared, entry.Lifecycle.Declaration);
             Assert.Equal(CapabilityInstallationState.Installed, entry.Lifecycle.Installation);
-            Assert.Equal(CapabilityEnablementState.Disabled, entry.Lifecycle.Enablement);
-            Assert.Equal(CapabilityTrustState.Unverified, entry.Lifecycle.Trust);
+            Assert.Equal(CapabilityEnablementState.Enabled, entry.Lifecycle.Enablement);
+            Assert.Equal(CapabilityHealthState.Healthy, entry.Lifecycle.Health);
+            Assert.Equal(CapabilityTrustState.Verified, entry.Lifecycle.Trust);
             Assert.Equal(CapabilityRetirementState.Active, entry.Lifecycle.Retirement);
         }
 

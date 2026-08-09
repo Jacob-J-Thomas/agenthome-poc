@@ -1,8 +1,11 @@
+using System.Text.Json.Serialization;
+
 namespace EmbodySense.Core.Common.Capabilities;
 
 /// <summary>
 /// Identifies the provider responsible for a capability implementation.
 /// </summary>
+[JsonConverter(typeof(CapabilityScalarJsonConverterFactory))]
 public sealed class CapabilityProviderId : IEquatable<CapabilityProviderId>, IComparable<CapabilityProviderId>
 {
     private CapabilityProviderId(string value)

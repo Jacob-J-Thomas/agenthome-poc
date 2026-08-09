@@ -521,7 +521,7 @@ public sealed class DefaultConversationTurnRecoveryTests
         var turns = new DefaultConversationTurnStore(paths);
         var runs = new LoopRunStore(paths);
         var state = new ConversationRuntimeState(workspaceLease: new FileConversationWorkspaceLease(paths));
-        var runner = new DefaultConversationLoopRunner(new RecordingInferenceClient("answer"), state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns, new ExitingFailpoint(boundary));
+        var runner = new DefaultConversationLoopRunner(new RecordingInferenceClient("answer"), state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns, new ExitingFailpoint(boundary), new TestCapabilityAdmissionService());
 
         _ = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: "process-loss-request"));
         throw new InvalidOperationException("The process-loss failpoint did not terminate the worker.");
@@ -618,7 +618,8 @@ public sealed class DefaultConversationTurnRecoveryTests
         var conversation = await memory.LoadCurrentConversationSnapshotAsync();
         const string RequestId = "request-store-test";
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, DateTimeOffset.UtcNow);
-        var admitted = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), DateTimeOffset.UtcNow, RequestId);
+        var admittedAtUtc = DateTimeOffset.UtcNow;
+        var admitted = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), admittedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, admittedAtUtc));
 
         Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(admitted)).Status);
         Assert.Equal(DefaultConversationTurnStoreStatus.Replay, (await turns.CreateAsync(admitted)).Status);
@@ -649,7 +650,8 @@ public sealed class DefaultConversationTurnRecoveryTests
         var conversation = await new ConversationMemoryStore(paths).LoadCurrentConversationSnapshotAsync();
         const string RequestId = "request-evidence-test";
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, DateTimeOffset.UtcNow, new Dictionary<string, string> { ["stable"] = "value" });
-        var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), DateTimeOffset.UtcNow, RequestId);
+        var admittedAtUtc = DateTimeOffset.UtcNow;
+        var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), admittedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, admittedAtUtc));
         Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
 
         foreach (var checkpoint in new[]
@@ -682,6 +684,23 @@ public sealed class DefaultConversationTurnRecoveryTests
         Assert.Equal("answer", (await turns.LoadAsync(record.TurnId))!.AssistantMessage!.Content);
     }
 
+    [Theory]
+    [InlineData("{", "invalid JSON")]
+    [InlineData("null", "was empty")]
+    public async Task Store_rejects_malformed_and_empty_turn_artifacts(string content, string expectedDetail)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new DefaultConversationTurnStore(paths);
+        const string TurnId = "invalid-turn-artifact";
+        Directory.CreateDirectory(paths.DefaultConversationTurnsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.DefaultConversationTurnsPath, TurnId + ".json"), content);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.LoadAsync(TurnId));
+
+        Assert.Contains(expectedDetail, exception.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Store_rejects_forged_latest_schema_one_artifacts_on_read()
     {
@@ -692,7 +711,8 @@ public sealed class DefaultConversationTurnRecoveryTests
         const string RequestId = "request-forged-artifact";
         var startedAtUtc = new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero);
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, startedAtUtc);
-        var admitted = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), startedAtUtc.AddSeconds(1), RequestId);
+        var admittedAtUtc = startedAtUtc.AddSeconds(1);
+        var admitted = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("hello"), admittedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, admittedAtUtc));
         var artifactPath = Path.Combine(paths.DefaultConversationTurnsPath, admitted.TurnId + ".json");
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
@@ -900,7 +920,9 @@ public sealed class DefaultConversationTurnRecoveryTests
             var conversation = await fixture.Memory.LoadCurrentConversationSnapshotAsync();
             var startedAtUtc = new DateTimeOffset(2026, 8, 1, 12, 0, 0, TimeSpan.Zero);
             var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(requestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, startedAtUtc);
-            var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("strict JSON"), startedAtUtc.AddSeconds(1), requestId);
+            var admittedAtUtc = startedAtUtc.AddSeconds(1);
+            var capabilities = TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, admittedAtUtc);
+            var record = DefaultConversationTurnProtocol.Admit(run, conversation, LlmMessage.User("strict JSON"), admittedAtUtc, requestId, capabilities);
             Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await fixture.Turns.CreateAsync(record)).Status);
             if (state == "incomplete")
             {
@@ -944,8 +966,9 @@ public sealed class DefaultConversationTurnRecoveryTests
         var runs = new LoopRunStore(paths);
         var inference = client ?? new RecordingInferenceClient("answer");
         var state = new ConversationRuntimeState(workspaceLease: new FileConversationWorkspaceLease(paths));
-        var runner = new DefaultConversationLoopRunner(inference, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns, failpoint);
-        var recovery = new DefaultConversationTurnRecoveryService(turns, memory, runs, new FileConversationWorkspaceLease(paths));
+        var capabilities = new TestCapabilityAdmissionService();
+        var runner = new DefaultConversationLoopRunner(inference, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns, failpoint, capabilities);
+        var recovery = new DefaultConversationTurnRecoveryService(turns, memory, runs, new FileConversationWorkspaceLease(paths), capabilityAdmissionService: capabilities);
         return new RecoveryFixture(runner, recovery, memory, turns, inference, failpoint);
     }
 

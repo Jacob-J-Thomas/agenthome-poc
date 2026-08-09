@@ -70,7 +70,8 @@ public sealed class ConversationTranscriptReaderTests
         var snapshot = await memory.LoadCurrentConversationSnapshotAsync();
         const string RequestId = "request-reader-recovery";
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, DateTimeOffset.UtcNow);
-        var record = DefaultConversationTurnProtocol.Admit(run, snapshot, LlmMessage.User("durable prompt"), DateTimeOffset.UtcNow, RequestId);
+        var admittedAtUtc = DateTimeOffset.UtcNow;
+        var record = DefaultConversationTurnProtocol.Admit(run, snapshot, LlmMessage.User("durable prompt"), admittedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, admittedAtUtc));
         Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
         await runs.SaveAsync(run);
 

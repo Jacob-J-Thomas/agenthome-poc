@@ -532,7 +532,10 @@ public sealed class AgentRuntimeFactoryTests
             events,
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, now)
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 
@@ -793,7 +796,7 @@ public sealed class AgentRuntimeFactoryTests
         var startedAtUtc = DateTimeOffset.UtcNow;
         const string RequestId = "transcript-conflict-review";
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Cli, LoopTrigger.HumanMessage, startedAtUtc);
-        var record = DefaultConversationTurnProtocol.Admit(run, await memory.LoadCurrentConversationSnapshotAsync(), LlmMessage.User("hello"), startedAtUtc, RequestId);
+        var record = DefaultConversationTurnProtocol.Admit(run, await memory.LoadCurrentConversationSnapshotAsync(), LlmMessage.User("hello"), startedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, startedAtUtc));
         Assert.Equal(DefaultConversationTurnStoreStatus.Created, (await turns.CreateAsync(record)).Status);
 
         foreach (var checkpoint in new[]
@@ -907,7 +910,7 @@ public sealed class AgentRuntimeFactoryTests
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null, string? codexPath = null)
     {
-        return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync(
             "test-model",
             workspace.RootPath,
             codexPath ?? await CreateFakeCodexExecutableAsync(workspace),

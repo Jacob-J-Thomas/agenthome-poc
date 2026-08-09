@@ -20,6 +20,9 @@ using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution;
 
@@ -41,6 +44,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     private readonly RuntimeSurfaceId _surface;
     private readonly IDefaultConversationTurnStore _turnStore;
     private readonly IDefaultConversationTurnFailpoint? _failpoint;
+    private readonly ICapabilityAdmissionService _capabilityAdmissionService;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DefaultConversationLoopRunner"/> type.
@@ -53,6 +57,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
     /// <param name="surface">The surface.</param>
     /// <param name="turnStore">The durable turn protocol store.</param>
     /// <param name="failpoint">An optional process-loss injection seam.</param>
+    /// <param name="capabilityAdmissionService">The workspace-bound exact capability admission authority.</param>
     public DefaultConversationLoopRunner(
         ILlmInferenceClient inferenceClient,
         ConversationRuntimeState conversationState,
@@ -61,7 +66,8 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         ILoopRunStore? loopRunStore = null,
         RuntimeSurfaceId? surface = null,
         IDefaultConversationTurnStore? turnStore = null,
-        IDefaultConversationTurnFailpoint? failpoint = null)
+        IDefaultConversationTurnFailpoint? failpoint = null,
+        ICapabilityAdmissionService? capabilityAdmissionService = null)
     {
         ArgumentNullException.ThrowIfNull(inferenceClient);
         ArgumentNullException.ThrowIfNull(conversationState);
@@ -74,6 +80,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         _surface = surface ?? RuntimeSurfaceId.Runtime;
         _turnStore = turnStore ?? new VolatileDefaultConversationTurnStore();
         _failpoint = failpoint;
+        _capabilityAdmissionService = capabilityAdmissionService ?? throw new ArgumentNullException(nameof(capabilityAdmissionService));
     }
 
     /// <summary>
@@ -146,7 +153,7 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         var trustedStartupInstructions = inferenceContextMessages
             .Where(message => message.Source == RuntimeContextSource.StartupContext && message.Message.Role == LlmMessageRole.System)
             .Select((message, index) => new EmbodySenseTrustedInstruction($"startup-context-{index + 1}", message.Message.Content))
-            .ToArray();
+            .ToList();
         var inferenceMessages = inferenceContextMessages
             .Where(message => message.Source != RuntimeContextSource.StartupContext || message.Message.Role != LlmMessageRole.System)
             .Select(message => message.Message)
@@ -154,7 +161,6 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         var availableToolCommands = Enum.GetValues<ToolCommand>()
             .Where(command => LoopCapabilityIds.AllowsWorkspaceCommand(_loopDefinition.CapabilityIds, command))
             .ToArray();
-        var instructionContext = new LlmInferenceInstructionContext(EmbodySenseDeveloperInstructions.Capture(availableToolCommands), trustedStartupInstructions, preserveExactLogicalContext: false);
         var runId = DefaultConversationTurnProtocol.CreateRunId(request.RequestId);
         var runIdentity = new LoopRunIdentity(_loopDefinition.Id, runId, _loopDefinition.RoleId);
         var run = LoopRunRecord.Started(
@@ -179,7 +185,16 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
 
         try
         {
-            turn = DefaultConversationTurnProtocol.Admit(run, conversation, userMessage, DateTimeOffset.UtcNow, request.RequestId);
+            var assignedCapabilityIds = LoopCapabilityRequirements.GetAssignedCapabilityIds(_loopDefinition.CapabilityRequirements);
+            var capabilityAdmission = await _capabilityAdmissionService.AdmitAsync(_loopDefinition.CapabilityRequirements, assignedCapabilityIds, request.CancellationToken);
+            if (!capabilityAdmission.IsAdmitted || capabilityAdmission.Snapshot is null)
+            {
+                return DefaultConversationLoopTurnResult.Failed($"Default-conversation capability admission failed closed: {capabilityAdmission.Detail}", runIdentity: runIdentity);
+            }
+
+            trustedStartupInstructions.Add(new EmbodySenseTrustedInstruction("admitted-capabilities", FormatSafeCapabilities(capabilityAdmission.Snapshot.Pins)));
+            var instructionContext = new LlmInferenceInstructionContext(EmbodySenseDeveloperInstructions.Capture(availableToolCommands), trustedStartupInstructions, preserveExactLogicalContext: false);
+            turn = DefaultConversationTurnProtocol.Admit(run, conversation, userMessage, DateTimeOffset.UtcNow, request.RequestId, capabilityAdmission.Snapshot);
             var admission = await _turnStore.CreateAsync(turn, CancellationToken.None);
             if (admission.Status is not (DefaultConversationTurnStoreStatus.Created or DefaultConversationTurnStoreStatus.Replay) || admission.Record is null)
             {
@@ -213,6 +228,14 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.UserMessageAccepted, "Exact user message content and stable message identity accepted.", DefaultConversationTurnBoundary.UserAccepted, request.CancellationToken);
             userMessageAccepted = true;
             turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.UserPublicationPrepared, "User-message transcript publication intent persisted.", DefaultConversationTurnBoundary.UserPublicationPrepared, request.CancellationToken);
+            var capabilityFailure = await GetCapabilityFailureAsync(turn, assignedCapabilityIds, request.CancellationToken);
+            if (capabilityFailure is not null)
+            {
+                var detail = $"Default-conversation capability authority changed before user transcript publication: {capabilityFailure}";
+                turn = await FinalizeAsync(turn, LoopRunStatus.Failed, detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.Failed(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+            }
+
             var userPublication = await PublishMessageAsync(turn, turn.BaseTranscript, turn.UserMessage, DefaultConversationTurnBoundary.UserTranscriptAppended, request.CancellationToken);
             if (userPublication is null)
             {
@@ -224,6 +247,14 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
             _conversationState.SynchronizeConversationTranscript(userPublication.Messages);
             acceptedTranscriptMessages.Add(new RuntimeTranscriptMessage(userMessage));
             turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.UserPublished, "User message is present exactly once in the canonical transcript.", DefaultConversationTurnBoundary.UserPublished, request.CancellationToken);
+            capabilityFailure = await GetCapabilityFailureAsync(turn, assignedCapabilityIds, request.CancellationToken);
+            if (capabilityFailure is not null)
+            {
+                var detail = $"Default-conversation capability authority changed before provider dispatch: {capabilityFailure}";
+                turn = await FinalizeAsync(turn, LoopRunStatus.Failed, detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.Failed(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+            }
+
             turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.ProviderDispatchPrepared, "Stable provider attempt and correlation identities prepared; provider turn/start transport-write boundary not yet reached.", DefaultConversationTurnBoundary.ProviderDispatchPrepared, request.CancellationToken);
             var inferenceRequest = new LlmInferenceRequest(inferenceMessages, instructionContext: instructionContext, correlation: CreateInferenceCorrelation(turn, availableToolCommands));
             var dispatchStarted = false;
@@ -334,6 +365,14 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
                 assistantMessage: assistantMessage,
                 providerResponseId: response.ProviderResponseId);
             turn = await AdvanceAsync(turn, DefaultConversationTurnCheckpoint.AssistantPublicationPrepared, "Assistant-message publication intent persisted.", DefaultConversationTurnBoundary.AssistantPublicationPrepared, CancellationToken.None);
+            capabilityFailure = await GetCapabilityFailureAsync(turn, assignedCapabilityIds, CancellationToken.None);
+            if (capabilityFailure is not null)
+            {
+                var detail = $"Default-conversation capability authority changed before assistant transcript publication: {capabilityFailure}";
+                turn = await FinalizeAsync(turn, LoopRunStatus.NeedsReview, detail, CancellationToken.None);
+                return DefaultConversationLoopTurnResult.NeedsReview(detail, acceptedTranscriptMessages.ToArray(), runIdentity, userMessageAccepted: true);
+            }
+
             var assistantPublication = await PublishMessageAsync(turn, CanonicalUserTranscript(turn), assistantMessage, DefaultConversationTurnBoundary.AssistantTranscriptAppended, CancellationToken.None);
             if (assistantPublication is null)
             {
@@ -361,6 +400,18 @@ public sealed class DefaultConversationLoopRunner : IDefaultConversationLoopRunn
         {
             return await HandleInterruptedOutcomeAsync(turn, runIdentity, acceptedTranscriptMessages, userMessageAccepted, exception.Message, cancelled: false);
         }
+    }
+
+    private static string FormatSafeCapabilities(IReadOnlyList<CapabilityAdmissionPin> pins)
+    {
+        var descriptions = pins.OrderBy(pin => pin.DescriptorIdentity.Id.Value, StringComparer.Ordinal).Select(pin => $"- {pin.SafeDescription}");
+        return "Effective admitted capabilities (descriptions only; pins, provenance, catalog state, private configuration, and secrets are intentionally omitted):" + Environment.NewLine + string.Join(Environment.NewLine, descriptions);
+    }
+
+    private async Task<string?> GetCapabilityFailureAsync(DefaultConversationTurnRecord turn, IReadOnlyCollection<CapabilityId> assignedCapabilityIds, CancellationToken cancellationToken)
+    {
+        var currentCapabilities = await _capabilityAdmissionService.RevalidateAsync(turn.CapabilityAdmission, assignedCapabilityIds, cancellationToken);
+        return currentCapabilities.IsValid ? null : currentCapabilities.Detail;
     }
 
     private async Task<DefaultConversationLoopTurnResult> HandleInterruptedOutcomeAsync(

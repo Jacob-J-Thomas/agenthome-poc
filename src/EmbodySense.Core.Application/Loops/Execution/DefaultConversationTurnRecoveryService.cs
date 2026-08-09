@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Application.Capabilities;
 
 namespace EmbodySense.Core.Application.Loops.Execution;
 
@@ -24,6 +25,7 @@ public sealed class DefaultConversationTurnRecoveryService
     private readonly IDefaultConversationTurnStore _turns;
     private readonly IConversationWorkspaceLease? _workspaceLease;
     private readonly IDefaultConversationTurnFailpoint? _failpoint;
+    private readonly ICapabilityAdmissionService? _capabilityAdmissionService;
 
     /// <summary>Initializes one recovery coordinator.</summary>
     public DefaultConversationTurnRecoveryService(
@@ -31,7 +33,8 @@ public sealed class DefaultConversationTurnRecoveryService
         IConversationMemoryStore conversationMemory,
         ILoopRunStore loopRuns,
         IConversationWorkspaceLease? workspaceLease = null,
-        IDefaultConversationTurnFailpoint? failpoint = null)
+        IDefaultConversationTurnFailpoint? failpoint = null,
+        ICapabilityAdmissionService? capabilityAdmissionService = null)
     {
         ArgumentNullException.ThrowIfNull(turns);
         ArgumentNullException.ThrowIfNull(conversationMemory);
@@ -41,6 +44,7 @@ public sealed class DefaultConversationTurnRecoveryService
         _loopRuns = loopRuns;
         _workspaceLease = workspaceLease;
         _failpoint = failpoint;
+        _capabilityAdmissionService = capabilityAdmissionService;
     }
 
     /// <summary>
@@ -66,6 +70,19 @@ public sealed class DefaultConversationTurnRecoveryService
     private async Task<DefaultConversationTurnRecoveryResult> RecoverOneAsync(DefaultConversationTurnRecord record, CancellationToken cancellationToken)
     {
         var originalCheckpoint = record.Checkpoint;
+        if (_capabilityAdmissionService is not null)
+        {
+            var allowed = LoopCapabilityRequirements.GetAssignedCapabilityIds(LoopDefinition.CreateDefaultConversation().CapabilityRequirements);
+            var capabilities = await _capabilityAdmissionService.RevalidateAsync(record.CapabilityAdmission, allowed, cancellationToken);
+            if (!capabilities.IsValid)
+            {
+                var detail = $"Restart capability revalidation failed closed: {capabilities.Detail}";
+                var status = record.Checkpoint < DefaultConversationTurnCheckpoint.ProviderDispatchStarted ? LoopRunStatus.Failed : LoopRunStatus.NeedsReview;
+                record = await FinalizeAsync(record, status, detail, cancellationToken);
+                return Result(record, originalCheckpoint, status == LoopRunStatus.Failed ? DefaultConversationTurnRecoveryClassification.PreDispatch : DefaultConversationTurnRecoveryClassification.ProviderOutcomeUnknown, detail);
+            }
+        }
+
         switch (record.Checkpoint)
         {
             case DefaultConversationTurnCheckpoint.Admitted:

@@ -13,7 +13,7 @@ public sealed class CapabilityDependencyResolverTests
         var manifest = Manifest("org.example/skill", [Dependency("org.example/a", "[1.0.0,3.0.0)")]);
         var first = Candidate("org.example/a", "1.0.0");
         var second = Candidate("org.example/a", "2.0.0");
-        var resolver = new CapabilityDependencyResolver();
+        var resolver = Resolver();
 
         var forward = resolver.Resolve(manifest, [first, second]);
         var reverse = resolver.Resolve(manifest, [second, first]);
@@ -37,7 +37,7 @@ public sealed class CapabilityDependencyResolverTests
     [Fact]
     public void Resolver_visibly_omits_missing_optional_without_hiding_missing_required()
     {
-        var resolver = new CapabilityDependencyResolver();
+        var resolver = Resolver();
         var manifest = Manifest("org.example/skill", [Dependency("org.example/required", "*")], [Dependency("org.example/optional", "*")]);
 
         var result = resolver.Resolve(manifest, []);
@@ -52,9 +52,9 @@ public sealed class CapabilityDependencyResolverTests
     {
         var cycleA = Manifest("org.example/a", [Dependency("org.example/b", "*")]);
         var cycleB = Manifest("org.example/b", [Dependency("org.example/a", "*")]);
-        var cycle = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", cycleA), Candidate("org.example/b", "1.0.0", cycleB)]);
-        var untrusted = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", trust: CapabilityTrustState.Unverified)]);
-        var conflict = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", source: "file:///a"), Candidate("org.example/a", "1.0.0", source: "file:///b")]);
+        var cycle = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", cycleA), Candidate("org.example/b", "1.0.0", cycleB)]);
+        var untrusted = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", trust: CapabilityTrustState.Unverified)]);
+        var conflict = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", source: "file:///a"), Candidate("org.example/a", "1.0.0", source: "file:///b")]);
 
         Assert.Contains(cycle.Evidence, item => item.Outcome == CapabilityDependencyResolutionOutcome.Cyclic);
         Assert.Contains(untrusted.Evidence, item => item.Outcome == CapabilityDependencyResolutionOutcome.Untrusted);
@@ -69,7 +69,7 @@ public sealed class CapabilityDependencyResolverTests
     [InlineData(CapabilityHealthState.Unknown)]
     public void Resolver_fails_closed_with_structured_evidence_for_unacceptable_candidate_health(CapabilityHealthState health)
     {
-        var result = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", health: health)]);
+        var result = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", health: health)]);
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Selected);
@@ -81,7 +81,7 @@ public sealed class CapabilityDependencyResolverTests
     [Fact]
     public void Resolver_accepts_degraded_candidate_health()
     {
-        var result = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", health: CapabilityHealthState.Degraded)]);
+        var result = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", health: CapabilityHealthState.Degraded)]);
 
         Assert.True(result.IsResolved);
         Assert.Equal("org.example/a", Assert.Single(result.Selected).DescriptorIdentity.Id.Value);
@@ -95,7 +95,7 @@ public sealed class CapabilityDependencyResolverTests
         Assert.True(CapabilityDescriptorIdentity.TryCreate(foreignDescriptor, out var foreignIdentity, out _));
         var confused = candidate with { Entry = candidate.Entry with { Lifecycle = candidate.Entry.Lifecycle with { DescriptorIdentity = foreignIdentity! } } };
 
-        var result = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [confused]);
+        var result = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [confused]);
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Selected);
@@ -118,10 +118,10 @@ public sealed class CapabilityDependencyResolverTests
 
         foreach (var candidate in malformed)
         {
-            var exception = Record.Exception(() => new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [candidate]));
+            var exception = Record.Exception(() => Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [candidate]));
 
             Assert.Null(exception);
-            var result = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [candidate]);
+            var result = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [candidate]);
             Assert.False(result.IsResolved);
             Assert.Empty(result.Selected);
             var evidence = Assert.Single(result.Evidence);
@@ -135,7 +135,7 @@ public sealed class CapabilityDependencyResolverTests
     {
         var malformed = Manifest("org.example/a", []) with { SubjectId = null! };
 
-        var result = new CapabilityDependencyResolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", malformed)]);
+        var result = Resolver().Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", malformed)]);
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Selected);
@@ -149,7 +149,7 @@ public sealed class CapabilityDependencyResolverTests
     {
         var malformed = Manifest("org.example/skill", []) with { SubjectId = null! };
 
-        var result = new CapabilityDependencyResolver().Resolve(malformed, []);
+        var result = Resolver().Resolve(malformed, []);
 
         Assert.False(result.IsResolved);
         Assert.Empty(result.Selected);
@@ -165,7 +165,7 @@ public sealed class CapabilityDependencyResolverTests
     {
         var requiresBroad = Manifest("org.example/a", [Dependency("org.example/shared", "[1.0.0,3.0.0)")]);
         var requiresNarrow = Manifest("org.example/b", [Dependency("org.example/shared", "[1.0.0,2.0.0)")]);
-        var result = new CapabilityDependencyResolver().Resolve(
+        var result = Resolver().Resolve(
             Manifest("org.example/skill", [Dependency("org.example/a", "*"), Dependency("org.example/b", "*")]),
             [Candidate("org.example/a", "1.0.0", requiresBroad), Candidate("org.example/b", "1.0.0", requiresNarrow), Candidate("org.example/shared", "1.5.0"), Candidate("org.example/shared", "2.5.0")]);
 
@@ -190,7 +190,7 @@ public sealed class CapabilityDependencyResolverTests
             Candidate("org.example/z", "1.0.0")
         };
         var root = Manifest("org.example/skill", [Dependency("org.example/a", "*"), Dependency("org.example/b", "*")]);
-        var expected = new CapabilityDependencyResolver().Resolve(root, candidates);
+        var expected = Resolver().Resolve(root, candidates);
 
         Assert.True(expected.IsResolved);
         Assert.Equal("1.5.0", expected.Selected.Single(item => item.DescriptorIdentity.Id.Value == "org.example/shared").DescriptorIdentity.Version.Value);
@@ -201,7 +201,7 @@ public sealed class CapabilityDependencyResolverTests
         var random = new Random(314159);
         for (var iteration = 0; iteration < 64; iteration++)
         {
-            var actual = new CapabilityDependencyResolver().Resolve(root, candidates.OrderBy(_ => random.Next()).ToArray());
+            var actual = Resolver().Resolve(root, candidates.OrderBy(_ => random.Next()).ToArray());
 
             Assert.Equal(expected.Selected.Select(item => item.DescriptorIdentity.Hash.Value), actual.Selected.Select(item => item.DescriptorIdentity.Hash.Value));
             Assert.Equal(expected.Evidence.Select(item => (item.SubjectId.Value, item.DependencyId.Value, item.Outcome, item.Pin?.DescriptorIdentity.Hash.Value)), actual.Evidence.Select(item => (item.SubjectId.Value, item.DependencyId.Value, item.Outcome, item.Pin?.DescriptorIdentity.Hash.Value)));
@@ -212,7 +212,7 @@ public sealed class CapabilityDependencyResolverTests
     public void Resolver_does_not_retain_an_omitted_optional_range_that_conflicts_with_a_later_required_dependency()
     {
         var optionalParent = Manifest("org.example/b", [], [Dependency("org.example/z", "[1.0.0,2.0.0)")]);
-        var result = new CapabilityDependencyResolver().Resolve(
+        var result = Resolver().Resolve(
             Manifest("org.example/skill", [Dependency("org.example/b", "*"), Dependency("org.example/z", "[1.0.0,3.0.0)")]),
             [Candidate("org.example/b", "1.0.0", optionalParent), Candidate("org.example/z", "2.5.0")]);
 
@@ -231,7 +231,7 @@ public sealed class CapabilityDependencyResolverTests
         var manifestArtifact = new CapabilityDependencyArtifactMetadata(checksumMismatch ? CapabilityIntegrityDigest.Compute("other artifact"u8) : candidateArtifact.Checksum, signatureMismatch ? "other-signature" : candidateArtifact.Signature);
         var transitive = Manifest("org.example/a", [Dependency("org.example/b", "*")]) with { Artifact = manifestArtifact };
 
-        var result = new CapabilityDependencyResolver().Resolve(
+        var result = Resolver().Resolve(
             Manifest("org.example/skill", [Dependency("org.example/a", "*")]),
             [Candidate("org.example/a", "1.0.0", transitive, artifact: candidateArtifact), Candidate("org.example/b", "1.0.0")]);
 
@@ -248,7 +248,7 @@ public sealed class CapabilityDependencyResolverTests
         var artifact = Artifact("candidate artifact", "candidate-signature");
         var transitive = Manifest("org.example/a", [Dependency("org.example/b", "*")]) with { Artifact = artifact };
 
-        var result = new CapabilityDependencyResolver().Resolve(
+        var result = Resolver().Resolve(
             Manifest("org.example/skill", [Dependency("org.example/a", "*")]),
             [Candidate("org.example/a", "1.0.0", transitive, artifact: artifact), Candidate("org.example/b", "1.0.0")]);
 
@@ -259,7 +259,7 @@ public sealed class CapabilityDependencyResolverTests
     [Fact]
     public void Resolver_treats_maximum_depth_as_the_dependency_edge_bound()
     {
-        var depth = new CapabilityDependencyResolver(new CapabilityDependencyResolutionLimits(1, 8, 8));
+        var depth = Resolver(new CapabilityDependencyResolutionLimits(1, 8, 8));
         var child = Manifest("org.example/a", [Dependency("org.example/b", "*")]);
         var result = depth.Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", child), Candidate("org.example/b", "1.0.0")]);
 
@@ -273,7 +273,7 @@ public sealed class CapabilityDependencyResolverTests
     [Fact]
     public void Resolver_enforces_the_dependency_count_bound_independently_of_depth()
     {
-        var resolver = new CapabilityDependencyResolver(new CapabilityDependencyResolutionLimits(8, 1, 8));
+        var resolver = Resolver(new CapabilityDependencyResolutionLimits(8, 1, 8));
         var child = Manifest("org.example/a", [Dependency("org.example/b", "*")]);
 
         var result = resolver.Resolve(Manifest("org.example/skill", [Dependency("org.example/a", "*")]), [Candidate("org.example/a", "1.0.0", child), Candidate("org.example/b", "1.0.0")]);
@@ -283,22 +283,64 @@ public sealed class CapabilityDependencyResolverTests
         Assert.Contains("count", evidence.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static CapabilityDependencyCatalogCandidate Candidate(string id, string version, CapabilityDependencyManifest? dependencies = null, CapabilityTrustState trust = CapabilityTrustState.Verified, CapabilityHealthState health = CapabilityHealthState.Healthy, string source = "file:///catalog", CapabilityDependencyArtifactMetadata? artifact = null)
+    [Theory]
+    [InlineData("[1.0.0,2.0.0)", true)]
+    [InlineData("[1.5.0]", true)]
+    [InlineData("[1.5.1,2.0.0)", false)]
+    [InlineData("[1.0.0,1.5.0)", false)]
+    public void Resolver_enforces_the_current_host_contract_version(string hostVersionRange, bool expectedResolved)
     {
-        var descriptor = Descriptor(id, version, source);
+        var result = Resolver().Resolve(
+            Manifest("org.example/skill", [Dependency("org.example/a", "*")]),
+            [Candidate("org.example/a", "1.0.0", hostVersionRange: hostVersionRange)]);
+
+        Assert.Equal(expectedResolved, result.IsResolved);
+        Assert.Equal(expectedResolved ? CapabilityDependencyResolutionOutcome.Selected : CapabilityDependencyResolutionOutcome.Incompatible, Assert.Single(result.Evidence).Outcome);
+    }
+
+    [Theory]
+    [InlineData("any/any", true)]
+    [InlineData("linux/x64", true)]
+    [InlineData("windows/x64", false)]
+    [InlineData("linux/arm64", false)]
+    public void Resolver_enforces_the_current_operating_system_and_architecture(string supportedPlatform, bool expectedResolved)
+    {
+        var result = Resolver().Resolve(
+            Manifest("org.example/skill", [Dependency("org.example/a", "*")]),
+            [Candidate("org.example/a", "1.0.0", supportedPlatform: supportedPlatform)]);
+
+        Assert.Equal(expectedResolved, result.IsResolved);
+        Assert.Equal(expectedResolved ? CapabilityDependencyResolutionOutcome.Selected : CapabilityDependencyResolutionOutcome.Incompatible, Assert.Single(result.Evidence).Outcome);
+    }
+
+    [Fact]
+    public void Resolver_requires_an_exact_current_host_platform()
+    {
+        Assert.Throws<ArgumentException>(() => new CapabilityDependencyResolver(Version("1.5.0"), CapabilityPlatform.Any));
+    }
+
+    private static CapabilityDependencyResolver Resolver(CapabilityDependencyResolutionLimits? limits = null)
+    {
+        return limits is null ? new CapabilityDependencyResolver(Version("1.5.0"), Platform("linux/x64")) : new CapabilityDependencyResolver(Version("1.5.0"), Platform("linux/x64"), limits);
+    }
+
+    private static CapabilityDependencyCatalogCandidate Candidate(string id, string version, CapabilityDependencyManifest? dependencies = null, CapabilityTrustState trust = CapabilityTrustState.Verified, CapabilityHealthState health = CapabilityHealthState.Healthy, string source = "file:///catalog", CapabilityDependencyArtifactMetadata? artifact = null, string hostVersionRange = "*", string supportedPlatform = "any/any")
+    {
+        var descriptor = Descriptor(id, version, source, hostVersionRange, supportedPlatform);
         Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out _));
         var lifecycle = new CapabilityLifecycleSnapshot(1, identity!, CapabilityDeclarationState.Declared, CapabilityInstallationState.Installed, CapabilityEnablementState.Disabled, health, CapabilityRetirementState.Active, trust);
         return new CapabilityDependencyCatalogCandidate(new CapabilityCatalogEntry(descriptor, lifecycle, 1, DateTimeOffset.UnixEpoch, "test"), dependencies, artifact ?? new CapabilityDependencyArtifactMetadata(null, null));
     }
 
-    private static CapabilityDescriptor Descriptor(string id, string version, string source)
+    private static CapabilityDescriptor Descriptor(string id, string version, string source, string hostVersionRange = "*", string supportedPlatform = "any/any")
     {
         Assert.True(CapabilityId.TryParse(id, out var capabilityId, out _));
         Assert.True(CapabilityProviderId.TryParse("org.example", out var provider, out _));
         Assert.True(CapabilityVersion.TryParse(version, out var exact, out _));
-        Assert.True(CapabilityVersionRange.TryParse("*", out var range, out _));
+        Assert.True(CapabilityVersionRange.TryParse(hostVersionRange, out var range, out _));
+        Assert.True(CapabilityPlatform.TryParse(supportedPlatform, out var platform, out _));
         Assert.True(CapabilityJsonSchema.TryCreate($"{{\"$schema\":\"{CapabilityJsonSchema.Draft202012Dialect}\",\"type\":\"object\"}}", out var schema, out _));
-        return new CapabilityDescriptor(1, capabilityId!, CapabilityKind.Skill, exact!, new CapabilityImplementationIdentity(provider!, id[(id.IndexOf('/') + 1)..]), new CapabilityProvenance(CapabilityProvenanceKind.LocalSource, source, null, null), new CapabilityCompatibility(range!, [CapabilityPlatform.Any]), "A test capability.", schema!, schema!, new CapabilityResourceLimits(1, 1, 1, 1), CapabilitySideEffectClass.None, new CapabilityAccessRequirements([], CapabilityEgressMode.None, [], []));
+        return new CapabilityDescriptor(1, capabilityId!, CapabilityKind.Skill, exact!, new CapabilityImplementationIdentity(provider!, id[(id.IndexOf('/') + 1)..]), new CapabilityProvenance(CapabilityProvenanceKind.LocalSource, source, null, null), new CapabilityCompatibility(range!, [platform!]), "A test capability.", schema!, schema!, new CapabilityResourceLimits(1, 1, 1, 1), CapabilitySideEffectClass.None, new CapabilityAccessRequirements([], CapabilityEgressMode.None, [], []));
     }
 
     private static CapabilityDependencyManifest Manifest(string id, IReadOnlyList<CapabilityDependency> required, IReadOnlyList<CapabilityDependency>? optional = null) => new(1, CapabilityDependencyManifestKind.Skill, Id(id), required, optional ?? [], new CapabilityDependencyArtifactMetadata(null, null));
@@ -317,5 +359,17 @@ public sealed class CapabilityDependencyResolverTests
     {
         Assert.True(CapabilityVersionRange.TryParse(value, out var range, out _));
         return range!;
+    }
+
+    private static CapabilityVersion Version(string value)
+    {
+        Assert.True(CapabilityVersion.TryParse(value, out var version, out _));
+        return version!;
+    }
+
+    private static CapabilityPlatform Platform(string value)
+    {
+        Assert.True(CapabilityPlatform.TryParse(value, out var platform, out _));
+        return platform!;
     }
 }

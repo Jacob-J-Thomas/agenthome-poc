@@ -1439,7 +1439,7 @@ public sealed class CustomLoopRunStoreTests
         var definition = CustomLoopDefinition.CreateSeed(loopId, "default-role", "step-1", "create-loop", _timestamp);
         var context = CustomLoopContextSnapshot.CreateEmpty(_timestamp);
         var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, _timestamp);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null) { CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp) };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

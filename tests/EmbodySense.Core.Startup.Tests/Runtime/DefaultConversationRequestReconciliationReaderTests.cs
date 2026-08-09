@@ -117,7 +117,7 @@ public sealed class DefaultConversationRequestReconciliationReaderTests
         var snapshot = await memory.LoadCurrentConversationSnapshotAsync();
         var startedAtUtc = DateTimeOffset.UtcNow;
         var run = LoopRunRecord.Started(DefaultConversationTurnProtocol.CreateRunId(RequestId), BuiltInLoopIds.DefaultConversation, "default-assistant", RuntimeSurfaceId.Web, LoopTrigger.HumanMessage, startedAtUtc);
-        var record = DefaultConversationTurnProtocol.Admit(run, snapshot, LlmMessage.User(Message), startedAtUtc, RequestId);
+        var record = DefaultConversationTurnProtocol.Admit(run, snapshot, LlmMessage.User(Message), startedAtUtc, RequestId, TestCapabilityAdmissionFactory.Create(LoopDefinition.CreateDefaultConversation().CapabilityRequirements, startedAtUtc));
         foreach (var next in OperationalCheckpoints().TakeWhile(next => next <= checkpoint))
         {
             record = Advance(record, next);

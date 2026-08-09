@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
@@ -15,12 +16,14 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
@@ -93,7 +96,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
         };
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
-        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
+        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths)), new CapabilityAdmissionService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform)).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
                 definition.DefinitionVersion,
@@ -229,7 +232,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             AgentRuntimeSurface.Cli);
         const string OperationId = "invoke-receipt-completion-failure";
         const string Prompt = "must never dispatch";
-        var prepared = await PrepareInterruptedAdmissionAsync(paths, definitionSnapshot, OperationId, Prompt);
+        var prepared = await PrepareInterruptedAdmissionAsync(paths, workspace.ServerStatePath, definitionSnapshot, OperationId, Prompt);
         var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, OperationId + ".json");
         File.SetAttributes(receiptPath, FileAttributes.ReadOnly);
 
@@ -283,7 +286,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         Assert.Contains("could not be read safely", response.Detail, StringComparison.Ordinal);
     }
 
-    private static async Task<(CustomLoopRunRecord Run, CustomLoopInvocationOperationStore ReceiptStore)> PrepareInterruptedAdmissionAsync(WorkspacePaths paths, LoopDefinitionSnapshot definitionSnapshot, string operationId, string prompt)
+    private static async Task<(CustomLoopRunRecord Run, CustomLoopInvocationOperationStore ReceiptStore)> PrepareInterruptedAdmissionAsync(WorkspacePaths paths, string capabilityTrustRootPath, LoopDefinitionSnapshot definitionSnapshot, string operationId, string prompt)
     {
         var definitionStore = new CustomLoopDefinitionStore(paths);
         var runStore = new CustomLoopRunStore(paths);
@@ -326,7 +329,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
         };
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
-        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths))).AdmitAsync(
+        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths)), new CapabilityAdmissionService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRootPath)), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform)).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
                 definition.DefinitionVersion,
@@ -345,16 +348,18 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
 
     private static AgentRuntimeFactory CreateRuntimeFactory(TestWorkspace workspace)
     {
-        return new AgentRuntimeFactory(
+        var status = new CodexRuntimeStatus(
+            CodexRuntimeCompatibility.Compatible,
+            workspace.File("unused-codex.cmd"),
+            workspace.File("unused-codex.cmd"),
+            "codex-cli test",
+            "test-model",
+            "controlled test",
+            "The provider process is not started by these receipt-recovery scenarios.");
+        return AgentRuntimeFactory.ForFileCapabilityTrustRoot(
             new RejectingApprovalPrompt(),
-            new CodexRuntimeStatus(
-                CodexRuntimeCompatibility.Compatible,
-                workspace.File("unused-codex.cmd"),
-                workspace.File("unused-codex.cmd"),
-                "codex-cli test",
-                "test-model",
-                "controlled test",
-                "The provider process is not started by these receipt-recovery scenarios."));
+            workspace.ServerStatePath,
+            status);
     }
 
     private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace)

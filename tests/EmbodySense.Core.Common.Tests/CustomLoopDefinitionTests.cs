@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using System.Text.Json;
+using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 
 namespace EmbodySense.Core.Common.Tests;
@@ -69,7 +70,10 @@ public sealed class CustomLoopDefinitionTests
             InferenceSteps = [definition.InferenceSteps[0] with { ContextPolicy = CustomLoopNodeContextPolicy.Override(customPolicy) }],
             ExitPolicy = definition.ExitPolicy with { ContextPolicy = CustomLoopNodeContextPolicy.Override(customPolicy) }
         };
-        definition = CustomLoopDefinitionContentHash.Apply(definition);
+        definition = CustomLoopDefinitionContentHash.Apply(definition with
+        {
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments)
+        });
 
         var result = CustomLoopDefinitionValidator.Validate(definition);
 
@@ -117,7 +121,10 @@ public sealed class CustomLoopDefinitionTests
             ToolAssignments = [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search],
             ExitPolicy = new CustomLoopExitPolicy(CustomLoopLimits.MaxAdditionalIterations, new string('e', CustomLoopLimits.MaxInstructionCharacters), CustomLoopNodeContextPolicy.Inherit())
         };
-        definition = CustomLoopDefinitionContentHash.Apply(definition);
+        definition = CustomLoopDefinitionContentHash.Apply(definition with
+        {
+            CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest(definition.Id, definition.ToolAssignments)
+        });
 
         Assert.True(CustomLoopDefinitionValidator.Validate(definition).IsValid);
         Assert.Equal(CustomLoopLimits.MaxModelAttemptsPerRun, CustomLoopLimits.GetMaximumModelAttempts(definition.InferenceSteps.Length, definition.ExitPolicy.MaxAdditionalIterations));

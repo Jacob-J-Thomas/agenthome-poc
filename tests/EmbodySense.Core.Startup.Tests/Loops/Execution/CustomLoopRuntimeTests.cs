@@ -458,6 +458,7 @@ public sealed class CustomLoopRuntimeTests
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-runtime-success", "custom task");
 
         var response = await runtime.InvokeCustomLoopAsync(input);
+        Assert.True(response.Run is not null, $"{response.Detail} {string.Join(" | ", response.ValidationErrors.Select(error => $"{error.Field}: {error.Message}"))}");
         var fetched = await runtime.GetCustomLoopRunAsync(response.Run!.Id);
         var listed = await runtime.ListCustomLoopRunsAsync();
         var replay = await runtime.InvokeCustomLoopAsync(input);
@@ -791,7 +792,10 @@ public sealed class CustomLoopRuntimeTests
             [admittedEvent, admissionAuditCompleted],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, now)
+        };
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid);
         var runStore = new CustomLoopRunStore(paths);
@@ -1276,7 +1280,10 @@ public sealed class CustomLoopRuntimeTests
             [admittedEvent],
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, now)
+        };
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(run)).Status);
         return run;
@@ -1324,9 +1331,7 @@ public sealed class CustomLoopRuntimeTests
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, IAgentRuntimeConversationPublicationObserver? observer = null)
     {
-        var factory = observer is null
-            ? new AgentRuntimeFactory(new RejectingApprovalPrompt())
-            : new AgentRuntimeFactory(new RejectingApprovalPrompt(), observer);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, conversationPublicationObserver: observer);
         return await factory.CreateAsync(
             "test-model",
             workspace.RootPath,
@@ -1338,7 +1343,7 @@ public sealed class CustomLoopRuntimeTests
     private static async Task<AgentRuntime> CreateRuntimeWithoutProviderAsync(TestWorkspace workspace)
     {
         var executable = OperatingSystem.IsWindows() ? await CreateFakeCodexExecutableAsync(workspace) : "/usr/bin/false";
-        return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync("test-model", workspace.RootPath, executable, "read-only", AgentRuntimeSurface.Cli);
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync("test-model", workspace.RootPath, executable, "read-only", AgentRuntimeSurface.Cli);
     }
 
     private sealed class RecordingConversationPublicationObserver : IAgentRuntimeConversationPublicationObserver

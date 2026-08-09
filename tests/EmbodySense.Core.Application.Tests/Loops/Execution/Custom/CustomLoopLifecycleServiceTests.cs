@@ -12,6 +12,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Tests.Support;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
@@ -1183,7 +1184,10 @@ public sealed class CustomLoopLifecycleServiceTests
             events.ToArray(),
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _now)
+        };
         run = CustomLoopAdmissionRequestHash.Apply(run);
         Assert.True(CustomLoopRunValidator.Validate(run).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(run).Errors));
         return run;

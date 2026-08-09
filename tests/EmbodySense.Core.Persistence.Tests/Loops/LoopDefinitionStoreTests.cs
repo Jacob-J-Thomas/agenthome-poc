@@ -161,6 +161,25 @@ public sealed class LoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task SaveAsync_rejects_invalid_and_noncanonical_default_capability_requirements()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new LoopDefinitionStore(paths);
+        var definition = LoopDefinition.CreateDefaultConversation();
+        var invalid = definition with { CapabilityRequirements = definition.CapabilityRequirements with { Artifact = null! } };
+
+        var invalidException = await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(invalid));
+
+        Assert.Contains("valid bounded capability requirement manifest", invalidException.Message, StringComparison.Ordinal);
+        var noncanonical = definition with { CapabilityRequirements = LoopCapabilityRequirements.CreateCustomLoopManifest("other-loop", []) };
+        var noncanonicalException = await Assert.ThrowsAsync<FormatException>(() => store.SaveAsync(noncanonical));
+
+        Assert.Contains("server-owned mapping", noncanonicalException.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(paths.DefaultConversationLoopDefinitionPath));
+    }
+
+    [Fact]
     public async Task SaveAsync_rejects_invalid_graph_definitions()
     {
         using var workspace = new TestWorkspace();

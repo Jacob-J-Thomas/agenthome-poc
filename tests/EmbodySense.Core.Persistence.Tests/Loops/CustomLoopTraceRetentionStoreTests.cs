@@ -617,7 +617,7 @@ public sealed class CustomLoopTraceRetentionStoreTests
         var createdAt = timestamp ?? _timestamp;
         var definition = CustomLoopDefinition.CreateSeed("loop-alpha", "default-role", "step-1", "create-loop", createdAt);
         var admitted = Event(1, $"event-{runId}-1", CustomLoopRunEventKind.Admitted, createdAt);
-        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, definition.Id, 1, CustomLoopRunStatus.Admitted, createdAt, createdAt, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(createdAt), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null);
+        var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, definition.Id, 1, CustomLoopRunStatus.Admitted, createdAt, createdAt, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, CustomLoopContextSnapshot.CreateEmpty(createdAt), CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null) { CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, createdAt) };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

@@ -1,6 +1,9 @@
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Runtime;
+using EmbodySense.Tests.Support;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Runtime;
 using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Application.Context;
@@ -47,7 +50,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
         var chunks = new List<string>();
         var diagnostics = new List<RuntimeDiagnosticMessage>();
 
@@ -83,9 +86,12 @@ public sealed class DefaultConversationLoopRunnerTests
         Assert.Collection(inferenceRequest.Messages, message => Assert.Equal("hello", message.Content));
         var instructionContext = Assert.IsType<LlmInferenceInstructionContext>(inferenceRequest.InstructionContext);
         Assert.True(EmbodySenseDeveloperInstructions.Matches(instructionContext.Governance, Enum.GetValues<ToolCommand>()));
-        var startupInstruction = Assert.Single(instructionContext.TrustedInstructions);
+        var startupInstruction = Assert.Single(instructionContext.TrustedInstructions, instruction => instruction.SourceId == "startup-context-1");
         Assert.Equal("startup-context-1", startupInstruction.SourceId);
         Assert.Equal("startup context", startupInstruction.Content);
+        var capabilityInstruction = Assert.Single(instructionContext.TrustedInstructions, instruction => instruction.SourceId == "admitted-capabilities");
+        Assert.Contains("descriptions only", capabilityInstruction.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("provenance", capabilityInstruction.Content[(capabilityInstruction.Content.IndexOf(':') + 1)..], StringComparison.OrdinalIgnoreCase);
         Assert.False(instructionContext.PreserveExactLogicalContext);
         Assert.Collection(
             state.Messages,
@@ -143,7 +149,7 @@ public sealed class DefaultConversationLoopRunnerTests
             null));
         var startupMessages = await new AgentContextProvider(contextStore).LoadAsync(new WorkspacePaths(Directory.GetCurrentDirectory()));
         var state = new ConversationRuntimeState(startupMessages);
-        var runner = new DefaultConversationLoopRunner(client, state, loopDefinition: LoopDefinition.CreateDefaultConversation(), surface: RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, loopDefinition: LoopDefinition.CreateDefaultConversation(), surface: RuntimeSurfaceId.Web);
         var diagnostics = new List<RuntimeDiagnosticMessage>();
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest(
@@ -167,7 +173,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -197,7 +203,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var runs = new RecordingLoopRunStore();
         var turns = new RecordingDefaultConversationTurnStore();
         var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns);
         const string RequestId = "terminal-provider-failure";
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
@@ -230,7 +236,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var turns = new RecordingDefaultConversationTurnStore();
-        var runner = new DefaultConversationLoopRunner(client, new ConversationRuntimeState(), memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns);
+        var runner = new DefaultConversationLoopRunner(client, new ConversationRuntimeState(), memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns, capabilityAdmissionService: new TestCapabilityAdmissionService());
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
         var turn = await turns.LoadAsync(DefaultConversationTurnProtocol.CreateTurnId(RequestId));
@@ -265,7 +271,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var runs = new RecordingLoopRunStore();
         var turns = new RecordingDefaultConversationTurnStore();
         var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns);
         const string RequestId = "observed-response-audit-failure";
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
@@ -294,7 +300,7 @@ public sealed class DefaultConversationLoopRunnerTests
         };
         var memory = new RecordingConversationMemoryStore();
         var turns = new RecordingDefaultConversationTurnStore();
-        var runner = new DefaultConversationLoopRunner(client, new ConversationRuntimeState(), memory, LoopDefinition.CreateDefaultConversation(), new RecordingLoopRunStore(), RuntimeSurfaceId.Web, turns);
+        var runner = new DefaultConversationLoopRunner(client, new ConversationRuntimeState(), memory, LoopDefinition.CreateDefaultConversation(), new RecordingLoopRunStore(), RuntimeSurfaceId.Web, turns, capabilityAdmissionService: new TestCapabilityAdmissionService());
         const string RequestId = "empty-observed-audit-failure";
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
@@ -315,12 +321,60 @@ public sealed class DefaultConversationLoopRunnerTests
     }
 
     [Fact]
+    public async Task RunTurnAsync_records_an_empty_terminal_provider_response_as_a_conclusive_failure()
+    {
+        var client = new RecordingInferenceClient("");
+        var memory = new RecordingConversationMemoryStore();
+        var runs = new RecordingLoopRunStore();
+        var turns = new RecordingDefaultConversationTurnStore();
+        var runner = new DefaultConversationLoopRunner(client, new ConversationRuntimeState(), memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web, turns, capabilityAdmissionService: new TestCapabilityAdmissionService());
+        const string RequestId = "empty-terminal-provider-response";
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        var turn = await turns.LoadAsync(DefaultConversationTurnProtocol.CreateTurnId(RequestId));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.Contains("without a usable assistant message body", result.FailureDetail, StringComparison.Ordinal);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.NotNull(turn);
+        Assert.Equal(DefaultConversationProviderOutcome.ObservedFailure, turn.ProviderOutcome);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, turn.Checkpoint);
+        Assert.Equal(LoopRunStatus.Failed, turn.Run.Status);
+        Assert.Null(turn.AssistantMessage);
+        Assert.Collection(memory.Messages, message => Assert.Equal((LlmMessageRole.User, "hello"), (message.Role, message.Content)));
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_preserves_an_empty_observed_response_as_a_conclusive_failure_when_completion_audit_fails()
+    {
+        var response = new LlmInferenceResponse("", LlmInferenceSurface.OpenAiCodex, ProviderResponseId: "provider-turn-empty");
+        var client = new RecordingInferenceClient("unused")
+        {
+            Failure = new LlmInferenceObservedResponseException("completion audit failed", response, new IOException("audit unavailable"))
+        };
+        var turns = new RecordingDefaultConversationTurnStore();
+        var runner = CreateRunner(client, new ConversationRuntimeState(), new RecordingConversationMemoryStore(), LoopDefinition.CreateDefaultConversation(), turnStore: turns);
+        const string RequestId = "empty-observed-response-audit-failure";
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
+        var turn = await turns.LoadAsync(DefaultConversationTurnProtocol.CreateTurnId(RequestId));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.Equal(0, client.QuarantineCount);
+        Assert.NotNull(turn);
+        Assert.Equal(DefaultConversationProviderOutcome.ObservedFailure, turn.ProviderOutcome);
+        Assert.Equal("provider-turn-empty", turn.ProviderResponseId);
+        Assert.Equal(DefaultConversationTurnCheckpoint.Terminal, turn.Checkpoint);
+        Assert.Null(turn.AssistantMessage);
+    }
+
+    [Fact]
     public async Task RunTurnAsync_replays_a_completed_caller_request_without_provider_redispatch_or_duplicate_publication()
     {
         var client = new RecordingInferenceClient("completed response");
         var memory = new RecordingConversationMemoryStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory);
+        var runner = CreateRunner(client, state, memory);
         const string RequestId = "caller-request-1";
 
         var first = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", requestId: RequestId));
@@ -345,7 +399,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var client = new RecordingInferenceClient("must not run");
         var memory = new RecordingConversationMemoryStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(
+        var runner = CreateRunner(
             client,
             state,
             memory,
@@ -371,7 +425,7 @@ public sealed class DefaultConversationLoopRunnerTests
     public async Task RunTurnAsync_rejects_reuse_of_a_caller_request_for_a_different_payload()
     {
         var client = new RecordingInferenceClient("completed response");
-        var runner = new DefaultConversationLoopRunner(client, new ConversationRuntimeState(), new RecordingConversationMemoryStore());
+        var runner = CreateRunner(client, new ConversationRuntimeState(), new RecordingConversationMemoryStore());
         const string RequestId = "caller-request-2";
 
         Assert.Equal(DefaultConversationLoopTurnStatus.Completed, (await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("first", requestId: RequestId))).Status);
@@ -383,6 +437,68 @@ public sealed class DefaultConversationLoopRunnerTests
     }
 
     [Fact]
+    public async Task RunTurnAsync_fails_closed_when_exact_capabilities_change_before_provider_dispatch()
+    {
+        var client = new RecordingInferenceClient("must not run");
+        var turns = new RecordingDefaultConversationTurnStore();
+        var capabilities = new TestCapabilityAdmissionService();
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(true, [], "The admitted capability was current before user publication."));
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(false, [], "The admitted capability was disabled."));
+        var runner = CreateRunner(client, new ConversationRuntimeState(), new RecordingConversationMemoryStore(), turnStore: turns, capabilityAdmissionService: capabilities);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.True(result.UserMessageAccepted);
+        Assert.Empty(client.Requests);
+        Assert.Equal(LoopRunStatus.Failed, turns.Record!.Run.Status);
+        Assert.Contains("changed before provider dispatch", result.FailureDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_fails_before_user_transcript_publication_when_capability_is_revoked()
+    {
+        var capabilities = new TestCapabilityAdmissionService();
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(false, [], "The admitted capability was disabled."));
+        var client = new RecordingInferenceClient("must not run");
+        var memory = new RecordingConversationMemoryStore();
+        var turns = new RecordingDefaultConversationTurnStore();
+        var runner = CreateRunner(client, new ConversationRuntimeState(), memory, turnStore: turns, capabilityAdmissionService: capabilities);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.Failed, result.Status);
+        Assert.True(result.UserMessageAccepted);
+        Assert.Empty(client.Requests);
+        Assert.Empty(memory.Messages);
+        Assert.Equal(LoopRunStatus.Failed, turns.Record!.Run.Status);
+        Assert.Contains("before user transcript publication", result.FailureDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunTurnAsync_parks_observed_assistant_before_transcript_publication_when_capability_is_revoked()
+    {
+        var capabilities = new TestCapabilityAdmissionService();
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(true, [], "Capabilities are current before user publication."));
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(true, [], "Capabilities are current before provider dispatch."));
+        capabilities.RevalidationResults.Enqueue(new CapabilityRevalidationResult(false, [], "The admitted capability was disabled."));
+        var client = new RecordingInferenceClient("observed response");
+        var memory = new RecordingConversationMemoryStore();
+        var turns = new RecordingDefaultConversationTurnStore();
+        var runner = CreateRunner(client, new ConversationRuntimeState(), memory, turnStore: turns, capabilityAdmissionService: capabilities);
+
+        var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
+
+        Assert.Equal(DefaultConversationLoopTurnStatus.NeedsReview, result.Status);
+        Assert.True(result.UserMessageAccepted);
+        Assert.Single(client.Requests);
+        Assert.Collection(memory.Messages, message => Assert.Equal("hello", message.Content));
+        Assert.Equal(LoopRunStatus.NeedsReview, turns.Record!.Run.Status);
+        Assert.Equal("observed response", turns.Record.AssistantMessage!.Content);
+        Assert.Contains("before assistant transcript publication", result.FailureDetail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RunTurnAsync_rejects_a_pre_cancelled_turn_before_accepting_its_prompt()
     {
         using var cancellation = new CancellationTokenSource();
@@ -391,7 +507,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", cancellationToken: cancellation.Token));
 
@@ -408,7 +524,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var client = new RecordingInferenceClient("unused");
         var memory = new RecordingConversationMemoryStore { LoadCurrentException = new IOException("conversation unavailable") };
         var state = new ConversationRuntimeState([LlmMessage.System("startup")]);
-        var runner = new DefaultConversationLoopRunner(client, state, memory);
+        var runner = CreateRunner(client, state, memory);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -432,7 +548,7 @@ public sealed class DefaultConversationLoopRunnerTests
             }
         };
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory);
+        var runner = CreateRunner(client, state, memory);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", cancellationToken: cancellation.Token));
 
@@ -449,7 +565,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
         var disabledLoop = LoopDefinition.CreateDefaultConversation() with { State = LoopState.Disabled };
-        var runner = new DefaultConversationLoopRunner(client, state, memory, disabledLoop, runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, disabledLoop, runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -504,7 +620,7 @@ public sealed class DefaultConversationLoopRunnerTests
                 ]).ToArray()
             }
         };
-        var runner = new DefaultConversationLoopRunner(client, state, memory, extendedLoop, runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, extendedLoop, runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -535,7 +651,7 @@ public sealed class DefaultConversationLoopRunnerTests
                 Edges = graph.Edges.Select(edge => edge.Id == "context-to-inference" ? edge with { Condition = LoopGraphEdgeCondition.Always } : edge).ToArray()
             }
         };
-        var runner = new DefaultConversationLoopRunner(client, state, memory, changedLoop, runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, changedLoop, runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -558,7 +674,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore { FailureAtSaveNumber = 1 };
         var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -577,7 +693,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore { FailureAtSaveNumber = 2 };
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -597,7 +713,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore { FailureAtSaveNumber = 2 };
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -629,7 +745,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore { FailureAtAppendNumber = 2 };
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
 
@@ -655,7 +771,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var client = new RecordingInferenceClient("unused");
         var memory = new RecordingConversationMemoryStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(
+        var runner = CreateRunner(
             client,
             state,
             memory,
@@ -682,7 +798,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var client = new BlockingInferenceClient("completed response");
         var memory = new RecordingConversationMemoryStore();
         var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
-        var runner = new DefaultConversationLoopRunner(client, state, memory);
+        var runner = CreateRunner(client, state, memory);
 
         var turn = runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello"));
         await client.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -715,8 +831,8 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var firstState = new ConversationRuntimeState([LlmMessage.System("startup context")], exclusiveAccessScope: scope);
         var secondState = new ConversationRuntimeState([LlmMessage.System("startup context")], exclusiveAccessScope: scope);
-        var firstRunner = new DefaultConversationLoopRunner(firstClient, firstState, memory);
-        var secondRunner = new DefaultConversationLoopRunner(secondClient, secondState, memory);
+        var firstRunner = CreateRunner(firstClient, firstState, memory);
+        var secondRunner = CreateRunner(secondClient, secondState, memory);
 
         var firstTurn = firstRunner.RunTurnAsync(new DefaultConversationLoopTurnRequest("first prompt"));
         await firstClient.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -734,7 +850,7 @@ public sealed class DefaultConversationLoopRunnerTests
             message => Assert.Equal("first prompt", message.Content),
             message => Assert.Equal("first response", message.Content),
             message => Assert.Equal("second prompt", message.Content));
-        Assert.Equal("startup context", Assert.Single(secondRequest.InstructionContext!.TrustedInstructions).Content);
+        Assert.Equal("startup context", Assert.Single(secondRequest.InstructionContext!.TrustedInstructions, instruction => instruction.SourceId == "startup-context-1").Content);
         Assert.Collection(
             memory.Messages,
             message => Assert.Equal("first prompt", message.Content),
@@ -751,7 +867,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var state = new ConversationRuntimeState([LlmMessage.System("startup context")]);
         state.AppendMessage(LlmMessage.User("active prompt"));
         state.AppendMessage(LlmMessage.Assistant("active response"));
-        var runner = new DefaultConversationLoopRunner(client, state, memory);
+        var runner = CreateRunner(client, state, memory);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("next prompt"));
 
@@ -769,7 +885,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
         using var queuedCancellation = new CancellationTokenSource();
 
         var firstTurn = runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("first prompt"));
@@ -808,7 +924,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest("hello", cancellationToken: cancellation.Token));
 
@@ -836,7 +952,7 @@ public sealed class DefaultConversationLoopRunnerTests
         var memory = new RecordingConversationMemoryStore();
         var runs = new RecordingLoopRunStore();
         var state = new ConversationRuntimeState();
-        var runner = new DefaultConversationLoopRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
+        var runner = CreateRunner(client, state, memory, LoopDefinition.CreateDefaultConversation(), runs, RuntimeSurfaceId.Web);
 
         var result = await runner.RunTurnAsync(new DefaultConversationLoopTurnRequest(
             "hello",
@@ -857,6 +973,20 @@ public sealed class DefaultConversationLoopRunnerTests
             runs.Saved,
             run => Assert.Equal(LoopRunStatus.Started, run.Status),
             run => Assert.Equal(LoopRunStatus.NeedsReview, run.Status));
+    }
+
+    private static DefaultConversationLoopRunner CreateRunner(
+        ILlmInferenceClient inferenceClient,
+        ConversationRuntimeState conversationState,
+        IConversationMemoryStore? conversationMemoryStore = null,
+        LoopDefinition? loopDefinition = null,
+        ILoopRunStore? loopRunStore = null,
+        RuntimeSurfaceId? surface = null,
+        IDefaultConversationTurnStore? turnStore = null,
+        IDefaultConversationTurnFailpoint? failpoint = null,
+        ICapabilityAdmissionService? capabilityAdmissionService = null)
+    {
+        return new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemoryStore, loopDefinition, loopRunStore, surface, turnStore, failpoint, capabilityAdmissionService ?? new TestCapabilityAdmissionService());
     }
 
     private sealed class RecordingInferenceClient(string output) : ILlmInferenceClient, IQuarantinableInferenceClient

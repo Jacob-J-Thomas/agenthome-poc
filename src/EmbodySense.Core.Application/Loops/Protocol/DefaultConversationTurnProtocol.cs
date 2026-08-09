@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Memory.Models;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Capabilities.Models;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -23,12 +24,14 @@ public static class DefaultConversationTurnProtocol
     /// <param name="userMessage">The exact accepted input candidate.</param>
     /// <param name="admittedAtUtc">The admission time.</param>
     /// <param name="requestId">The caller-owned idempotency identity.</param>
+    /// <param name="capabilityAdmission">The server-resolved immutable capability pins and evidence.</param>
     /// <returns>A lifecycle-version-one admitted record.</returns>
-    public static DefaultConversationTurnRecord Admit(LoopRunRecord run, ConversationMemorySnapshot conversation, LlmMessage userMessage, DateTimeOffset admittedAtUtc, string requestId)
+    public static DefaultConversationTurnRecord Admit(LoopRunRecord run, ConversationMemorySnapshot conversation, LlmMessage userMessage, DateTimeOffset admittedAtUtc, string requestId, CapabilityAdmissionSnapshot capabilityAdmission)
     {
         ArgumentNullException.ThrowIfNull(run);
         ArgumentNullException.ThrowIfNull(conversation);
         ArgumentNullException.ThrowIfNull(userMessage);
+        ArgumentNullException.ThrowIfNull(capabilityAdmission);
 
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
         requestId = requestId.Trim();
@@ -57,7 +60,10 @@ public static class DefaultConversationTurnProtocol
             DefaultConversationTurnReviewCause.None,
             null,
             null,
-            [transition]);
+            [transition])
+        {
+            CapabilityAdmission = capabilityAdmission
+        };
     }
 
     /// <summary>

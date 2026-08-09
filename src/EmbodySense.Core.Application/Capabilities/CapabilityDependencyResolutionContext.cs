@@ -10,14 +10,18 @@ internal sealed class CapabilityDependencyResolutionContext
     private readonly IReadOnlyList<CapabilityDependencyCatalogCandidate> _candidates;
     private readonly List<CapabilityDependencyResolutionEvidence> _evidence;
     private readonly CapabilityDependencyResolutionLimits _limits;
+    private readonly CapabilityVersion _hostContractVersion;
+    private readonly CapabilityPlatform _hostPlatform;
     private readonly Dictionary<string, List<CapabilityVersionRange>> _ranges = new(StringComparer.Ordinal);
     private int _dependencyCount;
 
-    public CapabilityDependencyResolutionContext(IReadOnlyList<CapabilityDependencyCatalogCandidate> candidates, List<CapabilityDependencyResolutionEvidence> evidence, CapabilityDependencyResolutionLimits limits, IReadOnlyDictionary<string, CapabilityDependencyCatalogCandidate> preferredSelection)
+    public CapabilityDependencyResolutionContext(IReadOnlyList<CapabilityDependencyCatalogCandidate> candidates, List<CapabilityDependencyResolutionEvidence> evidence, CapabilityDependencyResolutionLimits limits, IReadOnlyDictionary<string, CapabilityDependencyCatalogCandidate> preferredSelection, CapabilityVersion hostContractVersion, CapabilityPlatform hostPlatform)
     {
         _candidates = candidates;
         _evidence = evidence;
         _limits = limits;
+        _hostContractVersion = hostContractVersion;
+        _hostPlatform = hostPlatform;
         PreferredSelection = preferredSelection;
     }
 
@@ -93,13 +97,20 @@ internal sealed class CapabilityDependencyResolutionContext
             return;
         }
 
-        if (HasConflictingExactEvidence(compatible))
+        var hostCompatible = compatible.Where(IsHostCompatible).ToArray();
+        if (hostCompatible.Length == 0)
+        {
+            ObserveUnavailable(subjectId, dependency, optional, CapabilityDependencyResolutionOutcome.Incompatible, "No catalog candidate supports the current EmbodySense host contract and operating-system/architecture tuple.");
+            return;
+        }
+
+        if (HasConflictingExactEvidence(hostCompatible))
         {
             Fail(subjectId, dependency.CapabilityId, dependency.CompatibleVersionRange, optional, CapabilityDependencyResolutionOutcome.Conflict, "Equal-version candidates have conflicting exact descriptor or provenance evidence.");
             return;
         }
 
-        var trusted = compatible.Where(IsResolvable).OrderByDescending(item => item.Entry.Descriptor.Version).ThenBy(item => item.Entry.Lifecycle.DescriptorIdentity.Hash.Value, StringComparer.Ordinal).ToArray();
+        var trusted = hostCompatible.Where(IsResolvable).OrderByDescending(item => item.Entry.Descriptor.Version).ThenBy(item => item.Entry.Lifecycle.DescriptorIdentity.Hash.Value, StringComparer.Ordinal).ToArray();
         if (trusted.Length == 0)
         {
             Fail(subjectId, dependency.CapabilityId, dependency.CompatibleVersionRange, optional, CapabilityDependencyResolutionOutcome.Untrusted, "Compatible candidates are unavailable, unverified, or have mismatched integrity evidence.");
@@ -169,6 +180,13 @@ internal sealed class CapabilityDependencyResolutionContext
         var lifecycle = candidate.Entry.Lifecycle;
         var declaredIntegrity = candidate.Entry.Descriptor.Provenance.Integrity;
         return lifecycle.Declaration == CapabilityDeclarationState.Declared && lifecycle.Installation == CapabilityInstallationState.Installed && lifecycle.Health is CapabilityHealthState.Healthy or CapabilityHealthState.Degraded && lifecycle.Retirement != CapabilityRetirementState.Removed && lifecycle.Trust == CapabilityTrustState.Verified && (candidate.Artifact.Checksum is null || declaredIntegrity is null || candidate.Artifact.Checksum.FixedTimeEquals(declaredIntegrity));
+    }
+
+    private bool IsHostCompatible(CapabilityDependencyCatalogCandidate candidate)
+    {
+        var compatibility = candidate.Entry.Descriptor.Compatibility;
+        return compatibility.HostVersionRange.Contains(_hostContractVersion)
+            && compatibility.SupportedPlatforms.Any(platform => platform.Equals(CapabilityPlatform.Any) || platform.Equals(_hostPlatform));
     }
 
     private static bool HasValidCandidateShape(CapabilityDependencyCatalogCandidate candidate)

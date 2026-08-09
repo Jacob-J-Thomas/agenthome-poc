@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Models;
 using EmbodySense.Core.Common.Runtime;
+using EmbodySense.Core.Common.Capabilities;
 
 namespace EmbodySense.Core.Application.Loops.Protocol;
 
@@ -24,11 +25,20 @@ public static class DefaultConversationTurnProtocolValidator
         Require(string.Equals(record.TurnId, DefaultConversationTurnProtocol.CreateTurnId(record.RequestId), StringComparison.Ordinal), "Default-conversation turn identity must be derived from its exact caller request identity.");
         Require(record.Run is not null, "Default-conversation turn run evidence was missing.");
         ValidateRun(record);
+        ValidateCapabilityAdmission(record);
         ValidateConversation(record);
         ValidateStableIdentities(record);
         ValidateTransitions(record);
         ValidateProviderEvidence(record);
         ValidateTerminalEvidence(record);
+    }
+
+    private static void ValidateCapabilityAdmission(DefaultConversationTurnRecord record)
+    {
+        var error = CapabilityAdmissionSnapshotValidator.Validate(record.CapabilityAdmission);
+        Require(error is null, error ?? "Default-conversation capability admission evidence was invalid.");
+        _ = CapabilityDependencyManifestHash.TryCompute(_canonicalDefinition.CapabilityRequirements, out var expected, out _);
+        Require(string.Equals(record.CapabilityAdmission.RequirementsHash, expected!.Value, StringComparison.Ordinal), "Default-conversation capability evidence must bind the canonical system requirements.");
     }
 
     private static void ValidateRun(DefaultConversationTurnRecord record)

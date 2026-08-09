@@ -704,7 +704,10 @@ public sealed class WebAgentRuntimeHostTests
             events,
             null,
             null,
-            null);
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, now)
+        };
         return CustomLoopAdmissionRequestHash.Apply(run);
     }
 

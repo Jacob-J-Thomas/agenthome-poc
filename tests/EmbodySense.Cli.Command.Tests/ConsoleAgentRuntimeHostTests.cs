@@ -28,7 +28,7 @@ public sealed class ConsoleAgentRuntimeHostTests
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null)
     {
-        return await new AgentRuntimeFactory(new RejectingApprovalPrompt()).CreateAsync(
+        return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync(
             "test-model",
             workspace.RootPath,
             await CreateFakeCodexExecutableAsync(workspace),
