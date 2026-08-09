@@ -215,6 +215,12 @@ public sealed class WorkspacePaths
     /// <value>The default-conversation turn protocol path.</value>
     public string DefaultConversationTurnsPath => Path.Combine(LoopRunsPath, "default-conversation-turns");
 
+    /// <summary>Gets the bounded active and review-required default-conversation turn path.</summary>
+    public string DefaultConversationActiveTurnsPath => Path.Combine(DefaultConversationTurnsPath, "active");
+
+    /// <summary>Gets the immutable terminal default-conversation turn history path.</summary>
+    public string DefaultConversationTurnHistoryPath => Path.Combine(DefaultConversationTurnsPath, "history");
+
     /// <summary>
     /// Gets the custom loop runs path.
     /// </summary>
