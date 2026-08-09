@@ -98,6 +98,7 @@ public sealed class WorkspaceInitializer : IWorkspaceInitializer
     {
         var paths = new WorkspacePaths(rootPath);
         cancellationToken.ThrowIfCancellationRequested();
+        _capabilitySeeder.RequireDisjointTrustRoot(paths.RootPath);
         Directory.CreateDirectory(paths.RootPath);
         if (Directory.Exists(paths.AgentPath))
         {

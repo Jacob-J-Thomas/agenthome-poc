@@ -27,6 +27,33 @@ public sealed class WorkspaceInitializerTests
     }
 
     [Fact]
+    public async Task InitializeAsync_rejects_overlapping_file_trust_roots_before_creating_workspace_or_trust_state()
+    {
+        using var root = new TestWorkspace();
+        var workspaceRoot = root.File("absent-workspace");
+        var trustRoot = Path.Combine(workspaceRoot, "server-trust");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRoot).InitializeAsync(workspaceRoot));
+
+        Assert.False(Directory.Exists(workspaceRoot));
+        Assert.False(File.Exists(Path.Combine(trustRoot, "capability-catalog-root.key")));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_rejects_a_workspace_inside_the_file_trust_root_before_mutation()
+    {
+        using var trustRoot = new TestWorkspace();
+        var workspaceRoot = trustRoot.File("absent-workspace");
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRoot.RootPath).InitializeAsync(workspaceRoot));
+
+        Assert.False(Directory.Exists(workspaceRoot));
+        Assert.False(File.Exists(provider.AuthenticationKeyPath));
+        Assert.False(Directory.Exists(provider.AnchorsPath));
+    }
+
+    [Fact]
     public async Task InitializeAsync_creates_a_genuinely_absent_workspace_before_seeding_and_audits_only_after_success()
     {
         using var workspace = new TestWorkspace();

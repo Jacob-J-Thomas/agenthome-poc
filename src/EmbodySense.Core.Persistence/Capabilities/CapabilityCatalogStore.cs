@@ -54,6 +54,8 @@ public sealed class CapabilityCatalogStore : ICapabilityCatalogStore
             throw new ArgumentOutOfRangeException(nameof(trustProvider), "The trust provider must declare a positive bounded authentication-tag size.");
         }
 
+        trustProvider.RequireDisjointWorkspace(paths.RootPath);
+
         _paths = paths;
         _pathGuard = new CapabilityCatalogPathGuard(paths.RootPath, durabilityBarrier ?? NativeCapabilityCatalogDurabilityBarrier.Instance);
         _trustProvider = trustProvider;

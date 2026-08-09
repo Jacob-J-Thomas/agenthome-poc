@@ -7,6 +7,8 @@ internal sealed class FailingCapabilityCatalogTrustProvider(ICapabilityCatalogTr
 {
     public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
 
+    public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
+
     public bool FailAfterNextInitialization { get; set; }
 
     public bool FailNextAdvance { get; set; }
