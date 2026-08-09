@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 
 namespace EmbodySense.Core.Common.Tests;
 

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Common.Capabilities.Models;
 using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Common.Capabilities;

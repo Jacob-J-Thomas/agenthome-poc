@@ -1,3 +1,5 @@
+using EmbodySense.Core.Common.Capabilities.Models;
+
 namespace EmbodySense.Core.Common.Capabilities;
 
 internal static class CapabilityContractVocabulary
