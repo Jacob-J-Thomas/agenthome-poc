@@ -540,6 +540,107 @@ public sealed class FileCapabilityCatalogTrustProviderTests
     }
 
     [Fact]
+    public void Workspace_identity_rejects_a_workspace_that_does_not_exist()
+    {
+        var missingWorkspace = Path.Combine(Directory.GetCurrentDirectory(), ".embodysense-missing-workspace-" + Guid.NewGuid().ToString("N"));
+
+        Assert.False(Directory.Exists(missingWorkspace));
+        Assert.Throws<DirectoryNotFoundException>(() => CapabilityCatalogWorkspaceIdentity.Create(missingWorkspace));
+    }
+
+    [Fact]
+    public void Workspace_identity_changes_when_the_directory_is_recreated_at_the_same_path()
+    {
+        using var workspace = new TestWorkspace();
+        var originalIdentity = CapabilityCatalogWorkspaceIdentity.Create(workspace.RootPath);
+
+        Directory.Delete(workspace.RootPath, recursive: true);
+        Directory.CreateDirectory(workspace.RootPath);
+        var replacementIdentity = CapabilityCatalogWorkspaceIdentity.Create(workspace.RootPath);
+
+        Assert.NotEqual(originalIdentity, replacementIdentity);
+    }
+
+    [Fact]
+    public async Task Unix_workspace_lifetime_identity_rejects_retained_anchor_when_device_and_inode_are_reused()
+    {
+        using var trustRoot = new TestWorkspace();
+        var provider = new FileCapabilityCatalogTrustProvider(trustRoot.RootPath);
+        var oldMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 4, 0x65f1a2b3, 0);
+        var replacementMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 5, 0x65f1a2b3, 0);
+        var oldWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(oldMaterial);
+        var reusedWorkspaceIdentity = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(replacementMaterial);
+        var digest = Digest("reused-unix-workspace-artifact");
+
+        Assert.NotEqual(oldWorkspaceIdentity, reusedWorkspaceIdentity);
+        await provider.InitializeAsync(oldWorkspaceIdentity, 0, digest);
+        var copiedArtifactTag = await provider.AuthenticateArtifactAsync(oldWorkspaceIdentity, 0, digest);
+
+        await Assert.ThrowsAsync<IOException>(() => provider.VerifyArtifactAsync(reusedWorkspaceIdentity, 0, digest, copiedArtifactTag));
+    }
+
+    [Fact]
+    public void Unix_workspace_lifetime_identity_changes_when_only_inode_generation_changes()
+    {
+        var originalMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 4, 0x65f1a2b3, 0);
+        var replacementMaterial = CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 5, 0x65f1a2b3, 0);
+        var originalLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(originalMaterial);
+        var replacementLifetime = CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(replacementMaterial);
+
+        Assert.NotEqual(originalMaterial, replacementMaterial);
+        Assert.NotEqual(originalLifetime, replacementLifetime);
+    }
+
+    [Fact]
+    public void Workspace_identity_digest_rejects_missing_physical_identity_material()
+    {
+        Assert.Throws<ArgumentException>(() => CapabilityCatalogWorkspaceIdentity.CreateFromPhysicalIdentity(" "));
+    }
+
+    [Fact]
+    public void Unix_workspace_identity_material_requires_stable_identity_and_lifetime_availability()
+    {
+        Assert.Equal(
+            "macos:00000001:0000000000000003:generation-00000004:0000000065f1a2b3:0000000000000000",
+            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 4, 0x65f1a2b3, 0));
+        Assert.Equal(
+            "macos:00000001:0000000000000003:nonrecycled-inode:0000000065f1a2b3:0000000000000000",
+            CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 0, 0x65f1a2b3, 0, inodeIsNonRecycled: true));
+        var linuxFailure = Assert.Throws<PlatformNotSupportedException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("linux", 1, 2, 3, 4, 0x65f1a2b3, 0));
+        Assert.Equal("Capability catalog Linux workspace identity is unsupported because no non-owner-writable directory-lifetime identity is available.", linuxFailure.Message);
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, null, 4, 0x65f1a2b3, 0));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, null, 0x65f1a2b3, 0));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 0, 0x65f1a2b3, 0));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 4, null, null));
+        Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("macos", 1, 0, 3, 4, 0, 0));
+        Assert.Throws<ArgumentException>(() => CapabilityCatalogWorkspaceIdentity.CreateUnixPhysicalIdentityMaterial("freebsd", 1, 2, 3, 4, 0x65f1a2b3, 0));
+    }
+
+    [Fact]
+    public void Native_workspace_identity_read_mapping_preserves_failure_details()
+    {
+        CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(0, 0);
+        var readFailure = Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.RequireNativePhysicalIdentityRead(-1, 5));
+        Assert.Equal(unchecked((int)0x80070005), readFailure.HResult);
+    }
+
+    [Fact]
+    public void Mac_workspace_volume_capability_mapping_requires_complete_valid_enabled_persistent_object_id_evidence()
+    {
+        const uint CapabilityBufferLength = 36;
+        const uint PersistentObjectIds = 0x00000001;
+        const uint PathFromId = 0x00004000;
+        Assert.True(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength, CapabilityBufferLength, PersistentObjectIds, PersistentObjectIds));
+        Assert.False(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength - 1, CapabilityBufferLength, PersistentObjectIds, PersistentObjectIds));
+        Assert.False(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength, CapabilityBufferLength, 0, PersistentObjectIds));
+        Assert.False(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength, CapabilityBufferLength, PersistentObjectIds, 0));
+        Assert.False(CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, CapabilityBufferLength, CapabilityBufferLength, PathFromId, PathFromId));
+        Assert.Throws<ArgumentOutOfRangeException>(() => CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(0, 0, 0, 0, PersistentObjectIds, PersistentObjectIds));
+        var failure = Assert.Throws<IOException>(() => CapabilityCatalogWorkspaceIdentity.MacVolumeCapabilitiesProveNonRecycledObjectIdentity(-1, 5, CapabilityBufferLength, CapabilityBufferLength, PersistentObjectIds, PersistentObjectIds));
+        Assert.Equal(unchecked((int)0x80070005), failure.HResult);
+    }
+
+    [Fact]
     public async Task Provider_retains_anchors_without_eviction_and_rejects_a_root_over_its_byte_quota()
     {
         using var trustRoot = new TestWorkspace();

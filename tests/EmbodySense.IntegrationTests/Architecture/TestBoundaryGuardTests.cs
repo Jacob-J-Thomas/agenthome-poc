@@ -1,4 +1,6 @@
 using System.Xml.Linq;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace EmbodySense.IntegrationTests.Architecture;
 
@@ -131,6 +133,23 @@ public sealed class TestBoundaryGuardTests
             .ToArray();
 
         Assert.Empty(violations);
+    }
+
+    [Fact]
+    public void Public_capability_catalog_store_construction_cannot_override_physical_workspace_identity()
+    {
+        var root = FindRepositoryRoot();
+        var sourcePath = Path.Combine(root, "src", "EmbodySense.Core.Persistence", "Capabilities", "CapabilityCatalogStore.cs");
+        var store = CSharpSyntaxTree.ParseText(File.ReadAllText(sourcePath)).GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>().Single(declaration => declaration.Identifier.ValueText == "CapabilityCatalogStore");
+        var publicConstructorParameters = store.Members
+            .OfType<ConstructorDeclarationSyntax>()
+            .Where(constructor => constructor.Modifiers.Any(modifier => modifier.RawKind == (int)SyntaxKind.PublicKeyword))
+            .SelectMany(constructor => constructor.ParameterList.Parameters)
+            .Select(parameter => parameter.Type?.ToString() ?? "")
+            .ToArray();
+
+        Assert.DoesNotContain(publicConstructorParameters, type => type.Contains("WorkspaceIdentity", StringComparison.Ordinal) || type.Contains("Func<", StringComparison.Ordinal));
+        Assert.False(File.Exists(Path.Combine(root, "src", "EmbodySense.Core.Persistence", "Capabilities", "ICapabilityCatalogWorkspaceIdentityProvider.cs")));
     }
 
     private static IEnumerable<string> ReadCompiledAssemblyReferences(string projectPath)
