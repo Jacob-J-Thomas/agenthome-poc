@@ -7,6 +7,7 @@ using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 
@@ -110,6 +111,7 @@ public static class Program
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
         services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
         services.AddSingleton<ILoopReceiptRetentionFacade>(_ => new LoopReceiptRetentionFacade(options.WorkingDirectory));
+        services.AddSingleton<ICapabilityCatalogFacade>(_ => new CapabilityCatalogFacade(options.WorkingDirectory));
     }
 
     /// <summary>

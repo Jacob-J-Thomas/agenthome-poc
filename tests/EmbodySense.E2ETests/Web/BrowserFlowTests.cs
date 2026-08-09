@@ -7,13 +7,19 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
@@ -431,6 +437,66 @@ public sealed class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
+    public async Task Browser_inspects_and_confirms_an_exact_capability_lifecycle_preview()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var capabilityId = await InstallBrowserLifecycleCapabilityAsync(workspace.RootPath);
+        var capabilityIdJson = JsonSerializer.Serialize(capabilityId.Value);
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test");
+        HeadlessBrowserSession? browser = null;
+
+        try
+        {
+            browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl + "/capabilities.html");
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await browser.WaitForExpressionAsync("document.getElementById('capabilityList').textContent.includes(" + capabilityIdJson + ")");
+            await browser.EvaluateWithUserGestureAsync("(() => { const item = [...document.querySelectorAll('#capabilityList .capability-list-item')].find((candidate) => candidate.textContent.includes(" + capabilityIdJson + ")); if (!item) throw new Error('Browser lifecycle capability was not rendered.'); item.click(); })()");
+            await browser.WaitForExpressionAsync("document.getElementById('capabilityTitle').textContent === " + capabilityIdJson);
+
+            var detail = await browser.EvaluateStringAsync("document.getElementById('capabilityContent').textContent");
+            Assert.Contains("Browser lifecycle E2E capability", detail, StringComparison.Ordinal);
+            Assert.Contains("No registered loop, skill, or package currently depends", detail, StringComparison.Ordinal);
+            Assert.DoesNotContain(workspace.RootPath, detail, StringComparison.Ordinal);
+            Assert.DoesNotContain("secretValue", detail, StringComparison.OrdinalIgnoreCase);
+
+            await SetValueAsync(browser, "#lifecycleOperation", "disable", "change");
+            await ClickAsync(browser, "#previewLifecycleButton");
+            await browser.WaitForExpressionAsync("(() => { const confirm = [...document.querySelectorAll('#lifecyclePreview button')].find((button) => button.textContent.includes('Confirm Disable')); return !document.getElementById('lifecyclePreview').hidden && confirm && !confirm.disabled; })()");
+            var storageKey = await browser.EvaluateStringAsync("Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.'))");
+            Assert.Matches("^embodysense\\.pending-capability-lifecycle\\.v1\\.[0-9a-f]{64}$", storageKey);
+            Assert.DoesNotContain(workspace.RootPath, storageKey, StringComparison.Ordinal);
+            var pendingOperationId = await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).selection.operationId");
+            Assert.StartsWith("web-capability-", pendingOperationId, StringComparison.Ordinal);
+
+            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('lifecyclePreview').textContent.includes(" + JsonSerializer.Serialize(pendingOperationId) + ")");
+            Assert.Equal(pendingOperationId, await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).selection.operationId"));
+            await browser.EvaluateAsync("window.confirm = () => true");
+            await ClickButtonByTextAsync(browser, "#lifecyclePreview button", "Confirm Disable");
+
+            await browser.WaitForExpressionAsync("document.getElementById('capabilityBadges').textContent.includes('Disabled')");
+            Assert.True(await browser.EvaluateBooleanAsync("!Object.keys(localStorage).some((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.'))"));
+            Assert.Contains("Applied", await browser.EvaluateStringAsync("document.getElementById('lifecycleNotice').textContent"), StringComparison.Ordinal);
+            app.AssertHealthy();
+            await browser.AssertHealthyAsync();
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Browser_inspects_and_confirms_an_exact_capability_lifecycle_preview), browser, app);
+            throw;
+        }
+        finally
+        {
+            if (browser is not null)
+            {
+                await browser.DisposeAsync();
+            }
+        }
+    }
+
+    [InstalledBrowserFact]
     public async Task Incompatible_runtime_is_visible_and_restores_chat_controls_after_rejection()
     {
         using var workspace = new TestWorkspace();
@@ -465,6 +531,35 @@ public sealed class BrowserFlowTests
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private static async Task<CapabilityId> InstallBrowserLifecycleCapabilityAsync(string workspaceRoot)
+    {
+        var paths = new WorkspacePaths(workspaceRoot);
+        var catalogTrust = FileCapabilityCatalogTrustProvider.CreateDefault();
+        var artifactTrust = new FileCapabilityArtifactStateTrustProvider(catalogTrust.RootPath);
+        var content = "browser-lifecycle-artifact"u8.ToArray();
+        var digest = CapabilityIntegrityDigest.Compute(content);
+        Assert.True(CapabilityId.TryParse("org.example/browser-lifecycle", out var id, out _));
+        Assert.True(CapabilityProviderId.TryParse("org.example", out var provider, out _));
+        Assert.True(CapabilityVersion.TryParse("1.0.0", out var version, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var range, out _));
+        Assert.True(CapabilityJsonSchema.TryCreate($"{{\"$schema\":\"{CapabilityJsonSchema.Draft202012Dialect}\",\"type\":\"object\"}}", out var schema, out _));
+        const string SourceUri = "file:///sources/browser-lifecycle";
+        var descriptor = new CapabilityDescriptor(1, id!, CapabilityKind.Skill, version!, new CapabilityImplementationIdentity(provider!, "browser-lifecycle"), new CapabilityProvenance(CapabilityProvenanceKind.LocalSource, SourceUri, "rev-1", digest), new CapabilityCompatibility(range!, [CapabilityHostRuntime.Platform]), "Browser lifecycle E2E capability.", schema!, schema!, new CapabilityResourceLimits(1_000, 32_000_000, 16_384, 1), CapabilitySideEffectClass.None, new CapabilityAccessRequirements([], CapabilityEgressMode.None, [], []));
+        var manifest = new CapabilityArtifactManifest(1, descriptor, new CapabilityArtifactSourceReference(CapabilityArtifactSourceKind.Local, SourceUri, "rev-1", CapabilityArtifactUpdatePolicy.Pinned), digest, null, CapabilityHostRuntime.Platform, "browser-lifecycle", []);
+        var stage = new CapabilityArtifactStageRequest(manifest, new CapabilityArtifactContent(content), new CapabilityArtifactTrustDecision(CapabilityArtifactTrustStatus.Verified, "browser-e2e-policy", "Verified."));
+        var catalog = new CapabilityCatalogService(new CapabilityCatalogStore(paths, catalogTrust));
+        var revision = (await catalog.ReadAsync(null, 1)).Page!.CatalogRevision;
+        revision = (await catalog.DeclareAsync(descriptor, revision, "declare-browser-lifecycle")).CatalogRevision!.Value;
+        revision = (await catalog.InstallAsync(descriptor.Id, revision, "install-browser-lifecycle")).CatalogRevision!.Value;
+        revision = (await catalog.VerifyAsync(descriptor.Id, revision, "verify-browser-lifecycle")).CatalogRevision!.Value;
+        revision = (await catalog.EnableAsync(descriptor.Id, revision, "enable-browser-lifecycle")).CatalogRevision!.Value;
+        Assert.Equal(CapabilityCatalogMutationStatus.Applied, (await catalog.MarkHealthyAsync(descriptor.Id, revision, "healthy-browser-lifecycle")).Status);
+        var artifacts = new CapabilityArtifactStore(paths, artifactTrust, BrowserCapabilityArtifactVerifier.Instance);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifacts.StageAsync(stage)).Status);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifacts.ActivateAsync(new CapabilityArtifactActivationRequest(manifest, 0, "activate-browser-lifecycle"))).Status);
+        return descriptor.Id;
     }
 
     private static async Task InitializeWorkspaceAsync(HeadlessBrowserSession browser)
@@ -562,6 +657,16 @@ public sealed class BrowserFlowTests
         if (app is not null)
         {
             await app.WriteDiagnosticsAsync(directory);
+        }
+    }
+
+    private sealed class BrowserCapabilityArtifactVerifier : ICapabilityArtifactTrustVerifier
+    {
+        public static BrowserCapabilityArtifactVerifier Instance { get; } = new();
+
+        public Task<CapabilityArtifactTrustDecision> VerifyAsync(CapabilityArtifactManifest manifest, CapabilityIntegrityDigest actualDigest, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new CapabilityArtifactTrustDecision(CapabilityArtifactTrustStatus.Verified, "browser-e2e-policy", "Verified."));
         }
     }
 
