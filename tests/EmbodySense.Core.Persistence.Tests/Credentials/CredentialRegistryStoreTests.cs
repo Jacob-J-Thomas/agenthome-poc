@@ -433,6 +433,33 @@ public sealed class CredentialRegistryStoreTests
         Assert.Equal(CredentialProviderHealthStatus.Disabled, entry.Health);
     }
 
+    [Theory]
+    [InlineData(CredentialLifecycleOperationKind.Expire, CredentialLifecycleStatus.Expired, CredentialProviderHealthStatus.Expired)]
+    [InlineData(CredentialLifecycleOperationKind.Revoke, CredentialLifecycleStatus.Revoked, CredentialProviderHealthStatus.Revoked)]
+    public async Task MetadataPostureTransitionsPersistExactRestrictiveReferenceAndHealthAcrossRestart(CredentialLifecycleOperationKind kind, CredentialLifecycleStatus expectedStatus, CredentialProviderHealthStatus expectedHealth)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seeded = await SeedRegistrationAsync(paths);
+        var service = ReconciliationService(paths);
+        var operationId = Id($"metadata-{kind.ToString().ToLowerInvariant()}");
+        var preview = await service.PreviewAsync(new CredentialLifecyclePreviewRequest(operationId, kind, ReferenceId(), "workspace-1", Environment.UserName, seeded.RegistryRevision!.Value));
+        var request = new CredentialLifecycleRequest(kind, operationId, ReferenceId(), "workspace-1", Environment.UserName, seeded.RegistryRevision.Value, new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero), Preview: preview, Confirmed: true);
+
+        var applied = await service.ExecuteAsync(request);
+        var restarted = await Store(paths).ReadAsync();
+        var replayed = await ReconciliationService(paths).ExecuteAsync(request);
+
+        Assert.Equal(CredentialLifecycleResultStatus.Applied, applied.Status);
+        Assert.Equal(expectedHealth, applied.Health);
+        var entry = Assert.Single(restarted.Entries);
+        Assert.Equal(expectedStatus, entry.Reference.Status);
+        Assert.Equal(expectedHealth, entry.Health);
+        var terminal = Assert.Single(restarted.Operations, operation => operation.OperationId.Equals(request.OperationId));
+        Assert.Equal(CredentialLifecycleMutationPhase.MetadataComplete, terminal.LifecyclePhase);
+        Assert.Equal(CredentialLifecycleResultStatus.Replayed, replayed.Status);
+    }
+
     [Fact]
     public async Task RawProviderIntentAndConsentCannotBeIntroducedByDirectStoreCalls()
     {
@@ -783,6 +810,25 @@ public sealed class CredentialRegistryStoreTests
         Assert.False((await store.AppendAsync(Evidence(binding), default)).Succeeded);
         await SeedRegistrationAsync(paths);
         Assert.True((await store.AppendAsync(Evidence(binding), default)).Succeeded);
+    }
+
+    [Fact]
+    public async Task Registry_fails_closed_without_committing_when_a_trust_provider_exceeds_its_declared_tag_bound()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await SeedRegistrationAsync(paths);
+        var before = await Store(paths).ReadAsync();
+        var binding = Binding() with { Scope = Binding().Scope with { ActorId = Environment.UserName } };
+        var store = new CredentialRegistryStore(paths, new OversizedAuthenticationTagTrustProvider(TestTrust(paths)), new AcceptingLocatorVerifier());
+
+        var result = await store.AppendAsync(Evidence(binding), CancellationToken.None);
+        var after = await Store(paths).ReadAsync();
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(CredentialFailureCode.Unavailable, result.Failure!.Code);
+        Assert.Equal(before.RegistryRevision, after.RegistryRevision);
+        Assert.Empty(after.Evidence);
     }
 
     [Fact]
@@ -1556,6 +1602,23 @@ public sealed class CredentialRegistryStoreTests
     private sealed class AcceptingLocatorVerifier : ICredentialProviderLocatorVerifier
     {
         public ValueTask<bool> VerifyAsync(string workspaceIdentity, CredentialReferenceId referenceId, CredentialProviderId providerId, CredentialProviderLocator locator, CancellationToken cancellationToken) => ValueTask.FromResult(true);
+    }
+
+    private sealed class OversizedAuthenticationTagTrustProvider(ICapabilityCatalogTrustProvider inner) : ICapabilityCatalogTrustProvider
+    {
+        public int MaximumAuthenticationTagUtf8Bytes => inner.MaximumAuthenticationTagUtf8Bytes;
+
+        public void RequireDisjointWorkspace(string workspaceRootPath) => inner.RequireDisjointWorkspace(workspaceRootPath);
+
+        public Task<CapabilityCatalogTrustState?> ReadAsync(string workspaceIdentity, CancellationToken cancellationToken = default) => inner.ReadAsync(workspaceIdentity, cancellationToken);
+
+        public Task<CapabilityCatalogTrustState> InitializeAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default) => inner.InitializeAsync(workspaceIdentity, generation, contentDigest, cancellationToken);
+
+        public Task<string> AuthenticateArtifactAsync(string workspaceIdentity, long generation, string contentDigest, CancellationToken cancellationToken = default) => Task.FromResult(new string('x', MaximumAuthenticationTagUtf8Bytes + 1));
+
+        public Task<bool> VerifyArtifactAsync(string workspaceIdentity, long generation, string contentDigest, string authenticationTag, CancellationToken cancellationToken = default) => inner.VerifyArtifactAsync(workspaceIdentity, generation, contentDigest, authenticationTag, cancellationToken);
+
+        public Task<CapabilityCatalogTrustState> AdvanceAsync(string workspaceIdentity, long expectedGeneration, string expectedContentDigest, long newGeneration, string newContentDigest, CancellationToken cancellationToken = default) => inner.AdvanceAsync(workspaceIdentity, expectedGeneration, expectedContentDigest, newGeneration, newContentDigest, cancellationToken);
     }
 
     private sealed class RecordingLocatorVerifier : ICredentialProviderLocatorVerifier

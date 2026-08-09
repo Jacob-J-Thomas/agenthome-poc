@@ -15,6 +15,7 @@ using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
 
@@ -23,6 +24,36 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
     private static readonly DateTimeOffset _createdAtUtc = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset _observedAtUtc = _createdAtUtc.AddDays(40);
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+
+    [Fact]
+    public async Task Active_cleanup_journal_inspection_distinguishes_empty_and_nonterminal_authoring_state_without_mutating_it()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+
+        var empty = await store.InspectActiveReceiptCleanupJournalAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+
+        Assert.Equal(0, empty.Utf8Bytes);
+        Assert.Null(empty.Stage);
+        Assert.Null(empty.Outcome);
+        Assert.Null(empty.RecoveryAvailableAtUtc);
+
+        var operationId = await CreateExpiredUpdateAsync(store);
+        var candidate = await CreateCandidateAsync(paths, operationId, new string('a', CustomLoopLimits.Sha256HexCharacters), _createdAtUtc.AddDays(1));
+        var request = Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, "inspect-active-journal");
+        var ownershipAcquiredAtUtc = _observedAtUtc.AddMinutes(-1);
+        var journal = CleanupJournal(request, ownershipAcquiredAtUtc, CustomLoopReceiptCleanupStage.IntentAuditRecorded, [candidate]);
+        await WriteCleanupJournalAsync(paths, journal);
+
+        var active = await store.InspectActiveReceiptCleanupJournalAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+
+        Assert.Equal(CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(journal).LongLength, active.Utf8Bytes);
+        Assert.Equal(CustomLoopReceiptCleanupStage.IntentAuditRecorded, active.Stage);
+        Assert.Equal(CustomLoopReceiptCleanupOutcome.Unknown, active.Outcome);
+        Assert.Equal(ownershipAcquiredAtUtc + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow, active.RecoveryAvailableAtUtc);
+        Assert.True(File.Exists(paths.CustomLoopDefinitionMutationReceiptCleanupJournalPath));
+    }
 
     [Fact]
     public async Task Expired_update_receipt_compacts_to_proof_without_unbounding_routine_definition_reads()
@@ -472,6 +503,78 @@ public sealed class CustomLoopDefinitionReceiptRetentionTests
 
         Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, posture.CleanupBlockReason);
         Assert.Equal(1, posture.Categories.Single(item => item.Category == CustomLoopReceiptArtifactCategory.Corrupt).ArtifactCount);
+    }
+
+    [Fact]
+    public async Task Retention_posture_distinguishes_unaudited_live_and_expired_live_lineage_receipts()
+    {
+        using var unauditedWorkspace = new TestWorkspace();
+        var unauditedStore = new CustomLoopDefinitionStore(new WorkspacePaths(unauditedWorkspace.RootPath), new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var unauditedDefinition = CreateDefinition("loop-unaudited-posture");
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, (await unauditedStore.CreateAsync(unauditedDefinition)).Status);
+        var unaudited = await unauditedStore.InspectReceiptRetentionAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+
+        Assert.Equal(1, unaudited.Categories.Single(item => item.Category == CustomLoopReceiptArtifactCategory.Unaudited).ArtifactCount);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.UnauditedEvidence, unaudited.CleanupBlockReason);
+
+        using var liveWorkspace = new TestWorkspace();
+        var livePaths = new WorkspacePaths(liveWorkspace.RootPath);
+        var liveStore = new CustomLoopDefinitionStore(livePaths, new RecordingAuditLog(), new FixedTimeProvider(_createdAtUtc));
+        var liveDefinition = CreateDefinition("loop-live-posture");
+        await CreateCommittedAsync(liveStore, liveDefinition);
+        var live = await liveStore.InspectReceiptRetentionAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+
+        Assert.Equal(1, live.Categories.Single(item => item.Category == CustomLoopReceiptArtifactCategory.Live).ArtifactCount);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.None, live.CleanupBlockReason);
+
+        var expiredStore = new CustomLoopDefinitionStore(livePaths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+        var retained = await expiredStore.InspectReceiptRetentionAsync(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt);
+
+        Assert.Equal(1, retained.Categories.Single(item => item.Category == CustomLoopReceiptArtifactCategory.RetainedLiveLineage).ArtifactCount);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.None, retained.CleanupBlockReason);
+    }
+
+    [Theory]
+    [InlineData("receipt-identity")]
+    [InlineData("tombstone-identity")]
+    [InlineData("receipt-json")]
+    public async Task Retention_recovery_rejects_mismatched_or_noncanonical_raw_artifact_identity(string corruption)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths, new RecordingAuditLog(), new FixedTimeProvider(_observedAtUtc));
+
+        if (corruption == "tombstone-identity")
+        {
+            var definition = CreateDefinition("loop-tombstone-identity");
+            await CreateCommittedAsync(store, definition);
+            Assert.Equal(CustomLoopDefinitionStoreStatus.Deleted, (await store.DeleteAsync(definition.Id, definition.DefinitionVersion, "delete-tombstone-identity", _createdAtUtc.AddDays(1))).Status);
+            var tombstonePath = Path.Combine(paths.CustomLoopDefinitionTombstonesPath, definition.Id + ".json");
+            File.Move(tombstonePath, Path.Combine(paths.CustomLoopDefinitionTombstonesPath, "other-tombstone.json"));
+
+            var posture = await store.InspectReceiptRetentionAsync(CustomLoopReceiptArtifactClass.DefinitionTombstone);
+
+            Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, posture.CleanupBlockReason);
+            return;
+        }
+
+        var operationId = await CreateExpiredUpdateAsync(store);
+        var operationPath = Path.Combine(paths.CustomLoopDefinitionOperationsPath, operationId + ".json");
+        if (corruption == "receipt-identity")
+        {
+            File.Move(operationPath, Path.Combine(paths.CustomLoopDefinitionOperationsPath, "other-receipt.json"));
+        }
+        else
+        {
+            var operation = JsonNode.Parse(await File.ReadAllTextAsync(operationPath))!.AsObject();
+            operation["unexpected"] = true;
+            await File.WriteAllTextAsync(operationPath, operation.ToJsonString());
+        }
+
+        var cleanup = await store.CleanupReceiptRetentionAsync(Request(CustomLoopReceiptArtifactClass.DefinitionMutationReceipt, $"cleanup-{corruption}"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, cleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, cleanup.BlockReason);
     }
 
     [Fact]

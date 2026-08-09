@@ -67,6 +67,140 @@ public sealed class CustomLoopDefinitionStoreTests
     }
 
     [Fact]
+    public async Task Orphaned_version_one_definition_reconstructs_its_exact_create_receipt_and_replays_after_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var definition = CreateDefinition("loop-orphaned-create");
+        var initial = new CustomLoopDefinitionStore(paths);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, (await initial.CreateAsync(definition)).Status);
+        File.Delete(Path.Combine(paths.CustomLoopDefinitionOperationsPath, definition.LastMutationOperationId + ".json"));
+
+        var restarted = new CustomLoopDefinitionStore(paths);
+        var recovered = await restarted.CreateAsync(definition);
+        var receipt = await restarted.GetMutationOperationAsync(definition.LastMutationOperationId);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.AlreadyCreated, recovered.Status);
+        Assert.Equal(CustomLoopOperationIntegrity.PendingOutcomeAudit, recovered.OperationIntegrity);
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, receipt.Status);
+        Assert.Equal(CustomLoopDefinitionMutationKind.Create, receipt.Operation!.Kind);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, receipt.Operation.Outcome);
+        AssertDefinition(definition, receipt.Operation.PlannedDefinition);
+
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await restarted.MarkOperationOutcomeAuditedAsync(definition.LastMutationOperationId));
+        var replay = await new CustomLoopDefinitionStore(paths).CreateAsync(definition);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.AlreadyCreated, replay.Status);
+        Assert.Equal(CustomLoopOperationIntegrity.Complete, replay.OperationIntegrity);
+        AssertDefinition(definition, await restarted.GetAsync(definition.Id));
+    }
+
+    [Fact]
+    public async Task Orphaned_create_with_a_different_role_is_reported_as_a_version_conflict_without_reconstructing_a_receipt()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var original = CreateDefinition("loop-orphaned-role");
+        var store = new CustomLoopDefinitionStore(paths);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, (await store.CreateAsync(original)).Status);
+        File.Delete(Path.Combine(paths.CustomLoopDefinitionOperationsPath, original.LastMutationOperationId + ".json"));
+        var mismatchedRole = CustomLoopDefinitionContentHash.Apply(original with { RoleId = "other-assistant" });
+
+        var result = await new CustomLoopDefinitionStore(paths).CreateAsync(mismatchedRole);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Conflict, result.Status);
+        Assert.Null(result.Definition);
+        Assert.Equal(original.Id, result.Conflict!.LoopId);
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopDefinitionOperationsPath, original.LastMutationOperationId + ".json")));
+    }
+
+    [Fact]
+    public async Task Uncommitted_create_receipt_rebuilds_the_missing_definition_before_exact_replay()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var definition = CreateDefinition("loop-rebuild-create-projection");
+        var store = new CustomLoopDefinitionStore(paths);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, (await store.CreateAsync(definition)).Status);
+        File.Delete(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"));
+
+        var recovered = await new CustomLoopDefinitionStore(paths).CreateAsync(definition);
+        var receipt = await new CustomLoopDefinitionStore(paths).GetMutationOperationAsync(definition.LastMutationOperationId);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.AlreadyCreated, recovered.Status);
+        Assert.Equal(CustomLoopOperationIntegrity.PendingOutcomeAudit, recovered.OperationIntegrity);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json")));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.OutcomeCommitted, receipt.Status);
+        Assert.True(receipt.Operation!.HasAppliedMutationArtifact);
+        AssertDefinition(definition, receipt.Operation.ResultDefinition);
+    }
+
+    [Fact]
+    public async Task Create_lookup_downgrades_an_uncommitted_created_projection_to_pending_without_claiming_the_missing_definition()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-missing-create-projection");
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, (await store.CreateAsync(definition)).Status);
+        File.Delete(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json"));
+
+        var lookup = await new CustomLoopDefinitionStore(paths).GetMutationOperationAsync(definition.LastMutationOperationId);
+
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.PendingMutation, lookup.Status);
+        Assert.Equal(CustomLoopDefinitionMutationState.PendingMutation, lookup.Operation!.State);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Unknown, lookup.Operation.Outcome);
+        Assert.Null(lookup.Operation.ResultDefinition);
+        Assert.False(lookup.Operation.HasAppliedMutationArtifact);
+    }
+
+    [Fact]
+    public async Task Compatibility_delete_rejects_a_reused_operation_id_when_the_expected_version_or_loop_identity_changes()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var original = CreateDefinition("loop-delete-operation-binding");
+        var other = CreateDefinition("loop-delete-operation-other");
+        await CreateCommittedAsync(store, original);
+        await CreateCommittedAsync(store, other);
+        var operationId = "delete-operation-bound";
+        var deletedAtUtc = _initialTimestamp.AddMinutes(2);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Deleted, (await store.DeleteAsync(original.Id, 1, operationId, deletedAtUtc)).Status);
+
+        var versionConflict = await store.DeleteAsync(original.Id, 2, operationId, deletedAtUtc.AddMinutes(1));
+        var identityConflict = await store.DeleteAsync(other.Id, 1, operationId, deletedAtUtc.AddMinutes(1));
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Conflict, versionConflict.Status);
+        Assert.Equal(original.Id, versionConflict.Conflict!.LoopId);
+        Assert.Equal(CustomLoopDefinitionStoreStatus.OperationConflict, identityConflict.Status);
+        AssertDefinition(other, await store.GetAsync(other.Id));
+    }
+
+    [Fact]
+    public async Task Durable_update_rejects_a_reused_operation_id_with_a_changed_canonical_request()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopDefinitionStore(new WorkspacePaths(workspace.RootPath));
+        var original = CreateDefinition("loop-update-operation-binding");
+        await CreateCommittedAsync(store, original);
+        var updated = Advance(original, "Updated", "update-operation-bound");
+        var mutation = Mutation(CustomLoopDefinitionMutationKind.Update, updated.LastMutationOperationId, 'a', updated.Id, updated.RoleId, 1, updated, original, updated.UpdatedAtUtc);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Updated, (await store.UpdateAsync(updated, 1, mutation)).Status);
+        var changedRequest = mutation with { RequestHash = new string('b', CustomLoopLimits.Sha256HexCharacters) };
+
+        var result = await store.UpdateAsync(updated, 1, changedRequest);
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.OperationConflict, result.Status);
+        Assert.Equal(CustomLoopOperationAuditMarkStatus.Marked, await store.MarkOperationOutcomeAuditedAsync(mutation.OperationId));
+        AssertDefinition(updated, await store.GetAsync(updated.Id));
+    }
+
+    [Fact]
     public async Task Routine_workspace_reads_reject_uppercase_json_definition_artifacts_before_they_escape_inventory_validation()
     {
         using var workspace = new TestWorkspace();
@@ -675,6 +809,32 @@ public sealed class CustomLoopDefinitionStoreTests
         Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(mutation.OperationId)).Status);
     }
 
+    [Theory]
+    [InlineData("wrong-kind")]
+    [InlineData("wrong-loop")]
+    public async Task Direct_create_rejects_mismatched_mutation_kind_or_identity_before_writing(string corruption)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-mutation-contract");
+        var mutation = new CustomLoopDefinitionMutationRequest(
+            corruption == "wrong-kind" ? CustomLoopDefinitionMutationKind.Update : CustomLoopDefinitionMutationKind.Create,
+            definition.LastMutationOperationId,
+            ComputeCreateRequestHash(definition.RoleId),
+            corruption == "wrong-loop" ? "loop-other" : definition.Id,
+            definition.RoleId,
+            null,
+            definition,
+            null,
+            definition.CreatedAtUtc);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => store.CreateAsync(definition, mutation));
+
+        Assert.Null(await store.GetAsync(definition.Id));
+        Assert.Equal(CustomLoopDefinitionMutationLookupStatus.NotFound, (await store.GetMutationOperationAsync(definition.LastMutationOperationId)).Status);
+    }
+
     [Fact]
     public async Task Durable_Create_accepts_and_reloads_a_complete_first_save_request_hash()
     {
@@ -898,6 +1058,52 @@ public sealed class CustomLoopDefinitionStoreTests
         await File.WriteAllTextAsync(path, operation.ToJsonString());
 
         await Assert.ThrowsAsync<FormatException>(() => store.GetCreateOperationAsync(definition.LastMutationOperationId));
+    }
+
+    [Theory]
+    [InlineData("pending-outcome")]
+    [InlineData("unknown-outcome")]
+    [InlineData("wrong-outcome")]
+    [InlineData("missing-result")]
+    [InlineData("missing-conflict")]
+    [InlineData("default-timestamp")]
+    public async Task Additional_committed_create_receipt_corruption_fails_closed(string corruption)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopDefinitionStore(paths);
+        var definition = CreateDefinition("loop-additional-corruption");
+        await CreateCommittedAsync(store, definition);
+        var path = Path.Combine(paths.CustomLoopDefinitionOperationsPath, definition.LastMutationOperationId + ".json");
+        var operation = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+
+        switch (corruption)
+        {
+            case "pending-outcome":
+                operation["state"] = "pendingMutation";
+                break;
+            case "unknown-outcome":
+                operation["outcome"] = "unknown";
+                break;
+            case "wrong-outcome":
+                operation["outcome"] = "updated";
+                break;
+            case "missing-result":
+                operation["resultDefinition"] = null;
+                break;
+            case "missing-conflict":
+                operation["outcome"] = "conflict";
+                operation["resultDefinition"] = null;
+                operation["resultConflict"] = null;
+                break;
+            case "default-timestamp":
+                operation["updatedAtUtc"] = DateTimeOffset.MinValue.ToString("O");
+                break;
+        }
+
+        await File.WriteAllTextAsync(path, operation.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => store.GetMutationOperationAsync(definition.LastMutationOperationId));
     }
 
     [Theory]

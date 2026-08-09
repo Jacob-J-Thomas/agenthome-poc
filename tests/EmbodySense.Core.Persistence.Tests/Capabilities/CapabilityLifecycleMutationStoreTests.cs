@@ -680,6 +680,31 @@ public sealed class CapabilityLifecycleMutationStoreTests
     }
 
     [Fact]
+    public async Task Persisted_lifecycle_documents_fail_closed_when_the_trust_anchor_is_absent()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = Prepare(workspace);
+        var establishedTrust = new TestCapabilityLifecycleTrustProvider();
+        var baselineSource = new StubCapabilityLifecycleBaselineSource();
+        var evidence = new StubCapabilityLifecycleArtifactEvidenceSource();
+        var established = new CapabilityLifecycleMutationStore(paths, establishedTrust, baselineSource, evidence);
+        var snapshot = await new CapabilityDependentIndex([new StubCapabilityDependentIndexSource()]).CaptureAsync();
+        var baseline = CapabilityLifecycleTestData.Baseline();
+        var request = new CapabilityLifecyclePreviewRequest("missing-anchor", CapabilityLifecycleOperationKind.Disable, baseline.State.Descriptor.Id);
+        var preview = await established.PreviewAsync(request, baseline, snapshot);
+        var missingAnchor = new CapabilityLifecycleMutationStore(paths, new TestCapabilityLifecycleTrustProvider(), baselineSource, evidence);
+
+        var read = await missingAnchor.ReadAsync(request.CapabilityId);
+        var unavailablePreview = await missingAnchor.PreviewAsync(request with { OperationId = "missing-anchor-preview" }, baseline, snapshot);
+        var unavailableMutation = await missingAnchor.MutateAsync(preview, baseline, snapshot);
+
+        Assert.Equal(CapabilityLifecycleReadStatus.Unavailable, read.Status);
+        Assert.Equal(CapabilityLifecyclePreviewStatus.Unavailable, unavailablePreview.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Unavailable, unavailableMutation.Status);
+        Assert.Equal(CapabilityLifecycleReadStatus.Available, (await established.ReadAsync(request.CapabilityId)).Status);
+    }
+
+    [Fact]
     public async Task Missing_or_ambiguous_documents_cannot_reconstitute_trusted_lifecycle_state()
     {
         using var workspace = new TestWorkspace();

@@ -34,6 +34,16 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
         Assert.NotNull(new CapabilityCatalogStore(new WorkspacePaths(workspace.RootPath)));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(CapabilityCatalogLimits.MaximumArtifactUtf8Bytes + 1)]
+    public void Store_rejects_trust_providers_with_impossible_authentication_tag_bounds(int maximumAuthenticationTagUtf8Bytes)
+    {
+        using var workspace = new TestWorkspace();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new CapabilityCatalogStore(new WorkspacePaths(workspace.RootPath), new TestCapabilityLifecycleTrustProvider(maximumAuthenticationTagUtf8Bytes)));
+    }
+
     [Fact]
     public async Task Lifecycle_transitions_change_only_the_requested_axis_and_removal_retains_a_tombstone()
     {
@@ -857,6 +867,50 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Authority_transaction_failures_are_structured_while_cancellation_is_propagated_for_every_public_operation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var descriptor = CapabilityCatalogTestData.Descriptor();
+        var mutation = new CapabilityCatalogMutation(CapabilityCatalogMutationKind.Declare, "authority-failure", 0, descriptor.Id, descriptor);
+        var unavailable = new CapabilityCatalogStore(
+            paths,
+            _defaultTrustProvider,
+            authorityTransaction: new FailingAuthorityTransaction(new IOException("Injected authority boundary failure.")));
+
+        Assert.Equal(CapabilityCatalogReadStatus.Unavailable, (await unavailable.ReadAsync(null, 10)).Status);
+        Assert.Equal(CapabilityCatalogReadStatus.Unavailable, (await unavailable.ReadOperationReceiptsAsync(descriptor.Id)).Status);
+        Assert.Equal(CapabilityCatalogMutationStatus.Unavailable, (await unavailable.MutateAsync(mutation)).Status);
+
+        var cancelled = new CapabilityCatalogStore(
+            paths,
+            _defaultTrustProvider,
+            authorityTransaction: new FailingAuthorityTransaction(new OperationCanceledException("Injected authority cancellation.")));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled.ReadAsync(null, 10));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled.ReadOperationReceiptsAsync(descriptor.Id));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled.MutateAsync(mutation));
+    }
+
+    [Fact]
+    public async Task Cancellation_from_inside_the_authority_transaction_is_propagated_by_every_store_operation()
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var descriptor = CapabilityCatalogTestData.Descriptor();
+        var store = new CapabilityCatalogStore(
+            new WorkspacePaths(workspace.RootPath),
+            _defaultTrustProvider,
+            authorityTransaction: new PassThroughAuthorityTransaction());
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.ReadAsync(null, 10, cancellation.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.ReadOperationReceiptsAsync(descriptor.Id, cancellation.Token));
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.MutateAsync(
+            new CapabilityCatalogMutation(CapabilityCatalogMutationKind.Declare, "cancel-inside-authority", 0, descriptor.Id, descriptor),
+            cancellation.Token));
+    }
+
+    [Fact]
     public async Task Contended_cross_process_lock_fails_closed_without_writing()
     {
         using var workspace = new TestWorkspace();
@@ -971,6 +1025,28 @@ public sealed class CapabilityCatalogStoreTests : IDisposable
         var unkeyedDigest = SHA256.HashData(Encoding.UTF8.GetBytes(root.ToJsonString(JsonOptions(writeIndented: false))));
         root["authenticationTag"] = "hmac-sha256:" + Convert.ToHexString(unkeyedDigest).ToLowerInvariant();
     }
+
+    private sealed class FailingAuthorityTransaction(Exception failure) : ICapabilityAuthorityTransaction
+    {
+        public Task<TResult> ExecuteAsync<TResult>(Func<CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken = default)
+            => Task.FromException<TResult>(failure);
+
+        public Task<ICapabilityAuthorityLease?> AcquireValidatedLeaseAsync(Func<CancellationToken, Task<bool>> validator, CancellationToken cancellationToken = default)
+            => Task.FromException<ICapabilityAuthorityLease?>(failure);
+    }
+
+    private sealed class PassThroughAuthorityTransaction : ICapabilityAuthorityTransaction
+    {
+        public Task<TResult> ExecuteAsync<TResult>(Func<CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken = default)
+            => operation(cancellationToken);
+
+        public async Task<ICapabilityAuthorityLease?> AcquireValidatedLeaseAsync(Func<CancellationToken, Task<bool>> validator, CancellationToken cancellationToken = default)
+        {
+            _ = await validator(cancellationToken);
+            return null;
+        }
+    }
+
 
     private static JsonSerializerOptions JsonOptions(bool writeIndented) => new(JsonSerializerDefaults.Web) { WriteIndented = writeIndented };
 }

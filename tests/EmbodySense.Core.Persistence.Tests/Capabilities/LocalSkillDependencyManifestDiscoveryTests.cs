@@ -164,6 +164,31 @@ public sealed class LocalSkillDependencyManifestDiscoveryTests
     }
 
     [Fact]
+    public async Task Discovery_rejects_a_linked_entry_within_the_configured_skills_root_when_supported()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteSkillAsync(workspace, "valid", "org.example/valid", "# valid\n");
+        var target = workspace.File("outside-entry");
+        var linkedEntry = Path.Combine(paths.SkillsPath, "linked-entry");
+        await File.WriteAllTextAsync(target, "outside", Encoding.UTF8);
+        try
+        {
+            File.CreateSymbolicLink(linkedEntry, target);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        var result = Assert.Single(await new LocalSkillDependencyManifestDiscovery(paths).DiscoverAsync());
+
+        Assert.Equal(string.Empty, result.DirectoryName);
+        Assert.Equal(LocalSkillDependencyDiscoveryStatus.UnsafePath, result.Status);
+        Assert.Null(result.Manifest);
+    }
+
+    [Fact]
     public async Task Discovery_fails_closed_when_a_bound_skill_directory_is_replaced_before_its_single_reads()
     {
         using var workspace = new TestWorkspace();

@@ -4,4 +4,13 @@
     <TreatNoTestsAsError>true</TreatNoTestsAsError>
     <TestSessionTimeout>840000</TestSessionTimeout>
   </RunConfiguration>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <SingleHit>true</SingleHit>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
 </RunSettings>

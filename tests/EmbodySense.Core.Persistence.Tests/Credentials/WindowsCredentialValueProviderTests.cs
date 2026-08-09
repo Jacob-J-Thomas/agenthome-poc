@@ -681,9 +681,10 @@ public sealed class WindowsCredentialValueProviderTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        startInfo.ArgumentList.Add("vstest");
-        startInfo.ArgumentList.Add(typeof(WindowsCredentialValueProviderTests).Assembly.Location);
-        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests." + fixtureName);
+        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(WindowsCredentialValueProviderTests).Assembly.Location,
+            "EmbodySense.Core.Persistence.Tests.Credentials.WindowsCredentialValueProviderTests." + fixtureName);
         startInfo.Environment[ChildModeVariable] = childMode;
         if (contentionId is not null)
         {

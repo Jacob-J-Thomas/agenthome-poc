@@ -613,6 +613,22 @@ public sealed class ContextualRoleRevisionStoreTests
     }
 
     [Fact]
+    public async Task Existing_artifacts_without_an_anchor_block_new_mutations_without_publishing_a_second_intent()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new ContextualRoleRevisionStore(paths, "workspace-one");
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(CreateRequest("create-reviewer", Revision("reviewer", 1)))).Status);
+        File.Delete(Path.Combine(StoreRoot(workspace.RootPath), "workspace-anchor.json"));
+
+        var blocked = await store.MutateAsync(CreateRequest("create-writer", Revision("writer", 1)));
+
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Ambiguous, blocked.Status);
+        Assert.False(File.Exists(Path.Combine(StoreRoot(workspace.RootPath), "operations", "create-writer.intent.json")));
+    }
+
+
+    [Fact]
     public async Task Unknown_store_files_and_nested_artifact_directories_are_not_ignored()
     {
         using var workspace = new TestWorkspace();

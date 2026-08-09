@@ -266,6 +266,29 @@ public sealed class CustomLoopTraceRetentionStoreTests
     }
 
     [Fact]
+    public async Task Terminal_integrity_warning_rejects_a_deleted_trace_identity_without_replacing_its_tombstone()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var terminal = await CreateTerminalRunAsync(store);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        var request = Request(terminal.Id, inspection.PersistedArtifactHash);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(Mutation(request))).Status);
+        var warning = Event(terminal.Events.Length + 1L, "event-terminal-warning-after-delete", CustomLoopRunEventKind.IntegrityWarning, terminal.UpdatedAtUtc.AddMinutes(1)) with
+        {
+            Detail = "The terminal trace was already compacted to its immutable deletion tombstone."
+        };
+
+        var result = await store.AppendTerminalIntegrityWarningAsync(terminal.Id, terminal.LifecycleVersion, warning);
+
+        Assert.Equal(CustomLoopRunStoreStatus.DeletedIdentityConflict, result.Status);
+        var tombstone = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(terminal.Id));
+        Assert.Equal(CustomLoopTraceArtifactKind.Tombstone, tombstone.Kind);
+        Assert.Equal(request.OperationId, tombstone.Tombstone!.DeletionOperationId);
+    }
+
+    [Fact]
     public async Task Deletion_mutation_and_operation_readers_reject_invalid_authenticated_structure()
     {
         using var workspace = new TestWorkspace();

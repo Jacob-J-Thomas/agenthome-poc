@@ -1045,6 +1045,73 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Exact_monitor_cache_invalidates_when_a_created_artifact_changes_run_identity_topology()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var watchers = new List<ControllableFileSystemWatcher>();
+        using var store = new CustomLoopRunStore(paths, path =>
+        {
+            var watcher = new ControllableFileSystemWatcher(path);
+            watchers.Add(watcher);
+            return watcher;
+        });
+        Assert.NotNull(await store.GetMonitorAsync(run.Id));
+
+        var duplicate = CreateRun("loop-beta", run.Id, "invoke-beta");
+        await WriteDirectAsync(paths, duplicate);
+        Assert.Single(watchers).RaiseCreated(Path.Combine(paths.CustomLoopRunsPath, duplicate.LoopId, duplicate.Id + ".json"));
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => store.GetMonitorAsync(run.Id));
+        Assert.Contains(run.Id, exception.Message, StringComparison.Ordinal);
+        Assert.Contains("duplicat", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Exact_monitor_rehydrates_a_persisted_discovery_index_before_taking_the_mutation_lease()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        using (var initial = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(run.Id, (await initial.GetMonitorAsync(run.Id))?.Summary.Id);
+        }
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var monitor = await restarted.GetMonitorAsync(run.Id);
+
+        Assert.Equal(run.Id, monitor?.Summary.Id);
+        Assert.Equal(run.LifecycleVersion, monitor?.Summary.LifecycleVersion);
+    }
+
+    [Fact]
+    public async Task Exact_monitor_rebuild_returns_missing_after_a_deleted_artifact_topology_notification()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun();
+        await WriteDirectAsync(paths, run);
+        var watchers = new List<ControllableFileSystemWatcher>();
+        using var store = new CustomLoopRunStore(paths, path =>
+        {
+            var watcher = new ControllableFileSystemWatcher(path);
+            watchers.Add(watcher);
+            return watcher;
+        });
+        Assert.NotNull(await store.GetMonitorAsync(run.Id));
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        File.Delete(artifactPath);
+        Assert.Single(watchers).RaiseDeleted(artifactPath);
+
+        Assert.Null(await store.GetMonitorAsync(run.Id));
+        Assert.Empty((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items);
+    }
+
+    [Fact]
     public async Task Exact_monitor_cache_repairs_when_the_selected_canonical_artifact_disappears()
     {
         using var workspace = new TestWorkspace();
@@ -1498,6 +1565,252 @@ public sealed class CustomLoopRunStoreTests
         return item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning;
     }
 
+    [Fact]
+    public async Task Public_reads_fail_closed_for_corrupt_run_artifact_layouts()
+    {
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(paths.CustomLoopRunsPath);
+            await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, "unexpected-root-artifact"), "evidence");
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(Path.Combine(paths.CustomLoopRunsPath, "unsafe loop"));
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(Path.Combine(paths.CustomLoopRunsPath, "loop-alpha", "nested"));
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceQuotaAsync());
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            await WriteRawAsync(paths, "loop-alpha", "run-alpha", "{");
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            await WriteRawAsync(paths, "loop-alpha", "run-alpha", "{\"artifactKind\":5}");
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            await WriteRawAsync(paths, "loop-alpha", "run-alpha", "{\"artifactKind\":\"unsupported\"}");
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+            await WriteDirectAsync(paths, run);
+            File.Move(Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json"), Path.Combine(paths.CustomLoopRunsPath, run.LoopId, "renamed.json"));
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("renamed"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            await WriteDirectAsync(paths, CreateRun("loop-alpha", "run-alpha", "invoke-alpha"));
+            await WriteDirectAsync(paths, CreateRun("loop-beta", "run-alpha", "invoke-beta"));
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync("run-alpha"));
+        }
+    }
+
+    [Fact]
+    public async Task Public_index_and_operation_reads_reject_corrupt_derived_evidence()
+    {
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var store = new CustomLoopRunStore(paths);
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(CreateRun())).Status);
+            var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+            await File.WriteAllTextAsync(indexPath, "{");
+            var repaired = await new CustomLoopRunStore(paths).ListPageAsync(new CustomLoopRunPageRequest(50));
+            Assert.Equal("run-alpha", Assert.Single(repaired.Items).Id);
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
+            await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, "delete-trace.json"), "{");
+            var request = new CustomLoopTraceDeletionRequest("run-alpha", new string('a', 64), "delete-trace", "actor-user", "web");
+            var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp);
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).ReserveTraceDeletionOperationAsync(mutation));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, "nested"));
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceQuotaAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Monitor_remains_conservative_after_invalid_watcher_paths_and_rechecks_changed_artifacts()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        await WriteDirectAsync(paths, run);
+        var watchers = new List<ControllableFileSystemWatcher>();
+        using var store = new CustomLoopRunStore(paths, path =>
+        {
+            var watcher = new ControllableFileSystemWatcher(path);
+            watchers.Add(watcher);
+            return watcher;
+        });
+
+        Assert.Equal(run.Id, (await store.GetMonitorAsync(run.Id))?.Summary.Id);
+        var watcher = Assert.Single(watchers);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        watcher.RaiseChanged(artifactPath);
+        Assert.Equal(run.Id, (await store.GetMonitorAsync(run.Id))?.Summary.Id);
+        watcher.RaiseChanged("\0");
+        watcher.RaiseCreated("\0");
+
+        Assert.Equal(run.Id, (await store.GetMonitorAsync(run.Id))?.Summary.Id);
+        Assert.Null(await store.GetMonitorAsync("run-missing"));
+    }
+
+    [Fact]
+    public async Task Public_index_reads_repair_invalid_revision_and_entry_metadata()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteDirectAsync(paths, CreateRun("loop-alpha", "run-alpha", "invoke-alpha"));
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["revision"] = 0;
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+
+        index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"]![0]!["artifactUtf8Bytes"] = 0;
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+
+        using var orderingWorkspace = new TestWorkspace();
+        var orderingPaths = new WorkspacePaths(orderingWorkspace.RootPath);
+        await WriteDirectAsync(orderingPaths, CreateRun("loop-alpha", "run-alpha", "invoke-alpha"));
+        await WriteDirectAsync(orderingPaths, At(CreateRun("loop-beta", "run-beta", "invoke-beta"), 1));
+        var orderingStore = new CustomLoopRunStore(orderingPaths);
+        Assert.Equal(2, (await orderingStore.ListPageAsync(new CustomLoopRunPageRequest(50))).Items.Count);
+        var orderingIndexPath = Path.Combine(orderingPaths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var orderingIndex = JsonNode.Parse(await File.ReadAllTextAsync(orderingIndexPath))!.AsObject();
+        var entries = orderingIndex["entries"]!.AsArray();
+        var first = entries[0]!.DeepClone();
+        entries[0] = entries[1]!.DeepClone();
+        entries[1] = first;
+        await File.WriteAllTextAsync(orderingIndexPath, orderingIndex.ToJsonString(_artifactJsonOptions) + "\n");
+        Assert.Equal(2, (await orderingStore.ListPageAsync(new CustomLoopRunPageRequest(50))).Items.Count);
+    }
+
+    [Fact]
+    public async Task Deleted_traces_reject_create_update_and_terminal_warning_mutations()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun("loop-alpha", "run-alpha", "invoke-alpha");
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-trace", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(3));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+
+        Assert.Equal(CustomLoopRunStoreStatus.DeletedIdentityConflict, (await store.CreateAsync(admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.DeletedIdentityConflict, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var warning = Event(completed.Events.Length + 1L, "event-integrity-warning", CustomLoopRunEventKind.IntegrityWarning, completed.UpdatedAtUtc.AddMinutes(1));
+        Assert.Equal(CustomLoopRunStoreStatus.DeletedIdentityConflict, (await store.AppendTerminalIntegrityWarningAsync(completed.Id, completed.LifecycleVersion, warning)).Status);
+
+        var tracePath = Path.Combine(paths.CustomLoopRunsPath, completed.LoopId, completed.Id + ".json");
+        var renamedPath = Path.Combine(paths.CustomLoopRunsPath, completed.LoopId, "renamed.json");
+        File.Move(tracePath, renamedPath);
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync("renamed"));
+        File.Move(renamedPath, tracePath);
+        await File.AppendAllTextAsync(tracePath, new string(' ', CustomLoopLimits.MaxRunTraceTombstoneUtf8Bytes));
+        await Assert.ThrowsAsync<FormatException>(() => store.GetAsync(completed.Id));
+    }
+
+    [Fact]
+    public async Task Public_operation_reads_reject_filename_mismatch_empty_content_and_invalid_request_hashes()
+    {
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var storedRequest = new CustomLoopTraceDeletionRequest("run-alpha", new string('a', 64), "stored-operation", "actor-user", "web");
+            var storedMutation = new CustomLoopTraceDeletionMutation(storedRequest, CustomLoopTraceDeletionRequestHash.Compute(storedRequest), _timestamp);
+            var operation = new CustomLoopTraceDeletionOperation(CustomLoopTraceDeletionOperation.CurrentSchemaVersion, storedRequest.OperationId, storedMutation.RequestHash, storedRequest, _timestamp, _timestamp, CustomLoopTraceDeletionOperationState.PendingMutation, CustomLoopTraceDeletionStoreStatus.Unknown, null, CustomLoopTraceDeletionIntegrity.Unknown);
+            Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
+            await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, "requested-operation.json"), JsonSerializer.Serialize(operation, _artifactJsonOptions) + "\n");
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync("requested-operation"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(paths.CustomLoopTraceDeletionOperationsPath);
+            await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, "empty-operation.json"), string.Empty);
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetTraceDeletionOperationAsync("empty-operation"));
+        }
+
+        using (var workspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var request = new CustomLoopTraceDeletionRequest("run-alpha", new string('A', 64), "delete-trace", "actor-user", "web");
+            var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp);
+            await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).ReserveTraceDeletionOperationAsync(mutation));
+        }
+    }
+
+    [Fact]
+    public async Task Public_index_reads_repair_contract_shape_corruption()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WriteDirectAsync(paths, CreateRun("loop-alpha", "run-alpha", "invoke-alpha"));
+        var store = new CustomLoopRunStore(paths);
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+
+        await File.WriteAllTextAsync(indexPath, "[]");
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+
+        var index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index["entries"] = new JsonObject();
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+
+        index = JsonNode.Parse(await File.ReadAllTextAsync(indexPath))!.AsObject();
+        index.Remove("revision");
+        await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
+        Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+    }
+
     private static async Task WriteDirectAsync(WorkspacePaths paths, CustomLoopRunRecord run)
     {
         using var canonicalWorkspace = new TestWorkspace();
@@ -1531,9 +1844,10 @@ public sealed class CustomLoopRunStoreTests
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        startInfo.ArgumentList.Add("vstest");
-        startInfo.ArgumentList.Add(typeof(CustomLoopRunStoreTests).Assembly.Location);
-        startInfo.ArgumentList.Add("--TestCaseFilter:FullyQualifiedName=EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunStoreTests.Cross_process_staging_writer_holds_mutation_lease_for_recovery_test");
+        EmbodySense.Core.Persistence.Tests.Verification.CoverageChildProcessAssembly.AddVstestArguments(
+            startInfo,
+            typeof(CustomLoopRunStoreTests).Assembly.Location,
+            "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunStoreTests.Cross_process_staging_writer_holds_mutation_lease_for_recovery_test");
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[CrossProcessLockPathVariable] = lockPath;
         startInfo.Environment[CrossProcessStagingPathVariable] = stagingPath;
@@ -1582,6 +1896,21 @@ public sealed class CustomLoopRunStoreTests
         public void RaiseError(Exception exception)
         {
             OnError(new ErrorEventArgs(exception));
+        }
+
+        public void RaiseCreated(string path)
+        {
+            OnCreated(new FileSystemEventArgs(WatcherChangeTypes.Created, System.IO.Path.GetDirectoryName(path)!, System.IO.Path.GetFileName(path)));
+        }
+
+        public void RaiseChanged(string path)
+        {
+            OnChanged(new FileSystemEventArgs(WatcherChangeTypes.Changed, string.Empty, path));
+        }
+
+        public void RaiseDeleted(string path)
+        {
+            OnDeleted(new FileSystemEventArgs(WatcherChangeTypes.Deleted, System.IO.Path.GetDirectoryName(path)!, System.IO.Path.GetFileName(path)));
         }
     }
 }

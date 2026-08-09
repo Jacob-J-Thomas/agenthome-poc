@@ -704,6 +704,7 @@ public sealed class PersistencePublicBoundaryCoverageTests
         RejectTool(root => ToolEvidence(root, 5)["shape"] = 99);
         RejectTool(root => ToolEvidence(root, 3)["extra"] = true);
         RejectTool(root => ToolEvidence(root, 2)["shape"] = "one");
+        RejectTool(root => ToolEvidence(root, 2)["phase"] = null);
 
         RejectTool(root =>
         {
@@ -732,6 +733,14 @@ public sealed class PersistencePublicBoundaryCoverageTests
         }, includeIntegrity: true);
         RejectTool(root => AppendCompactToolEvent(root, 3, "event-governance-after-integrity"), includeIntegrity: true);
         RejectTool(root => AppendCompactToolEvent(root, 6, "event-integrity-duplicate"), includeIntegrity: true);
+        RejectTool(root =>
+        {
+            var authorities = Authorities(root);
+            var authority = authorities[0]!["authority"]!.DeepClone().AsObject();
+            authority["isValid"] = false;
+            authorities.Add(StructuralEntry("a1", "authority", authority));
+            Events(root)[6]!["toolAuthority"] = new JsonObject { ["$authority"] = "a1" };
+        }, includeIntegrity: true);
     }
 
     [Fact]
@@ -932,14 +941,14 @@ public sealed class PersistencePublicBoundaryCoverageTests
     {
         var root = Parse(CustomLoopRunArtifactSerializer.Serialize(CreateToolRun(includeIntegrity)));
         mutate(root);
-        Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString())));
+        Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString() + "\n")));
     }
 
     private static void Reject(Action<JsonObject> mutate, byte[]? artifact = null)
     {
         var root = Parse(artifact ?? Artifact());
         mutate(root);
-        Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString())));
+        Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString() + "\n")));
     }
 
     private static JsonObject Parse(byte[] artifact) => JsonNode.Parse(artifact)!.AsObject();

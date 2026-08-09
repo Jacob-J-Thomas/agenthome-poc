@@ -1749,6 +1749,121 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Equal(retentionFiles.Length, retentionFiles.Count(File.Exists));
     }
 
+    [Fact]
+    public async Task Active_cleanup_journal_inspection_reports_empty_and_audit_blocked_retention_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var time = new MutableTimeProvider(_timestamp);
+        var store = new CustomLoopControlOperationStore(paths, timeProvider: time);
+
+        var empty = await store.InspectActiveCleanupJournalAsync();
+        var created = await store.BeginAsync(Pending("control-inspect-active-cleanup", AuditSchema.Actors.Web));
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        var completed = Complete(created.Operation!, _timestamp);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+        lease.Dispose();
+
+        time.UtcNow = completed.UpdatedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
+        var cleanup = await store.CleanupAsync(CleanupCommand("cleanup-inspect-active"));
+        var active = await store.InspectActiveCleanupJournalAsync();
+
+        Assert.Equal(0, empty.Utf8Bytes);
+        Assert.Null(empty.Stage);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.AuditUnavailable, cleanup.Status);
+        Assert.True(active.Utf8Bytes > 0);
+        Assert.Equal(CustomLoopReceiptCleanupStage.IntentPersisted, active.Stage);
+        Assert.Equal(CustomLoopReceiptCleanupOutcome.Unknown, active.Outcome);
+        Assert.Equal(cleanup.Journal!.OwnershipAcquiredAtUtc + CustomLoopReceiptRetentionPolicy.CleanupOwnershipWindow, active.RecoveryAvailableAtUtc);
+    }
+
+    [Fact]
+    public async Task Cleanup_reports_corrupt_when_terminal_journal_cannot_be_archived_before_a_new_request()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new CustomLoopControlOperationStore(paths, timeProvider: new MutableTimeProvider(_timestamp));
+
+        var first = await store.CleanupAsync(CleanupCommand("cleanup-terminal-archive"));
+        Directory.CreateDirectory(Path.GetDirectoryName(paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath)!);
+        await File.WriteAllTextAsync(paths.CustomLoopLifecycleControlReceiptCleanupHistoryPath, "history-path-is-not-a-directory");
+        var blocked = await store.CleanupAsync(CleanupCommand("cleanup-after-unarchivable-terminal"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, first.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, blocked.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, blocked.BlockReason);
+        Assert.Equal(first.Journal!.Request.OperationId, blocked.Journal!.Request.OperationId);
+    }
+
+    [Fact]
+    public async Task Inspection_and_cleanup_distinguish_pending_unaudited_and_corrupt_control_receipt_evidence()
+    {
+        using var pendingWorkspace = new TestWorkspace();
+        var pendingPaths = new WorkspacePaths(pendingWorkspace.RootPath);
+        var pendingStore = new CustomLoopControlOperationStore(pendingPaths, timeProvider: new MutableTimeProvider(_timestamp));
+        var pending = await pendingStore.BeginAsync(Pending("control-pending-inspection", AuditSchema.Actors.Web));
+        using var pendingLease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(pending.Lease);
+        var pendingCleanup = await pendingStore.CleanupAsync(CleanupCommand("cleanup-pending-inspection"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, pendingCleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.PendingEvidence, pendingCleanup.BlockReason);
+
+        using var unauditedWorkspace = new TestWorkspace();
+        var unauditedPaths = new WorkspacePaths(unauditedWorkspace.RootPath);
+        var unauditedStore = new CustomLoopControlOperationStore(unauditedPaths, timeProvider: new MutableTimeProvider(_timestamp));
+        var created = await unauditedStore.BeginAsync(Pending("control-unaudited-inspection", AuditSchema.Actors.Web));
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        var unaudited = Complete(created.Operation!, _timestamp) with { OutcomeAuditRecorded = false };
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await unauditedStore.CompleteAsync(unaudited)).Status);
+        lease.Dispose();
+        var unauditedCleanup = await unauditedStore.CleanupAsync(CleanupCommand("cleanup-unaudited-inspection"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.NothingEligible, unauditedCleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.UnauditedEvidence, unauditedCleanup.BlockReason);
+
+        using var corruptWorkspace = new TestWorkspace();
+        var corruptPaths = new WorkspacePaths(corruptWorkspace.RootPath);
+        Directory.CreateDirectory(corruptPaths.CustomLoopControlOperationsPath);
+        await using (var oversized = new FileStream(Path.Combine(corruptPaths.CustomLoopControlOperationsPath, "control-oversized.json"), FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+        {
+            oversized.SetLength((64 * 1024) + 1);
+        }
+
+        var corruptCleanup = await new CustomLoopControlOperationStore(corruptPaths).CleanupAsync(CleanupCommand("cleanup-oversized-evidence"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, corruptCleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, corruptCleanup.BlockReason);
+    }
+
+    [Fact]
+    public async Task Cleanup_fails_closed_for_invalid_filename_and_missing_ownership_in_inventory_reads()
+    {
+        using var filenameWorkspace = new TestWorkspace();
+        var filenamePaths = new WorkspacePaths(filenameWorkspace.RootPath);
+        Directory.CreateDirectory(filenamePaths.CustomLoopControlOperationsPath);
+        await File.WriteAllTextAsync(Path.Combine(filenamePaths.CustomLoopControlOperationsPath, "not a canonical id.json"), "{}");
+        var filenameFailure = await new CustomLoopControlOperationStore(filenamePaths).CleanupAsync(CleanupCommand("cleanup-invalid-filename"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, filenameFailure.Status);
+
+        using var ownershipWorkspace = new TestWorkspace();
+        var ownershipPaths = new WorkspacePaths(ownershipWorkspace.RootPath);
+        var store = new CustomLoopControlOperationStore(ownershipPaths, timeProvider: new MutableTimeProvider(_timestamp));
+        var created = await store.BeginAsync(Pending("control-inventory-owner", AuditSchema.Actors.Web));
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        var receiptPath = Path.Combine(ownershipPaths.CustomLoopControlOperationsPath, "control-inventory-owner.json");
+        var receipt = JsonNode.Parse(await File.ReadAllTextAsync(receiptPath))!.AsObject();
+        receipt.Remove("ownerGenerationId");
+        receipt.Remove("ownerProcessId");
+        receipt.Remove("ownerAcquiredAtUtc");
+        await File.WriteAllTextAsync(receiptPath, receipt.ToJsonString());
+        lease.Dispose();
+        var ownershipFailure = await store.CleanupAsync(CleanupCommand("cleanup-missing-owner"));
+
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Corrupt, ownershipFailure.Status);
+        Assert.Equal(CustomLoopReceiptCleanupBlockReason.CorruptEvidence, ownershipFailure.BlockReason);
+    }
+
     private static CustomLoopControlOperation Pending(string operationId, string actor)
     {
         var kind = CustomLoopControlKind.Pause;

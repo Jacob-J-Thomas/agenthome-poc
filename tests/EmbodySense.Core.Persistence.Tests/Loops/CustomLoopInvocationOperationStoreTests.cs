@@ -24,6 +24,7 @@ public sealed class CustomLoopInvocationOperationStoreTests
         var bound = ContextBound(pending);
 
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(ContextBound(Pending(pending.OperationId, "changed immutable prompt")))).Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await store.BindAsync(bound)).Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Replayed, (await store.BindAsync(bound)).Status);
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await store.BindAsync(bound with { InvokingConversationId = new string('d', CustomLoopLimits.Sha256HexCharacters) })).Status);
@@ -708,6 +709,224 @@ public sealed class CustomLoopInvocationOperationStoreTests
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, conflictRecovery.Operation!.State);
         Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.ConflictPendingAudit, terminal.Status);
         Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.AbandonedWithAuditWarning, terminal.Operation!.State);
+    }
+
+    [Fact]
+    public async Task Retention_journal_fails_closed_for_malformed_unrecognized_and_unsupported_recovery_state()
+    {
+        using var malformedWorkspace = new TestWorkspace();
+        var malformedPaths = new WorkspacePaths(malformedWorkspace.RootPath);
+        Directory.CreateDirectory(malformedPaths.CustomLoopInvocationReceiptRetentionPath);
+        await File.WriteAllTextAsync(Path.Combine(malformedPaths.CustomLoopInvocationReceiptRetentionPath, "active.json"), "{ malformed");
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(malformedPaths).ReserveCompletedReceiptRetentionAsync(RetentionRequest(_timestamp.AddDays(31))));
+
+        using var unrecognizedWorkspace = new TestWorkspace();
+        var unrecognizedPaths = new WorkspacePaths(unrecognizedWorkspace.RootPath);
+        Directory.CreateDirectory(unrecognizedPaths.CustomLoopInvocationReceiptRetentionPath);
+        await File.WriteAllTextAsync(Path.Combine(unrecognizedPaths.CustomLoopInvocationReceiptRetentionPath, "unexpected.bin"), "unrecognized");
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(unrecognizedPaths).ReserveCompletedReceiptRetentionAsync(RetentionRequest(_timestamp.AddDays(31))));
+
+        using var recoveryWorkspace = new TestWorkspace();
+        var recoveryPaths = new WorkspacePaths(recoveryWorkspace.RootPath);
+        var now = _timestamp.AddDays(32);
+        var store = new CustomLoopInvocationOperationStore(recoveryPaths, new MutableTimeProvider(now));
+        await PersistCompletedAsync(store, "invoke-unsupported-retention-state", _timestamp.AddSeconds(1));
+        var reservation = await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now));
+        var journalPath = Path.Combine(recoveryPaths.CustomLoopInvocationReceiptRetentionPath, "active.json");
+        var journal = JsonNode.Parse(await File.ReadAllTextAsync(journalPath))!.AsObject();
+        journal["state"] = "intentAuditStarted";
+        await File.WriteAllTextAsync(journalPath, journal.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now.AddSeconds(1))));
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.Reserved, reservation.Status);
+    }
+
+    [Fact]
+    public async Task Retention_commit_requires_a_durable_intent_and_replays_a_committed_result()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var now = _timestamp.AddDays(33);
+        var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
+        await PersistCompletedAsync(store, "invoke-commit-requires-intent", _timestamp.AddSeconds(1));
+        var reservation = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now))).Operation);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.CommitCompletedReceiptRetentionAsync(reservation.OperationId, now.AddSeconds(1)));
+        await store.MarkReceiptRetentionIntentAuditedAsync(reservation.OperationId, now.AddSeconds(2));
+        var committed = await store.CommitCompletedReceiptRetentionAsync(reservation.OperationId, now.AddSeconds(3));
+        var replay = await store.CommitCompletedReceiptRetentionAsync(reservation.OperationId, now.AddSeconds(4));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeCommitted, committed.State);
+        Assert.Equal(committed.OperationId, replay.OperationId);
+        Assert.Equal(committed.State, replay.State);
+        Assert.Equal(committed.UpdatedAtUtc, replay.UpdatedAtUtc);
+    }
+
+    [Fact]
+    public async Task Invocation_public_validation_rejects_missing_and_nonterminal_outcome_shapes()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new CustomLoopInvocationOperationStore(new WorkspacePaths(workspace.RootPath));
+        var pending = Pending("invoke-validation-public", "prompt");
+
+        await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(null!));
+        await Assert.ThrowsAsync<FormatException>(() => store.BeginAsync(pending with { BindingState = (CustomLoopInvocationBindingState)99 }));
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var bound = await BindContextAsync(store, pending);
+
+        var missingOutcome = CompletedAdmitted(bound) with { Outcome = CustomLoopInvocationOutcome.Unknown };
+        await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(missingOutcome));
+
+        var unboundRejected = pending with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = CustomLoopAdmissionStatusNames.Invalid,
+            Detail = "A rejection must preserve a binding."
+        };
+        await Assert.ThrowsAsync<FormatException>(() => store.CompleteAsync(unboundRejected));
+
+        var invalidConversationPending = Pending("invoke-invalid-conversation", "prompt");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(invalidConversationPending)).Status);
+        var invalidConversation = await BindConversationAsync(store, invalidConversationPending, CustomLoopInvocationBindingState.ConversationInvalid);
+        var rejected = invalidConversation with
+        {
+            UpdatedAtUtc = _timestamp.AddSeconds(1),
+            State = CustomLoopInvocationOperationState.Complete,
+            Outcome = CustomLoopInvocationOutcome.Rejected,
+            AdmissionStatus = CustomLoopAdmissionStatusNames.Invalid,
+            Detail = "The conversation cannot be invoked."
+        };
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Completed, (await store.CompleteAsync(rejected)).Status);
+    }
+
+    [Fact]
+    public async Task Retention_public_operations_reject_missing_wrong_state_and_invalid_storage_shapes()
+    {
+        using var missingWorkspace = new TestWorkspace();
+        var missingStore = new CustomLoopInvocationOperationStore(new WorkspacePaths(missingWorkspace.RootPath));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => missingStore.CommitCompletedReceiptRetentionAsync("missing-retention", _timestamp));
+
+        using var directoryWorkspace = new TestWorkspace();
+        var directoryPaths = new WorkspacePaths(directoryWorkspace.RootPath);
+        Directory.CreateDirectory(Path.Combine(directoryPaths.CustomLoopInvocationReceiptRetentionPath, "nested"));
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(directoryPaths).ReserveCompletedReceiptRetentionAsync(RetentionRequest(_timestamp.AddDays(31))));
+
+        using var journalWorkspace = new TestWorkspace();
+        var paths = new WorkspacePaths(journalWorkspace.RootPath);
+        var now = _timestamp.AddDays(34);
+        var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
+        await PersistCompletedAsync(store, "invoke-retention-wrong-state", _timestamp.AddSeconds(1));
+        var reservation = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now))).Operation);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.CommitCompletedReceiptRetentionAsync("different-retention-owner", now.AddSeconds(1)));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.MarkReceiptRetentionOutcomeAuditedAsync(reservation.OperationId, now.AddSeconds(1)));
+    }
+
+    [Fact]
+    public async Task Retention_journal_rejects_null_candidates_chronology_and_totals_corruption()
+    {
+        using var nullWorkspace = new TestWorkspace();
+        var nullPaths = new WorkspacePaths(nullWorkspace.RootPath);
+        Directory.CreateDirectory(nullPaths.CustomLoopInvocationReceiptRetentionPath);
+        await File.WriteAllTextAsync(Path.Combine(nullPaths.CustomLoopInvocationReceiptRetentionPath, "active.json"), "null");
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(nullPaths).ReserveCompletedReceiptRetentionAsync(RetentionRequest(_timestamp.AddDays(35))));
+
+        await AssertRetentionCorruptionFailsClosedAsync("invoke-invalid-candidate", journal => journal["candidates"]![0]!["artifactHash"] = "not-a-hash");
+        await AssertRetentionCorruptionFailsClosedAsync("invoke-invalid-chronology", journal => journal["candidates"]![0]!["completedAtUtc"] = _timestamp.AddDays(36).ToString("O"));
+        await AssertRetentionCorruptionFailsClosedAsync("invoke-invalid-totals", journal => journal["deletedReceiptCount"] = 1);
+        await AssertRetentionCorruptionFailsClosedAsync("invoke-invalid-schema", journal => journal["schemaVersion"] = 99);
+        await AssertRetentionCorruptionFailsClosedAsync("invoke-empty-candidates", journal => journal["candidates"] = new JsonArray());
+    }
+
+    [Fact]
+    public async Task Retention_request_validation_and_operation_replacement_capacity_fail_closed()
+    {
+        using var requestWorkspace = new TestWorkspace();
+        var requestStore = new CustomLoopInvocationOperationStore(new WorkspacePaths(requestWorkspace.RootPath));
+        var now = _timestamp.AddDays(36);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => requestStore.ReserveCompletedReceiptRetentionAsync(new CustomLoopInvocationReceiptRetentionRequest("receipt-invalid-actor", "invalid\tactor", "web", now, now - CustomLoopInvocationReceiptRetentionPolicy.MinimumReplayDuration)));
+        await Assert.ThrowsAsync<ArgumentException>(() => requestStore.ReserveCompletedReceiptRetentionAsync(new CustomLoopInvocationReceiptRetentionRequest("receipt-invalid-cutoff", "embodysense.web", "web", now, now)));
+        await Assert.ThrowsAsync<FormatException>(() => requestStore.ReserveCompletedReceiptRetentionAsync(new CustomLoopInvocationReceiptRetentionRequest("receipt-invalid-time", "embodysense.web", "web", default, default)));
+
+        using var capacityWorkspace = new TestWorkspace();
+        var paths = new WorkspacePaths(capacityWorkspace.RootPath);
+        var store = new CustomLoopInvocationOperationStore(paths);
+        var pending = Pending("invoke-binding-capacity", "prompt");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await store.BeginAsync(pending)).Status);
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json");
+        await using (var quota = new FileStream(Path.Combine(paths.CustomLoopInvocationOperationsPath, "existing-capacity.json"), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            quota.SetLength(CustomLoopLimits.MaxInvocationOperationWorkspaceUtf8Bytes - new FileInfo(receiptPath).Length);
+        }
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.LimitExceeded, (await store.BindAsync(ContextBound(pending))).Status);
+
+        using var conflictWorkspace = new TestWorkspace();
+        var conflictStore = new CustomLoopInvocationOperationStore(new WorkspacePaths(conflictWorkspace.RootPath));
+        var conflictPending = Pending("invoke-completion-envelope-conflict", "prompt");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await conflictStore.BeginAsync(conflictPending)).Status);
+        await BindContextAsync(conflictStore, conflictPending);
+        var changedEnvelope = CompletedAdmitted(ContextBound(Pending(conflictPending.OperationId, "changed prompt")));
+
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Conflict, (await conflictStore.CompleteAsync(changedEnvelope)).Status);
+    }
+
+    [Fact]
+    public async Task Invocation_receipt_reads_fail_closed_for_filename_identity_and_nested_storage()
+    {
+        using var filenameWorkspace = new TestWorkspace();
+        var filenamePaths = new WorkspacePaths(filenameWorkspace.RootPath);
+        var filenameStore = new CustomLoopInvocationOperationStore(filenamePaths);
+        Assert.Null(await filenameStore.GetAsync("invoke-never-created"));
+        var pending = Pending("invoke-source-identity", "prompt");
+        Assert.Equal(CustomLoopInvocationOperationStoreStatus.Created, (await filenameStore.BeginAsync(pending)).Status);
+        File.Copy(Path.Combine(filenamePaths.CustomLoopInvocationOperationsPath, pending.OperationId + ".json"), Path.Combine(filenamePaths.CustomLoopInvocationOperationsPath, "invoke-mismatched-identity.json"));
+
+        await Assert.ThrowsAsync<FormatException>(() => filenameStore.GetAsync("invoke-mismatched-identity"));
+
+        using var nestedWorkspace = new TestWorkspace();
+        var nestedPaths = new WorkspacePaths(nestedWorkspace.RootPath);
+        Directory.CreateDirectory(Path.Combine(nestedPaths.CustomLoopInvocationOperationsPath, "nested"));
+
+        await Assert.ThrowsAsync<FormatException>(() => new CustomLoopInvocationOperationStore(nestedPaths).BeginAsync(Pending("invoke-nested-storage", "prompt")));
+    }
+
+    [Fact]
+    public async Task Active_outcome_audit_retention_is_reported_in_progress_before_stale_recovery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var now = _timestamp.AddDays(37);
+        var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
+        await PersistCompletedAsync(store, "invoke-outcome-audit-in-progress", _timestamp.AddSeconds(1));
+        var reservation = Assert.IsType<CustomLoopInvocationReceiptRetentionOperation>((await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now))).Operation);
+
+        await store.MarkReceiptRetentionIntentAuditedAsync(reservation.OperationId, now.AddSeconds(1));
+        await store.CommitCompletedReceiptRetentionAsync(reservation.OperationId, now.AddSeconds(2));
+        await store.MarkReceiptRetentionOutcomeAuditStartedAsync(reservation.OperationId, now.AddSeconds(3));
+        var inProgress = await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now.AddSeconds(4)));
+
+        Assert.Equal(CustomLoopInvocationReceiptRetentionReservationStatus.OperationInProgress, inProgress.Status);
+        Assert.Equal(CustomLoopInvocationReceiptRetentionOperationState.OutcomeAuditStarted, inProgress.Operation!.State);
+    }
+
+    private static async Task AssertRetentionCorruptionFailsClosedAsync(string operationId, Action<JsonObject> corrupt)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var now = _timestamp.AddDays(35);
+        var store = new CustomLoopInvocationOperationStore(paths, new MutableTimeProvider(now));
+        await PersistCompletedAsync(store, operationId, _timestamp.AddSeconds(1));
+        await store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now));
+        var journalPath = Path.Combine(paths.CustomLoopInvocationReceiptRetentionPath, "active.json");
+        var journal = JsonNode.Parse(await File.ReadAllTextAsync(journalPath))!.AsObject();
+        corrupt(journal);
+        await File.WriteAllTextAsync(journalPath, journal.ToJsonString());
+
+        await Assert.ThrowsAsync<FormatException>(() => store.ReserveCompletedReceiptRetentionAsync(RetentionRequest(now.AddSeconds(1))));
     }
 
     private static async Task<CustomLoopInvocationOperation> BindConversationAsync(CustomLoopInvocationOperationStore store, CustomLoopInvocationOperation pending, CustomLoopInvocationBindingState bindingState)
