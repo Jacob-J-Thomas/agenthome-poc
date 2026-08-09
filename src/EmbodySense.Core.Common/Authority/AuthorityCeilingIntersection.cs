@@ -13,7 +13,7 @@ public static class AuthorityCeilingIntersection
     /// Evaluates bounded profile declarations at an exact UTC instant without establishing a grant or executing an effect.
     /// </summary>
     /// <param name="profiles">The profiles supplied by an externally governed authority source.</param>
-    /// <param name="evaluatedAtUtc">The exact UTC instant used for expiry and receipt evidence.</param>
+    /// <param name="evaluatedAtUtc">The exact UTC instant used for profile activation, expiry, and receipt evidence.</param>
     /// <returns>The candidate and effective ceilings, boundary receipt, and structured validation result.</returns>
     public static AuthorityIntersectionResult Evaluate(IReadOnlyList<AuthorityProfile>? profiles, DateTimeOffset evaluatedAtUtc)
     {
@@ -28,6 +28,11 @@ public static class AuthorityCeilingIntersection
         var conditions = snapshot.SelectMany(profile => profile.BoundaryConditions).ToList();
         foreach (var profile in snapshot)
         {
+            if (evaluatedAtUtc < profile.IssuedAtUtc)
+            {
+                conditions.Add(new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Pause, AuthorityBoundaryReason.StaleEvidence));
+            }
+
             if (profile.ExpiresAtUtc is { } expiresAtUtc && expiresAtUtc <= evaluatedAtUtc)
             {
                 conditions.Add(new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Deny, AuthorityBoundaryReason.ProfileExpired));

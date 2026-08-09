@@ -13,9 +13,9 @@ namespace EmbodySense.Core.Persistence.Triggers;
 /// <summary>Reads and writes only the exact canonical schema-version-1 trigger queue ledger.</summary>
 internal static class TriggerQueueLedgerCodec
 {
-    private static readonly string[] _rootProperties = ["entries", "generation", "previousGenerationHash", "quota", "schemaVersion"];
+    private static readonly string[] _rootProperties = ["entries", "generation", "lastWorkerObservedAtUtc", "previousGenerationHash", "quota", "schemaVersion"];
     private static readonly string[] _quotaProperties = ["maxDurabilityTombstones", "maxEntryBytes", "maxQueuedBytes", "maxQueuedEntries", "maxQueuedEntriesPerLoop", "maxRetainedBytes", "maxRetainedEntries"];
-    private static readonly string[] _entryProperties = ["admissionReason", "admissionStatus", "canonicalEnvelope", "canonicalEnvelopeHash", "priority", "receiptRecordedAtUtc", "receiptReplayBindingHash", "receiptSchemaVersion", "recordedAtUtc", "revision", "state", "terminalAtUtc", "terminalReason"];
+    private static readonly string[] _entryProperties = ["admissionReason", "admissionStatus", "canonicalEnvelope", "canonicalEnvelopeHash", "dispatchAuthorityEvidenceHash", "dispatchDetail", "dispatchIntentRecordedAtUtc", "dispatchOperationId", "dispatchOutcome", "dispatchOutcomeRecordedAtUtc", "dispatchRequestHash", "governedAdmissionRequestHash", "governedDefinitionHash", "governedDefinitionVersion", "governedLoopId", "governedOperationId", "governedRunId", "leaseAcquiredAtUtc", "leaseExpiresAtUtc", "leaseGeneration", "leaseReleasedAtUtc", "leaseRenewalCount", "leaseWorkerId", "priority", "receiptRecordedAtUtc", "receiptReplayBindingHash", "receiptSchemaVersion", "recordedAtUtc", "revision", "state", "terminalAtUtc", "terminalReason"];
     private static readonly UTF8Encoding _strictUtf8 = new(false, true);
 
     /// <summary>Serializes one already validated ledger.</summary>
@@ -33,6 +33,7 @@ internal static class TriggerQueueLedgerCodec
 
         writer.WriteEndArray();
         writer.WriteNumber("generation", ledger.Generation);
+        WriteTimestamp(writer, "lastWorkerObservedAtUtc", ledger.LastWorkerObservedAtUtc);
         WriteNullableString(writer, "previousGenerationHash", ledger.PreviousGenerationHash);
         writer.WritePropertyName("quota");
         writer.WriteStartObject();
@@ -84,6 +85,7 @@ internal static class TriggerQueueLedgerCodec
                 || schemaVersion != TriggerQueueSnapshot.CurrentSchemaVersion
                 || !TryLong(root, "generation", out var generation)
                 || generation < 1
+                || !TryTimestamp(root, "lastWorkerObservedAtUtc", nullable: true, out var lastWorkerObservedAtUtc)
                 || !TryNullableHash(root, "previousGenerationHash", out var previousGenerationHash)
                 || generation == 1 != (previousGenerationHash is null)
                 || !TryQuota(root.GetProperty("quota"), out var quota)
@@ -120,7 +122,7 @@ internal static class TriggerQueueLedgerCodec
                 entries.Add(ReadEntry(element));
             }
 
-            var ledger = new TriggerQueueLedger(generation, previousGenerationHash, quota, entries);
+            var ledger = new TriggerQueueLedger(generation, previousGenerationHash, lastWorkerObservedAtUtc, quota, entries);
             if (!content.AsSpan().SequenceEqual(Serialize(ledger)))
             {
                 throw Invalid();
@@ -150,7 +152,12 @@ internal static class TriggerQueueLedgerCodec
             || revision < 1
             || !TryTimestamp(element, "recordedAtUtc", nullable: false, out var recordedAtUtc)
             || !TryTimestamp(element, "terminalAtUtc", nullable: true, out var terminalAtUtc)
-            || !TryTimestamp(element, "receiptRecordedAtUtc", nullable: true, out var receiptRecordedAtUtc))
+            || !TryTimestamp(element, "receiptRecordedAtUtc", nullable: true, out var receiptRecordedAtUtc)
+            || !TryTimestamp(element, "leaseAcquiredAtUtc", nullable: true, out var leaseAcquiredAtUtc)
+            || !TryTimestamp(element, "leaseExpiresAtUtc", nullable: true, out var leaseExpiresAtUtc)
+            || !TryTimestamp(element, "leaseReleasedAtUtc", nullable: true, out var leaseReleasedAtUtc)
+            || !TryTimestamp(element, "dispatchIntentRecordedAtUtc", nullable: true, out var dispatchIntentRecordedAtUtc)
+            || !TryTimestamp(element, "dispatchOutcomeRecordedAtUtc", nullable: true, out var dispatchOutcomeRecordedAtUtc))
         {
             throw Invalid();
         }
@@ -179,7 +186,71 @@ internal static class TriggerQueueLedgerCodec
             }
         }
 
-        return new TriggerQueueLedgerEntry(envelope!, canonicalEnvelope!, receipt, admissionStatus, admissionReason, canonicalEnvelopeHash!, priority, state, terminalReason, revision, recordedAtUtc!.Value, terminalAtUtc);
+        TriggerWorkerLease? lease = null;
+        var leaseWorkerId = element.GetProperty("leaseWorkerId");
+        var leaseGeneration = element.GetProperty("leaseGeneration");
+        var leaseRenewalCount = element.GetProperty("leaseRenewalCount");
+        if (leaseWorkerId.ValueKind == JsonValueKind.Null && leaseGeneration.ValueKind == JsonValueKind.Null && leaseRenewalCount.ValueKind == JsonValueKind.Null && leaseAcquiredAtUtc is null && leaseExpiresAtUtc is null && leaseReleasedAtUtc is null)
+        {
+        }
+        else if (leaseWorkerId.ValueKind == JsonValueKind.String && leaseGeneration.TryGetInt64(out var parsedLeaseGeneration) && leaseRenewalCount.TryGetInt32(out var parsedRenewalCount) && leaseAcquiredAtUtc is not null && leaseExpiresAtUtc is not null)
+        {
+            lease = new TriggerWorkerLease(leaseWorkerId.GetString()!, parsedLeaseGeneration, leaseAcquiredAtUtc.Value, leaseExpiresAtUtc.Value, parsedRenewalCount, leaseReleasedAtUtc);
+        }
+        else
+        {
+            throw Invalid();
+        }
+
+        TriggerDispatchEvidence? dispatch = null;
+        var dispatchOperationId = element.GetProperty("dispatchOperationId");
+        var dispatchRequestHash = element.GetProperty("dispatchRequestHash");
+        var dispatchAuthorityEvidenceHash = element.GetProperty("dispatchAuthorityEvidenceHash");
+        var dispatchOutcome = element.GetProperty("dispatchOutcome");
+        var dispatchDetail = element.GetProperty("dispatchDetail");
+        if (dispatchOperationId.ValueKind == JsonValueKind.Null && dispatchRequestHash.ValueKind == JsonValueKind.Null && dispatchAuthorityEvidenceHash.ValueKind == JsonValueKind.Null && dispatchOutcome.ValueKind == JsonValueKind.Null && dispatchDetail.ValueKind == JsonValueKind.Null && dispatchIntentRecordedAtUtc is null && dispatchOutcomeRecordedAtUtc is null)
+        {
+        }
+        else if (dispatchOperationId.ValueKind == JsonValueKind.String
+            && dispatchRequestHash.ValueKind == JsonValueKind.String
+            && dispatchAuthorityEvidenceHash.ValueKind == JsonValueKind.String
+            && dispatchOutcome.TryGetInt32(out var parsedOutcome)
+            && Enum.IsDefined(typeof(TriggerDispatchOutcome), parsedOutcome)
+            && dispatchDetail.ValueKind == JsonValueKind.String
+            && dispatchIntentRecordedAtUtc is not null)
+        {
+            TriggerGovernedInvocationEvidence? governedInvocation = null;
+            var governedOperationId = element.GetProperty("governedOperationId");
+            var governedRunId = element.GetProperty("governedRunId");
+            var governedAdmissionRequestHash = element.GetProperty("governedAdmissionRequestHash");
+            var governedLoopId = element.GetProperty("governedLoopId");
+            var governedDefinitionVersion = element.GetProperty("governedDefinitionVersion");
+            var governedDefinitionHash = element.GetProperty("governedDefinitionHash");
+            if (governedOperationId.ValueKind == JsonValueKind.Null && governedRunId.ValueKind == JsonValueKind.Null && governedAdmissionRequestHash.ValueKind == JsonValueKind.Null && governedLoopId.ValueKind == JsonValueKind.Null && governedDefinitionVersion.ValueKind == JsonValueKind.Null && governedDefinitionHash.ValueKind == JsonValueKind.Null)
+            {
+            }
+            else if (governedOperationId.ValueKind == JsonValueKind.String
+                && governedRunId.ValueKind == JsonValueKind.String
+                && governedAdmissionRequestHash.ValueKind == JsonValueKind.String
+                && governedLoopId.ValueKind == JsonValueKind.String
+                && governedDefinitionVersion.TryGetInt32(out var parsedDefinitionVersion)
+                && governedDefinitionHash.ValueKind == JsonValueKind.String)
+            {
+                governedInvocation = new TriggerGovernedInvocationEvidence(governedOperationId.GetString()!, governedRunId.GetString()!, governedAdmissionRequestHash.GetString()!, governedLoopId.GetString()!, parsedDefinitionVersion, governedDefinitionHash.GetString()!);
+            }
+            else
+            {
+                throw Invalid();
+            }
+
+            dispatch = new TriggerDispatchEvidence(dispatchOperationId.GetString()!, dispatchRequestHash.GetString()!, dispatchAuthorityEvidenceHash.GetString()!, dispatchIntentRecordedAtUtc.Value, (TriggerDispatchOutcome)parsedOutcome, dispatchOutcomeRecordedAtUtc, dispatchDetail.GetString()!, governedInvocation);
+        }
+        else
+        {
+            throw Invalid();
+        }
+
+        return new TriggerQueueLedgerEntry(envelope!, canonicalEnvelope!, receipt, admissionStatus, admissionReason, canonicalEnvelopeHash!, priority, state, terminalReason, revision, recordedAtUtc!.Value, terminalAtUtc, lease, dispatch);
     }
 
     private static void WriteEntry(Utf8JsonWriter writer, TriggerQueueLedgerEntry entry)
@@ -189,6 +260,57 @@ internal static class TriggerQueueLedgerCodec
         writer.WriteNumber("admissionStatus", (int)entry.AdmissionStatus);
         writer.WriteString("canonicalEnvelope", entry.CanonicalEnvelope);
         writer.WriteString("canonicalEnvelopeHash", entry.CanonicalEnvelopeHash);
+        WriteNullableString(writer, "dispatchAuthorityEvidenceHash", entry.Dispatch?.AuthorityEvidenceHash);
+        WriteNullableString(writer, "dispatchDetail", entry.Dispatch?.Detail);
+        WriteTimestamp(writer, "dispatchIntentRecordedAtUtc", entry.Dispatch?.IntentRecordedAtUtc);
+        WriteNullableString(writer, "dispatchOperationId", entry.Dispatch?.OperationId);
+        if (entry.Dispatch is null)
+        {
+            writer.WriteNull("dispatchOutcome");
+        }
+        else
+        {
+            writer.WriteNumber("dispatchOutcome", (int)entry.Dispatch.Outcome);
+        }
+
+        WriteTimestamp(writer, "dispatchOutcomeRecordedAtUtc", entry.Dispatch?.OutcomeRecordedAtUtc);
+        WriteNullableString(writer, "dispatchRequestHash", entry.Dispatch?.RequestHash);
+        WriteNullableString(writer, "governedAdmissionRequestHash", entry.Dispatch?.GovernedInvocation?.AdmissionRequestHash);
+        WriteNullableString(writer, "governedDefinitionHash", entry.Dispatch?.GovernedInvocation?.DefinitionHash);
+        if (entry.Dispatch?.GovernedInvocation is null)
+        {
+            writer.WriteNull("governedDefinitionVersion");
+        }
+        else
+        {
+            writer.WriteNumber("governedDefinitionVersion", entry.Dispatch.GovernedInvocation.DefinitionVersion);
+        }
+
+        WriteNullableString(writer, "governedLoopId", entry.Dispatch?.GovernedInvocation?.LoopId);
+        WriteNullableString(writer, "governedOperationId", entry.Dispatch?.GovernedInvocation?.OperationId);
+        WriteNullableString(writer, "governedRunId", entry.Dispatch?.GovernedInvocation?.RunId);
+        WriteTimestamp(writer, "leaseAcquiredAtUtc", entry.WorkerLease?.AcquiredAtUtc);
+        WriteTimestamp(writer, "leaseExpiresAtUtc", entry.WorkerLease?.ExpiresAtUtc);
+        if (entry.WorkerLease is null)
+        {
+            writer.WriteNull("leaseGeneration");
+        }
+        else
+        {
+            writer.WriteNumber("leaseGeneration", entry.WorkerLease.Generation);
+        }
+
+        WriteTimestamp(writer, "leaseReleasedAtUtc", entry.WorkerLease?.ReleasedAtUtc);
+        if (entry.WorkerLease is null)
+        {
+            writer.WriteNull("leaseRenewalCount");
+        }
+        else
+        {
+            writer.WriteNumber("leaseRenewalCount", entry.WorkerLease.RenewalCount);
+        }
+
+        WriteNullableString(writer, "leaseWorkerId", entry.WorkerLease?.WorkerId);
         writer.WriteNumber("priority", (int)entry.Priority);
         WriteTimestamp(writer, "receiptRecordedAtUtc", entry.Receipt?.RecordedAtUtc);
         WriteNullableString(writer, "receiptReplayBindingHash", entry.Receipt?.ReplayBindingHash);

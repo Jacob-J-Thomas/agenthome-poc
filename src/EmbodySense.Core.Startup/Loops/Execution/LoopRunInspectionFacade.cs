@@ -41,7 +41,7 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
     /// Creates a read-only or authenticated inspection facade for one workspace.
     /// </summary>
     /// <param name="workingDirectory">The workspace root, normalized to an absolute path.</param>
-    /// <param name="authenticatedActor">The optional server-owned actor used for recovery and deletion audit events.</param>
+    /// <param name="authenticatedActor">The optional server-owned actor that authorizes recovery and owns deletion audit events. Recovery lifecycle events retain each run's admission actor.</param>
     /// <param name="authenticatedSurface">The optional server-owned interface surface paired with <paramref name="authenticatedActor"/>.</param>
     /// <remarks>Actor and surface must either both be supplied or both be omitted.</remarks>
     public LoopRunInspectionFacade(string workingDirectory, string? authenticatedActor = null, string? authenticatedSurface = null)
