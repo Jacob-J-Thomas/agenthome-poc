@@ -168,7 +168,14 @@ public sealed class IsolatedCapabilityExecutableHost : ICapabilityExecutableHost
         Process? process = null;
         try
         {
-            process = _isolationBoundary.StartIsolated(startInfo, invocation.Manifest, artifactLease);
+            await using (var launchFence = await artifactLease.AcquireLaunchFenceAsync(cancellationToken))
+            {
+                if (launchFence is null)
+                {
+                    return Result(CapabilityExecutableInvocationStatus.Unavailable, invocation.OperationId, null, "The capability lifecycle changed before isolated process launch.", null, startedAt);
+                }
+                process = _isolationBoundary.StartIsolated(startInfo, invocation.Manifest, artifactLease);
+            }
             var budget = new CapabilityProcessOutputBudget(invocation.Manifest.Descriptor.ResourceLimits.MaxOutputBytes);
             var stdoutTask = ReadBoundedAsync(process.StandardOutput, budget);
             var stderrTask = ReadBoundedAsync(process.StandardError, budget);
@@ -224,6 +231,10 @@ public sealed class IsolatedCapabilityExecutableHost : ICapabilityExecutableHost
                 Kill(process);
             }
             return Result(CapabilityExecutableInvocationStatus.OutputLimitExceeded, invocation.OperationId, null, "Process output exceeded its declared bound and the process tree was terminated.", null, startedAt);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException and not AccessViolationException)
         {

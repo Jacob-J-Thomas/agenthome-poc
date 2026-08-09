@@ -11,4 +11,5 @@ node_modules/
 scratch/
 output/playwright/
 .agent/
+.embodysense-capability-authority.lock
 **/logs/*.ndjson

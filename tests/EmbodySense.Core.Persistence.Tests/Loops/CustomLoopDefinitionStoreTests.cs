@@ -5,6 +5,8 @@ using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Tests.Capabilities;
 using EmbodySense.Tests.Support;
 using System.Text.Json.Nodes;
 
@@ -13,6 +15,28 @@ namespace EmbodySense.Core.Persistence.Tests.Loops;
 public sealed class CustomLoopDefinitionStoreTests
 {
     private static readonly DateTimeOffset _initialTimestamp = DateTimeOffset.Parse("2026-07-16T12:00:00+00:00");
+
+    [Fact]
+    public async Task Governed_definition_writer_cannot_commit_inside_capability_snapshot_finalization_fence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var authority = new CapabilityAuthorityTransaction(paths);
+        var writerAuthority = new ProbingCapabilityAuthorityTransaction(new CapabilityAuthorityTransaction(paths));
+        var store = new CustomLoopDefinitionStore(paths, writerAuthority);
+        var definition = CreateDefinition("fenced-dependent");
+        var retained = await authority.AcquireValidatedLeaseAsync(_ => Task.FromResult(true));
+
+        var writer = Task.Run(() => store.CreateAsync(definition));
+        await writerAuthority.Attempted.Task;
+
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json")));
+        await retained!.DisposeAsync();
+        var result = await writer;
+
+        Assert.Equal(CustomLoopDefinitionStoreStatus.Created, result.Status);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopDefinitionsPath, definition.Id + ".json")));
+    }
 
     [Fact]
     public async Task CreateAsync_round_trips_strict_canonical_json_in_the_custom_directory()

@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Text;
+using EmbodySense.Core.Persistence.Capabilities.Models;
 using Microsoft.Win32.SafeHandles;
 
 namespace EmbodySense.Core.Persistence.Capabilities;
@@ -209,6 +211,55 @@ internal static class CapabilityCatalogNativeFileSystem
 
         var devicePath = $"/dev/fd/{descriptor}";
         return Directory.Exists(devicePath) ? devicePath : throw new IOException("No handle-relative directory enumeration surface is available on this platform.");
+    }
+
+    public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateMacDirectory(SafeFileHandle directory)
+    {
+        if (!OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException("Native directory enumeration is required only on macOS.");
+        }
+        var duplicate = dup(directory.DangerousGetHandle().ToInt32());
+        if (duplicate < 0)
+        {
+            throw NativeIOException("The capability catalog directory handle could not be duplicated", Marshal.GetLastPInvokeError());
+        }
+        var stream = fdopendir(duplicate);
+        if (stream == IntPtr.Zero)
+        {
+            _ = close(duplicate);
+            throw NativeIOException("The capability catalog directory stream could not be opened", Marshal.GetLastPInvokeError());
+        }
+        try
+        {
+            var entries = new List<CapabilityCatalogDirectoryEntry>();
+            while (true)
+            {
+                Marshal.SetLastPInvokeError(0);
+                var pointer = readdir(stream);
+                if (pointer == IntPtr.Zero)
+                {
+                    var error = Marshal.GetLastPInvokeError();
+                    return error == 0 ? entries : throw NativeIOException("The capability catalog directory stream could not be read", error);
+                }
+                var entry = Marshal.PtrToStructure<CapabilityCatalogMacDirent>(pointer);
+                if (entry.NameLength is 0 or > 1_024 || entry.Name is null || entry.NameLength > entry.Name.Length)
+                {
+                    throw new IOException("The capability catalog directory stream returned a malformed entry.");
+                }
+                var name = Encoding.UTF8.GetString(entry.Name, 0, entry.NameLength);
+                if (name is "." or "..")
+                {
+                    continue;
+                }
+                var kind = entry.Type switch { 4 => CapabilityCatalogDirectoryEntryKind.Directory, 8 => CapabilityCatalogDirectoryEntryKind.RegularFile, 0 => CapabilityCatalogDirectoryEntryKind.Unknown, _ => CapabilityCatalogDirectoryEntryKind.Unsafe };
+                entries.Add(new CapabilityCatalogDirectoryEntry(name, kind));
+            }
+        }
+        finally
+        {
+            _ = closedir(stream);
+        }
     }
 
     private static SafeFileHandle? OpenWindowsDirectory(string fullPath, bool create, ICapabilityCatalogDurabilityBarrier durabilityBarrier, out bool created)
@@ -472,6 +523,10 @@ internal static class CapabilityCatalogNativeFileSystem
             var handle = new SafeFileHandle(new IntPtr(descriptor), ownsHandle: true);
             try
             {
+                if (mode is FileMode.CreateNew or FileMode.OpenOrCreate)
+                {
+                    SetUserOnlyPermissions(handle);
+                }
                 RequireUnixRegularFile(handle, name);
                 return handle;
             }
@@ -615,6 +670,21 @@ internal static class CapabilityCatalogNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fchmod(SafeFileHandle file, int mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int dup(int descriptor);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int close(int descriptor);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern IntPtr fdopendir(int descriptor);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern IntPtr readdir(IntPtr directory);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int closedir(IntPtr directory);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int statx(SafeFileHandle directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out CapabilityCatalogLinuxStatx information);

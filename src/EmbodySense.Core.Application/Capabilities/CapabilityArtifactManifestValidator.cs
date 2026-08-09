@@ -82,6 +82,19 @@ public static class CapabilityArtifactManifestValidator
             }
         }
 
+        if (manifest.Dependencies is { } dependencies)
+        {
+            var dependencyValidation = CapabilityDependencyManifestValidator.Validate(dependencies);
+            foreach (var error in dependencyValidation.Errors)
+            {
+                errors.Add(new CapabilityContractError(error.Code, "dependencies." + error.Field, error.Message));
+            }
+            if (dependencies.Kind != CapabilityDependencyManifestKind.CapabilityPackage || dependencies.SubjectId is null || manifest.Descriptor?.Id is { } descriptorId && !dependencies.SubjectId.Equals(descriptorId))
+            {
+                errors.Add(Error("artifact_dependency_identity_conflict", "dependencies", "Artifact dependencies must be a capability-package manifest for the artifact capability identity."));
+            }
+        }
+
         return new CapabilityContractValidationResult(errors);
     }
 

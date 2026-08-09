@@ -8,7 +8,7 @@ using EmbodySense.Core.Common.Workspace;
 namespace EmbodySense.Core.Persistence.Capabilities;
 
 /// <summary>Discovers standard <c>SKILL.md</c> entries and closed dependency sidecars under one configured skills root.</summary>
-/// <remarks>Discovery is read-only and never declares, installs, trusts, enables, assigns, or executes a discovered skill.</remarks>
+/// <remarks>Discovery is read-only and never declares, installs, trusts, enables, assigns, or executes a discovered skill. Skill files are unmanaged by the workspace capability-authority lock, so lifecycle finalization recaptures this metadata and fails closed if it changes. Later edits invalidate the prior metadata snapshot for the next lifecycle operation; discovery evidence is not a runtime admission guarantee.</remarks>
 public sealed class LocalSkillDependencyManifestDiscovery : ISkillDependencyManifestDiscovery
 {
     private const int MaximumSkillDirectories = 256;

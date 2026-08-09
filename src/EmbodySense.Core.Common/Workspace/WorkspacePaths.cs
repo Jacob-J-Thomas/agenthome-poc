@@ -302,6 +302,9 @@ public sealed class WorkspacePaths
     /// <summary>Gets the governed capability catalog directory.</summary>
     public string CapabilityCatalogPath => Path.Combine(AgentPath, "capabilities");
 
+    /// <summary>Gets the workspace-wide capability authority transaction lock.</summary>
+    public string CapabilityAuthorityLockPath => Path.Combine(RootPath, ".embodysense-capability-authority.lock");
+
     /// <summary>Gets the canonical capability catalog artifact path.</summary>
     public string CapabilityCatalogDocumentPath => Path.Combine(CapabilityCatalogPath, "catalog.json");
 
@@ -310,6 +313,15 @@ public sealed class WorkspacePaths
 
     /// <summary>Gets the cross-process capability catalog mutation lock path.</summary>
     public string CapabilityCatalogLockPath => Path.Combine(CapabilityCatalogPath, ".catalog.lock");
+
+    /// <summary>Gets the authenticated capability lifecycle aggregate path.</summary>
+    public string CapabilityLifecycleDocumentPath => Path.Combine(CapabilityCatalogPath, "lifecycle.json");
+
+    /// <summary>Gets the last-proved capability lifecycle aggregate path.</summary>
+    public string CapabilityLifecycleProofPath => Path.Combine(CapabilityCatalogPath, "lifecycle.proved.json");
+
+    /// <summary>Gets the single capability lifecycle mutation lock path.</summary>
+    public string CapabilityLifecycleLockPath => Path.Combine(CapabilityCatalogPath, ".lifecycle.lock");
 
     /// <summary>Gets the immutable capability artifact storage root.</summary>
     public string CapabilityArtifactsPath => Path.Combine(CapabilityCatalogPath, "artifacts");

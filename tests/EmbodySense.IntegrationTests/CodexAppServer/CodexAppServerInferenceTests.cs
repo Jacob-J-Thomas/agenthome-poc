@@ -7,6 +7,8 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Application.Governance.Permissions;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.Governance.Tools.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -15,6 +17,7 @@ using EmbodySense.Core.Clients.LocalWorkspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Persistence.ToolResults;
+using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Inference;
@@ -944,7 +947,9 @@ public sealed class CodexAppServerInferenceTests
     {
         var paths = new WorkspacePaths(workspace.RootPath);
         var policy = new PermissionPolicyStore().Load(paths);
-        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, new LocalWorkspaceClient(paths), new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), new ToolResultRetentionStore(paths));
+        ICapabilityAuthorityTransaction authority = new CapabilityAuthorityTransaction(paths);
+        var workspaceClient = new LocalWorkspaceClient(paths, new CapabilityAuthorityWorkspaceMutationCommitBoundary(paths, authority));
+        return new ToolBroker(paths, new ToolPermissionService(paths, policy), prompt, workspaceClient, new AuditLog(paths), loopDefinition ?? LoopDefinition.CreateDefaultConversation(), new ToolResultRetentionStore(paths));
     }
 
     private static string Response(int id, string result)

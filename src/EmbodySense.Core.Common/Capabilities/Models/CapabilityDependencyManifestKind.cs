@@ -10,5 +10,8 @@ public enum CapabilityDependencyManifestKind
     Skill = 1,
 
     /// <summary>The manifest belongs to a loop package, not a live loop admission.</summary>
-    LoopPackage = 2
+    LoopPackage = 2,
+
+    /// <summary>The manifest belongs to an immutable executable capability package.</summary>
+    CapabilityPackage = 3
 }

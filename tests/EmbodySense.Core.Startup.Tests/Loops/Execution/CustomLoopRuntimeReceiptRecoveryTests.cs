@@ -96,7 +96,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
         };
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
-        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths)), new CapabilityAdmissionService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform)).AdmitAsync(
+        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths)), new CapabilityAdmissionService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform, new CapabilityAuthorityTransaction(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
                 definition.DefinitionVersion,
@@ -329,7 +329,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
             ContextIdentityHash = CustomLoopContextSnapshotHash.ComputeIdentity(context)
         };
         Assert.Equal(CustomLoopInvocationOperationStoreStatus.Bound, (await receiptStore.BindAsync(pending)).Status);
-        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths)), new CapabilityAdmissionService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRootPath)), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform)).AdmitAsync(
+        var admission = await new CustomLoopAdmissionService(definitionStore, runStore, new AuditLog(paths), new CustomLoopToolAuthorityProvider(new LoopDefinitionStore(paths)), new CapabilityAdmissionService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRootPath)), CapabilityWorkspaceScopeId.Create(paths.RootPath), CapabilityHostRuntime.HostContractVersion, CapabilityHostRuntime.Platform, new CapabilityAuthorityTransaction(paths))).AdmitAsync(
             new CustomLoopAdmissionRequest(
                 definition.Id,
                 definition.DefinitionVersion,

@@ -31,6 +31,7 @@ public static class CapabilityArtifactManifestCanonicalizer
         {
             Append(builder, argument);
         }
+        Append(builder, manifest.Dependencies is null ? string.Empty : CapabilityDependencyManifestHash.TryCompute(manifest.Dependencies, out var dependencyHash, out _) ? dependencyHash!.Value : throw new InvalidOperationException("Validated artifact dependencies must be canonicalizable."));
         payload = Encoding.UTF8.GetBytes(builder.ToString());
         return true;
     }

@@ -1,4 +1,5 @@
 using System.Text;
+using EmbodySense.Core.Persistence.Capabilities.Models;
 using Microsoft.Win32.SafeHandles;
 
 namespace EmbodySense.Core.Persistence.Capabilities;
@@ -100,6 +101,12 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         throw new IOException("The capability catalog lock is unavailable.");
     }
 
+    public void ReleaseLock()
+    {
+        _lock?.Dispose();
+        _lock = null;
+    }
+
     public bool DirectoryExists(string path)
     {
         return GetDirectory(RequireContained(path), create: false) is not null;
@@ -133,10 +140,10 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             return true;
         }
 
-        var enumerationPath = OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory);
         var directories = new List<string>();
         var entryCount = 0;
-        foreach (var entry in Directory.EnumerateFileSystemEntries(enumerationPath, "*", SearchOption.TopDirectoryOnly))
+        var entries = OperatingSystem.IsMacOS() ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory) : Directory.EnumerateFileSystemEntries(OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory), "*", SearchOption.TopDirectoryOnly).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+        foreach (var entry in entries)
         {
             if (entryCount >= maximumEntries)
             {
@@ -145,16 +152,15 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
             entryCount++;
 
-            var attributes = File.GetAttributes(entry);
-            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            if (entry.Kind is CapabilityCatalogDirectoryEntryKind.Unsafe or CapabilityCatalogDirectoryEntryKind.Unknown)
             {
                 throw new IOException("Capability catalog directory enumeration refuses reparse points.");
             }
-            if ((attributes & FileAttributes.Directory) == 0)
+            if (entry.Kind != CapabilityCatalogDirectoryEntryKind.Directory)
             {
                 continue;
             }
-            var name = Path.GetFileName(entry);
+            var name = entry.Name;
             if (string.IsNullOrEmpty(name) || GetDirectory(Path.Combine(safePath, name), create: false) is null)
             {
                 throw new IOException("A capability catalog directory entry disappeared during bound enumeration.");
@@ -329,17 +335,21 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             return [];
         }
 
-        var enumerationPath = OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory);
         var entries = new List<(string Name, long Length)>();
         var totalBytes = 0L;
-        foreach (var entry in Directory.EnumerateFileSystemEntries(enumerationPath))
+        var directoryEntries = OperatingSystem.IsMacOS() ? CapabilityCatalogNativeFileSystem.EnumerateMacDirectory(directory) : Directory.EnumerateFileSystemEntries(OperatingSystem.IsWindows() ? safePath : CapabilityCatalogNativeFileSystem.GetDirectoryEnumerationPath(directory)).Select(entry => new CapabilityCatalogDirectoryEntry(Path.GetFileName(entry), (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0 ? CapabilityCatalogDirectoryEntryKind.Unsafe : (File.GetAttributes(entry) & FileAttributes.Directory) != 0 ? CapabilityCatalogDirectoryEntryKind.Directory : CapabilityCatalogDirectoryEntryKind.RegularFile));
+        foreach (var entry in directoryEntries)
         {
             if (entries.Count >= maximumEntries)
             {
                 throw new IOException("The bounded capability catalog trust-root entry quota is exhausted.");
             }
 
-            var name = Path.GetFileName(entry);
+            if (entry.Kind != CapabilityCatalogDirectoryEntryKind.RegularFile)
+            {
+                throw new IOException("The capability catalog trust root contains a non-regular entry.");
+            }
+            var name = entry.Name;
             var fullPath = Path.Combine(safePath, name);
             var handle = CapabilityCatalogNativeFileSystem.OpenRegularFile(fullPath, directory, name, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, writeThrough: false) ?? throw new IOException("A capability catalog trust-root entry disappeared during bounded enumeration.");
             using var stream = new FileStream(handle, FileAccess.Read, 1, isAsync: false);
